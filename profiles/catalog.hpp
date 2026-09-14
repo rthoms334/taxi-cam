@@ -25,20 +25,13 @@ inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.guide_color = {1, 0.55f, 0};
   c.speed_color = {0, 0.94f, 0.28f};
-  // Initial image-space points; live alignment is saved per aircraft profile.
+  // Shared A350 image-space guide defaults; live adjustments remain per profile.
   c.tail_upper = {0.29f, 0.76f};
-  c.tail_corner = {0.27f, 0.93f};
-  c.tail_inner = {0.36f, 0.935f};
+  c.tail_corner = {0.26f, 0.87f};
+  c.tail_inner = {0.31f, 0.87f};
   return c;
 }();
-inline constexpr Composition AmberEtacsA35K = [] {
-  Composition c = AmberEtacs;
-  // The longer fuselage moves the same pitch/lens view's main gear higher.
-  c.tail_upper = {0.31f, 0.69f};
-  c.tail_corner = {0.29f, 0.85f};
-  c.tail_inner = {0.37f, 0.855f};
-  return c;
-}();
+inline constexpr Composition AmberEtacsA35K = AmberEtacs;
 struct AircraftProfile {
   std::uint32_t id;
   std::string_view key;

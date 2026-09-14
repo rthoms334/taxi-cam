@@ -681,12 +681,12 @@ void native_case(bool warp, bool a350, bool query_fallback) {
             ++gs_label_pixels;
           }
           // These pixels verify configured coordinates, not alignment to aircraft geometry.
-          if (a350 && (working_x == 207 || working_x == 560) && working_y == 728) {
+          if (a350 && (working_x == 199 || working_x == 568) && working_y == 697) {
             require(pixel[0] > 250 && pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3,
                     "Configured A350 lower bracket corners render on both sides");
             ++tail_guide_pixels;
           }
-          if (a350 && ((working_x == 234 && working_y == 637) || (working_x == 207 && working_y == 682)))
+          if (a350 && ((working_x == 234 && working_y == 637) || ((working_x == 207 || working_x == 560) && working_y == 728)))
             require(pixel[2] >= 202 && pixel[2] <= 206, "Old A350 bracket position is camera imagery");
           if (working_x >= 106 && working_x <= 109 && working_y >= 121 && working_y <= 123) {
             require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),
