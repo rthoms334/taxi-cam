@@ -115,6 +115,8 @@ A capture is recorded when one of these paths provides enough information:
 | Render-target transition | At a known transition away from rendering into the camera texture |
 | End of queue submission | After submitted draws when tracking proves the texture remains a valid render target |
 
+Legacy barrier metadata is tracked in full for batches of up to 1,048,576 entries. This linear scan does not issue GPU work or dereference resource pointers. Larger or malformed batches invalidate source-state evidence. The separate 256-entry limit for inserting a copy before a barrier remains in place.
+
 The copy goes into a texture owned by Taxi Cam. This gives the compositor an image whose lifetime it controls while MSFS continues rendering into its own resources.
 
 A **GPU fence** marks completion of submitted work. Taxi Cam waits for the relevant fence and recording-lifetime conditions before using a captured image. If the resource identity or state is unknown, that capture is refused.
@@ -142,7 +144,7 @@ Source: [compositor](../src/camera_compositor_d3d12.hpp), [output buffer](../src
 
 ## 6. Draw the result into the PFD
 
-The bridge observes drawing into the selected PFD texture. After eligible aircraft display draws, it records another draw that places the combined camera image over the upper region.
+The bridge tracks drawing into the selected PFD texture and adds the camera image at the end of each eligible display batch: before a target change, a verified transition out of render-target state, or command-list closure. It draws once for the batch, covering the upper PFD region while preserving the rest of a shared PFD/navigation texture.
 
 | PFD region | Content |
 | --- | --- |
@@ -159,7 +161,7 @@ MSFS can record a GPU command list once and execute it again later. Taxi Cam the
 
 A shared per-device fence timeline orders output writes and PFD reads, including work submitted on different queues. The output cannot be overwritten while an earlier tracked PFD read still needs it. Resources remain alive while recorded commands can reference them.
 
-Turning off one TAXI side stops further camera draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge requests removal of its cameras.
+Turning off one TAXI side stops further camera draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge closes their render gates and retains the camera pair for the next activation.
 
 Source: [native graphics adapter](../standalone/d3d12_bridge.cpp), [PFD draw](../src/pfd_stamp_d3d12.hpp), [graphics-state restoration](../src/pfd_stamp_state.hpp), [runtime coordination](../src/scene_runtime.cpp).
 

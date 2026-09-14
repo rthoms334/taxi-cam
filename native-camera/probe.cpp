@@ -250,11 +250,11 @@ ec::OwnedViewSnapshot inspect_entry(Runtime& runtime, std::uint64_t id) {
   return inspected(runtime, [&] { return ec::inspect_owned_view(reader, entries.entries[0].address, id, pool); });
 }
 
-// Both IDs share one complete table walk and a fresh pool from this observer
-// phase. Each view retains its own full trace reread and bounded-reader budget.
+// Pool, table and both views share one read-only region-query scope. Every
+// field/trace is still reread, and every queried region is revalidated before
+// publishing pointers or calling the engine. Nothing survives this observer.
 void inspect_pair(Runtime& runtime,
                   const std::array<ec::EntryId, 2>& ids,
-                  const ec::ViewPoolSnapshot& pool,
                   ProbeSnapshot& report,
                   std::array<ec::OwnedViewSnapshot, 2>& views) {
   views = {};
@@ -270,6 +270,10 @@ void inspect_pair(Runtime& runtime,
   };
   const auto ticket = timed(runtime, ProbeStage::handoff, [] { return scene_handoff().begin_capture(); });
   std::array<std::uint64_t, 2> resources{};
+  ScopedLocalMemoryQueryCache queries;
+  LocalMemoryReader reader;
+  const auto pool = timed(runtime, ProbeStage::pool, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
+  report.free_views = pool.valid ? pool.free_count : 0;
   if (!pool.valid) {
     refuse((runtime.inspection_changed && pool.status == ec::ViewPoolStatus::not_inspected) ||
                    pool.status == ec::ViewPoolStatus::read_failed || pool.status == ec::ViewPoolStatus::changed
@@ -278,9 +282,8 @@ void inspect_pair(Runtime& runtime,
            "The current view pool could not be validated.");
     return;
   }
-  LocalMemoryReader reader;
-  const auto entries = timed(runtime, ProbeStage::entries,
-                             [&] { return inspected(runtime, [&] { return ec::inspect_owned_entries(reader, runtime.manager, ids); }); });
+  reader.reset_budget();
+  const auto entries = timed(runtime, ProbeStage::entries, [&] { return ec::inspect_owned_entries(reader, runtime.manager, ids); });
   runtime.performance.entry_count = entries.entry_count;
   runtime.performance.bucket_count = entries.bucket_count;
   if (!entries.complete) {
@@ -296,9 +299,8 @@ void inspect_pair(Runtime& runtime,
       continue;
     }
     reader.reset_budget();
-    const auto view = timed(runtime, i == 0 ? ProbeStage::first_view : ProbeStage::second_view, [&] {
-      return inspected(runtime, [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool); });
-    });
+    const auto view = timed(runtime, i == 0 ? ProbeStage::first_view : ProbeStage::second_view,
+                            [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool); });
     views[i] = view;
     report.inspection_status[i] = ec::owned_view_status_name(view.status);
     report.ready[i] = view.complete && view.ready;
@@ -323,6 +325,17 @@ void inspect_pair(Runtime& runtime,
         refuse(SceneStopReason::resolution_changed, "Owned-view resolution changed; retiring the pair before a guarded resize retry.");
       }
     }
+  }
+  if (!queries.finish()) {
+    runtime.inspection_changed = true;
+    runtime.inspection_stop = SceneStopReason::inspection_unavailable;
+    runtime.stage_error = "Memory-region metadata changed during pair inspection; no result was accepted.";
+    views = {};
+    report.ready = report.resource_present = {};
+    report.dimensions = {};
+    report.flags = {};
+    report.inspection_status = {"not_inspected", "not_inspected"};
+    return;
   }
   if (report.ready[0] && report.ready[1])
     report.outputs_matched = timed(runtime, ProbeStage::handoff, [&] {
@@ -595,8 +608,12 @@ void observer(void* manager) noexcept {
       report.pair = before;
     } else {
       LocalMemoryReader reader;
-      auto pool = timed(runtime, ProbeStage::pool,
-                        [&] { return inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); }); });
+      ec::ViewPoolSnapshot pool;
+      // Creation still needs its own pre-call pool validation. An established
+      // pair is inspected once, below, after processing any lifecycle request.
+      if (before.state != ec::State::active || before.request_pending || requested_start || runtime.resize_warmup.pending())
+        pool = timed(runtime, ProbeStage::pool,
+                     [&] { return inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); }); });
       report.free_views = pool.valid ? pool.free_count : 0;
       runtime.creations = 0;
       runtime.creation_valid = pool.valid && pool.free_count >= 2;
@@ -640,8 +657,8 @@ void observer(void* manager) noexcept {
         }
       }
       if (pair.state == ec::State::active) {
-        // Creation may claim previously free slots. Only that transition needs
-        // another pool snapshot; an existing pair reuses the one above.
+        // Creation may claim previously free slots. Recheck that transition;
+        // an established pair validates its pool inside inspect_pair below.
         if (runtime.creations != 0) {
           reader.reset_budget();
           pool = timed(runtime, ProbeStage::pool,
@@ -661,7 +678,7 @@ void observer(void* manager) noexcept {
         }
         std::array<ec::OwnedViewSnapshot, 2> views{};
         if (!closed_warmup)
-          inspect_pair(runtime, pair.owned_ids, pool, report, views);
+          inspect_pair(runtime, pair.owned_ids, report, views);
         const bool wait_for_views = runtime.view_wait.observe(now, pair,
                                                               !runtime.resize_warmup.pending() && runtime.scheduled_ids == pair.owned_ids &&
                                                                   runtime.resized_ids == pair.owned_ids &&

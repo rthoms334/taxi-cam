@@ -815,7 +815,24 @@ int main() {
     obs::successful_reset(list, 2);
     raw_before = evidence.raw_legacy;
     check_legacy(4097, metadata_barriers.data(), 0, "Metadata cap relaxed native capture cap");
-    require(evidence.raw_legacy == raw_before + 4096, "Legacy metadata bound incorrect");
+    require(evidence.raw_legacy == raw_before + 4097, "Complete large legacy metadata was truncated");
+    const auto large_invalidations = evidence.invalidations;
+    metadata_barriers.resize(65537, transition);
+    metadata_barriers.back() = legacy_transition(other_resource);
+    raw_before = evidence.raw_legacy;
+    check_legacy(static_cast<UINT>(metadata_barriers.size()), metadata_barriers.data(), 0,
+                 "Large metadata batch relaxed native capture cap");
+    require(evidence.raw_legacy == raw_before + metadata_barriers.size() && evidence.invalidations == large_invalidations &&
+                (evidence.raw_scope & obs::ScopeInvalidRecording) == 0,
+            "Valid large batch invalidated otherwise persistent source state");
+    require(obs::statistics().maximum_legacy_batch == metadata_barriers.size(), "Largest legacy batch was not recorded");
+    // The original API is still called exactly once, but an oversized span is
+    // refused before inspecting any prefix (the supplied small array is safe).
+    raw_before = evidence.raw_legacy;
+    check_legacy(obs::maximum_legacy_metadata_barriers + 1, metadata_barriers.data(), 0, "Oversize batch forwarding changed");
+    require(evidence.raw_legacy == raw_before && evidence.invalidations == large_invalidations + 1 &&
+                (evidence.invalid_reasons & obs::InvalidationBarrierBatch),
+            "Oversize metadata guard lost");
     auto enhanced_raw_before = evidence.raw_enhanced;
     D3D12_BARRIER_GROUP metadata_group{};
     metadata_group.Type = D3D12_BARRIER_TYPE_TEXTURE;
@@ -893,7 +910,7 @@ int main() {
     list->ResourceBarrier(1, &uncertain);
     require((evidence.invalid_reasons & obs::InvalidationBarrierBatch) != 0 && (evidence.raw_scope & obs::ScopeInvalidRecording) != 0,
             "Unknown transition flags were treated as source-specific split metadata");
-    list->ResourceBarrier(4097, metadata_barriers.data());
+    list->ResourceBarrier(obs::maximum_legacy_metadata_barriers + 1, metadata_barriers.data());
     require((evidence.invalid_reasons & obs::InvalidationBarrierBatch) != 0, "Truncated legacy metadata remained usable");
     auto uncertain_texture = texture;
     uncertain_texture.Flags = D3D12_TEXTURE_BARRIER_FLAG_DISCARD;

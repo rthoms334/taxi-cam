@@ -200,8 +200,9 @@ void native_case(bool warp, bool a350) {
   list->SetGraphicsRoot32BitConstant(0, 1, 2);
   const D3D12_RECT lower{0, 763, static_cast<LONG>(display_width), 1024};
   list->RSSetScissorRects(1, &lower);
-  list->DrawInstanced(3, 1, 0, 0);
-  require(runtime::snapshot(key).stamps == 3, "Three automatic native PFD stamps");
+  for (unsigned draw = 0; draw < 1000; ++draw)
+    list->DrawInstanced(3, 1, 0, 0);
+  require(runtime::snapshot(key).stamps == 1, "One overlay at target switch; repeated glyph draws stay deferred");
   std::array<Reference<ID3D12Resource>, 2> readbacks;
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
   UINT64 bytes{};
@@ -230,6 +231,7 @@ void native_case(bool warp, bool a350) {
     transition(list.get(), textures[i + 2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
   submit();
+  require(runtime::snapshot(key).stamps == 2, "One overlay per completed PFD batch, including RT-to-copy boundary");
   reset();
   std::uint64_t pixels = 0;
   for (UINT side = 0; side < 2; ++side) {
@@ -290,7 +292,10 @@ void native_case(bool warp, bool a350) {
   submit();
   reset();
   generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
-  require(runtime::snapshot(key).stamps == before_predicate + 1, "Fresh Reset restores PFD injection");
+  require(runtime::snapshot(key).stamps == before_predicate, "Fresh draw is deferred until list boundary");
+  submit();
+  require(runtime::snapshot(key).stamps == before_predicate + 1, "Close flushes a valid pending overlay after fresh Reset");
+  reset();
   win::set_target_mask(0);
   const auto stamps = runtime::snapshot(key).stamps;
   generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);

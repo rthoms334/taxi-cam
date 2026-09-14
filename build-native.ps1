@@ -90,6 +90,19 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'WARP native graphics validation failed.' }
     & $gpu --warp --a350
     if ($LASTEXITCODE -ne 0) { throw 'WARP A350 graphics validation failed.' }
+    $tailTest = Join-Path $out 'scene-queue-tail-test.exe'
+    & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'src/scene_queue_tail_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $tailTest
+    if ($LASTEXITCODE -ne 0) { throw 'Live capture regression compilation failed.' }
+    foreach ($tailAdapter in @('hardware', 'warp')) {
+        if ($WarpOnly -and $tailAdapter -eq 'hardware') { continue }
+        foreach ($tailOrigin in @('transition', 'creation')) {
+            $tailArgs = @()
+            if ($tailAdapter -eq 'warp') { $tailArgs += '--warp' }
+            if ($tailOrigin -eq 'creation') { $tailArgs += '--born-render-target' }
+            & $tailTest @tailArgs
+            if ($LASTEXITCODE -ne 0) { throw "Live capture regression failed: $tailAdapter / $tailOrigin" }
+        }
+    }
 
     $smoke = Join-Path $out 'native-smoke-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'standalone/smoke_validation.cpp') '-ladvapi32' '-o' $smoke
@@ -161,7 +174,7 @@ if ($Validate) {
     if (-not $WarpOnly) { $gpuTests = @('hardware GPU') + $gpuTests }
     [ordered]@{
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
-        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','exact DLL smoke',
+        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));

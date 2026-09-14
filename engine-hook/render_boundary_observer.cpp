@@ -53,7 +53,7 @@ std::atomic<CopyResource> original_copy_resource{nullptr};
 std::atomic<CopyTexture> original_copy_texture{nullptr};
 std::atomic<std::uint64_t> legacy_calls{0}, enhanced_calls{0}, legacy_candidates{0}, enhanced_candidates{0}, pass_refusals{0},
     batch_refusals{0};
-std::atomic<std::uint64_t> copy_resource_calls{0}, copy_texture_calls{0}, metadata_truncated_calls{0};
+std::atomic<std::uint64_t> copy_resource_calls{0}, copy_texture_calls{0}, metadata_truncated_calls{0}, maximum_legacy_batch{0};
 std::array<Slot, 8> slots{{{26}, {68}, {69}, {80}, {12}, {13}, {16}, {17}}};
 struct ActiveEndSlot {
   void* table = nullptr;
@@ -251,13 +251,23 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
   }
   const Guard guard;
   const auto identity = lookup(list);
-  if (identity.generation)
+  if (identity.generation) {
     ++legacy_calls;
+    auto maximum = maximum_legacy_batch.load(std::memory_order_relaxed);
+    while (count > maximum && !maximum_legacy_batch.compare_exchange_weak(maximum, count, std::memory_order_relaxed)) {
+    }
+  }
   auto uncertainty = scope_invalidation(identity);
-  if (count && (!barriers || count > 4096))
+  const bool metadata_complete =
+      !count || (barriers && count <= maximum_legacy_metadata_barriers &&
+                 reinterpret_cast<std::uintptr_t>(barriers) <= UINTPTR_MAX - std::uint64_t(count) * sizeof(*barriers));
+  if (!metadata_complete) {
     uncertainty |= InvalidationBarrierBatch;
-  if (identity.generation && barriers) {
-    const auto count_observed = count > 4096 ? 4096 : count;
+    if (identity.generation)
+      ++metadata_truncated_calls;
+  }
+  if (identity.generation && metadata_complete && barriers) {
+    const auto count_observed = count;
     for (UINT n = 0; n < count_observed; ++n) {
       const auto& b = barriers[n];
       if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING)
@@ -275,10 +285,8 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
         uncertainty |= InvalidationBarrierBatch;
     }
   }
-  if (identity.generation && callbacks.observe_legacy && barriers) {
-    const auto count_observed = count > 4096 ? 4096 : count;
-    if (count > 4096)
-      ++metadata_truncated_calls;
+  if (identity.generation && metadata_complete && callbacks.observe_legacy && barriers) {
+    const auto count_observed = count;
     const auto scope = scope_flags(identity) | (global_uncertainty(uncertainty) ? ScopeInvalidRecording : 0u);
     for (UINT n = 0; n < count_observed; ++n) {
       if (!same_identity(list, identity.generation))
@@ -832,13 +840,17 @@ Result repair_protection() noexcept {
   DWORD error = 0;
   return repair(error) ? result("protection_restored") : result("protection_restore_failed", error);
 }
+bool recording_allows_injection(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  return list && generation && same_safe(list, generation);
+}
 bool operational() noexcept {
   return enabled.load(std::memory_order_acquire);
 }
 Statistics statistics() noexcept {
   return {legacy_calls.load(),        enhanced_calls.load(),     legacy_candidates.load(),
           enhanced_candidates.load(), pass_refusals.load(),      batch_refusals.load(),
-          copy_resource_calls.load(), copy_texture_calls.load(), metadata_truncated_calls.load()};
+          copy_resource_calls.load(), copy_texture_calls.load(), metadata_truncated_calls.load(),
+          maximum_legacy_batch.load()};
 }
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 std::uint32_t validation_state(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {

@@ -54,6 +54,7 @@ struct List : Metadata {
   DXGI_FORMAT depth = DXGI_FORMAT_UNKNOWN;
   bool depth_known = true;
   bool ready = false;
+  bool pfd_dirty = false, pfd_transition = false;
   void retire() noexcept override {
     alive.store(false, std::memory_order_release);
     boundary::unregister_list(native, id);
@@ -203,20 +204,36 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
   const auto it = r.lists.find(p);
   return it != r.lists.end() && it->second->alive ? it->second : nullptr;
 }
+void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = false) noexcept;
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   const OwnedWork guard;
+  if (auto item = find_list(list);
+      item && item->id == id && item->count == 1 && item->targets[0].resource && item->targets[0].resource->native == b.pResource)
+    flush_pfd(list, id, true);
   runtime::manager().record_render_target_before_transition(list, b.pResource, true, id);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
   const OwnedWork guard;
+  if (auto item = find_list(list);
+      item && item->id == id && item->count == 1 && item->targets[0].resource && item->targets[0].resource->native == b.pResource)
+    flush_pfd(list, id, true);
   runtime::manager().record_render_target_before_enhanced_transition(list, b.pResource, true, id);
 }
 void observe_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_BARRIER& b, std::uint32_t) noexcept {
   const OwnedWork guard;
+  if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
+    if (auto item = find_list(list); item && item->id == id)
+      for (UINT i = 0; i < item->count; ++i)
+        if (item->targets[i].resource && item->targets[i].resource->native == b.Transition.pResource)
+          item->pfd_transition = true;
   runtime::manager().observe_source_legacy(list, id, b);
 }
 void observe_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b, std::uint32_t) noexcept {
   const OwnedWork guard;
+  if (auto item = find_list(list); item && item->id == id)
+    for (UINT i = 0; i < item->count; ++i)
+      if (item->targets[i].resource && item->targets[i].resource->native == b.pResource)
+        item->pfd_transition = true;
   runtime::manager().observe_source_enhanced(list, id, b);
 }
 void copy_resource(void*,
@@ -246,6 +263,7 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
   auto list = find_list(native);
   if (!list || list->id != id)
     return;
+  list->pfd_dirty = false;
   const bool scoped =
       (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationSplitBarrier | boundary::InvalidationAliasOrDiscard)) == 0;
   if (scoped && list->count) {
@@ -286,8 +304,20 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   }
   runtime::manager().stage_source_draw(native, id, count, sources.data(), ids.data());
   runtime::manager().after_source_draw(native, id, allowed);
-  if (!allowed || list->count != 1 || !list->depth_known)
+  // Mark damage only. Compositing between individual HTML/glyph draws both
+  // multiplies fill cost and unnecessarily disturbs the application's state.
+  list->pfd_dirty = allowed && list->count == 1 && list->depth_known;
+  list->pfd_transition = false;
+}
+void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool proven_transition) noexcept {
+  auto list = find_list(native);
+  if (!registry().ready || !list || list->id != id || !list->ready || !list->pfd_dirty)
     return;
+  list->pfd_dirty = false;
+  if ((!proven_transition && list->pfd_transition) || list->count != 1 || !list->depth_known ||
+      !boundary::recording_allows_injection(native, id))
+    return;
+  auto& r = registry();
   const auto& view = list->targets[0];
   if (!view.resource || !view.resource->alive || view.mip)
     return;
@@ -326,6 +356,7 @@ void pass_targets(void*,
                   const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*) noexcept;
 void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   if (auto item = find_list(native); item && item->id == id) {
+    item->pfd_dirty = false;
     item->targets = {};
     item->count = 0;
     item->depth_known = false;
@@ -624,7 +655,18 @@ HRESULT STDMETHODCALLTYPE list_create1(ID3D12Device4* device,
   }
   return hr;
 }
-NativeSlot list_reset;
+NativeSlot list_reset, list_close;
+HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
+  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
+  if (!owned_depth && registry().ready) {
+    const OwnedWork guard;
+    observe_safely([&] {
+      if (auto item = find_list(native))
+        flush_pfd(native, item->id);
+    });
+  }
+  return list_close.forward<F>()(native);
+}
 HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12CommandAllocator* allocator, ID3D12PipelineState* pso) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
   if (owned_depth)
@@ -634,6 +676,7 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   observe_safely([&] { item = ensure_list(native); });
   const auto hr = list_reset.forward<F>()(native, allocator, pso);
   if (item) {
+    item->pfd_dirty = false;
     item->targets = {};
     item->count = 0;
     item->depth = DXGI_FORMAT_UNKNOWN;
@@ -702,6 +745,9 @@ struct Scissors {
   static void apply(List& l, UINT n, const D3D12_RECT* p) { l.graphics.scissors(0, n, p); }
 };
 struct Targets {
+  static void before(List& l, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*) {
+    flush_pfd(l.native, l.id);
+  }
   static void apply(List& l,
                     UINT count,
                     const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
@@ -709,6 +755,8 @@ struct Targets {
                     const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
     auto& r = registry();
     const std::lock_guard lock(r.mutex);
+    l.pfd_dirty = false;
+    l.pfd_transition = false;
     l.targets = {};
     l.count = 0;
     l.depth = DXGI_FORMAT_UNKNOWN;
@@ -743,6 +791,7 @@ void pass_targets(void*,
   if (!item || item->id != id)
     return;
   if (count > 8 || (count && !targets)) {
+    item->pfd_dirty = false;
     item->targets = {};
     item->count = 0;
     item->depth_known = false;
@@ -778,6 +827,15 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
   using F = void(STDMETHODCALLTYPE*)(C*, Args...);
   static inline NativeSlot slot;
   static void STDMETHODCALLTYPE call(C* native, Args... args) noexcept {
+    if constexpr (requires(List& l) { Action::before(l, args...); }) {
+      if (!owned_depth && registry().ready) {
+        const OwnedWork guard;
+        observe_safely([&] {
+          if (auto item = find_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native)))
+            Action::before(*item, args...);
+        });
+      }
+    }
     slot.forward<F>()(native, args...);
     if (owned_depth || !registry().ready)
       return;
@@ -792,6 +850,7 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
 #define STATE(Slot, Method, Action) StateHook<Slot, decltype(&ID3D12GraphicsCommandList::Method), Action>
 bool hook_state(ID3D12GraphicsCommandList* list) {
   bool ok = list_reset.install(list, 10, reinterpret_cast<void*>(&reset));
+  ok &= list_close.install(list, 9, reinterpret_cast<void*>(&close));
   ok &= STATE(25, SetPipelineState, Pipeline)::install(list);
   ok &= STATE(28, SetDescriptorHeaps, Heaps)::install(list);
   ok &= STATE(30, SetGraphicsRootSignature, GraphicsRoot)::install(list);

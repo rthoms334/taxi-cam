@@ -148,6 +148,9 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   callbacks.observe_legacy = tail_legacy;
   callbacks.observe_enhanced = tail_enhanced;
   callbacks.after_draw = tail_draw;
+  callbacks.recording_invalidated = [](void* raw, ID3D12GraphicsCommandList* native, std::uint64_t generation, std::uint32_t reasons) noexcept {
+    static_cast<TailContext*>(raw)->manager->invalidate_source_recording(native, generation, true, reasons);
+  };
   require(Boundary::register_list(producer.list.p, Generation, callbacks).ready, "Register actual native draw/barrier observer");
   namespace Queue = taxi_camera::engine_hook::queue_submit;
   auto* queue_context = new TailQueueContext;
@@ -290,6 +293,15 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
         draw.record(list7.p, handles[feed], first_color, false, 768, heights[feed]);
         manager->stage_source_draw(producer.list.p, Generation, 1, &target, &ids[feed]);
         draw.record(list7.p, handles[feed], colors[frame][feed], false, 768, heights[feed]);
+      }
+      if (frame == 1 && !enhanced) {
+        // A legal large application batch between two live frames must not
+        // erase the ordered RT evidence for untouched camera sources.
+        D3D12_RESOURCE_BARRIER uav{};
+        uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        std::vector<D3D12_RESOURCE_BARRIER> large_batch(4097, uav);
+        producer.list->ResourceBarrier(static_cast<UINT>(large_batch.size()), large_batch.data());
+        require(!manager->list(producer.list.p)->source_effects.invalid, "Large unrelated batch froze live capture");
       }
       // No source transition at all in these recordings: resources stay RT.
       check(producer.list->Close(), "Close persistent RT draw recording");

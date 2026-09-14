@@ -6,6 +6,9 @@
 #include <cstdint>
 
 namespace taxi_camera::engine_hook::render_boundary {
+// Linear metadata inspection, without allocations or resource dereferences.
+// Kept separate from the 256-barrier limit for inserting GPU commands.
+inline constexpr UINT maximum_legacy_metadata_barriers = 1u << 20;
 enum ScopeFlags : std::uint32_t {
   ScopeEnabled = 1,
   ScopeActivePass = 2,
@@ -45,7 +48,9 @@ struct Callbacks {
                           std::uint64_t object_generation,
                           const D3D12_TEXTURE_BARRIER&) noexcept = nullptr;
   // Metadata only, before RT/pass filters; never issue GPU work here. Inspect
-  // at most4096 barriers/64 groups per call, without dereferencing resources.
+  // Legacy batches are inspected completely up to the explicit metadata bound;
+  // larger/null/overflowing spans are rejected in full. Enhanced metadata is
+  // bounded to 4096 barriers/64 groups. No resource pointer is dereferenced.
   // Legacy delivery includes exact transition, alias and UAV records; NULL
   // alias arguments retain their wildcard meaning. Unknown types invalidate.
   void (*observe_legacy)(void*,
@@ -107,6 +112,7 @@ struct Statistics {
   std::uint64_t legacy_calls = 0, enhanced_calls = 0, legacy_candidates = 0, enhanced_candidates = 0;
   std::uint64_t pass_refusals = 0, batch_refusals = 0;
   std::uint64_t copy_resource_calls = 0, copy_texture_calls = 0, metadata_truncated_calls = 0;
+  std::uint64_t maximum_legacy_batch = 0;
 };
 // Explicit live native DIRECT object. QI7 must succeed and return this identical
 // interface pointer before its extended vtable slots are inspected. Eight slots
@@ -135,6 +141,10 @@ void invalidate_recording(ID3D12GraphicsCommandList*,
 Result remove() noexcept;
 Result repair_protection() noexcept;
 bool operational() noexcept;
+// Permission for caller-owned work at an actual native list boundary. This is
+// only recording/pass permission; callers must separately prove the bound RTV,
+// resource lifetime/state and complete graphics restoration.
+bool recording_allows_injection(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;
 Statistics statistics() noexcept;
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 // Test-only scalar state; never part of the production add-on interface.
