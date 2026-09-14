@@ -12,6 +12,8 @@ The companion saves settings to:
 
 The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900` and `ini-a350-1000`; each has its own calibration file.
 
+Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
+
 The INI contains `[service]`, `[display]`, `[nose]`, `[tail]` and `[guides]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it uses that aircraft's defaults. Only the A380 profile imports `taxi-camera-mounts.cfg` beside the companion.
 
 Saves validate the complete settings object, flush a temporary UTF-16 file and replace the INI atomically.
@@ -42,6 +44,8 @@ The following controls are session-only and start cleared:
 | `route_request` | Identify a new explicit assignment request |
 
 Side masks are **0 off, 1 left, 2 right, 3 both**. Using manual preview disables automatic TAXI control in the UI; re-enable **TAXI buttons** on Overview to return to aircraft control.
+
+PFD routing selections apply immediately. Each side may use an explicit current texture ID or **Automatic assignment**. Automatic detection preserves an explicitly selected side and identifies the other from the same confirmed pair. Selecting the same nonzero ID for both sides shows an error and preserves the accepted assignment. Changing aircraft profile starts fresh target discovery; ordinary loss of both resource identities still requires an explicit assignment before side order can be trusted.
 
 Calibration identifies the destination texture using an animated pattern. Its write allowance renews every 50 ms in the native adapter. Reaching the limit skips additional pattern writes for that window without disabling calibration.
 

@@ -1451,10 +1451,9 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
     l |= item->id == left;
     rr |= item->id == right;
   }
-  if (!l || !rr || !left || !right || left == right)
+  if (!l || !rr)
     return false;
-  r.routes.targets = {};
-  const bool assigned = r.routes.assign(0, left) && r.routes.assign(1, right);
+  const bool assigned = r.routes.select_explicit({left, right});
   refresh_selected(r);
   return assigned;
 }
@@ -1484,7 +1483,8 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   {
     const std::lock_guard lock(r.mutex);
     r.active_mask = r.calibration_mask = 0;
-    r.routes.targets = {};
+    if (r.profile != profile)
+      r.routes.reset();  // A deliberate profile switch starts fresh binding ownership.
     r.profile = profile;
     r.detector.configure(*profile);
     refresh_selected(r);

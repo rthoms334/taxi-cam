@@ -311,9 +311,17 @@ DWORD run_impl() {
     for (UINT i = 0; i < status.candidate_count; ++i)
       status.candidates[i] = {inventory[i].id,     inventory[i].draws,  inventory[i].width,
                               inventory[i].height, inventory[i].levels, inventory[i].format};
+    char aircraft_message[sizeof(status.message)] = "Waiting for a supported aircraft identity or profile switch.";
+    const auto* detected_profile = identity.fresh ? profiles::find(identity.detected_profile) : nullptr;
+    const auto* selected_profile = profiles::find(applied_profile);
+    if (!aircraft_matches && detected_profile && selected_profile && detected_profile != selected_profile)
+      std::snprintf(aircraft_message, sizeof(aircraft_message), "Detected %ls; selected %ls. %s", detected_profile->name,
+                    selected_profile->name,
+                    settings.auto_profile ? "Waiting for Auto aircraft to switch profiles."
+                                          : "Enable Auto aircraft or select the detected profile on Overview.");
     const char* message = !connected                             ? "Waiting for Windows companion heartbeat."
                           : !settings.enabled                    ? "Camera service paused."
-                          : !aircraft_matches                    ? "Waiting for a supported aircraft identity or profile switch."
+                          : !aircraft_matches                    ? aircraft_message
                           : cutoff.inhibited                     ? "Above 60 knots: TAXI buttons commanded off."
                           : failed                               ? scene.message.c_str()
                           : !buttons.valid                       ? buttons.error

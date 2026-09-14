@@ -13,6 +13,7 @@
 #include "launcher.hpp"
 #include "protocol.hpp"
 #include "settings_store.hpp"
+#include "target_assignment.hpp"
 #include "updater.hpp"
 
 namespace {
@@ -148,7 +149,9 @@ double number(int id, double previous, bool& ok) {
   }
   return n;
 }
-bool read_fields(win::Settings& settings) {
+bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
+  if (error)
+    *error = nullptr;
   bool ok = true;
   const double rate = number(200, settings.camera_rate, ok);
   if (rate < 15 || rate > 60 || std::floor(rate) != rate)
@@ -175,33 +178,34 @@ bool read_fields(win::Settings& settings) {
         (*guides[i])[axis] = static_cast<float>(value / 100.);
     }
   if (page == 3) {
+    std::array<std::uint64_t, 2> selected_ids{settings.left_id, settings.right_id};
     for (unsigned i = 0; i < 2; ++i) {
       const LRESULT selected = SendDlgItemMessageW(window, 400 + i, CB_GETCURSEL, 0, 0);
-      if (selected == 0) {
-        if (i)
-          settings.right_id = 0;
-        else
-          settings.left_id = 0;
-      }
-      if (selected > 0 && static_cast<size_t>(selected - 1) < combo_ids.size()) {
-        const auto id = combo_ids[selected - 1];
-        if (i)
-          settings.right_id = id;
-        else
-          settings.left_id = id;
-      }
+      if (selected == 0)
+        selected_ids[i] = 0;
+      else if (selected > 0 && static_cast<size_t>(selected - 1) < combo_ids.size())
+        selected_ids[i] = combo_ids[selected - 1];
     }
-    if (settings.left_id && settings.right_id && settings.left_id != settings.right_id)
-      ++settings.route_request;
+    const auto result =
+        win::update_target_assignment(settings.left_id, settings.right_id, settings.route_request, selected_ids[0], selected_ids[1]);
+    if (result == win::TargetAssignmentResult::duplicate || result == win::TargetAssignmentResult::sequence_exhausted) {
+      if (error)
+        *error = result == win::TargetAssignmentResult::duplicate
+                     ? L"Choose different textures for left and right, or Automatic assignment."
+                     : L"Display assignment request limit reached. Restart Taxi Cam.";
+      return false;
+    }
   }
   return ok && win::valid_settings(settings);
 }
 void build_controls();
 bool apply(bool save = true) {
   auto settings = draft();
-  if (!read_fields(settings)) {
-    notice = page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
-                       : L"Check the values: rate 15–60, EV −16 to +4, lens 0.05–1.55.";
+  const wchar_t* field_error{};
+  if (!read_fields(settings, &field_error)) {
+    notice = field_error ? field_error
+             : page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
+                         : L"Check the values: rate 15–60, EV −16 to +4, lens 0.05–1.55.";
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
@@ -925,14 +929,20 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const int id = LOWORD(w);
       if (refreshing)
         return 0;
+      if (HIWORD(w) == CBN_SELCHANGE && (id == 400 || id == 401)) {
+        if (apply(false))
+          dirty_notice();
+        return 0;
+      }
       if (HIWORD(w) == EN_CHANGE || (HIWORD(w) == CBN_SELCHANGE && id != 210)) {
         dirty_notice();
         return 0;
       }
       if (id >= 100 && id < 106) {
         auto s = draft();
-        if (!read_fields(s)) {
-          notice = L"Finish the current values before changing pages.";
+        const wchar_t* field_error{};
+        if (!read_fields(s, &field_error)) {
+          notice = field_error ? field_error : L"Finish the current values before changing pages.";
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
@@ -1082,16 +1092,20 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (id == 402) {
-        apply(false);
-        build_controls();
+        if (apply(false))
+          build_controls();
         return 0;
       }
       if (id == 403) {
         if (!apply(false))
           return 0;
         auto s = draft();
-        std::swap(s.left_id, s.right_id);
-        ++s.route_request;
+        const auto result = win::update_target_assignment(s.left_id, s.right_id, s.route_request, s.right_id, s.left_id);
+        if (result == win::TargetAssignmentResult::sequence_exhausted) {
+          notice = L"Display assignment request limit reached. Restart Taxi Cam.";
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
         publish(s);
         dirty_notice();
         build_controls();
