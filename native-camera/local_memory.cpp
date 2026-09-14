@@ -180,9 +180,24 @@ SIZE_T ScopedLocalMemoryQueryCache::query(const void* address, MEMORY_BASIC_INFO
       return sizeof(region);
     }
   }
-  if (count_ == regions_.size() || query_memory_uncached(address, region) != sizeof(region) || !region_contains(region, value, 1)) {
+  if (count_ == regions_.size()) {
     failed_ = true;
     return 0;
+  }
+  // VirtualQuery reports only the suffix beginning at its queried page. Probe
+  // the containing 64 KiB window first so descending graph fields can share
+  // one observation. This queries metadata only: no extra bytes are read. The
+  // result is usable only when it contains the actual field; a preceding guard,
+  // reservation or protection split falls back to the exact requested address.
+  // There is no merging, eviction or cross-stage reuse. finish() still freshly
+  // compares every saved region, including any newly observed prefix pages.
+  constexpr std::uintptr_t window_size = 65536;
+  const auto window_start = value - value % window_size;
+  if (query_memory_uncached(reinterpret_cast<const void*>(window_start), region) != sizeof(region) || !region_contains(region, value, 1)) {
+    if (window_start == value || query_memory_uncached(address, region) != sizeof(region) || !region_contains(region, value, 1)) {
+      failed_ = true;
+      return 0;
+    }
   }
   regions_[count_++] = region;
   return sizeof(region);

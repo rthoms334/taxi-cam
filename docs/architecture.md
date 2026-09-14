@@ -43,7 +43,7 @@ The installer adds an `exe.xml` entry that starts the companion in background mo
 
 The companion checks the simulator's executable path, Windows user/session and AMD64 executable structure. Different paths are accepted only when Windows identifies them as the same file, allowing the Xbox installation path and its WindowsApps alias to match. It then loads the bridge using Windows `LoadLibraryW` in the simulator process and calls the DLL's `TaxiCameraStart` export. The bridge starts its control worker after the loader has finished.
 
-The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. Camera creation is requested when at least one enabled TAXI side has an assigned PFD, or when the explicit scene test is active.
+The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. An accepted TAXI request starts camera preparation while PFD discovery proceeds independently. Only confirmed, assigned display textures receive the image. The explicit scene test prepares cameras without writing a PFD.
 
 Closing the settings window hides it. Exiting the companion clears camera delivery. The bridge and its installed hooks stay loaded until MSFS exits because recorded GPU commands may still refer to their resources.
 
@@ -76,6 +76,8 @@ The bridge calls internal MSFS camera functions to create two scene views. These
 
 Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair. A transient inspection failure pauses new camera work. Removal requires a fresh, complete view inspection and a closed render gate observed across distinct manager updates. Pending or unreadable views retain their IDs; they cannot be erased or replaced until validation recovers. The engine handles deferred renderer release after an accepted removal. TAXI OFF, speed cutoff, service pause and companion disconnection close render gates and hide the PFD feed while retaining the pair. A subsequent ON reuses those same owned views. Aircraft/profile changes still require guarded cleanup before selecting the next adapter. Losing GPU capture-state evidence reports a stalled feed; it does not authorize camera removal or recreation. Capture resumes only when ordered GPU observations establish a valid source state again.
 
+Each bounded private-memory inspection caches memory-region metadata, never field contents. Metadata queries begin at the containing 64 KiB window when that region covers the requested field; protection or allocation splits fall back to the exact field address. Every field read and trace reread still runs, and each cached region must pass a fresh endpoint check before results are used. No cache survives an inspection stage.
+
 ### Following the aircraft
 
 SimConnect supplies latitude, longitude, altitude, pitch, bank and true heading. Taxi Cam converts these into an aircraft position and orientation in the scene's world coordinate system. Public camera data and the internal view establish the coordinate calibration.
@@ -92,8 +94,8 @@ The aircraft transform is applied to each mount on camera updates. A camera ther
 
 | Camera | Render size | Destination |
 | --- | --- | --- |
-| Nose | 768 × 255 | Upper pane |
-| Tail | 768 × 504 | Lower camera pane |
+| Nose | A380: 736 x 251; A350: 774 x 251 | Upper pane inside the black border |
+| Tail | A380: 736 x 496; A350: 774 x 496 | Lower camera pane inside the black border |
 
 MSFS renders each view at its pane size. The image does not need to be rendered at the main window's resolution and reduced afterward.
 
@@ -129,12 +131,12 @@ Source dimensions come from the aircraft profile. The compositor takes a complet
 
 - nose view above and tail view below;
 - a black horizontal divider;
-- two magenta nose reference dots and mirrored tail brackets;
+- nose reference dots and mirrored tail brackets: magenta for the A380, amber for the A350;
 - an opaque ground-speed panel inset from the top-left camera edges, with internal padding and a width that fits the current value on both A380 and A350.
 
 Ground speed is read from SimConnect and rendered by Taxi Cam. It is rounded to whole knots; unavailable data displays `--`. The original PFD's GS text is covered by this panel.
 
-The magenta guides are fixed positions in the image. Changing the camera mount or field of view does not reproject them onto the ground.
+The guides have aircraft-specific fixed positions in the image. Changing the camera mount or field of view does not reproject them onto the ground.
 
 Exposure controls operate in the compositor. For the HDR `R11G11B10_FLOAT` camera format, the shader applies the selected exposure, tone mapping and colour encoding. Automatic exposure adjusts the requested EV from ambient-light data, with a gradual transition. It can brighten captured content but cannot supply lighting that MSFS omitted from the scene.
 
@@ -153,7 +155,7 @@ The bridge tracks drawing into the selected PFD texture and adds the camera imag
 
 This is why the camera appears on the cockpit's physical screen: the cockpit model samples the texture that Taxi Cam has just updated. The camera is part of the image rendered on the aircraft display.
 
-The bridge saves and restores the graphics state it changes, including the pipeline, shader inputs, viewport and clipping rectangle. It only inserts the draw when enough application state is known to restore it. A native `ClearState` discards pending overlay work and clears the tracked bindings, retaining only the pipeline supplied by that call. It does not reset command-list lifetime or revive a recording that was unsafe for injection.
+The bridge tracks state setters in both the normal command-list table and the native render-pass table, discovered on an owned bootstrap list. Each hook forwards the exact original for its table. It saves and restores the graphics state it changes, including the pipeline, shader inputs, viewport and clipping rectangle. It only inserts the draw when enough application state is known to restore it. A native `ClearState` discards pending overlay work and clears the tracked bindings, retaining only the pipeline supplied by that call. It does not reset command-list lifetime or revive a recording that was unsafe for injection.
 
 ### Keeping readers and writers in order
 
@@ -174,9 +176,9 @@ The control loop checks companion heartbeat, aircraft telemetry, display identit
 | Ground speed exceeds 60 knots | Inhibit cameras and send TAXI push events to switch active buttons off; wait for OFF acknowledgement |
 | TAXI telemetry briefly disappears | Hold the last accepted button state for a bounded interval; continue checking camera-pose freshness separately |
 | Camera output changes identity | Discard the old image pairing and wait for current captures |
-| Capture stalls while source draws continue in a qualifying state | Request camera recreation, with a bounded retry budget |
+| Capture stalls while source draws continue | Retain the camera pair and wait for fresh, ordered GPU-state evidence |
 | Companion settings mutex is briefly busy | Retain the last validated settings within the existing heartbeat deadline |
-| Companion exits or its heartbeat expires | Suppress delivery and request camera stop |
+| Companion exits or its heartbeat expires | Suppress delivery and close render gates while retaining the pair |
 | Changed private code/layout or invalid GPU state | Refuse the affected operation and report the failed check |
 
 Recovery is conditional. It does not infer a valid camera image from a non-null pointer, and a ready flag does not mean a frame has reached the PFD. The [diagnostic reference](runtime-reference.md#diagnostics) explains how to distinguish each stage.

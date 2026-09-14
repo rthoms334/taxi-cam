@@ -465,7 +465,11 @@ void draw_page(HDC dc) {
       const int x = 244 + i * 375;
       panel(dc, x, 138, 354, 424);
       text(dc, i ? L"Tail camera" : L"Nose-wheel camera", x + 16, 154, 324, 30, heading);
-      text(dc, i ? L"LOWER VIEW · 768 × 504" : L"UPPER VIEW · 768 × 255", x + 16, 190, 324, 22, small, Muted);
+      const auto* profile = profiles::find(draft().profile);
+      const auto& dimensions = (profile ? *profile : profiles::A380).camera_panes[i];
+      wchar_t view_label[96];
+      std::swprintf(view_label, 96, L"%ls · %d × %d", i ? L"LOWER VIEW" : L"UPPER VIEW", dimensions[0], dimensions[1]);
+      text(dc, view_label, x + 16, 190, 324, 22, small, Muted);
       for (int j = 0; j < 6; ++j)
         text(dc, labels[j], x + 16 + (j % 3) * 106, 215 + (j / 3) * 108, 98, 24, small, Muted);
       text(dc, L"Position relative to the aircraft datum", x + 16, 397, 324, 22, small, Muted);

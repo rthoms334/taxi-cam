@@ -31,7 +31,10 @@ float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
-float4 ps_main() : SV_Target { return float4(0, 1, 0, 1); }
+cbuffer Parameters : register(b0) { uint Width; uint Height; uint Mode; uint Frame; };
+float4 ps_main() : SV_Target {
+  return float4(Mode != 0 ? 1 : 0, Width == 64 && Height == 64 ? 1 : 0, Frame != 0 ? 1 : 0, 1);
+}
 )";
     check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", nullptr, nullptr, "vs_main", "vs_5_0",
                      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, vertex.put(), nullptr),
@@ -313,7 +316,7 @@ void native_case(bool warp, bool a350) {
     const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
     check(readbacks[side]->Map(0, &range, &mapped), "Map verification readback");
     const auto* data = static_cast<const unsigned char*>(mapped);
-    std::uint64_t border_pixels = 0, gs_padding_pixels = 0, gs_label_pixels = 0, guide_pixels = 0;
+    std::uint64_t border_pixels = 0, gs_padding_pixels = 0, gs_label_pixels = 0, guide_pixels = 0, tail_guide_pixels = 0;
     for (UINT y = 0; y < 1024; ++y)
       for (UINT x = 0; x < display_width; ++x) {
         const auto* pixel = data + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
@@ -364,6 +367,14 @@ void native_case(bool warp, bool a350) {
             require(pixel[0] > 250 && pixel[1] > 250 && pixel[2] > 250, "GS label scales with inset content in both axes");
             ++gs_label_pixels;
           }
+          // Independent A350 default lower corners sit below/outside the bogies.
+          if (a350 && (working_x == 207 || working_x == 560) && working_y == 682) {
+            require(pixel[0] > 250 && pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3,
+                    "A350 lower brackets appear beside the bogies on both sides");
+            ++tail_guide_pixels;
+          }
+          if (a350 && working_x == 234 && working_y == 637)
+            require(pixel[2] >= 202 && pixel[2] <= 206, "Old A350 bracket position is camera imagery");
           if (working_x >= 106 && working_x <= 109 && working_y >= 121 && working_y <= 123) {
             require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),
                     "Aircraft reference marker scales with inset content in both axes");
@@ -377,7 +388,8 @@ void native_case(bool warp, bool a350) {
         ++pixels;
       }
     require(border_pixels == (a350 ? 33704u : 33248u), "Exact black border coverage on each PFD");
-    require(gs_padding_pixels && gs_label_pixels && guide_pixels, "Inset GS/guide pixel checks were not exercised");
+    require(gs_padding_pixels && gs_label_pixels && guide_pixels && (!a350 || tail_guide_pixels >= 2),
+            "Inset GS/guide pixel checks were not exercised");
     const D3D12_RANGE none{0, 0};
     readbacks[side]->Unmap(0, &none);
   }
@@ -434,6 +446,52 @@ void native_case(bool warp, bool a350) {
   clear_readback->Unmap(0, &clear_none);
   require(runtime::snapshot(key).stamps == before_clear_stamps, "ClearState discards the pending PFD stamp");
   require(win::graphics_status().clear_states == before_clears + 1, "Observe native ClearState once");
+  reset();
+  // Native BeginRenderPass switches the command-list vtable. State changed
+  // through that active table must survive a later deferred PFD stamp, even
+  // when the application does not redundantly rebind its pipeline or root.
+  transition(list.get(), clear_target.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+  const float pass_background[]{1, 0, 0, 1};
+  list->ClearRenderTargetView(clear_rtv, pass_background, 0, nullptr);
+  Reference<ID3D12GraphicsCommandList4> pass_list;
+  check(list->QueryInterface(IID_PPV_ARGS(pass_list.put())), "Render-pass command list");
+  D3D12_RENDER_PASS_RENDER_TARGET_DESC pass_target{};
+  pass_target.cpuDescriptor = clear_rtv;
+  pass_target.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+  pass_target.EndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+  pass_list->BeginRenderPass(1, &pass_target, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+  list->SetPipelineState(cleared.pipeline.get());
+  list->SetGraphicsRootSignature(cleared.root.get());
+  const UINT pass_parameters[]{64, 64, 0, 77};
+  list->SetGraphicsRoot32BitConstants(0, 4, pass_parameters, 0);
+  list->SetGraphicsRoot32BitConstant(0, 0, 3);
+  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  const D3D12_VIEWPORT pass_viewport{0, 0, 32, 32, 0, 1};
+  const D3D12_RECT pass_scissor{0, 0, 16, 16};
+  list->RSSetViewports(1, &pass_viewport);
+  list->RSSetScissorRects(1, &pass_scissor);
+  list->DrawInstanced(3, 1, 0, 0);
+  pass_list->EndRenderPass();
+  list->OMSetRenderTargets(1, &rtvs[2], FALSE, nullptr);
+  list->DrawInstanced(3, 1, 0, 0);
+  const auto before_pass_stamp = runtime::snapshot(key).stamps;
+  list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);  // Flush the PFD before switching.
+  require(runtime::snapshot(key).stamps == before_pass_stamp + 1, "PFD stamps after a completed ordinary render pass");
+  list->DrawInstanced(3, 1, 0, 0);  // All graphics state still inherited from inside the pass.
+  transition(list.get(), clear_target.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  list->CopyTextureRegion(&clear_destination, 0, 0, 0, &clear_source, nullptr);
+  submit();
+  check(clear_readback->Map(0, &clear_range, &clear_mapped), "Map post-render-pass application pixels");
+  for (UINT y = 0; y < 64; ++y)
+    for (UINT x = 0; x < 64; ++x) {
+      const auto* pixel = static_cast<const unsigned char*>(clear_mapped) + SIZE_T{y} * clear_footprint.Footprint.RowPitch + 4 * x;
+      const bool drawn = x < 16 && y < 16;
+      require(pixel[0] == (drawn ? 0 : 255) && pixel[1] == (drawn ? 255 : 0) && pixel[2] == 0 && pixel[3] == 255,
+              "PSO/root/constants/viewport/scissor set inside a native render pass survive the next deferred PFD stamp");
+      ++pixels;
+    }
+  clear_readback->Unmap(0, &clear_none);
   reset();
   // A real predicate must still refuse injection. Disabling it later cannot
   // revive this recording; only the next successful native Reset can do that.
@@ -495,7 +553,8 @@ void native_case(bool warp, bool a350) {
   std::printf(
       "PASS native %s: two GPU feeds, two PFDs, pre-existing root/list/queue, partial state restoration, exact black borders, inset "
       "GS/guides, A350 gutter/ND, lower trim, descriptor copies, "
-      "OFF, D3D11On12 capture coexistence, ClearState pipeline pixels and predicate guards; %llu pixels; debug=%d errors=%llu\n",
+      "OFF, D3D11On12 capture coexistence, ClearState and active-render-pass state pixels, predicate guards; %llu pixels; debug=%d "
+      "errors=%llu\n",
       warp ? "WARP" : "hardware", static_cast<unsigned long long>(pixels), debug_enabled, static_cast<unsigned long long>(errors));
 }
 }  // namespace

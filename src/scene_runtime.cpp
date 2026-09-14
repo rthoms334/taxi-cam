@@ -1,6 +1,6 @@
 #include "scene_runtime.hpp"
-#include "scene_frame_output.hpp"
 #include "../standalone/native_hooks.hpp"
+#include "scene_frame_output.hpp"
 
 #include <algorithm>
 #include <array>
@@ -246,7 +246,7 @@ void service() {
     item.pending = {};
     item.status.output = true;
     ++item.status.frames;
-    item.status.message = "Live camera composition available: full-width upper PFD, lower trim area preserved.";
+    item.status.message = "Live camera composition available: inset upper PFD, lower trim area preserved.";
   }
 }
 Snapshot snapshot(std::uint64_t key) {

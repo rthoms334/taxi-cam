@@ -43,7 +43,10 @@ class ScopedLocalMemoryMetrics {
 };
 
 // One read-only inspection stage only; no private calls may run inside it. The
-// first query caches region metadata, never contents. Exact RPM field reads and
+// first query caches region metadata, never contents. A bounded earlier-page
+// metadata probe is accepted only if it covers the requested address; otherwise
+// query that exact address. At most two initial queries plus one endpoint query
+// per saved region (192 calls total); no metadata merging. Exact RPM reads and
 // the caller's complete trace rereads still run. finish() freshly queries every
 // cached region and compares its allocation, extent, state, type and protection.
 // Results must remain local until finish() succeeds. A failure poisons the scope;

@@ -6,8 +6,17 @@ namespace taxi_camera::standalone {
 struct SceneDemand {
   bool start;
   bool suspend;
+  unsigned stamp_mask;
 };
-inline SceneDemand scene_demand(bool display_requested, bool scene_requested, bool failed) noexcept {
-  return {display_requested && !scene_requested && !failed, !display_requested || failed};
+// accepted_mask has already passed heartbeat, identity, enabled and cutoff
+// checks. Target discovery gates writes, never preparation of requested views.
+inline SceneDemand scene_demand(unsigned accepted_mask,
+                                bool test_scene,
+                                unsigned assigned_mask,
+                                bool scene_requested,
+                                bool failed) noexcept {
+  accepted_mask &= 3;
+  const bool wanted = accepted_mask || test_scene;
+  return {wanted && !scene_requested && !failed, !wanted || failed, failed ? 0 : accepted_mask & assigned_mask & 3};
 }
 }  // namespace taxi_camera::standalone

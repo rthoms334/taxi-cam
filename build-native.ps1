@@ -174,7 +174,7 @@ if ($Validate) {
     if (-not $WarpOnly) { $gpuTests = @('hardware GPU') + $gpuTests }
     [ordered]@{
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
-        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','camera border and inset composition','ClearState pipeline preservation','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
+        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));

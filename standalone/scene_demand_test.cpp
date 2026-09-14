@@ -40,7 +40,7 @@ void button_sequence(unsigned rate) {
     std::array<unsigned, 2> pulses{};
     const auto end = time + duration;
     for (; time < end; time += 10) {
-      const auto demand = taxi_camera::standalone::scene_demand(wanted, requested, false);
+      const auto demand = taxi_camera::standalone::scene_demand(wanted ? 3u : 0u, false, 3, requested, false);
       if (demand.start) {
         pair.request_independent_pose();
         requested = true;
@@ -77,14 +77,57 @@ void button_sequence(unsigned rate) {
   pair.process_update(owner, callbacks);
   require(engine.erases == 2 && pair.snapshot().state == ec::State::disabled, "Explicit lifecycle cleanup was lost");
 }
+void discovery_sequence() {
+  Engine engine;
+  ec::PairController pair;
+  const ec::ManagerToken owner{11, 1};
+  const ec::EngineCallbacks callbacks{&engine, Engine::initialize, Engine::create, Engine::erase};
+  bool requested = false;
+  unsigned starts = 0;
+  const auto update = [&](unsigned accepted, bool test_scene, unsigned assigned, unsigned expected_stamp, bool expected_suspend) {
+    const auto demand = taxi_camera::standalone::scene_demand(accepted, test_scene, assigned, requested, false);
+    require(demand.stamp_mask == expected_stamp, "An unrequested or undiscovered display was stamped");
+    require(demand.suspend == expected_suspend, "Scene suspension depended on display discovery");
+    if (demand.start) {
+      pair.request_independent_pose();
+      requested = true;
+      ++starts;
+    }
+    pair.process_update(owner, callbacks);
+  };
+  update(0, false, 3, 0, true);
+  require(engine.creates == 0, "Discovered targets created cameras without accepted demand");
+  update(1, false, 0, 0, false);
+  require(starts == 1 && engine.creates == 2, "TAXI before target discovery did not prepare the pair");
+  const auto ids = pair.snapshot().owned_ids;
+  for (unsigned i = 0; i < 100; ++i)
+    update(1, false, 0, 0, false);
+  update(1, false, 2, 0, false);  // Opposite display becoming ready cannot receive this button's output.
+  update(1, false, 3, 1, false);
+  update(3, false, 1, 1, false);  // A missing second target does not block the first target.
+  update(0, false, 3, 0, true);
+  update(2, false, 0, 0, false);
+  update(2, false, 3, 2, false);
+  update(0, true, 3, 0, false);  // Scene-only testing never writes either PFD.
+  update(0, false, 3, 0, true);
+  require(starts == 1 && engine.creates == 2 && engine.erases == 0 && pair.snapshot().owned_ids == ids,
+          "Discovery, OFF or the other button recreated/erased the pair");
+}
 }  // namespace
 int main() {
   try {
     button_sequence(15);
     button_sequence(60);
-    const auto failed = taxi_camera::standalone::scene_demand(true, false, true);
-    require(!failed.start && failed.suspend, "A failed start retried without permission");
-    std::puts("PASS scene demand: left/OFF/right, repeated toggles, closed idle gates and retained pair at 15/60 fps. Mock engine only.");
+    discovery_sequence();
+    const auto failed = taxi_camera::standalone::scene_demand(3, false, 3, false, true);
+    require(!failed.start && failed.suspend && !failed.stamp_mask, "A failed start retried or stamped without permission");
+    const auto test = taxi_camera::standalone::scene_demand(0, true, 0, false, false);
+    require(test.start && !test.suspend && !test.stamp_mask, "Scene test incorrectly required a display target");
+    const auto unknown = taxi_camera::standalone::scene_demand(4, false, 7, false, false);
+    require(!unknown.start && unknown.suspend && !unknown.stamp_mask, "Unknown demand bits created or stamped views");
+    std::puts(
+        "PASS scene demand: prepare once before discovery, matched-target-only writes, scene-only test, left/OFF/right, retained "
+        "pair and closed idle gates at 15/60 fps. Mock engine only.");
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL scene demand: %s\n", e.what());

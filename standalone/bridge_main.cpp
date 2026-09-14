@@ -46,6 +46,30 @@ void log_status(const win::Status& s, const char* detail = "") {
     WriteFile(file, line, static_cast<DWORD>(length), &wrote, nullptr);
   CloseHandle(file);
 }
+struct StartupTiming {
+  unsigned intent_mask{}, attempts{};
+  bool observed{}, target_ready{}, output_ready{}, stamped{};
+  std::uint64_t intent_ms{}, target_ms{}, prepare_begin_ms{}, prepare_end_ms{}, request_begin_ms{}, request_end_ms{};
+  std::uint64_t output_ms{}, stamp_ms{}, baseline_stamps{};
+};
+void log_startup(const win::Status& status, const StartupTiming& timing, const char* phase) {
+  char detail[768];
+  std::snprintf(detail, sizeof(detail),
+                "Startup phase=%s intent_mask=%u attempt=%u intent_observed_ms=%llu targets_observed_ms=%llu "
+                "prepare_begin_ms=%llu prepare_end_ms=%llu prepare_duration_ms=%llu "
+                "request_begin_ms=%llu request_end_ms=%llu request_duration_ms=%llu "
+                "output_observed_ms=%llu stamp_observed_ms=%llu intent_to_output_ms=%llu intent_to_stamp_ms=%llu",
+                phase, timing.intent_mask, timing.attempts, static_cast<unsigned long long>(timing.intent_ms),
+                static_cast<unsigned long long>(timing.target_ms), static_cast<unsigned long long>(timing.prepare_begin_ms),
+                static_cast<unsigned long long>(timing.prepare_end_ms),
+                static_cast<unsigned long long>(timing.prepare_end_ms ? timing.prepare_end_ms - timing.prepare_begin_ms : 0),
+                static_cast<unsigned long long>(timing.request_begin_ms), static_cast<unsigned long long>(timing.request_end_ms),
+                static_cast<unsigned long long>(timing.request_end_ms ? timing.request_end_ms - timing.request_begin_ms : 0),
+                static_cast<unsigned long long>(timing.output_ms), static_cast<unsigned long long>(timing.stamp_ms),
+                static_cast<unsigned long long>(timing.output_ready ? timing.output_ms - timing.intent_ms : 0),
+                static_cast<unsigned long long>(timing.stamped ? timing.stamp_ms - timing.intent_ms : 0));
+  log_status(status, detail);
+}
 DWORD run_impl() {
   win::Mailbox mailbox;
   if (!mailbox.open(GetCurrentProcessId(), false))
@@ -70,6 +94,7 @@ DWORD run_impl() {
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
   CaptureProgress progress;
+  StartupTiming startup;
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
@@ -120,6 +145,7 @@ DWORD run_impl() {
       applied_mounts = {};
       intent = {};
       progress = {};
+      startup = {};
       exposure = {};
       route_request = next_telemetry = next_discovery = 0;
       changing_profile = false;
@@ -146,11 +172,14 @@ DWORD run_impl() {
                               ? (settings.follow_taxi ? desired.buttons : settings.manual_mask)
                               : 0;
     const bool test_scene = connected && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
+    const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene)
       failed = false;
     const auto targets = win::target_ids();
-    const unsigned active = ((mask & 1) && targets[0] ? 1u : 0u) | ((mask & 2) && targets[1] ? 2u : 0u);
-    win::set_target_mask(failed ? 0 : active);
+    const unsigned assigned = (targets[0] ? 1u : 0u) | (targets[1] ? 2u : 0u);
+    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed);
+    unsigned active = demand.stamp_mask;
+    win::set_target_mask(active);
     win::set_calibration(connected && settings.enabled && aircraft_matches && !cutoff.inhibited ? settings.calibration_mask : 0,
                          settings.calibration_budget);
     const win::OwnedWork owned;
@@ -169,21 +198,45 @@ DWORD run_impl() {
       if (native_camera::request_scene_mounts(mounts))
         applied_mounts = settings.mounts;
     }
-    const auto demand = win::scene_demand(active || test_scene, requested, failed);
+    if (!startup.observed && (mask || test_scene)) {
+      startup.observed = true;
+      startup.intent_mask = mask & 3;
+      startup.intent_ms = intent_observed_ms;
+      startup.baseline_stamps = scene_runtime::snapshot(key).stamps;
+      log_startup(status, startup, "accepted_intent");
+    }
+    if (startup.observed && !startup.target_ready && startup.intent_mask && (assigned & startup.intent_mask) == startup.intent_mask) {
+      startup.target_ready = true;
+      startup.target_ms = GetTickCount64();
+      log_startup(status, startup, "targets_ready");
+    }
     // Close render gates on OFF, cutoff, service pause or a lost heartbeat.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
     if (demand.start) {
-      if (scene_runtime::prepare(key)) {
+      ++startup.attempts;
+      startup.prepare_begin_ms = GetTickCount64();
+      startup.prepare_end_ms = startup.request_begin_ms = startup.request_end_ms = 0;
+      log_startup(status, startup, "prepare_begin");
+      const bool prepared = scene_runtime::prepare(key);
+      startup.prepare_end_ms = GetTickCount64();
+      log_startup(status, startup, prepared ? "prepare_ready" : "prepare_failed");
+      if (prepared) {
+        startup.request_begin_ms = GetTickCount64();
+        log_startup(status, startup, "request_begin");
         scene_runtime::set_composition(key, profiles::find(applied_profile)->composition);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
         requested = native_camera::scene_snapshot().accepting_requests;
+        startup.request_end_ms = GetTickCount64();
+        log_startup(status, startup, requested ? "request_accepted" : "request_refused");
       }
       if (!requested) {
         failed = true;
+        active = 0;
         win::set_target_mask(0);
+        native_camera::suspend_scene_rendering(true);
       }
     }
     // Normal button changes never call request_scene_stop/reset_feed or release
@@ -201,7 +254,7 @@ DWORD run_impl() {
     const auto scene = native_camera::scene_snapshot();
     const auto output = scene_runtime::snapshot(key);
     if (now >= next_recovery) {
-      const bool eligible = (active || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
+      const bool eligible = (mask || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
                             scene.requested_feeds == 2 && !scene.pose_waiting && !scene.view_waiting &&
                             native_camera::sample_body_pose(now).valid;
       if (eligible && output.frames != last_frames)
@@ -237,6 +290,18 @@ DWORD run_impl() {
     status.captures = output.capture.captures;
     status.composed = output.frames;
     status.stamps = output.stamps;
+    // These are polling observations, not GPU timestamps. They include all work
+    // since accepted intent and do not redefine request duration as cold latency.
+    if (startup.observed && requested && !startup.output_ready && output.output) {
+      startup.output_ready = true;
+      startup.output_ms = GetTickCount64();
+      log_startup(status, startup, "first_output");
+    }
+    if (startup.observed && requested && !startup.stamped && output.stamps > startup.baseline_stamps) {
+      startup.stamped = true;
+      startup.stamp_ms = GetTickCount64();
+      log_startup(status, startup, "first_stamp");
+    }
     const auto inventory = win::pfd_inventory();
     status.candidate_count = static_cast<UINT>(std::min<size_t>(inventory.size(), 16));
     for (UINT i = 0; i < status.candidate_count; ++i)

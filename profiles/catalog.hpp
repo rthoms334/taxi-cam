@@ -25,6 +25,11 @@ inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.guide_color = {1, 0.55f, 0};
   c.speed_color = {0, 0.94f, 0.28f};
+  // A350 bogies occupy roughly x[.284,.345], y[.657,.817] in the
+  // default -900 tail view. Put the mirrored L marks outside and below them.
+  c.tail_upper = {0.29f, 0.67f};
+  c.tail_corner = {0.27f, 0.84f};
+  c.tail_inner = {0.36f, 0.845f};
   return c;
 }();
 struct AircraftProfile {
@@ -60,8 +65,10 @@ inline constexpr AircraftProfile A380{1,
                                       1024,
                                       5};
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
-// Mount seeds follow the exterior camera mesh positions; lens/pitch remain
-// adjustable per variant. The compositor retains its bounded 768px working image.
+// Mount positions follow the exterior camera meshes. The -900 pitch/lens fit
+// the cockpit ETACS reference and a live simulator comparison; -1000 tail
+// framing accounts for its longer camera-to-gear distance and needs a live check.
+// The compositor retains its bounded 768px working image.
 // Preserve a 32px central gap around the PFD/MFDDivider artwork on both sides.
 inline constexpr AircraftProfile A359{2,
                                       "ini-a350-900",
@@ -69,7 +76,7 @@ inline constexpr AircraftProfile A359{2,
                                       {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                                       {"", ""},
                                       {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -1.98, 16.55, -12, 0, 1.24}, {0, 10.85, -33.0, -22, 0, 1.02}}},
+                                      {{{0, -2, 16.55, -15, 0, 0.55}, {0, 10.85, -33.0, -18, 0, 0.62}}},
                                       1644,
                                       1024,
                                       0,
@@ -88,7 +95,7 @@ inline constexpr AircraftProfile A35K{3,
                                       {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                                       {"", ""},
                                       {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -1.98, 20.36, -12, 0, 1.24}, {0, 10.85, -36.17, -22, 0, 1.02}}},
+                                      {{{0, -2, 20.36, -15, 0, 0.55}, {0, 10.85, -36.17, -16.4, 0, 0.57}}},
                                       1644,
                                       1024,
                                       0,

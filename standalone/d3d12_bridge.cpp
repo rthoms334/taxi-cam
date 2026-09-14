@@ -848,7 +848,12 @@ template <unsigned Slot, class C, class... Args, class Action>
 struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
   using F = void(STDMETHODCALLTYPE*)(C*, Args...);
   static inline NativeSlot slot;
-  static void STDMETHODCALLTYPE call(C* native, Args... args) noexcept {
+  // The native active-pass table has distinct cells even where the target
+  // functions are identical. Retain a second, pinned cell for that exact table;
+  // Each table forwards its own immutable original, including if another hook
+  // changes a cell between the admission read and the installation CAS.
+  static inline NativeSlot active_slot;
+  static void invoke(F forward, C* native, Args... args) noexcept {
     if constexpr (requires(List& l) { Action::before(l, args...); }) {
       if (!owned_depth && registry().ready) {
         const OwnedWork guard;
@@ -858,7 +863,7 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
         });
       }
     }
-    slot.forward<F>()(native, args...);
+    forward(native, args...);
     if (owned_depth || !registry().ready)
       return;
     const OwnedWork guard;
@@ -867,30 +872,51 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
         Action::apply(*item, args...);
     });
   }
-  static bool install(ID3D12GraphicsCommandList* list) { return slot.install(list, Slot, reinterpret_cast<void*>(&call)); }
+  static void STDMETHODCALLTYPE call(C* native, Args... args) noexcept { invoke(slot.forward<F>(), native, args...); }
+  static void STDMETHODCALLTYPE active_call(C* native, Args... args) noexcept { invoke(active_slot.forward<F>(), native, args...); }
+  static bool install(ID3D12GraphicsCommandList* list, bool active = false) {
+    if (!active)
+      return slot.install(list, Slot, reinterpret_cast<void*>(&call));
+    auto** address = *reinterpret_cast<void***>(list) + Slot;
+    if (address == slot.address)
+      return *address == reinterpret_cast<void*>(&call);
+    if (active_slot.address)
+      return active_slot.install(list, Slot, reinterpret_cast<void*>(&active_call)) &&
+             active_slot.original.load(std::memory_order_acquire) == slot.original.load(std::memory_order_acquire);
+    if (!slot.address || *address != slot.original.load(std::memory_order_acquire))
+      return false;
+    // If installation observed a changed chain, refuse graphics admission.
+    // The installed active trampoline still forwards its exact captured chain;
+    // no transient caller can be sent to a different table's implementation.
+    return active_slot.install(list, Slot, reinterpret_cast<void*>(&active_call)) &&
+           active_slot.original.load(std::memory_order_acquire) == slot.original.load(std::memory_order_acquire);
+  }
 };
 #define STATE(Slot, Method, Action) StateHook<Slot, decltype(&ID3D12GraphicsCommandList::Method), Action>
-bool hook_state(ID3D12GraphicsCommandList* list) {
-  bool ok = list_reset.install(list, 10, reinterpret_cast<void*>(&reset));
-  ok &= list_close.install(list, 9, reinterpret_cast<void*>(&close));
-  ok &= STATE(11, ClearState, ClearState)::install(list);
-  ok &= STATE(25, SetPipelineState, Pipeline)::install(list);
-  ok &= STATE(28, SetDescriptorHeaps, Heaps)::install(list);
-  ok &= STATE(30, SetGraphicsRootSignature, GraphicsRoot)::install(list);
-  ok &= STATE(32, SetGraphicsRootDescriptorTable, Table)::install(list);
-  ok &= STATE(34, SetGraphicsRoot32BitConstant, Constant)::install(list);
-  ok &= STATE(36, SetGraphicsRoot32BitConstants, Constants)::install(list);
-  ok &= STATE(38, SetGraphicsRootConstantBufferView, Address<PfdRootKind::cbv>)::install(list);
-  ok &= STATE(40, SetGraphicsRootShaderResourceView, Address<PfdRootKind::srv>)::install(list);
-  ok &= STATE(42, SetGraphicsRootUnorderedAccessView, Address<PfdRootKind::uav>)::install(list);
-  ok &= STATE(20, IASetPrimitiveTopology, Topology)::install(list);
-  ok &= STATE(21, RSSetViewports, Viewports)::install(list);
-  ok &= STATE(22, RSSetScissorRects, Scissors)::install(list);
-  ok &= STATE(46, OMSetRenderTargets, Targets)::install(list);
-  ok &= STATE(27, ExecuteBundle, Unsupported)::install(list);
-  ok &= STATE(59, ExecuteIndirect, Unsupported)::install(list);
-  ok &= STATE(55, SetPredication, Predication)::install(list);
-  ok &= STATE(51, DiscardResource, Unsupported)::install(list);
+bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
+  bool ok = true;
+  if (!active) {
+    ok = list_reset.install(list, 10, reinterpret_cast<void*>(&reset));
+    ok &= list_close.install(list, 9, reinterpret_cast<void*>(&close));
+  }
+  ok &= STATE(11, ClearState, ClearState)::install(list, active);
+  ok &= STATE(25, SetPipelineState, Pipeline)::install(list, active);
+  ok &= STATE(28, SetDescriptorHeaps, Heaps)::install(list, active);
+  ok &= STATE(30, SetGraphicsRootSignature, GraphicsRoot)::install(list, active);
+  ok &= STATE(32, SetGraphicsRootDescriptorTable, Table)::install(list, active);
+  ok &= STATE(34, SetGraphicsRoot32BitConstant, Constant)::install(list, active);
+  ok &= STATE(36, SetGraphicsRoot32BitConstants, Constants)::install(list, active);
+  ok &= STATE(38, SetGraphicsRootConstantBufferView, Address<PfdRootKind::cbv>)::install(list, active);
+  ok &= STATE(40, SetGraphicsRootShaderResourceView, Address<PfdRootKind::srv>)::install(list, active);
+  ok &= STATE(42, SetGraphicsRootUnorderedAccessView, Address<PfdRootKind::uav>)::install(list, active);
+  ok &= STATE(20, IASetPrimitiveTopology, Topology)::install(list, active);
+  ok &= STATE(21, RSSetViewports, Viewports)::install(list, active);
+  ok &= STATE(22, RSSetScissorRects, Scissors)::install(list, active);
+  ok &= STATE(46, OMSetRenderTargets, Targets)::install(list, active);
+  ok &= STATE(27, ExecuteBundle, Unsupported)::install(list, active);
+  ok &= STATE(59, ExecuteIndirect, Unsupported)::install(list, active);
+  ok &= STATE(55, SetPredication, Predication)::install(list, active);
+  ok &= STATE(51, DiscardResource, Unsupported)::install(list, active);
   return ok;
 }
 #undef STATE
@@ -936,6 +962,22 @@ bool initialize_graphics(ID3D12Device* device) noexcept {
   bool ok = hook_state(list);
   const auto base = boundary::register_list(list, ++r.next_id, Boundaries);
   ok &= base.ready && base.protection_restored;
+  // Discover the runtime's real active-pass table on this owned, empty list,
+  // before admitting application recordings. No simulator resource is bound.
+  // The state setters are hooked in both tables; native Begin/End and all
+  // existing pass/suspend/alias capture guards remain owned by the boundary
+  // observer. A different forwarding implementation is refused, never guessed.
+  ID3D12GraphicsCommandList4* pass_list{};
+  const bool same_pass_interface = SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&pass_list))) && pass_list == list;
+  if (base.ready && base.protection_restored && same_pass_interface) {
+    pass_list->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+    ok &= hook_state(list, true);
+    pass_list->EndRenderPass();
+  } else {
+    ok = false;
+  }
+  if (pass_list)
+    pass_list->Release();
   boundary::unregister_list(list, r.next_id);
   list->Close();
   ok &= runtime::init_queue(r.key, queue);

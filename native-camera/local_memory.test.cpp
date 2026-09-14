@@ -309,6 +309,120 @@ void cache_profile() {
               milliseconds(middle.QuadPart - started.QuadPart), milliseconds(finished.QuadPart - middle.QuadPart));
 }
 
+void descending_cache_profile() {
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const auto page = std::size_t(info.dwPageSize);
+  Allocation allocation(page * 16);
+  std::fill(allocation.data, allocation.data + allocation.size, 0x39);
+  LocalMemoryReader reader;
+  LocalMemoryMetrics metrics;
+  LARGE_INTEGER frequency{}, start{}, finish{};
+  require(QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&start), "Descending benchmark clock unavailable");
+  constexpr unsigned repeats = 128;
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    for (unsigned repeat = 0; repeat < repeats; ++repeat) {
+      reader.reset_budget();
+      ScopedLocalMemoryQueryCache cache;
+      // Graph traversal may discover lower-address objects after higher ones.
+      // Each requested field and its exact consistency reread remain present.
+      for (unsigned pass = 0; pass < 2; ++pass)
+        for (unsigned offset = 14; offset > 0; --offset) {
+          std::uint64_t value = 0;
+          require(reader.read(allocation.address(offset * page), &value, sizeof(value)) && value == 0x3939393939393939ull,
+                  "Descending cached field or complete reread changed");
+        }
+      require(cache.finish(), "Descending cache endpoint proof failed");
+    }
+  }
+  require(QueryPerformanceCounter(&finish), "Descending benchmark clock unavailable at endpoint");
+  require(metrics.query_calls == 2 * repeats && metrics.read_calls == 28 * repeats && metrics.requested_bytes == 224 * repeats,
+          "Canonical query failed to reduce descending queries or omitted exact fields");
+  std::printf("Descending own-allocation graph: queries_per_stage=%llu exact_reads=28 bytes=224 stage_ms=%.6f query_ms=%.6f\n",
+              static_cast<unsigned long long>(metrics.query_calls / repeats),
+              double(finish.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart / repeats,
+              double(metrics.query_ticks) * 1000 / frequency.QuadPart / repeats);
+}
+void canonical_query_ranges() {
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const auto page = std::size_t(info.dwPageSize);
+  Allocation allocation(65536);
+  require(page == 4096 && allocation.address() % 65536 == 0, "Canonical query fixture needs this host's aligned 64 KiB allocation");
+  std::fill(allocation.data, allocation.data + allocation.size, 0x39);
+  LocalMemoryReader reader;
+  for (const DWORD protection : {DWORD(PAGE_NOACCESS), DWORD(PAGE_READWRITE | PAGE_GUARD), DWORD(PAGE_READONLY)}) {
+    DWORD previous = 0;
+    require(VirtualProtect(allocation.data, page, protection, &previous) != FALSE, "Could not protect preceding query page");
+    LocalMemoryMetrics metrics;
+    {
+      ScopedLocalMemoryMetrics measured(metrics);
+      ScopedLocalMemoryQueryCache cache;
+      std::uint64_t output = 0;
+      require(reader.read(allocation.address(3 * page), &output, sizeof(output)) && output == 0x3939393939393939ull,
+              "Earlier metadata query changed the actual field read");
+      require(cache.finish() && metrics.query_calls == 3 && metrics.read_calls == 1 && metrics.requested_bytes == 8,
+              "Preceding split did not use exact-address fallback and exact endpoint proof");
+    }
+    MEMORY_BASIC_INFORMATION prefix{};
+    require(VirtualQuery(allocation.data, &prefix, sizeof(prefix)) == sizeof(prefix) && prefix.Protect == protection,
+            "Earlier metadata query consumed a guard or changed preceding protection");
+    require(VirtualProtect(allocation.data, page, PAGE_READWRITE, &previous) != FALSE, "Could not restore preceding query page");
+  }
+  require(VirtualFree(allocation.data, page, MEM_DECOMMIT) != FALSE, "Could not decommit preceding query page");
+  {
+    LocalMemoryMetrics metrics;
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    require(reader.read(allocation.address(3 * page), &output, sizeof(output)) && cache.finish() && metrics.query_calls == 3 &&
+                metrics.read_calls == 1 && output == 0x3939393939393939ull,
+            "Reserved preceding page bypassed exact-address fallback");
+  }
+  require(VirtualAlloc(allocation.data, page, MEM_COMMIT, PAGE_READWRITE) == allocation.data, "Could not recommit preceding page");
+  std::fill(allocation.data, allocation.data + page, 0x39);
+  // Changes outside the actual field still invalidate the broader observation.
+  for (const auto changed : {0u, 3u, 15u}) {
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    DWORD previous = 0;
+    require(reader.read(allocation.address(8 * page), &output, sizeof(output)), "Canonical extent initial read failed");
+    require(VirtualProtect(allocation.data + changed * page, page, PAGE_READONLY, &previous) != FALSE, "Could not split canonical extent");
+    require(reader.read(allocation.address(8 * page), &output, sizeof(output)) && !cache.finish(),
+            "Changed preceding/succeeding page escaped canonical endpoint proof");
+    require(VirtualProtect(allocation.data + changed * page, page, PAGE_READWRITE, &previous) != FALSE,
+            "Could not restore canonical extent");
+  }
+  // The fixed region cap still bounds both fallback queries and every endpoint.
+  std::vector<std::unique_ptr<Allocation>> allocations;
+  for (unsigned i = 0; i <= ScopedLocalMemoryQueryCache::kRegionLimit; ++i) {
+    auto item = std::make_unique<Allocation>(65536);
+    DWORD previous = 0;
+    require(VirtualProtect(item->data, page, PAGE_NOACCESS, &previous) != FALSE, "Could not create bounded fallback fixture");
+    allocations.push_back(std::move(item));
+  }
+  {
+    LocalMemoryMetrics metrics;
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    for (unsigned i = 0; i < ScopedLocalMemoryQueryCache::kRegionLimit; ++i)
+      require(reader.read(allocations[i]->address(page), &output, sizeof(output)), "Allowed bounded fallback read failed");
+    require(metrics.query_calls == 128 && cache.finish() && metrics.query_calls == 192 && metrics.read_calls == 64,
+            "Fallback query plus endpoint exceeded or omitted fixed 192-call maximum");
+  }
+  {
+    LocalMemoryMetrics metrics;
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    for (unsigned i = 0; i < ScopedLocalMemoryQueryCache::kRegionLimit; ++i)
+      require(reader.read(allocations[i]->address(page), &output, sizeof(output)), "Bounded fallback cap setup failed");
+    require(!reader.read(allocations.back()->address(page), &output, sizeof(output)) && metrics.query_calls == 128 && !cache.finish(),
+            "Region cap issued an extra canonical or fallback query");
+  }
+}
 void private_memory_reads() {
   SYSTEM_INFO info{};
   GetSystemInfo(&info);
@@ -764,6 +878,8 @@ int main() {
   cache_protection_changes();
   cache_bounds();
   cache_profile();
+  descending_cache_profile();
+  canonical_query_ranges();
   private_memory_reads();
   large_private_fields();
   bulk_read_profile();

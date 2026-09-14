@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include "../native-camera/aircraft_identity.hpp"
@@ -6,6 +7,26 @@
 #include "../native-camera/view_resize.hpp"
 #include "../src/pfd_target_detector.hpp"
 using namespace taxi_camera;
+namespace {
+// The vertical-FOV interpretation matches the live -900 horizon/gear fit.
+// Project independent aircraft-model contact points to catch a return to
+// the wide inherited framing, not just changed literal defaults.
+std::array<double, 2> project_landmark(const profiles::AircraftProfile& profile, unsigned feed, std::array<double, 3> point) {
+  const auto& mount = profile.mounts[feed];
+  constexpr double radians = 3.14159265358979323846 / 180;
+  const double pitch = mount[3] * radians, yaw = mount[4] * radians;
+  const double cp = std::cos(pitch), sp = std::sin(pitch), cy = std::cos(yaw), sy = std::sin(yaw);
+  for (unsigned i = 0; i < 3; ++i)
+    point[i] -= mount[i];
+  const double x = point[0] * cy - point[2] * sy;
+  const double y = -point[0] * sy * sp + point[1] * cp - point[2] * cy * sp;
+  const double z = point[0] * sy * cp + point[1] * sp + point[2] * cy * cp;
+  assert(z > 0);
+  const double half_height = z * std::tan(mount[5] / 2);
+  const double aspect = double(profile.camera_panes[feed][0]) / profile.camera_panes[feed][1];
+  return {0.5 + x / (2 * half_height * aspect), 0.5 - y / (2 * half_height)};
+}
+}  // namespace
 int main() {
   using namespace standalone;
   wchar_t temporary[32768];
@@ -112,7 +133,28 @@ int main() {
     assert(left_content.top == 12 && right_content.top == 12 && left_content.bottom == 763 && right_content.bottom == 763);
     for (const auto& pane : profile->camera_panes)
       assert(pane[0] == 774);
+    // iniBuilds 1.2.6 variant flight_model.cfg contact_points are feet:
+    // NLG forward/up 79.46/-15.6 (-900), 92.045/-15.5 (-1000);
+    // left MLG right/up/forward -20.200737/-16.45/-17.63 for both.
+    const bool longer = profile->id == profiles::A35K.id;
+    const auto nose = project_landmark(*profile, 0, {0, (longer ? -15.5 : -15.6) * 0.3048, (longer ? 92.045 : 79.46) * 0.3048});
+    // Preserve the user's accepted nose calibration on both variants, with
+    // the -1000's forward offset keeping the equivalent gear-relative mount.
+    assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == (longer ? 20.36 : 16.55));
+    assert(profile->mounts[0][3] == -15 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 0.55);
+    assert(std::abs(nose[0] - 0.5) < 1e-6 && nose[1] > 0.55 && nose[1] < 0.75);
+    const auto gear = project_landmark(*profile, 1, {-20.200737 * 0.3048, -16.45 * 0.3048, -17.63 * 0.3048});
+    assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > 0.77 && gear[1] < 0.84);
+    assert(profile->composition.tail_corner[0] < gear[0] && profile->composition.tail_inner[0] > gear[0]);
+    assert(profile->composition.tail_corner[1] > gear[1] && profile->composition.tail_upper[1] < gear[1]);
+    const auto& tail_mount = profile->mounts[1];
+    assert(tail_mount[3] * (3.14159265358979323846 / 180) + tail_mount[5] / 2 < 0);  // Tail horizon stays above the pane.
   }
+  // Independent bounds from the -900 live framing trial. The lower legs clear
+  // the whole visible bogie instead of crossing its tyres as the old marks did.
+  const auto& a359_guides = profiles::A359.composition;
+  assert(a359_guides.tail_corner[0] < 0.284 && a359_guides.tail_corner[1] > 0.817);
+  assert(a359_guides.tail_inner[0] > 0.345 && a359_guides.tail_inner[1] > 0.817);
   static PfdTargetDetector detector;
   detector.configure(profiles::A359);
   std::array<PfdTargetObservation, 4> observations{
@@ -131,5 +173,7 @@ int main() {
   assert(!detector.observe(observations.data(), observations.size(), 4000).valid);
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 0, 28));
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 1, 0));
-  std::puts("PASS aircraft profiles: isolated settings, variant identity, pane dimensions, mirrored display regions and detector reset");
+  std::puts(
+      "PASS aircraft profiles: isolated settings, variant identity, pane dimensions, mirrored display regions, "
+      "A350 gear framing and detector reset");
 }
