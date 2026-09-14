@@ -8,9 +8,9 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 
 | Profile | Settings key | Display texture | Nose / tail render sizes |
 | --- | --- | --- | --- |
-| FlyByWire A380X | `fbw-a380x` | 768 x 1024, RGBA8, five mips | 768 x 255 / 768 x 504 |
-| iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | 806 x 255 / 806 x 504 |
-| iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | 806 x 255 / 806 x 504 |
+| FlyByWire A380X | `fbw-a380x` | 768 x 1024, RGBA8, five mips | 736 x 251 / 736 x 496 |
+| iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
+| iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
 
 A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The A350 adapters are undergoing live simulator validation; a passing GPU fixture does not establish aircraft framing or automatic target ordering.
 
@@ -25,13 +25,15 @@ The installed iniBuilds behavior XML uses each TAXI latch for its button state a
 
 ## Display placement
 
-Each side has an explicit destination rectangle. The A380 covers rows 0 through 762 across the PFD. The A350 captain uses columns 0 through 805 of the combined EFIS surface; the first officer uses columns 838 through 1643. Both camera regions are 806 pixels wide, leaving a 32-pixel central gap for the grey separator and its edge padding. The adjacent navigation display and rows 763 through 1023 are preserved. The gap is based on the installed divider artwork; exact cockpit alignment remains subject to live verification. The display arrangement follows the [Airbus ETACS diagram, section 4-1-0](https://www.aircraft.airbus.com/sites/g/files/jlcbta126/files/2024-06/AC_A350_0524.pdf).
+Each side has an explicit destination rectangle. The A380 covers rows 0 through 762 across the PFD. The A350 captain uses columns 0 through 805 of the combined EFIS surface; the first officer uses columns 838 through 1643. Both outer camera regions are 806 pixels wide, leaving a 32-pixel central gap for the grey separator and its edge padding. The adjacent navigation display and rows 763 through 1023 are preserved. The gap is based on the installed divider artwork; exact cockpit alignment remains subject to live verification. The display arrangement follows the [Airbus ETACS diagram, section 4-1-0](https://www.aircraft.airbus.com/sites/g/files/jlcbta126/files/2024-06/AC_A350_0524.pdf).
+
+Inside each outer region, both aircraft draw a black border 16 target pixels wide on the left and right and 12 pixels high at the top. The complete camera image fits within that border, including its GS panel and reference marks. Content is 736 x 751 pixels on A380 and 774 x 751 on A350. This is distinct from the preserved central grey separator.
 
 The profile defines accepted texture dimensions, mip policy and formats. Resource IDs identify an allocation lifetime, not an aircraft material. The detector ranks activity across three one-second windows and requires a clear pair above other candidates. The side-order rule is profile data; it must be verified in the simulator. `$EFIS_LEFT` / `$EFIS_RIGHT` and A380 material hints are reference labels, not proof of GPU identity. **PFD routing** supports explicit assignment and correction when the heuristic is ambiguous.
 
 ## Shared rendering contract
 
-The renderer captures two independently sized scene textures. It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's destination rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. The A350's 806-pixel sources preserve the destination aspect ratio through composition and presentation.
+The renderer captures two independently sized scene textures. It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's inner content rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. Native sources match the inner pane sizes: 736 pixels wide on A380 and 774 on A350, with nose and tail heights of 251 and 496 pixels. The border is drawn by the existing PFD shader, without an additional GPU pass.
 
 Profiles supply the pane division, visible separator, reference dot/bracket coordinates and colour. A380 uses magenta marks; A350 uses amber marks from the Airbus diagram. On both A380 and A350, the ground-speed panel is inset from the camera edges, with internal padding and a width that fits the current value. The same layout applies to both PFDs. Panel layout belongs to the aircraft profile. The ground-speed text has its own saved RGB colour, editable on **Display**; changing it does not change exposure or the reference marks. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
 
@@ -43,6 +45,6 @@ Changing profiles stops output and retires owned views through the engine update
 
 ## Adding an aircraft
 
-Define an `AircraftProfile` in [the catalog](../profiles/catalog.hpp): accepted aircraft types and add-on path markers, control strategy and variables, texture constraints, side-order rule, destination rectangles, camera dimensions, mounts, composition and speed limit. Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
+Define an `AircraftProfile` in [the catalog](../profiles/catalog.hpp): accepted aircraft types and add-on path markers, control strategy and variables, texture constraints, side-order rule, destination rectangles and border insets, camera dimensions, mounts, composition and speed limit. Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
 
 Add profile/settings tests and a GPU fixture that checks both camera regions and every preserved display region. Then verify actual cockpit buttons, texture identity, framing, cutoff and aircraft reload. An aircraft with different control semantics needs a control adapter; an aircraft without two camera views needs a different composition contract.

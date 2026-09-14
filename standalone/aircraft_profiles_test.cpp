@@ -81,18 +81,37 @@ int main() {
     for (unsigned side = 0; side < 2; ++side) {
       const auto rect = profiles::display_rect(*profile, side);
       assert(rect.left < rect.right && rect.right <= profile->width && rect.bottom <= profile->height);
+      const auto content = profiles::display_content_rect(*profile, side);
+      assert(content.left == rect.left + 16 && content.right + 16 == rect.right && content.top == rect.top + 12 &&
+             content.bottom == rect.bottom);
+      assert(rect.top == 0 && rect.bottom == 763);
+      assert(content.left < content.right && content.top < content.bottom && content.left >= rect.left && content.top >= rect.top &&
+             content.right <= rect.right && content.bottom <= rect.bottom);
+      assert(content.bottom - content.top == 751);
+      const int expected_width = profile->id == 1 ? 736 : 774;
+      assert(content.right - content.left == static_cast<unsigned>(expected_width));
+      assert(profile->camera_panes[side][0] == expected_width && profile->camera_panes[side][1] == (side == 0 ? 251 : 496));
       native_camera::ViewDimensions desired, original{{{3413, 913}, {3413, 913}, {3413, 913}}};
       assert(native_camera::plan_view_resize(original, side, desired, profile->camera_panes));
       assert(desired[0] == profile->camera_panes[side] && desired[1] == desired[0] && desired[2] == desired[0]);
       assert(profiles::camera_candidate(desired[0][0], desired[0][1]));
     }
   }
+  for (unsigned side = 0; side < 2; ++side) {
+    const auto outer = profiles::display_rect(profiles::A380, side);
+    assert(outer.left == 0 && outer.right == 768 && outer.top == 0 && outer.bottom == 763);
+    const auto content = profiles::display_content_rect(profiles::A380, side);
+    assert(content.left == 16 && content.right == 752 && content.top == 12 && content.bottom == 763);
+  }
   for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
     const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1);
     assert(left.left == 0 && left.right == 806 && right.left == 838 && right.right == 1644);
     assert(right.left - left.right == 32);
+    const auto left_content = profiles::display_content_rect(*profile, 0), right_content = profiles::display_content_rect(*profile, 1);
+    assert(left_content.left == 16 && left_content.right == 790 && right_content.left == 854 && right_content.right == 1628);
+    assert(left_content.top == 12 && right_content.top == 12 && left_content.bottom == 763 && right_content.bottom == 763);
     for (const auto& pane : profile->camera_panes)
-      assert(pane[0] == 806);
+      assert(pane[0] == 774);
   }
   static PfdTargetDetector detector;
   detector.configure(profiles::A359);

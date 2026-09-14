@@ -32,6 +32,8 @@ void reset_feed(std::uint64_t key);
 void set_composition(std::uint64_t key, const profiles::Composition& layout);
 void service();
 Snapshot snapshot(std::uint64_t key);
+// Optional half-open content bounds inside destination; nullptr fills the
+// destination. Any surrounding destination border is opaque black.
 bool stamp(ID3D12GraphicsCommandList*,
            const PfdGraphicsState&,
            std::uint64_t key,
@@ -39,5 +41,6 @@ bool stamp(ID3D12GraphicsCommandList*,
            UINT width,
            UINT height,
            DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
-           const D3D12_RECT* destination = nullptr);
+           const D3D12_RECT* destination = nullptr,
+           const D3D12_RECT* content = nullptr);
 }  // namespace taxi_camera::scene_runtime

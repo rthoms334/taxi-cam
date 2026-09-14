@@ -54,8 +54,8 @@ float4 ps_main() : SV_Target { return float4(0, 1, 0, 1); }
     desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     desc.RasterizerState.DepthClipEnable = TRUE;
     desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    desc.DepthStencilState.FrontFace = desc.DepthStencilState.BackFace = {
-        D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+    desc.DepthStencilState.FrontFace = desc.DepthStencilState.BackFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
+                                                                          D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     desc.NumRenderTargets = 1;
     desc.SampleDesc.Count = 1;
@@ -78,8 +78,18 @@ void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   // DXGI's compatibility metadata and triggers ReflectSharedProperties errors
   // when the D3D12 debug layer validates the D3D11On12 resource open.
   struct HiddenWindow {
-    HWND handle = CreateWindowExW(0, L"STATIC", L"Taxi Cam capture validation", WS_OVERLAPPEDWINDOW, 0, 0, 1920, 1080,
-                                  nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    HWND handle = CreateWindowExW(0,
+                                  L"STATIC",
+                                  L"Taxi Cam capture validation",
+                                  WS_OVERLAPPEDWINDOW,
+                                  0,
+                                  0,
+                                  1920,
+                                  1080,
+                                  nullptr,
+                                  nullptr,
+                                  GetModuleHandleW(nullptr),
+                                  nullptr);
     ~HiddenWindow() {
       if (handle)
         DestroyWindow(handle);
@@ -125,6 +135,7 @@ void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
 void native_case(bool warp, bool a350) {
   const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
   const UINT pane_width = profile.camera_panes[0][0], display_width = profile.width;
+  const UINT nose_height = profile.camera_panes[0][1], tail_height = profile.camera_panes[1][1];
   Reference<ID3D12Debug> debug;
   const bool debug_enabled = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debug.put())));
   if (debug_enabled)
@@ -160,7 +171,11 @@ void native_case(bool warp, bool a350) {
   runtime::manager().set_source_rate(60);
   std::array<Reference<ID3D12Resource>, 4> textures;
   for (UINT i = 0; i < 4; ++i) {
-    auto d = texture_description(i < 2 ? pane_width : display_width, i == 0 ? 255 : i == 1 ? 504 : 1024, DXGI_FORMAT_R8G8B8A8_UNORM);
+    auto d = texture_description(i < 2 ? pane_width : display_width,
+                                 i == 0   ? nose_height
+                                 : i == 1 ? tail_height
+                                          : 1024,
+                                 DXGI_FORMAT_R8G8B8A8_UNORM);
     if (i > 1)
       d.MipLevels = a350 ? 1 : 5;
     create_texture(device.get(), d, textures[i].put());
@@ -210,8 +225,8 @@ void native_case(bool warp, bool a350) {
     check(allocator->Reset(), "Allocator Reset");
     check(list->Reset(allocator.get(), nullptr), "Observed native Reset");
   };
-  generator.record(list.get(), rtvs[0], pane_width, 255, false, 0, 0);
-  generator.record(list.get(), rtvs[1], pane_width, 504, false, 0, 1);
+  generator.record(list.get(), rtvs[0], pane_width, nose_height, false, 0, 0);
+  generator.record(list.get(), rtvs[1], pane_width, tail_height, false, 0, 1);
   submit();
   reset();
   const auto deadline = GetTickCount64() + 10000;
@@ -234,8 +249,8 @@ void native_case(bool warp, bool a350) {
               after_interop.invalid_source_recordings, before_interop.unknown_submitted_lists, after_interop.unknown_submitted_lists);
   Sleep(20);  // Next permitted 60-Hz capture opportunity.
   const auto frames_before_interop = runtime::snapshot(key).frames;
-  generator.record(list.get(), rtvs[0], pane_width, 255, false, 0, 0);
-  generator.record(list.get(), rtvs[1], pane_width, 504, false, 0, 1);
+  generator.record(list.get(), rtvs[0], pane_width, nose_height, false, 0, 0);
+  generator.record(list.get(), rtvs[1], pane_width, tail_height, false, 0, 1);
   submit();
   reset();
   const auto interop_deadline = GetTickCount64() + 1000;
@@ -298,51 +313,71 @@ void native_case(bool warp, bool a350) {
     const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
     check(readbacks[side]->Map(0, &range, &mapped), "Map verification readback");
     const auto* data = static_cast<const unsigned char*>(mapped);
+    std::uint64_t border_pixels = 0, gs_padding_pixels = 0, gs_label_pixels = 0, guide_pixels = 0;
     for (UINT y = 0; y < 1024; ++y)
       for (UINT x = 0; x < display_width; ++x) {
         const auto* pixel = data + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
-        const UINT left = a350 && side ? 838u : 0u;
-        const UINT region_width = a350 ? 806u : 768u;
-        const bool camera_region = x >= left && x < left + region_width;
-        const auto local_x = static_cast<int>(x) - static_cast<int>(left);
-        // Independent broad regions deliberately exclude reference marks and GS.
-        if (local_x >= 350 && local_x < 400 && y >= 100 && y < 150)
-          require(pixel[2] >= 49 && pixel[2] <= 53, "Nose frame on PFD");
-        if (local_x >= 350 && local_x < 400 && y >= 400 && y < 450)
-          require(pixel[2] >= 202 && pixel[2] <= 206, "Tail frame on PFD");
-        if (camera_region && y >= 255 && y < 259)
-          require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Black divider");
-        if (a350 && !camera_region && y < 763) {
+        // Expected bounds are independent of the production profile helper.
+        // The outer rectangle still excludes the A35032px grey gutter and ND.
+        const UINT outer_left = a350 && side ? 838u : 0u;
+        const UINT outer_width = a350 ? 806u : 768u;
+        const UINT inner_left = outer_left + 16, inner_width = outer_width - 32;
+        constexpr UINT inner_top = 12, inner_height = 751;
+        const bool outer = x >= outer_left && x < outer_left + outer_width && y < 763;
+        const bool inner = x >= inner_left && x < inner_left + inner_width && y >= inner_top && y < 763;
+        if (outer && !inner) {
+          // Every border pixel was seeded by a nonblack application gradient.
+          require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255,
+                  "Opaque black top/left/right camera border on both displays");
+          ++border_pixels;
+        }
+        if (a350 && !outer && y < 763) {
           if (x >= 806 && x < 838)
             require(pixel[0] >= 63 && pixel[0] <= 65 && pixel[1] >= 63 && pixel[1] <= 65 && pixel[2] >= 63 && pixel[2] <= 65,
-                    "A350 central grey separator and inner padding preserved on both sides");
+                    "A350 central grey separator preserved on both sides");
           else
             require(pixel[2] >= 50 && pixel[2] <= 52, "A350 navigation area preserved");
         }
-        if (camera_region) {
-          const auto working_x = static_cast<int>((local_x + .5) * 768 / region_width);
-          // Default unavailable GS renders "--" in an inset, padded panel.
-          // Surrounding pixels must continue to show the nose camera on both sides.
-          const bool camera_margin = (working_x == 0 && y == 0) || (working_x == 4 && y == 30) ||
-                                     (working_x == 40 && y == 4) || (working_x == 108 && y == 30) ||
-                                     (working_x == 40 && y == 52);
+        if (inner) {
+          const auto working_x = static_cast<unsigned>((x - inner_left + .5) * 768 / inner_width);
+          const auto working_y = static_cast<unsigned>((y - inner_top + .5) * 763 / inner_height);
+          require(working_x < 768 && working_y < 763, "Inset working-image mapping remains bounded");
+          // Independent broad regions deliberately exclude reference marks and GS.
+          if (working_x >= 350 && working_x < 400 && working_y >= 100 && working_y < 150)
+            require(pixel[2] >= 49 && pixel[2] <= 53, "Nose frame within inset PFD content");
+          if (working_x >= 350 && working_x < 400 && working_y >= 400 && working_y < 450)
+            require(pixel[2] >= 202 && pixel[2] <= 206, "Tail frame within inset PFD content");
+          if (working_y >= 245 && working_y < 269)
+            require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Black divider scales with the complete working image");
+          // Both coordinates move with the inner rectangle, including the GS
+          // panel's own independent padding. Its default unavailable value is--.
+          const bool camera_margin = (working_x == 0 && working_y == 0) || (working_x == 4 && working_y == 30) ||
+                                     (working_x == 40 && working_y == 4) || (working_x == 108 && working_y == 30) ||
+                                     (working_x == 40 && working_y == 52);
           if (camera_margin)
             require(pixel[2] >= 50 && pixel[2] <= 52, "Camera image around inset GS panel");
-          if (working_x == 20 && y == 16)
+          if (working_x == 20 && working_y == 16) {
             require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "GS panel internal padding");
-          if (working_x == 26 && y == 21)
-            require(pixel[0] > 250 && pixel[1] > 250 && pixel[2] > 250, "GS label moves with its padded panel");
+            ++gs_padding_pixels;
+          }
+          if (working_x == 26 && working_y == 21) {
+            require(pixel[0] > 250 && pixel[1] > 250 && pixel[2] > 250, "GS label scales with inset content in both axes");
+            ++gs_label_pixels;
+          }
+          if (working_x >= 106 && working_x <= 109 && working_y >= 121 && working_y <= 123) {
+            require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),
+                    "Aircraft reference marker scales with inset content in both axes");
+            ++guide_pixels;
+          }
         }
-        // Nose dot verifies profile-dependent overlay colour reaches the GPU.
-        if (camera_region && local_x == static_cast<int>(region_width * .14) && y == 122)
-          require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),
-                  "Aircraft reference-marker style");
-        if (y >= 800) {
+        if (y >= 763) {
           const UINT blue = side ? 153 : 51;
           require(pixel[2] >= blue - 1 && pixel[2] <= blue + 1, "Lower trim and application graphics state preserved");
         }
         ++pixels;
       }
+    require(border_pixels == (a350 ? 33704u : 33248u), "Exact black border coverage on each PFD");
+    require(gs_padding_pixels && gs_label_pixels && guide_pixels, "Inset GS/guide pixel checks were not exercised");
     const D3D12_RANGE none{0, 0};
     readbacks[side]->Unmap(0, &none);
   }
@@ -458,7 +493,8 @@ void native_case(bool warp, bool a350) {
   }
   require(errors == 0, "D3D12 validation errors");
   std::printf(
-      "PASS native %s: two GPU feeds, two PFDs, pre-existing root/list/queue, partial state restoration, lower trim, descriptor copies, "
+      "PASS native %s: two GPU feeds, two PFDs, pre-existing root/list/queue, partial state restoration, exact black borders, inset "
+      "GS/guides, A350 gutter/ND, lower trim, descriptor copies, "
       "OFF, D3D11On12 capture coexistence, ClearState pipeline pixels and predicate guards; %llu pixels; debug=%d errors=%llu\n",
       warp ? "WARP" : "hardware", static_cast<unsigned long long>(pixels), debug_enabled, static_cast<unsigned long long>(errors));
 }

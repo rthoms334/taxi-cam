@@ -144,11 +144,11 @@ Source: [compositor](../src/camera_compositor_d3d12.hpp), [output buffer](../src
 
 ## 6. Draw the result into the PFD
 
-The bridge tracks drawing into the selected PFD texture and adds the camera image at the end of each eligible display batch: before a target change, a verified transition out of render-target state, or command-list closure. It draws once for the batch, covering the upper PFD region while preserving the rest of a shared PFD/navigation texture.
+The bridge tracks drawing into the selected PFD texture and adds the camera image at the end of each eligible display batch: before a target change, a verified transition out of render-target state, or command-list closure. It draws once for the batch, covering the upper PFD region while preserving the rest of a shared PFD/navigation texture. That same draw fills a black top/left/right border and maps the complete camera image into the inner rectangle. Native camera sizes match the smaller panes.
 
 | PFD region | Content |
 | --- | --- |
-| Upper 763 rows | Combined camera image, divider, guides and GS |
+| Upper 763 rows | Black border around the combined camera image, divider, guides and GS |
 | Lower 261 rows | Aircraft's existing trim display |
 
 This is why the camera appears on the cockpit's physical screen: the cockpit model samples the texture that Taxi Cam has just updated. The camera is part of the image rendered on the aircraft display.

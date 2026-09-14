@@ -64,20 +64,21 @@ Source: [aircraft defaults](../profiles/catalog.hpp), [mount transforms](../nati
 
 ## Display geometry
 
-Pixel coordinates start at the top left. Row ranges below are inclusive. The table gives the A380 defaults and common working-canvas contract. The A350 uses 1644 x 1024 EFIS targets, 806 x 255 / 806 x 504 sources and an 806 x 763 destination within the PFD area, preserving the central separator. See [Aircraft integration](aircraft-profiles.md).
+Pixel coordinates start at the top left. Row ranges below are inclusive. The table gives the A380 defaults and common working-canvas contract. The A350 uses 1644 x 1024 EFIS targets, 774 x 251 / 774 x 496 sources and a 774 x 751 content rectangle inside an 806 x 763 destination within the PFD area, preserving the central separator. See [Aircraft integration](aircraft-profiles.md).
 
 | Element | Geometry |
 | --- | --- |
 | PFD texture | 768 × 1024, five mips, RGBA8 for automatic detection |
 | Composed image | 768 × 763 |
-| Nose pane | Rows 0–254; source 768 × 255 |
-| Tail pane | Rows 259–762; source 768 × 504 |
+| Camera border (both aircraft) | 16 target pixels left/right, 12 top, 0 bottom; inner height 751 |
+| Nose pane | Working rows 0-254; native source 736 x 251 |
+| Tail pane | Working rows 259-762; native source 736 x 496 |
 | Visible divider | Black rows 245–268 |
 | Preserved aircraft display | Rows 763–1023 |
 | Ground-speed panel (A380 and A350) | Origin (16, 12); 8-pixel internal padding; height 36; width 72 / 88 / 104 for 1 / 2 / 3 digits (`--` uses 88) |
 | Stable output buffer | Row pitch 3072 bytes; total 2,343,936 bytes |
 
-The logical gap between panes is four rows. The visible divider covers ten additional rows of each pane; the camera render sizes and tail sampling origin remain unchanged.
+The logical gap between panes is four working-image rows. The visible divider covers ten additional working rows of each pane. The whole 768 x 763 composition, including GS and guides, maps into the inner bordered area; working-image coordinates scale with it. Native source dimensions above match the resulting pane sizes to the nearest pixel.
 
 Nose reference dots are at 14% and 86% of image width, 48% of nose-pane height, with a 4.5-pixel radius. Each tail bracket consists of two mirrored segments through normalized tail-pane points `(0.33, 0.625)`, `(0.305, 0.75)` and `(0.365, 0.758)`. The stroke uses a two-pixel distance threshold.
 

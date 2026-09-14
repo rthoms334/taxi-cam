@@ -7,10 +7,10 @@ namespace taxi_camera::native_camera {
 
 using ViewDimensions = std::array<std::array<std::int32_t, 2>, 3>;
 
-// Native outputs match their actual PFD panes: feed0 is768x255, feed1 is768x504.
+// Native outputs fit inside the profile camera border: A380 panes are736x251 and736x496.
 // The four-row separator belongs only to the compositor. All three inherited
 // pairs must agree, but their aspect/size does not determine the requested size.
-inline constexpr std::array<std::array<std::int32_t, 2>, 2> kCameraPaneDimensions{{{768, 255}, {768, 504}}};
+inline constexpr auto kCameraPaneDimensions = profiles::A380.camera_panes;
 bool plan_view_resize(const ViewDimensions& inherited,
                       unsigned feed,
                       ViewDimensions& desired,

@@ -322,13 +322,15 @@ void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool proven_
   if (!view.resource || !view.resource->alive || view.mip)
     return;
   bool selected = false, calibrate = false;
-  profiles::DisplayRect area{};
+  profiles::DisplayRect area{}, content{};
   {
     const std::lock_guard lock(r.mutex);
     if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
                                    view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
       return;
-    area = profiles::display_rect(*r.profile, r.routes.targets[1] == view.resource->id ? 1u : 0u);
+    const auto side = r.routes.targets[1] == view.resource->id ? 1u : 0u;
+    area = profiles::display_rect(*r.profile, side);
+    content = profiles::display_content_rect(*r.profile, side);
     calibrate = r.routes.matches(view.resource->id, r.calibration_mask) && r.calibration_budget.try_acquire(0, GetTickCount64());
     selected = r.routes.matches(view.resource->id, r.active_mask);
     if (selected) {
@@ -345,8 +347,10 @@ void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool proven_
   const boundary::ScopedBypass bypass;
   const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
                                static_cast<LONG>(area.bottom)};
+  const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
+                         static_cast<LONG>(content.bottom)};
   runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
-                 list->depth, &destination);
+                 list->depth, &destination, &inner);
 }
 void pass_targets(void*,
                   ID3D12GraphicsCommandList*,

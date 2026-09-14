@@ -79,7 +79,7 @@ void planning() {
     for (unsigned feed = 0; feed < 2; ++feed) {
       require(nc::plan_view_resize(input, feed, output), "valid dimensions refused");
       for (const auto pair : output)
-        require(pair == std::array<std::int32_t, 2>{768, feed == 0 ? 255 : 504}, "output differs from its exact PFD pane");
+        require(pair == std::array<std::int32_t, 2>{736, feed == 0 ? 251 : 496}, "output differs from its exact PFD pane");
     }
   }
   for (const auto value : {std::numeric_limits<std::int32_t>::min(), -1, 0, 31, 16385, std::numeric_limits<std::int32_t>::max()}) {
@@ -158,7 +158,7 @@ void refusals() {
         fixture.feed = 2;
         break;
       case 14:
-        fixture.desired.fill({768, 504});  // The other feed's valid size must still be refused.
+        fixture.desired.fill({736, 496});  // The other feed's valid size must still be refused.
         break;
     }
     const auto result = nc::resize_owned_view(fixture.view, fixture.feed, fixture.desired, callbacks);

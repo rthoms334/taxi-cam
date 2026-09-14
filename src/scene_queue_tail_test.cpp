@@ -182,13 +182,14 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 2> footprints{};
   std::array<UINT64, 2> readback_bytes{};
   std::array<std::uint64_t, 2> ids{29265, 29266};
-  const std::array<UINT, 2> heights{255, 504};
+  const std::array<UINT, 2> heights{251, 496};
+  constexpr UINT width = 736;
   Ref<ID3D12Resource> unrelated_source;
   constexpr std::uint64_t UnrelatedGeneration = 929292;
   for (unsigned feed = 0; feed < 2; ++feed) {
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Width = 768;
+    desc.Width = width;
     desc.Height = heights[feed];
     desc.DepthOrArraySize = desc.MipLevels = 1;
     desc.SampleDesc.Count = 1;
@@ -290,9 +291,9 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
         ID3D12Resource* target = sources[feed].p;
         const float first_color[]{1, 0, 1, 1};
         manager->stage_source_draw(producer.list.p, Generation, 1, &target, &ids[feed]);
-        draw.record(list7.p, handles[feed], first_color, false, 768, heights[feed]);
+        draw.record(list7.p, handles[feed], first_color, false, width, heights[feed]);
         manager->stage_source_draw(producer.list.p, Generation, 1, &target, &ids[feed]);
-        draw.record(list7.p, handles[feed], colors[frame][feed], false, 768, heights[feed]);
+        draw.record(list7.p, handles[feed], colors[frame][feed], false, width, heights[feed]);
       }
       if (frame == 1 && !enhanced) {
         // A legal large application batch between two live frames must not
@@ -348,7 +349,7 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       const D3D12_RANGE range{0, static_cast<SIZE_T>(readback_bytes[feed])};
       check(readbacks[feed]->Map(0, &range, &mapped), "Map completed tail pixels");
       for (UINT y = 0; y < heights[feed]; ++y)
-        for (UINT x = 0; x < 768; ++x) {
+        for (UINT x = 0; x < width; ++x) {
           std::uint32_t pixel = 0;
           std::memcpy(&pixel, static_cast<const std::uint8_t*>(mapped) + footprints[feed].Offset +
                                UINT64(y) * footprints[feed].Footprint.RowPitch + x * 4, 4);

@@ -269,7 +269,8 @@ bool stamp(ID3D12GraphicsCommandList* list,
            UINT width,
            UINT height,
            DXGI_FORMAT depth_format,
-           const D3D12_RECT* destination) {
+           const D3D12_RECT* destination,
+           const D3D12_RECT* content) {
   const std::lock_guard lock(runtime().mutex);
   auto* item = find(key);
   if (!item || !current_output(*item) || item->status.failed)
@@ -282,7 +283,7 @@ bool stamp(ID3D12GraphicsCommandList* list,
         continue;
       const auto slot = i * DepthFormats.size() + d;
       if (item->stamp_ready[slot] && state.complete() && manager().register_consumer_recording(list) &&
-          item->stamps[slot].record_buffer(list, state, item->native, item->output.address(), width, height, destination)) {
+          item->stamps[slot].record_buffer(list, state, item->native, item->output.address(), width, height, destination, content)) {
         ++item->status.stamps;
         return true;
       }

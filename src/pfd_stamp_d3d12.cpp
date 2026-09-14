@@ -94,14 +94,22 @@ HRESULT PfdStampD3D12::initialize(ID3D12Device* device, DXGI_FORMAT format, DXGI
     return E_INVALIDARG;
   constexpr char shader[] = R"(
 ByteAddressBuffer Pixels : register(t0);
-cbuffer Parameters : register(b0) { uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY; };
+cbuffer Parameters : register(b0) {
+  uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY;
+  uint InsetLeft; uint InsetTop; uint InsetRight; uint InsetBottom;
+};
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
-  uint x = min((uint)((position.x - OriginX) * 768 / TargetWidth), 767);
-  uint y = min((uint)((position.y - OriginY) * 763 / TargetHeight), 762);
+  float2 local = position.xy - float2(OriginX, OriginY);
+  uint2 contentEnd = uint2(TargetWidth - InsetRight, TargetHeight - InsetBottom);
+  if (local.x < InsetLeft || local.y < InsetTop || local.x >= contentEnd.x || local.y >= contentEnd.y)
+    return float4(0, 0, 0, 1);
+  uint2 contentSize = contentEnd - uint2(InsetLeft, InsetTop);
+  uint x = min((uint)((local.x - InsetLeft) * 768 / contentSize.x), 767);
+  uint y = min((uint)((local.y - InsetTop) * 763 / contentSize.y), 762);
   uint rgba = Pixels.Load(y * 3072 + x * 4);
   return float4(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255, 255) / 255.0;
 }
@@ -112,7 +120,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
   params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-  params[1].Constants.Num32BitValues = 4;
+  params[1].Constants.Num32BitValues = 8;
   D3D12_ROOT_SIGNATURE_DESC desc{};
   desc.NumParameters = 2;
   desc.pParameters = params;
@@ -179,7 +187,8 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                   D3D12_GPU_VIRTUAL_ADDRESS address,
                                   UINT width,
                                   UINT height,
-                                  const D3D12_RECT* destination) noexcept {
+                                  const D3D12_RECT* destination,
+                                  const D3D12_RECT* content) noexcept {
   if (!list || !pipeline_ || !state.complete() || !address || address % 4 || buffer_device != device_ || width < 1 || height < 2 ||
       width > 16384 || height > 16384 || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return false;
@@ -190,6 +199,10 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
   if (rect.left < 0 || rect.top < 0 || rect.right <= rect.left || rect.bottom <= rect.top || rect.right > static_cast<LONG>(width) ||
       rect.bottom > static_cast<LONG>(height))
     return false;
+  const D3D12_RECT inner = content ? *content : rect;
+  if (inner.left < rect.left || inner.top < rect.top || inner.right > rect.right || inner.bottom > rect.bottom ||
+      inner.right <= inner.left || inner.bottom <= inner.top)
+    return false;
   const D3D12_VIEWPORT viewport{static_cast<float>(rect.left),
                                 static_cast<float>(rect.top),
                                 static_cast<float>(rect.right - rect.left),
@@ -197,13 +210,15 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                 0,
                                 1};
   const D3D12_RECT scissor = rect;
-  const UINT constants[4]{static_cast<UINT>(rect.right - rect.left), static_cast<UINT>(rect.bottom - rect.top),
-                          static_cast<UINT>(rect.left), static_cast<UINT>(rect.top)};
+  const UINT constants[8]{static_cast<UINT>(rect.right - rect.left), static_cast<UINT>(rect.bottom - rect.top),
+                          static_cast<UINT>(rect.left), static_cast<UINT>(rect.top),
+                          static_cast<UINT>(inner.left - rect.left), static_cast<UINT>(inner.top - rect.top),
+                          static_cast<UINT>(rect.right - inner.right), static_cast<UINT>(rect.bottom - inner.bottom)};
   const engine_hook::pfd_state::ScopedBypass bypass;
   list->SetPipelineState(pipeline_);
   list->SetGraphicsRootSignature(root_);
   list->SetGraphicsRootShaderResourceView(0, address);
-  list->SetGraphicsRoot32BitConstants(1, 4, constants, 0);
+  list->SetGraphicsRoot32BitConstants(1, 8, constants, 0);
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);

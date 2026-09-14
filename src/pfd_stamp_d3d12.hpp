@@ -65,13 +65,18 @@ class PfdStampD3D12 {
   // shader reads (COMMON promotion is valid for buffers). Producer completion
   // and exclusion of concurrent/future writes during every consumer submission
   // are caller fence contracts, not inferred from this scalar GPU address.
+  // Rectangles are half-open absolute target pixels. Content must be nonempty
+  // and contained in destination; nullptr uses the whole destination. The
+  // existing single draw maps the complete frame into content and emits opaque
+  // black in the surrounding destination border. Outside destination is untouched.
   bool record_buffer(ID3D12GraphicsCommandList*,
                      const PfdGraphicsState&,
                      ID3D12Device* buffer_device,
                      D3D12_GPU_VIRTUAL_ADDRESS,
                      UINT width,
                      UINT height,
-                     const D3D12_RECT* destination = nullptr) noexcept;
+                     const D3D12_RECT* destination = nullptr,
+                     const D3D12_RECT* content = nullptr) noexcept;
   DXGI_FORMAT format() const noexcept { return format_; }
   DXGI_FORMAT depth_format() const noexcept { return depth_format_; }
   void release() noexcept;

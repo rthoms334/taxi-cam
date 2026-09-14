@@ -6,6 +6,9 @@ namespace taxi_camera::profiles {
 struct DisplayRect {
   unsigned left, top, right, bottom;
 };
+struct DisplayInsets {
+  unsigned left, top, right, bottom;
+};
 using CameraPanes = std::array<std::array<std::int32_t, 2>, 2>;
 struct Composition {
   float nose_height = 255, tail_top = 259, divider_top = 245, divider_bottom = 269;
@@ -37,12 +40,14 @@ struct AircraftProfile {
   TaxiControl taxi_control = TaxiControl::push_event;
   std::array<std::string_view, 3> aircraft_types{"A388"};
   std::array<DisplayRect, 2> display_regions{{{0, 0, 768, 763}, {0, 0, 768, 763}}};
-  CameraPanes camera_panes{{{768, 255}, {768, 504}}};
+  CameraPanes camera_panes{{{736, 251}, {736, 496}}};
   bool higher_id_left = true;
   double speed_cutoff_knots = 60;
   Composition composition{};
   std::array<unsigned, 6> formats{28};
   std::array<std::string_view, 3> package_markers{"flybywire-aircraft-a380-842", "flybywire_a380_842"};
+  // Target pixels: the outer display region is black around this camera inset.
+  DisplayInsets camera_padding{16, 12, 16, 0};
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -71,7 +76,7 @@ inline constexpr AircraftProfile A359{2,
                                       TaxiControl::lvar_off,
                                       {"A359", "A359 ULR"},
                                       {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                                      {{{806, 255}, {806, 504}}},
+                                      {{{774, 251}, {774, 496}}},
                                       true,
                                       60,
                                       AmberEtacs,
@@ -90,7 +95,7 @@ inline constexpr AircraftProfile A35K{3,
                                       TaxiControl::lvar_off,
                                       {"A35K"},
                                       {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                                      {{{806, 255}, {806, 504}}},
+                                      {{{774, 251}, {774, 496}}},
                                       true,
                                       60,
                                       AmberEtacs,
@@ -99,6 +104,17 @@ inline constexpr AircraftProfile A35K{3,
 inline constexpr std::array<const AircraftProfile*, 3> Catalog{&A380, &A359, &A35K};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < 2 ? side : 0];
+}
+inline constexpr DisplayRect display_content_rect(const AircraftProfile& p, unsigned side) noexcept {
+  const auto outer = display_rect(p, side);
+  if (outer.right <= outer.left || outer.bottom <= outer.top)
+    return {};
+  const auto width = outer.right - outer.left, height = outer.bottom - outer.top;
+  const auto padding = p.camera_padding;
+  if (padding.left >= width || padding.right >= width - padding.left || padding.top >= height ||
+      padding.bottom >= height - padding.top)
+    return {};
+  return {outer.left + padding.left, outer.top + padding.top, outer.right - padding.right, outer.bottom - padding.bottom};
 }
 inline bool camera_candidate(unsigned width, unsigned height) noexcept {
   for (const auto* profile : Catalog)
