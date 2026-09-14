@@ -10,6 +10,59 @@
 namespace {
 namespace win = taxi_camera::standalone;
 namespace runtime = taxi_camera::scene_runtime;
+struct ClearStatePipeline {
+  Reference<ID3D12RootSignature> root;
+  Reference<ID3D12PipelineState> pipeline;
+  explicit ClearStatePipeline(ID3D12Device* device) {
+    // Match the gradient's root layout, but make pipeline loss visible as
+    // different GPU pixels rather than relying only on intercepted-call counts.
+    D3D12_ROOT_PARAMETER parameter{};
+    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameter.Constants.Num32BitValues = 4;
+    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    const D3D12_ROOT_SIGNATURE_DESC signature{1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    Reference<ID3DBlob> serialized, vertex, pixel;
+    check(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, serialized.put(), nullptr),
+          "Serialize ClearState signature");
+    check(device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(root.put())),
+          "Create ClearState signature");
+    constexpr char shader[] = R"(
+float4 vs_main(uint id : SV_VertexID) : SV_Position {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+}
+float4 ps_main() : SV_Target { return float4(0, 1, 0, 1); }
+)";
+    check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", nullptr, nullptr, "vs_main", "vs_5_0",
+                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, vertex.put(), nullptr),
+          "Compile ClearState vertex shader");
+    check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", nullptr, nullptr, "ps_main", "ps_5_0",
+                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, pixel.put(), nullptr),
+          "Compile ClearState pixel shader");
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature = root.get();
+    desc.VS = {vertex->GetBufferPointer(), vertex->GetBufferSize()};
+    desc.PS = {pixel->GetBufferPointer(), pixel->GetBufferSize()};
+    auto& blend = desc.BlendState.RenderTarget[0];
+    blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    desc.SampleMask = UINT_MAX;
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.RasterizerState.DepthClipEnable = TRUE;
+    desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    desc.DepthStencilState.FrontFace = desc.DepthStencilState.BackFace = {
+        D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.NumRenderTargets = 1;
+    desc.SampleDesc.Count = 1;
+    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pipeline.put())), "Create ClearState pipeline");
+  }
+};
 void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   const auto module = LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   require(module != nullptr, "Load system D3D11 for capture interop regression");
@@ -293,6 +346,60 @@ void native_case(bool warp, bool a350) {
     const D3D12_RANGE none{0, 0};
     readbacks[side]->Unmap(0, &none);
   }
+  // ClearState changes bindings without starting a new command-list recording.
+  // The next target switch must not flush the old PFD against now-unbound RTs,
+  // or restore its gradient pipeline over the new green pipeline.
+  ClearStatePipeline cleared(device.get());
+  Reference<ID3D12Resource> clear_target, clear_readback;
+  const auto clear_desc = texture_description(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM);
+  create_texture(device.get(), clear_desc, clear_target.put());
+  const D3D12_CPU_DESCRIPTOR_HANDLE clear_rtv{base.ptr + 6 * stride};
+  device->CreateRenderTargetView(clear_target.get(), nullptr, clear_rtv);
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT clear_footprint{};
+  UINT64 clear_bytes{};
+  device->GetCopyableFootprints(&clear_desc, 0, 1, 0, &clear_footprint, nullptr, nullptr, &clear_bytes);
+  auto clear_buffer = bd;
+  clear_buffer.Width = clear_bytes;
+  check(device->CreateCommittedResource(&bh, D3D12_HEAP_FLAG_NONE, &clear_buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(clear_readback.put())),
+        "ClearState readback");
+  const auto before_clear_stamps = runtime::snapshot(key).stamps;
+  const auto before_clears = win::graphics_status().clear_states;
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+  list->ClearState(cleared.pipeline.get());
+  list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);
+  list->SetGraphicsRootSignature(cleared.root.get());
+  const UINT clear_parameters[]{64, 64, 0, 0};
+  list->SetGraphicsRoot32BitConstants(0, 4, clear_parameters, 0);
+  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  const D3D12_VIEWPORT clear_viewport{0, 0, 64, 64, 0, 1};
+  const D3D12_RECT clear_scissor{0, 0, 64, 64};
+  list->RSSetViewports(1, &clear_viewport);
+  list->RSSetScissorRects(1, &clear_scissor);
+  list->DrawInstanced(3, 1, 0, 0);  // Deliberately no SetPipelineState after ClearState.
+  transition(list.get(), clear_target.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  D3D12_TEXTURE_COPY_LOCATION clear_source{}, clear_destination{};
+  clear_source.pResource = clear_target.get();
+  clear_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  clear_destination.pResource = clear_readback.get();
+  clear_destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  clear_destination.PlacedFootprint = clear_footprint;
+  list->CopyTextureRegion(&clear_destination, 0, 0, 0, &clear_source, nullptr);
+  submit();
+  void* clear_mapped{};
+  const D3D12_RANGE clear_range{0, static_cast<SIZE_T>(clear_bytes)}, clear_none{0, 0};
+  check(clear_readback->Map(0, &clear_range, &clear_mapped), "Map ClearState pixels");
+  for (UINT y = 0; y < 64; ++y)
+    for (UINT x = 0; x < 64; ++x) {
+      const auto* pixel = static_cast<const unsigned char*>(clear_mapped) + SIZE_T{y} * clear_footprint.Footprint.RowPitch + 4 * x;
+      require(pixel[0] == 0 && pixel[1] == 255 && pixel[2] == 0 && pixel[3] == 255,
+              "ClearState pipeline survives deferred target switch without PSO rebind");
+      ++pixels;
+    }
+  clear_readback->Unmap(0, &clear_none);
+  require(runtime::snapshot(key).stamps == before_clear_stamps, "ClearState discards the pending PFD stamp");
+  require(win::graphics_status().clear_states == before_clears + 1, "Observe native ClearState once");
+  reset();
   // A real predicate must still refuse injection. Disabling it later cannot
   // revive this recording; only the next successful native Reset can do that.
   Reference<ID3D12Resource> predicate;
@@ -314,7 +421,11 @@ void native_case(bool warp, bool a350) {
   list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
   generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == before_predicate, "Disable predication cannot revive invalid recording");
+  list->ClearState(nullptr);
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+  require(runtime::snapshot(key).stamps == before_predicate, "ClearState cannot revive a predicate-invalidated recording");
   submit();
+  require(runtime::snapshot(key).stamps == before_predicate, "Invalidation survives ClearState through Close");
   reset();
   generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == before_predicate, "Fresh draw is deferred until list boundary");
@@ -348,7 +459,7 @@ void native_case(bool warp, bool a350) {
   require(errors == 0, "D3D12 validation errors");
   std::printf(
       "PASS native %s: two GPU feeds, two PFDs, pre-existing root/list/queue, partial state restoration, lower trim, descriptor copies, "
-      "OFF, D3D11On12 capture coexistence, predicate guards; %llu pixels; debug=%d errors=%llu\n",
+      "OFF, D3D11On12 capture coexistence, ClearState pipeline pixels and predicate guards; %llu pixels; debug=%d errors=%llu\n",
       warp ? "WARP" : "hardware", static_cast<unsigned long long>(pixels), debug_enabled, static_cast<unsigned long long>(errors));
 }
 }  // namespace

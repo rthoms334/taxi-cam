@@ -94,7 +94,7 @@ struct Registry {
   std::uint64_t key{}, next_id = 0;
   UINT rtv_stride{}, dsv_stride{};
   std::atomic<bool> ready{};
-  std::atomic<std::uint64_t> failures{}, draws{};
+  std::atomic<std::uint64_t> failures{}, draws{}, clear_states{};
   const char* error = "not_started";
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
@@ -697,6 +697,24 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
 struct Pipeline {
   static void apply(List& l, ID3D12PipelineState* p) { l.graphics.bind_pipeline(p); }
 };
+struct ClearState {
+  static void apply(List& l, ID3D12PipelineState* p) {
+    ++registry().clear_states;
+    // ClearState unbinds the targets and graphics arguments immediately. A
+    // deferred stamp must not reuse the pre-clear bindings at the next target
+    // switch, nor restore the old pipeline over the caller's supplied PSO.
+    l.pfd_dirty = false;
+    l.pfd_transition = false;
+    l.targets = {};
+    l.count = 0;
+    l.depth = DXGI_FORMAT_UNKNOWN;
+    l.depth_known = true;
+    l.graphics.reset(l.recording, l.ready);
+    l.graphics.bind_pipeline(p);
+    // This is still the same recording. Keep boundary/capture invalidations,
+    // render-pass scope and readiness; only an actual Reset can renew them.
+  }
+};
 struct Heaps {
   static void apply(List& l, UINT n, ID3D12DescriptorHeap* const* p) { l.graphics.descriptor_heaps(n, p); }
 };
@@ -851,6 +869,7 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
 bool hook_state(ID3D12GraphicsCommandList* list) {
   bool ok = list_reset.install(list, 10, reinterpret_cast<void*>(&reset));
   ok &= list_close.install(list, 9, reinterpret_cast<void*>(&close));
+  ok &= STATE(11, ClearState, ClearState)::install(list);
   ok &= STATE(25, SetPipelineState, Pipeline)::install(list);
   ok &= STATE(28, SetDescriptorHeaps, Heaps)::install(list);
   ok &= STATE(30, SetGraphicsRootSignature, GraphicsRoot)::install(list);
@@ -947,7 +966,7 @@ bool initialize_graphics() noexcept {
 GraphicsStatus graphics_status() noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  return {r.ready, r.key, r.resources.size(), r.lists.size(), r.draws, r.failures, r.error};
+  return {r.ready, r.key, r.resources.size(), r.lists.size(), r.draws, r.failures, r.clear_states, r.error};
 }
 std::vector<PfdTargetObservation> pfd_inventory() {
   auto& r = registry();

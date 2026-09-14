@@ -153,7 +153,7 @@ The bridge tracks drawing into the selected PFD texture and adds the camera imag
 
 This is why the camera appears on the cockpit's physical screen: the cockpit model samples the texture that Taxi Cam has just updated. The camera is part of the image rendered on the aircraft display.
 
-The bridge saves and restores the graphics state it changes, including the pipeline, shader inputs, viewport and clipping rectangle. It only inserts the draw when enough application state is known to restore it.
+The bridge saves and restores the graphics state it changes, including the pipeline, shader inputs, viewport and clipping rectangle. It only inserts the draw when enough application state is known to restore it. A native `ClearState` discards pending overlay work and clears the tracked bindings, retaining only the pipeline supplied by that call. It does not reset command-list lifetime or revive a recording that was unsafe for injection.
 
 ### Keeping readers and writers in order
 
@@ -161,7 +161,7 @@ MSFS can record a GPU command list once and execute it again later. Taxi Cam the
 
 A shared per-device fence timeline orders output writes and PFD reads, including work submitted on different queues. The output cannot be overwritten while an earlier tracked PFD read still needs it. Resources remain alive while recorded commands can reference them.
 
-Turning off one TAXI side stops further camera draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge closes their render gates and retains the camera pair for the next activation.
+Turning off one TAXI side stops further camera draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
 
 Source: [native graphics adapter](../standalone/d3d12_bridge.cpp), [PFD draw](../src/pfd_stamp_d3d12.hpp), [graphics-state restoration](../src/pfd_stamp_state.hpp), [runtime coordination](../src/scene_runtime.cpp).
 

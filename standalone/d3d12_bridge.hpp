@@ -5,7 +5,7 @@
 namespace taxi_camera::standalone {
 struct GraphicsStatus {
   bool ready{};
-  std::uint64_t device{}, resources{}, lists{}, draws{}, hook_failures{};
+  std::uint64_t device{}, resources{}, lists{}, draws{}, hook_failures{}, clear_states{};
   const char* error = "not_started";
 };
 bool initialize_graphics() noexcept;

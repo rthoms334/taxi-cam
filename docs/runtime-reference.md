@@ -164,6 +164,8 @@ Private-code mismatch diagnostics include the failed RVA and byte count. Code th
 
 A counter measures work at its stage, not frames visibly presented. For example, increasing compositions with zero stamps points to display routing or PFD draw eligibility.
 
+`probe_ms`, `query_ms` and `read_ms` describe the last serviced inspection callback, not every simulator frame. `inspections` counts serviced callbacks; its change over a log interval gives their frequency. Skipped callbacks leave the last timings visible. `clear_states` counts observed application graphics-state resets. These measurements exclude MSFS scene rendering and GPU time.
+
 | Symptom | Inspect |
 | --- | --- |
 | No bridge status | Companion connection, executable path/structure and bridge startup |

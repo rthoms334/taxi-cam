@@ -273,7 +273,8 @@ DWORD run_impl() {
                     "gates=%u/%u tail=%s "
                     "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
                     "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
-                    "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu | %.256s",
+                    "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
+                    "inspections=%llu updates=%llu clear_states=%llu | %.256s",
                     applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()),
                     buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
                     native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
@@ -291,7 +292,9 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(output.capture.recording_overflows), output.capture.last_invalidation_reasons,
                     progress.stalled(), static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
                     static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
-                    static_cast<unsigned long long>(scene.performance.query_calls),
+                    static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,
+                    static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
+                    static_cast<unsigned long long>(graphics.clear_states),
                     scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||

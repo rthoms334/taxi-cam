@@ -27,6 +27,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Control policy test failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Render schedule test compilation failed.' }
 & $scheduleTest
 if ($LASTEXITCODE -ne 0) { throw 'Render schedule test failed.' }
+$idleTest = Join-Path $outputDirectory 'probe-inspection-gate-test.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'probe_inspection_gate_test.cpp') '-o' $idleTest
+if ($LASTEXITCODE -ne 0) { throw 'Probe idle inspection gate compilation failed.' }
+& $idleTest
+if ($LASTEXITCODE -ne 0) { throw 'Probe idle inspection gate validation failed.' }
 $recoveryTest = Join-Path $outputDirectory 'scene-recovery-test.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'scene_recovery_test.cpp') `
     (Join-Path $nativeRoot 'engine-camera/entry_pair.cpp') '-o' $recoveryTest

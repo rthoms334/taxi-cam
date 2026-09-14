@@ -8,6 +8,7 @@
 #include "activation_mask.hpp"
 #include "body_pose_provider.hpp"
 #include "local_memory.hpp"
+#include "probe_inspection_gate.hpp"
 #include "profile.hpp"
 #include "render_schedule.hpp"
 #include "source_view.hpp"
@@ -64,6 +65,7 @@ struct Runtime {
   double observer_max_ms = 0;
   ProbePerformance performance;
   RenderSchedule schedule;
+  ProbeInspectionGate inspection_gate;
   std::array<ec::EntryId, 2> scheduled_ids{};
   std::array<bool, 2> gates{};
   std::array<std::uint64_t, 2> activation_counts{};
@@ -558,6 +560,9 @@ void observer(void* manager) noexcept {
     const auto now = GetTickCount64();
     const auto settings = runtime.requested_settings.load(std::memory_order_acquire);
     bool requested_start = false;
+    bool mount_changed = false;
+    bool recovery_pending = false;
+    bool pair_ready = false;
     std::uint64_t start_revision = 0;
     {
       const std::lock_guard lock(runtime.mutex);
@@ -565,7 +570,10 @@ void observer(void* manager) noexcept {
         runtime.aircraft_profile = runtime.requested_profile;
       requested_start = runtime.requested_start;
       start_revision = runtime.requested_start_revision;
+      recovery_pending = runtime.recovery.pending() || runtime.published.view_waiting || runtime.published.pose_waiting;
+      pair_ready = runtime.published.ready[0] && runtime.published.ready[1];
       if (runtime.mount_revision != runtime.requested_mount_revision) {
+        mount_changed = true;
         runtime.mounts = runtime.requested_mounts;
         runtime.mount_revision = runtime.requested_mount_revision;
       }
@@ -574,10 +582,30 @@ void observer(void* manager) noexcept {
     next_schedule.configure(settings & 0xffu, settings >> 8);
     std::array<bool, 2> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
+    const bool suspended = runtime.suspended.load();
     if (scheduled_pair)
-      desired = next_schedule.tick(now, runtime.suspended.load());
+      desired = next_schedule.tick(now, suspended);
     const bool gate_change = scheduled_pair && desired != runtime.gates;
-    if (!before.request_pending && !gate_change && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
+    const ProbeInspectionState inspection_state{scheduled_pair && before.owner.valid() && before.owned_ids[0] && before.owned_ids[1] &&
+                                                    before.owned_ids[0] != before.owned_ids[1] && runtime.resized_ids == before.owned_ids &&
+                                                    before.failure == ec::Failure::none && before.blocked == ec::Blocked::none,
+                                                suspended,
+                                                !runtime.gates[0] && !runtime.gates[1],
+                                                pair_ready,
+                                                before.request_pending || before.creation_pending,
+                                                requested_start,
+                                                runtime.resize_warmup.pending(),
+                                                recovery_pending,
+                                                mount_changed};
+    const auto inspection = runtime.inspection_gate.decide(inspection_state);
+    if (inspection == ProbeInspectionDecision::idle) {
+      // No native pointer is used while idle. The first resume/lifecycle/mount
+      // update bypasses the periodic throttle and repeats the complete guard.
+      runtime.schedule = next_schedule;
+      return;
+    }
+    if (inspection != ProbeInspectionDecision::required && !before.request_pending && !gate_change && !runtime.resize_warmup.pending() &&
+        now - runtime.last_inspection < 250) {
       runtime.schedule = next_schedule;
       return;
     }
