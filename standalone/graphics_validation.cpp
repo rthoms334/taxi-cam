@@ -246,6 +246,18 @@ void native_case(bool warp, bool a350, bool query_fallback) {
   const auto second = std::max(inventory[0].id, inventory[1].id);
   require(win::assign_targets(first, second), "Explicit PFD pair");
   require(!win::assign_targets(inventory[0].id, inventory[0].id), "Reject duplicate PFD identity");
+  win::set_aircraft_profile(profile.id);
+  require(win::target_ids() == std::array<std::uint64_t, 2>{}, "Same-aircraft session clears old display bindings");
+  require(win::pfd_inventory().size() == 2, "Same-aircraft session preserves live resource incarnations");
+  require(win::assign_targets(first, second), "Same-aircraft session reacquires existing displays");
+  win::set_aircraft_profile(a350 ? taxi_camera::profiles::A380.id : taxi_camera::profiles::A359.id);
+  require(win::target_ids() == std::array<std::uint64_t, 2>{} && win::pfd_inventory().empty(),
+          "Other aircraft profile releases bindings and rejects previous display dimensions");
+  require(!win::assign_targets(first, second), "Previous aircraft display IDs cannot bind the other profile");
+  win::set_aircraft_profile(profile.id);
+  require(win::target_ids() == std::array<std::uint64_t, 2>{} && win::pfd_inventory().size() == 2,
+          "Profile round trip returns to unbound eligible displays");
+  require(win::assign_targets(first, second), "Profile round trip reacquires existing displays");
 
   auto submit = [&] {
     check(list->Close(), "Close application recording");

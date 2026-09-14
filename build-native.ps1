@@ -122,6 +122,7 @@ if ($Validate) {
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('standalone/launcher_path_test.cpp')},
         @{Name='aircraft-profiles'; Sources=@('standalone/aircraft_profiles_test.cpp','native-camera/view_resize.cpp')},
+        @{Name='profile-selection'; Sources=@('standalone/profile_selection_test.cpp')},
         @{Name='companion-control'; Sources=@('standalone/companion_control_test.cpp')},
         @{Name='scene-demand'; Sources=@('standalone/scene_demand_test.cpp','engine-camera/entry_pair.cpp')},
         @{Name='aircraft-layout'; Sources=@('discovery/aircraft_inventory.cpp','discovery/aircraft_inventory_test.cpp')},

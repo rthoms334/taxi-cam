@@ -1483,8 +1483,9 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   {
     const std::lock_guard lock(r.mutex);
     r.active_mask = r.calibration_mask = 0;
-    if (r.profile != profile)
-      r.routes.reset();  // A deliberate profile switch starts fresh binding ownership.
+    // This entry point starts an explicit aircraft/profile session, including a
+    // reload of the same adapter. Ordinary texture replacement uses forget().
+    r.routes.reset();
     r.profile = profile;
     r.detector.configure(*profile);
     refresh_selected(r);

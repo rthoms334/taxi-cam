@@ -9,12 +9,14 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 4;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 5;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
   float exposure = -8.8f, night_boost = 4.f;
   std::uint64_t route_request{}, left_id{}, right_id{};
+  std::uint64_t profile_request{};         // Session-only: selecting the same profile is an explicit retry.
+  std::uint64_t aircraft_session_epoch{};  // Scope manual previews and texture IDs to the observed flight.
   std::uint32_t auto_profile = 1;
   std::array<float, 3> speed_color = profiles::A380.composition.speed_color;
   // Normalized left-side guide positions; the right side mirrors X. These are
@@ -41,7 +43,7 @@ struct Status {
   std::uint64_t heartbeat{}, captures{}, composed{}, stamps{}, left_id{}, right_id{}, hook_failures{};
   std::uint32_t graphics_ready{}, scene_ready{}, taxi_mask{}, speed_inhibited{}, candidate_count{};
   std::uint32_t active_profile{}, detected_profile{};
-  std::uint64_t identity_sample_ms{};
+  std::uint64_t identity_sample_ms{}, aircraft_session_epoch{};
   char aircraft_type[256]{}, aircraft_path[260]{};
   float speed{}, exposure{};
   double probe_cpu_ms{}, probe_max_ms{};

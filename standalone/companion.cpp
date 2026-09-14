@@ -13,6 +13,7 @@
 #include "launcher.hpp"
 #include "protocol.hpp"
 #include "settings_store.hpp"
+#include "profile_selection.hpp"
 #include "target_assignment.hpp"
 #include "updater.hpp"
 
@@ -274,6 +275,30 @@ void target_combos(const win::Settings& s) {
   refreshing = was_refreshing;
 }
 // Runs on the UI thread, including when hidden to the tray.
+void sync_aircraft_session() {
+  auto s = draft();
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto now = GetTickCount64();
+  if (!sample.heartbeat || now < sample.heartbeat || now - sample.heartbeat > 3000 ||
+      sample.aircraft_session_epoch == s.aircraft_session_epoch)
+    return;
+  win::reset_aircraft_session(s, sample.aircraft_session_epoch);
+  publish(s);
+  profile_selection = {};
+  // Do not rebuild numeric edits when a flight changes in the background.
+  for (unsigned side = 0; side < 2; ++side)
+    SendDlgItemMessageW(window, 400 + side, CB_SETCURSEL, 0, 0);
+  for (const auto& label : std::array<std::pair<int, const wchar_t*>, 5>{{{224, L"Left preview: Off"},
+                                                                          {225, L"Right preview: Off"},
+                                                                          {226, L"Calibrate left: Off"},
+                                                                          {227, L"Calibrate right: Off"},
+                                                                          {229, L"Scene test: Off"}}})
+    SetDlgItemTextW(window, label.first, label.second);
+}
 void auto_profile() {
   const auto s = draft();
   if (!s.auto_profile) {
@@ -298,8 +323,7 @@ void auto_profile() {
   win::Settings next;
   if (!win::load_settings(next, installation, detected))
     return;
-  next.auto_profile = 1;
-  if (!win::save_settings(next))
+  if (!win::prepare_profile_selection(next, s, true) || !win::save_settings(next))
     return;
   publish(next);
   notice = L"Aircraft detected. Its saved calibration is active.";
@@ -890,6 +914,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       return TRUE;
     }
     case StatusMessage:
+      sync_aircraft_session();
       auto_profile();
       if (page == 3)
         target_combos(draft());
@@ -955,7 +980,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         PostMessageW(hwnd, TrayMessage, 0, WM_CONTEXTMENU);
         return 0;
       }
-      if (id == 210 && HIWORD(w) == CBN_SELCHANGE) {
+      if (id == 210 && HIWORD(w) == CBN_SELENDOK) {
         const auto index = SendDlgItemMessageW(hwnd, 210, CB_GETCURSEL, 0, 0);
         if (index < 0 || static_cast<size_t>(index) >= profiles::Catalog.size())
           return 0;
@@ -966,9 +991,14 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           notice = L"Could not load that aircraft profile.";
           return 0;
         }
-        next.auto_profile = 0;
+        if (!win::prepare_profile_selection(next, draft(), false) || !win::save_settings(next)) {
+          notice = L"Could not apply that aircraft profile.";
+          InvalidateRect(hwnd, nullptr, FALSE);
+          return 0;
+        }
         publish(next);
-        dirty_notice();
+        dirty = false;
+        notice = L"Aircraft profile selected. Reconnecting its cameras and displays.";
         build_controls();
         return 0;
       }

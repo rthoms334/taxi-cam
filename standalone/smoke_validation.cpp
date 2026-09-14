@@ -45,6 +45,8 @@ int wmain(int argc, wchar_t** argv) {
     require(reader.open(GetCurrentProcessId(), false), "Open mailbox");
     require(owner.lock(100), "Lock mailbox");
     owner.data()->settings.camera_rate = 60;
+    owner.data()->settings.profile_request = 17;
+    owner.data()->settings.aircraft_session_epoch = 23;
     owner.data()->settings.nose_dot = {0.125f, 0.375f};
     owner.data()->settings.tail_upper = {0.25f, 0.625f};
     owner.data()->settings.tail_corner = {0.1875f, 0.75f};
@@ -52,14 +54,16 @@ int wmain(int argc, wchar_t** argv) {
     owner.unlock();
     require(reader.lock(100), "Read mailbox lock");
     require(reader.data()->settings.camera_rate == 60, "Settings exchange");
-    require(ProtocolVersion == 4 && reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
+    require(ProtocolVersion == 5 && reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
                 reader.data()->settings.tail_upper == std::array<float, 2>{0.25f, 0.625f} &&
                 reader.data()->settings.tail_corner == std::array<float, 2>{0.1875f, 0.75f} &&
                 reader.data()->settings.tail_inner == std::array<float, 2>{0.375f, 0.875f},
-            "Guide pairs exchanged in protocol4");
+            "Guide pairs exchanged in protocol5");
+    require(reader.data()->settings.profile_request == 17 && reader.data()->settings.aircraft_session_epoch == 23,
+            "Profile retry and flight scope exchanged");
     reader.unlock();
     require(owner.lock(100), "Mutate test version");
-    owner.data()->version = 3;
+    owner.data()->version = 4;
     owner.unlock();
     Mailbox refused;
     require(!refused.open(GetCurrentProcessId(), false), "Incompatible mailbox accepted");
@@ -83,6 +87,8 @@ int wmain(int argc, wchar_t** argv) {
     saved.left_id = 999;
     saved.right_id = 888;
     saved.route_request = 12;
+    saved.profile_request = 17;
+    saved.aircraft_session_epoch = 23;
     require(save_settings(saved), "Atomic profile save");
     Settings loaded;
     require(load_settings(loaded, install), "Profile reload");
@@ -91,7 +97,8 @@ int wmain(int argc, wchar_t** argv) {
     require(loaded.nose_dot == saved.nose_dot && loaded.tail_upper == saved.tail_upper && loaded.tail_corner == saved.tail_corner &&
                 loaded.tail_inner == saved.tail_inner,
             "All guide pairs persist with camera settings");
-    require(!loaded.manual_mask && !loaded.left_id && !loaded.right_id && !loaded.route_request,
+    require(!loaded.manual_mask && !loaded.left_id && !loaded.right_id && !loaded.route_request && !loaded.profile_request &&
+                !loaded.aircraft_session_epoch,
             "Session texture IDs and manual tests must not persist");
     saved.camera_rate = 999;
     require(!save_settings(saved), "Reject invalid save");
