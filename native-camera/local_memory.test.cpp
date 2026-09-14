@@ -44,6 +44,97 @@ struct Allocation {
   std::uint64_t address(std::size_t offset = 0) const { return reinterpret_cast<std::uintptr_t>(data + offset); }
 };
 
+void public_query_equivalence() {
+  // Both public APIs document identical consecutive-region MBI semantics.
+  // https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex
+  const auto compare = [](const void* address) {
+    MEMORY_BASIC_INFORMATION implicit{}, explicit_process{};
+    const auto first = VirtualQuery(address, &implicit, sizeof(implicit));
+    const auto second = VirtualQueryEx(GetCurrentProcess(), address, &explicit_process, sizeof(explicit_process));
+    require(first == sizeof(implicit) && second == first, "Public query APIs returned different metadata lengths");
+    require(implicit.BaseAddress == explicit_process.BaseAddress && implicit.AllocationBase == explicit_process.AllocationBase &&
+                implicit.AllocationProtect == explicit_process.AllocationProtect && implicit.RegionSize == explicit_process.RegionSize &&
+                implicit.State == explicit_process.State && implicit.Protect == explicit_process.Protect &&
+                implicit.Type == explicit_process.Type,
+            "Explicit current-process query changed allocation, extent, state, protection or type");
+    return explicit_process;
+  };
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const auto page = std::size_t(info.dwPageSize);
+  Allocation allocation(page * 16);
+  for (const DWORD protection : {DWORD(PAGE_READONLY), DWORD(PAGE_READWRITE), DWORD(PAGE_NOACCESS), DWORD(PAGE_EXECUTE),
+                                 DWORD(PAGE_EXECUTE_READ), DWORD(PAGE_EXECUTE_READWRITE), DWORD(PAGE_READWRITE | PAGE_GUARD)}) {
+    DWORD previous = 0;
+    require(VirtualProtect(allocation.data, allocation.size, protection, &previous) != FALSE,
+            "Could not set equivalence fixture protection");
+    for (unsigned offset = 0; offset < 16; ++offset) {
+      const auto region = compare(allocation.data + offset * page + 13);
+      require(region.State == MEM_COMMIT && region.Type == MEM_PRIVATE && region.Protect == protection,
+              "Public query altered requested protection or consumed a guard page");
+    }
+  }
+  DWORD previous = 0;
+  require(VirtualProtect(allocation.data, allocation.size, PAGE_READWRITE, &previous) != FALSE, "Could not restore equivalence fixture");
+  require(VirtualProtect(allocation.data + 3 * page, page, PAGE_READONLY, &previous) != FALSE, "Could not create query split fixture");
+  for (unsigned offset = 0; offset < 16; ++offset)
+    compare(allocation.data + offset * page);
+  require(VirtualFree(allocation.data + 8 * page, page, MEM_DECOMMIT) != FALSE, "Could not decommit equivalence fixture");
+  require(compare(allocation.data + 8 * page).State == MEM_RESERVE, "Explicit query accepted decommitted page as committed");
+  compare(allocation.data + 7 * page);
+  compare(allocation.data + 9 * page);
+  require(VirtualAlloc(allocation.data + 8 * page, page, MEM_COMMIT, PAGE_READWRITE) == allocation.data + 8 * page,
+          "Could not recommit equivalence fixture");
+  require(compare(allocation.data + 8 * page).State == MEM_COMMIT, "Explicit query did not observe recommit");
+  {
+    Allocation reservation(page * 3, MEM_RESERVE);
+    require(compare(reservation.data + page).State == MEM_RESERVE, "Explicit query changed reserved region identity");
+  }
+  const auto mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(page), nullptr);
+  require(mapping != nullptr, "Could not create public query mapping fixture");
+  const auto mapped = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, page);
+  require(mapped && compare(mapped).Type == MEM_MAPPED, "Explicit query lost mapped-file type");
+  require(UnmapViewOfFile(mapped) != FALSE && CloseHandle(mapping) != FALSE, "Could not release public query mapping fixture");
+  require(compare(GetModuleHandleW(nullptr)).Type == MEM_IMAGE, "Explicit query lost main-image type");
+  auto* released = VirtualAlloc(nullptr, page, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  require(released != nullptr && VirtualFree(released, 0, MEM_RELEASE) != FALSE, "Could not create released query fixture");
+  require(compare(released).State == MEM_FREE, "Explicit query lost released-region state");
+  MEMORY_BASIC_INFORMATION invalid{};
+  const auto* inaccessible = reinterpret_cast<const void*>(std::numeric_limits<std::uintptr_t>::max());
+  require(VirtualQuery(inaccessible, &invalid, sizeof(invalid)) == 0 &&
+              VirtualQueryEx(GetCurrentProcess(), inaccessible, &invalid, sizeof(invalid)) == 0,
+          "Explicit query accepted an out-of-range address");
+
+  // Compare identical wrapper work on this process only. This does not model
+  // MSFS's address map, thread scheduling or any installed instrumentation.
+  Allocation benchmark(page * 16);
+  LARGE_INTEGER frequency{}, start{}, middle{}, end{};
+  constexpr unsigned repeats = 512;
+  constexpr unsigned queries_per_stage = 28;
+  std::uint64_t implicit_bytes = 0, explicit_bytes = 0;
+  require(QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&start), "Could not start public wrapper benchmark");
+  for (unsigned run = 0; run < repeats; ++run)
+    for (unsigned pass = 0; pass < 2; ++pass)
+      for (unsigned offset = 14; offset > 0; --offset) {
+        MEMORY_BASIC_INFORMATION region{};
+        require(VirtualQuery(benchmark.data + offset * page, &region, sizeof(region)) == sizeof(region), "Implicit query benchmark failed");
+        implicit_bytes += region.RegionSize;
+      }
+  require(QueryPerformanceCounter(&middle), "Could not time implicit queries");
+  for (unsigned run = 0; run < repeats; ++run)
+    for (unsigned pass = 0; pass < 2; ++pass)
+      for (unsigned offset = 14; offset > 0; --offset) {
+        MEMORY_BASIC_INFORMATION region{};
+        require(VirtualQueryEx(GetCurrentProcess(), benchmark.data + offset * page, &region, sizeof(region)) == sizeof(region),
+                "Explicit current-process query benchmark failed");
+        explicit_bytes += region.RegionSize;
+      }
+  require(QueryPerformanceCounter(&end) && implicit_bytes == explicit_bytes, "Public wrappers did not query equivalent extents");
+  std::printf(
+      "Own-process public query wrappers: queries_each=%u VirtualQuery_ms=%.6f VirtualQueryEx_ms=%.6f per28; live benefit unmeasured.\n",
+      repeats * queries_per_stage, double(middle.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart / repeats,
+      double(end.QuadPart - middle.QuadPart) * 1000 / frequency.QuadPart / repeats);
+}
 void measured_reads() {
   Allocation allocation(8192);
   LocalMemoryReader reader;
@@ -873,6 +964,7 @@ void synthetic_headers() {
 }  // namespace
 
 int main() {
+  public_query_equivalence();
   measured_reads();
   cached_queries();
   cache_protection_changes();

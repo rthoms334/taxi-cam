@@ -52,6 +52,8 @@ class ViewResizeWarmup {
 enum class ViewResizeStatus {
   not_attempted,
   resized,
+  dimensions_restored,
+  output_mismatch,
   unchanged,
   invalid_snapshot,
   invalid_dimensions,
@@ -94,6 +96,17 @@ ViewResizeResult resize_owned_view(const engine_camera::OwnedViewSnapshot& view,
                                    const ViewDimensions& desired,
                                    const ViewResizeCallbacks& callbacks,
                                    const profiles::CameraPanes& panes = profiles::A380.camera_panes) noexcept;
+
+// Established mode2 views can have their three size fields overwritten when
+// the primary view changes. Restore only when the fully reread existing Bitmap
+// already has the desired dimensions. No output allocation/replacement occurs;
+// ensure_output is never called. Caller keeps both gates closed, retains the
+// entry IDs, and revalidates the complete chain/resource after this operation.
+ViewResizeResult restore_owned_view_dimensions(const engine_camera::OwnedViewSnapshot& view,
+                                               unsigned feed,
+                                               const ViewDimensions& desired,
+                                               const ViewResizeCallbacks& callbacks,
+                                               const profiles::CameraPanes& panes = profiles::A380.camera_panes) noexcept;
 
 const char* view_resize_status_name(ViewResizeStatus status) noexcept;
 

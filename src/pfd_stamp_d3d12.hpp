@@ -52,6 +52,15 @@ class PfdStampD3D12 {
   // DSV may be UNKNOWN (absent), D16, D24S8, D32 or D32S8. Depth/stencil testing
   // and writes remain disabled; the bound DSV is never changed by the stamp.
   HRESULT initialize(ID3D12Device*, DXGI_FORMAT target_format, DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN) noexcept;
+  // PRIVATE command list only. Caller binds our owned patch RTV, no DSV. This
+  // overwrites graphics state without replaying any application bindings.
+  bool record_private_patch(ID3D12GraphicsCommandList*,
+                            ID3D12Device* buffer_device,
+                            D3D12_GPU_VIRTUAL_ADDRESS address,
+                            UINT width,
+                            UINT height,
+                            const D3D12_RECT* destination = nullptr,
+                            const D3D12_RECT* content = nullptr) noexcept;
   // Caller has just forwarded an actual direct draw on this exact native list,
   // with ONE bound matching RTV and the matching optional DSV, outside native pass/bundle, no pending
   // split/aliasing, exact selected bound mip extent and registered generations.

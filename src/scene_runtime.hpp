@@ -5,6 +5,19 @@
 #include "scene_capture_manager.hpp"
 
 namespace taxi_camera::scene_runtime {
+// Profile configuration changes only future private patch recordings.
+bool set_patch_profile(std::uint64_t device_key, std::uint32_t profile);
+// Exact, positively observed native RT-exit boundary only. Never infer a
+// barrier model from an RTV bind, draw, OM switch or Close. No app draw/state
+// setters; the original application barrier remains the caller's responsibility.
+bool copy_patch(ID3D12GraphicsCommandList*,
+                std::uint64_t device_key,
+                ID3D12Resource* target,
+                const D3D12_RESOURCE_DESC& target_desc,
+                DXGI_FORMAT view_format,
+                const D3D12_RECT& destination,
+                const D3D12_RECT& content,
+                ID3D12GraphicsCommandList7* enhanced = nullptr);
 struct Snapshot {
   bool initialized = false;
   bool output = false;

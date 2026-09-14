@@ -51,8 +51,7 @@ int main() {
     recovery.failed(reason, 10);
     require(!recovery.pending() && !recovery.retry(99999, clean, true), "Fatal failure cannot retry");
   }
-  for (const auto reason :
-       {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent, SceneStopReason::resolution_changed}) {
+  for (const auto reason : {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent}) {
     recovery.start();
     recovery.failed(reason, 100);
     require(recovery.pending() && recovery.reason() == reason, "Recoverable reason is recorded");
@@ -95,7 +94,11 @@ int main() {
   require(pair.process_update(manager, engine.callbacks()), "Suspended controller update");
   require(pair.snapshot().owned_ids == original && engine.erases == 0 && engine.creates == 2,
           "Temporary pose gap retains IDs without repeated creation or erase");
-  recovery.failed(SceneStopReason::resolution_changed, 100);
+  recovery.failed(SceneStopReason::resolution_changed, 90);
+  require(!recovery.pending() && !recovery.retry(5000, pair.snapshot(), true), "Resolution change cannot recreate retained views");
+  recovery.resumed_retained_resolution();
+  require(recovery.reason() == SceneStopReason::none && recovery.requested(), "Retained resolution recovery preserves demand");
+  recovery.failed(SceneStopReason::owned_entry_absent, 100);
   pair.request_disable();
   require(pair.process_update(manager, engine.callbacks()), "First cleanup update");
   require(pair.snapshot().state == ec::State::cleanup_pending && pair.snapshot().owned_ids == original,

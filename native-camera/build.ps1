@@ -38,6 +38,12 @@ $recoveryTest = Join-Path $outputDirectory 'scene-recovery-test.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Scene recovery test compilation failed.' }
 & $recoveryTest
 if ($LASTEXITCODE -ne 0) { throw 'Scene recovery test failed.' }
+$retainedResizeTest = Join-Path $outputDirectory 'view-resize-recovery-test.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'view_resize_recovery_test.cpp') `
+    (Join-Path $nativeRoot 'engine-camera/entry_pair.cpp') '-o' $retainedResizeTest
+if ($LASTEXITCODE -ne 0) { throw 'Retained resolution recovery compilation failed.' }
+& $retainedResizeTest
+if ($LASTEXITCODE -ne 0) { throw 'Retained resolution recovery validation failed.' }
 $mountTest = Join-Path $outputDirectory 'aircraft-mounts-test.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'aircraft_mounts_test.cpp') '-o' $mountTest
 if ($LASTEXITCODE -ne 0) { throw 'Aircraft mount test compilation failed.' }

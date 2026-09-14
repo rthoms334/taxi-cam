@@ -47,8 +47,9 @@ inline const char* scene_stop_reason_name(SceneStopReason reason) noexcept {
 }
 
 inline bool retryable_scene_stop(SceneStopReason reason) noexcept {
-  return reason == SceneStopReason::inspection_unavailable || reason == SceneStopReason::owned_entry_absent ||
-         reason == SceneStopReason::resolution_changed;
+  // Dimension drift uses the retained-pair path. It must never trigger erase
+  // and recreation of camera entries that the renderer may still reference.
+  return reason == SceneStopReason::inspection_unavailable || reason == SceneStopReason::owned_entry_absent;
 }
 
 inline bool temporary_pose_unavailable(const char* reason) noexcept {
@@ -91,6 +92,10 @@ class SceneRecovery {
     pending_ = false;
     ++attempts_;
     return true;
+  }
+  void resumed_retained_resolution() noexcept {
+    if (requested_ && !pending_ && reason_ == SceneStopReason::resolution_changed)
+      reason_ = SceneStopReason::none;
   }
   bool requested() const noexcept { return requested_; }
   void capture_progress(std::uint64_t now) noexcept {

@@ -28,7 +28,10 @@ std::uint64_t elapsed_ticks(std::uint64_t start) noexcept {
 SIZE_T query_memory_uncached(const void* address, MEMORY_BASIC_INFORMATION& region) noexcept {
   auto* const metrics = active_metrics;
   const auto start = metrics ? performance_tick() : 0;
-  const auto result = VirtualQuery(address, &region, sizeof(region));
+  // Use the documented explicit-process entry point with only the current
+  // process pseudo-handle. The MBI contract and all caller validation remain
+  // unchanged; no handle/PID or lower-level syscall path is configurable here.
+  const auto result = VirtualQueryEx(GetCurrentProcess(), address, &region, sizeof(region));
   if (metrics) {
     ++metrics->query_calls;
     metrics->query_ticks += elapsed_ticks(start);

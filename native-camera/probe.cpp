@@ -14,6 +14,7 @@
 #include "source_view.hpp"
 #include "view_readiness_wait.hpp"
 #include "view_resize.hpp"
+#include "view_resize_recovery.hpp"
 #include "view_retirement.hpp"
 
 #include <algorithm>
@@ -72,6 +73,7 @@ struct Runtime {
   std::array<ec::EntryId, 2> resized_ids{};
   std::array<ViewDimensions, 2> resized_dimensions{};
   ViewResizeWarmup resize_warmup;
+  ViewResizeRecovery resize_recovery;
   ViewReadinessWait view_wait;
   ViewRetirement retirement;
   ULONGLONG last_inspection = 0;
@@ -319,12 +321,13 @@ void inspect_pair(Runtime& runtime,
       report.dimensions[i] = view.dimensions;
       report.flags[i] = view.flags;
       resources[i] = view.resource_address;
-      // Primary-view resizing can overwrite mode2 dimensions in the original
-      // update. Stop instead of silently rendering at that larger resolution.
-      // Reallocation is confined to new inactive views, never in-flight outputs.
+      // Primary-view resizing can overwrite mode2 size fields while its Bitmap
+      // remains pane-sized. Retain the pair; recovery may restore fields only
+      // when fresh output dimensions prove that no reallocation is needed.
       if (runtime.resized_ids[i] != ids[i] || runtime.resized_dimensions[i] != view.dimensions) {
         report.ready[i] = report.resource_present[i] = false;
-        refuse(SceneStopReason::resolution_changed, "Owned-view resolution changed; retiring the pair before a guarded resize retry.");
+        refuse(SceneStopReason::resolution_changed,
+               "Owned-view dimensions changed; retaining the pair for closed-gate dimension recovery.");
       }
     }
   }
@@ -345,6 +348,89 @@ void inspect_pair(Runtime& runtime,
     });
 }
 
+// Only a closing pulse reaches this path. It cannot supply an OwnedViewSnapshot
+// to pose, resize or handoff code. Keep the complete table/pool and association
+// guards, but do not touch Camera/material/output data that false activation
+// neither reads nor writes. Each cache ends before the first private call.
+bool close_owned_pair(Runtime& runtime, const ec::Snapshot& pair, ProbeSnapshot& report) {
+  if (runtime.token != pair.owner)
+    return false;
+  std::array<ec::OwnedViewCloseSnapshot, 2> views{};
+  {
+    ScopedLocalMemoryQueryCache queries;
+    LocalMemoryReader reader;
+    const auto pool = timed(runtime, ProbeStage::pool, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
+    if (!pool.valid)
+      return false;
+    reader.reset_budget();
+    const auto entries =
+        timed(runtime, ProbeStage::entries, [&] { return ec::inspect_owned_entries(reader, runtime.manager, pair.owned_ids); });
+    runtime.performance.entry_count = entries.entry_count;
+    runtime.performance.bucket_count = entries.bucket_count;
+    if (!entries.complete)
+      return false;
+    for (unsigned i = 0; i < views.size(); ++i) {
+      if (!entries.entries[i].found)
+        return false;
+      reader.reset_budget();
+      views[i] = timed(runtime, i == 0 ? ProbeStage::first_view : ProbeStage::second_view,
+                       [&] { return ec::inspect_owned_view_for_close(reader, entries.entries[i].address, pair.owned_ids[i], pool); });
+      if (!views[i].complete || views[i].dimensions != runtime.resized_dimensions[i])
+        return false;
+    }
+    if (views[0].view_address == views[1].view_address || views[0].view_index == views[1].view_index || !queries.finish())
+      return false;
+  }
+  const auto current = runtime.pair.snapshot();
+  if (current.state != ec::State::active || current.owner != pair.owner || current.owned_ids != pair.owned_ids || current.request_pending ||
+      current.creation_pending || current.failure != ec::Failure::none || current.blocked != ec::Blocked::none)
+    return false;
+  {
+    const std::lock_guard lock(runtime.mutex);
+    if (runtime.requested_start || runtime.recovery.pending() || runtime.published.view_waiting || runtime.published.pose_waiting ||
+        runtime.mount_revision != runtime.requested_mount_revision)
+      return false;
+  }
+  const bool closed = timed(runtime, ProbeStage::activation, [&] {
+    // Captured return is AL: false means native lookup refused. No open call is
+    // available here. Any refusal, including after a partial close, falls back
+    // to the normal full inspection without trusting the cached gate booleans.
+    const auto activate = function<bool (*)(void*, std::uint64_t, bool)>(runtime, 17641776);
+    for (unsigned i = 0; i < views.size(); ++i)
+      if ((views[i].flags[0] & 1u) == 0 && !activate(reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false))
+        return false;
+    ScopedLocalMemoryQueryCache queries;
+    LocalMemoryReader reader(64);
+    for (const auto& view : views) {
+      auto expected = view.flags;
+      expected[0] |= 1u;
+      std::array<std::uint64_t, 2> first{}, second{};
+      if (!word(reader, view.view_address + 48, first) || first != expected || !word(reader, view.view_address + 48, second) ||
+          second != first)
+        return false;
+    }
+    return queries.finish();
+  });
+  if (!closed)
+    return false;
+  runtime.gates = {};
+  // Retain the last FULL camera/output diagnostics; do not publish a new
+  // resource ticket or imply that this close-only inspection refreshed them.
+  {
+    const std::lock_guard lock(runtime.mutex);
+    report = runtime.published;
+  }
+  report.updates = runtime.updates;
+  report.thread_id = GetCurrentThreadId();
+  report.pair = pair;
+  report.gates = {};
+  for (unsigned i = 0; i < views.size(); ++i) {
+    report.flags[i] = views[i].flags;
+    report.flags[i][0] |= 1u;
+    report.inspection_status[i] = "close_only; last full output diagnostics retained";
+  }
+  return true;
+}
 void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose) noexcept {
   using SetVector = void (*)(void*, const double*);
   function<SetVector>(runtime, 66324928)(reinterpret_cast<void*>(view.node_address), pose.position.data());
@@ -464,10 +550,10 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
   return id;
 }
 
-bool resize_new_entry(Runtime& runtime, ec::EntryId id, unsigned index) {
+bool resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true) {
   const auto view = inspect_entry(runtime, id);
   if (!view.complete || !view.ready || !(view.flags[0] & 1u) || index >= runtime.resized_dimensions.size()) {
-    runtime.stage_error = "The owned view did not stay closed during its initial engine update.";
+    runtime.stage_error = "The owned view could not be validated with its render gate closed.";
     return false;
   }
   const auto desired = runtime.resized_dimensions[index];
@@ -482,15 +568,19 @@ bool resize_new_entry(Runtime& runtime, ec::EntryId id, unsigned index) {
         auto& current = *static_cast<Runtime*>(opaque);
         return reinterpret_cast<std::uintptr_t>(function<void* (*)(void*)>(current, 66809728)(reinterpret_cast<void*>(address)));
       }};
-  const auto resized = resize_owned_view(view, index, desired, resize_callbacks, runtime.aircraft_profile->camera_panes);
+  const auto resized = initialize_output
+                           ? resize_owned_view(view, index, desired, resize_callbacks, runtime.aircraft_profile->camera_panes)
+                           : restore_owned_view_dimensions(view, index, desired, resize_callbacks, runtime.aircraft_profile->camera_panes);
   if (!resized.complete) {
     runtime.stage_error = view_resize_status_name(resized.status);
     return false;
   }
   const auto confirmed = inspect_entry(runtime, id);
-  const bool valid = confirmed.complete && confirmed.ready && confirmed.view_address == view.view_address &&
-                     confirmed.node_address == view.node_address && confirmed.camera_address == view.camera_address &&
-                     confirmed.dimensions == desired && (confirmed.flags[0] & 1u);
+  const bool valid =
+      confirmed.complete && confirmed.ready && confirmed.view_address == view.view_address && confirmed.node_address == view.node_address &&
+      confirmed.camera_address == view.camera_address && confirmed.dimensions == desired && (confirmed.flags[0] & 1u) &&
+      (initialize_output || (confirmed.mode == 2 && confirmed.resource_present && confirmed.output_dimensions == desired[0] &&
+                             confirmed.resource_address == view.resource_address));
   if (!valid) {
     runtime.stage_error = "The resized owned-view chain did not remain stable; its render gate stays closed.";
     return false;
@@ -623,12 +713,19 @@ void observer(void* manager) noexcept {
     report.accepting_requests = true;
     report.updates = runtime.updates;
     report.thread_id = GetCurrentThreadId();
+    const bool close_only = inspection_state.established_pair && pair_ready && gate_change && !desired[0] && !desired[1] &&
+                            (runtime.gates[0] || runtime.gates[1]) && !before.request_pending && !before.creation_pending &&
+                            !requested_start && !runtime.resize_warmup.pending() && !runtime.resize_recovery.pending() &&
+                            !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed;
     const auto start_body = requested_start ? sample_body_pose(now) : BodyPoseSnapshot{};
     if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !start_body.valid && !start_body.calibration_required) {
       // Public startup is asynchronous. Do not walk private manager, pool or
       // aircraft graphs repeatedly while its first telemetry is still pending.
       report.pair = before;
       report.message = std::string("Waiting for read-only aircraft telemetry: ") + start_body.error;
+    } else if (close_only && timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); }) &&
+               close_owned_pair(runtime, before, report)) {
+      runtime.schedule = next_schedule;
     } else if (!timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); })) {
       scene_handoff().stop_scene();
       record_stop(runtime, SceneStopReason::identity_refused, "Manager/renderer identity did not pass its complete guard.", now);
@@ -662,6 +759,7 @@ void observer(void* manager) noexcept {
         }
       }
       bool waiting_for_body = false;
+      bool resolution_pause = false;
       if (requested_start && !pair.owned_ids[0] && !pair.owned_ids[1]) {
         waiting_for_body = !timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
         bool create_requested = false;
@@ -698,8 +796,8 @@ void observer(void* manager) noexcept {
         const bool closed_warmup = runtime.creations != 0 && runtime.creation_valid && runtime.resize_warmup.pending();
         if (!closed_warmup && runtime.resize_warmup.pending()) {
           runtime.creation_valid = timed(runtime, ProbeStage::lifecycle, [&] {
-            return runtime.resize_warmup.may_resize(pair.owned_ids, runtime.updates) && resize_new_entry(runtime, pair.owned_ids[0], 0) &&
-                   resize_new_entry(runtime, pair.owned_ids[1], 1);
+            return runtime.resize_warmup.may_resize(pair.owned_ids, runtime.updates) &&
+                   resize_closed_entry(runtime, pair.owned_ids[0], 0) && resize_closed_entry(runtime, pair.owned_ids[1], 1);
           });
           if (runtime.creation_valid)
             runtime.resize_warmup.finish(pair.owned_ids, runtime.updates);
@@ -712,7 +810,60 @@ void observer(void* manager) noexcept {
                                                                   runtime.resized_ids == pair.owned_ids &&
                                                                   runtime.inspection_stop == SceneStopReason::inspection_unavailable,
                                                               views);
-        if (closed_warmup) {
+        resolution_pause = runtime.resize_recovery.pending() || runtime.resize_recovery.failed() ||
+                           (runtime.inspection_stop == SceneStopReason::resolution_changed && runtime.scheduled_ids == pair.owned_ids &&
+                            runtime.resized_ids == pair.owned_ids);
+        if (resolution_pause) {
+          // Never remove/recreate live camera entries for a primary-size change.
+          // Mode2's original update only overwrites P16..39: restore those fields
+          // if its already allocated Bitmap still has the exact desired size.
+          if (!runtime.resize_recovery.pending() && !runtime.resize_recovery.failed()) {
+            runtime.resize_recovery.begin(pair.owner, pair.owned_ids);
+            scene_handoff().stop_scene();
+            record_stop(runtime, SceneStopReason::resolution_changed,
+                        "Primary dimensions changed; camera IDs retained and output allocation prohibited.", now);
+          }
+          const auto action = runtime.resize_recovery.observe(pair.owner, pair.owned_ids, runtime.updates, views);
+          // A temporarily unavailable feed grants no native-call permission.
+          // Close only independently fresh ready chains; never use failed ones.
+          for (unsigned i = 0; i < views.size(); ++i) {
+            const auto& view = views[i];
+            if (view.complete && view.ready && view.status == ec::OwnedViewStatus::ready) {
+              if ((view.flags[0] & 1u) == 0)
+                function<void (*)(void*, std::uint64_t, bool)>(runtime, 17641776)(reinterpret_cast<void*>(runtime.manager),
+                                                                                  pair.owned_ids[i], false);
+              runtime.gates[i] = false;
+            }
+          }
+          runtime.message = "Graphics settings changed; camera IDs retained while both render gates close.";
+          if (action == ViewResizeRecovery::Action::resize) {
+            const bool outputs_unchanged = views[0].mode == 2 && views[1].mode == 2 && views[0].resource_present &&
+                                           views[1].resource_present &&
+                                           views[0].output_dimensions == runtime.aircraft_profile->camera_panes[0] &&
+                                           views[1].output_dimensions == runtime.aircraft_profile->camera_panes[1];
+            const bool restored = outputs_unchanged && timed(runtime, ProbeStage::lifecycle, [&] {
+                                    return resize_closed_entry(runtime, pair.owned_ids[0], 0, false) &&
+                                           resize_closed_entry(runtime, pair.owned_ids[1], 1, false);
+                                  });
+            if (restored && runtime.resize_recovery.finish(pair.owner, pair.owned_ids)) {
+              // Reopening requires a new full pair inspection and fresh captures
+              // on the next observer, never this pre-restoration snapshot.
+              scene_handoff().begin_scene();
+              runtime.schedule.reset();
+              const std::lock_guard lock(runtime.mutex);
+              runtime.recovery.resumed_retained_resolution();
+              runtime.stop_detail.clear();
+              runtime.message = "Camera dimensions restored without replacing entries or output textures; waiting for fresh frames.";
+            } else {
+              runtime.resize_recovery.mark_failed();
+            }
+          }
+          if (runtime.resize_recovery.failed())
+            runtime.message = "Camera paused after graphics change: existing output could not be safely retained. Restart MSFS to resume.";
+          report.ready = report.resource_present = {};
+          report.outputs_matched = false;
+          report.view_waiting = true;
+        } else if (closed_warmup) {
           // No publication, resize or activation yet. The tail-called original
           // initializes its cache while both verified new gates remain closed.
         } else if (!runtime.resize_warmup.pending() && report.ready[0] && report.ready[1] &&
@@ -795,6 +946,7 @@ void observer(void* manager) noexcept {
         runtime.resized_ids = {};
         runtime.resized_dimensions = {};
         runtime.resize_warmup.clear();
+        runtime.resize_recovery.clear();
         runtime.view_wait.clear();
         runtime.retirement.clear();
         runtime.gates = {};
@@ -808,7 +960,9 @@ void observer(void* manager) noexcept {
         report.flags = {};
       }
       report.pose_captured = runtime.pose_captured;
-      if (body_pose_failed || waiting_for_body)
+      if (resolution_pause)
+        report.message = runtime.message;
+      else if (body_pose_failed || waiting_for_body)
         report.message = runtime.message.empty() ? runtime.stage_error : runtime.message;
       else if (report.view_waiting)
         report.message = "Owned view inspection unavailable; camera IDs retained while waiting for fresh validation.";

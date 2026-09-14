@@ -26,7 +26,8 @@ std::uint64_t u64(const std::uint8_t* bytes) noexcept {
   return std::uint64_t(u32(bytes)) | (std::uint64_t(u32(bytes + 4)) << 32);
 }
 
-bool fail(OwnedViewSnapshot& result, OwnedViewStatus status, const char* error) noexcept {
+template <typename Result>
+bool fail(Result& result, OwnedViewStatus status, const char* error) noexcept {
   result.status = status;
   result.error = error;
   return false;
@@ -38,9 +39,10 @@ struct Observation {
   std::array<std::uint8_t, 16> bytes{};
 };
 
+template <typename Result>
 class BoundedReader {
  public:
-  BoundedReader(MemoryReader& reader, OwnedViewSnapshot& result) noexcept : reader_(reader), result_(result) {}
+  BoundedReader(MemoryReader& reader, Result& result) noexcept : reader_(reader), result_(result) {}
 
   bool field(std::uint64_t address, std::uint64_t offset, std::uint32_t size, std::uint8_t* output, bool require_aligned = true) noexcept {
     if (!pointer_range(address, offset, size, require_aligned))
@@ -112,7 +114,7 @@ class BoundedReader {
   }
 
   MemoryReader& reader_;
-  OwnedViewSnapshot& result_;
+  Result& result_;
   std::array<Observation, 32> observations_{};
   std::size_t count_ = 0;
 };
@@ -133,11 +135,12 @@ bool valid_pool(const ViewPoolSnapshot& pool) noexcept {
   return true;
 }
 
-bool output_resource(BoundedReader& source,
+bool output_resource(BoundedReader<OwnedViewSnapshot>& source,
                      OwnedViewSnapshot& result,
                      std::uint64_t entry,
                      std::uint64_t view,
-                     std::uint64_t& address) noexcept {
+                     std::uint64_t& address,
+                     std::array<std::int32_t, 2>& output_dimensions) noexcept {
   std::uint64_t entry_material = 0;
   std::uint64_t view_material = 0;
   if (!source.handle(entry, 80, entry_material) || !source.handle(view, 144, view_material))
@@ -166,12 +169,100 @@ bool output_resource(BoundedReader& source,
     return false;
   if (resource != 0 && !pointer_range(resource, 0, 8))
     return fail(result, OwnedViewStatus::invalid_pointer, "The optional resource member is malformed.");
+  if (resource != 0) {
+    std::array<std::uint8_t, 8> bytes{};
+    // Captured66809728 compares Bitmap40/44 with view32/36 before its output
+    // replacement branch. Observe these exact fields, never dereference the
+    // opaque resource member or infer completed allocation from these values.
+    if (!source.field(bitmap, 40, bytes.size(), bytes.data()))
+      return false;
+    output_dimensions = {std::bit_cast<std::int32_t>(u32(bytes.data())), std::bit_cast<std::int32_t>(u32(bytes.data() + 4))};
+  }
   address = resource;
   return true;
 }
 
 }  // namespace
 
+OwnedViewCloseSnapshot inspect_owned_view_for_close(MemoryReader& reader,
+                                                    std::uint64_t entry_address,
+                                                    std::uint64_t expected_id,
+                                                    const ViewPoolSnapshot& pool) noexcept {
+  OwnedViewCloseSnapshot result;
+  if (!expected_id || !pointer_range(entry_address, 0, 8)) {
+    fail(result, OwnedViewStatus::invalid_request, "Gate closure requires a nonzero owned ID and aligned entry.");
+    return result;
+  }
+  if (!valid_pool(pool)) {
+    fail(result, OwnedViewStatus::invalid_pool, "Gate closure requires the complete current pool proof.");
+    return result;
+  }
+  BoundedReader source(reader, result);
+  std::uint64_t key = 0, payload_id = 0;
+  std::array<std::uint8_t, 16> bytes{};
+  if (!source.word(entry_address, 0, key) || !source.word(entry_address, 16, payload_id))
+    return result;
+  if (key != expected_id || payload_id != expected_id) {
+    fail(result, OwnedViewStatus::id_mismatch, "The entry key or payload ID changed before closure.");
+    return result;
+  }
+  if (!source.field(entry_address, 8, 1, bytes.data()))
+    return result;
+  if (bytes[0] != 1) {
+    fail(result, bytes[0] == 0 ? OwnedViewStatus::pending : OwnedViewStatus::invalid_ready_byte,
+         "Gate closure requires a ready owned entry.");
+    return result;
+  }
+  if (!source.field(entry_address, 24, 4, bytes.data()))
+    return result;
+  if (u32(bytes.data()) != 2) {
+    fail(result, OwnedViewStatus::invalid_request, "Gate closure requires an independent-pose mode2 entry.");
+    return result;
+  }
+  if (!source.field(entry_address, 76, 4, bytes.data()))
+    return result;
+  const auto index = std::bit_cast<std::int32_t>(u32(bytes.data()));
+  if (index < 0 || index >= 8) {
+    fail(result, OwnedViewStatus::invalid_view_index, "The entry index is outside the captured eight-view pool.");
+    return result;
+  }
+  std::uint64_t view = 0;
+  if (!source.word(pool.array_address, std::uint64_t(index) * 8, view))
+    return result;
+  if (view != pool.slots[index].view_address) {
+    fail(result, OwnedViewStatus::pool_changed, "The selected view changed since the complete pool inspection.");
+    return result;
+  }
+  std::uint64_t node = 0, view_node = 0;
+  if (!source.handle(entry_address, 96, node) || !source.handle(view, 104, view_node))
+    return result;
+  if (!node || !view_node) {
+    fail(result, OwnedViewStatus::node_unavailable, "The owned entry/view association is unavailable.");
+    return result;
+  }
+  if (node != view_node) {
+    fail(result, OwnedViewStatus::node_mismatch, "The entry and view Node identities differ.");
+    return result;
+  }
+  std::array<std::array<std::int32_t, 2>, 3> dimensions{};
+  for (std::uint32_t pair = 0; pair < dimensions.size(); ++pair) {
+    if (!source.field(view, 16 + pair * 8, 8, bytes.data()))
+      return result;
+    dimensions[pair] = {std::bit_cast<std::int32_t>(u32(bytes.data())), std::bit_cast<std::int32_t>(u32(bytes.data() + 4))};
+  }
+  if (!source.field(view, 48, 16, bytes.data()))
+    return result;
+  const std::array<std::uint64_t, 2> flags{u64(bytes.data()), u64(bytes.data() + 8)};
+  if (!source.recheck())
+    return result;
+  result.complete = true;
+  result.status = OwnedViewStatus::ready;
+  result.view_index = index;
+  result.view_address = view;
+  result.dimensions = dimensions;
+  result.flags = flags;
+  return result;
+}
 OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
                                      std::uint64_t entry_address,
                                      std::uint64_t expected_id,
@@ -208,6 +299,9 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
     fail(result, OwnedViewStatus::invalid_ready_byte, "The entry ready byte is neither zero nor one.");
     return result;
   }
+  if (!source.field(entry_address, 24, 4, bytes.data()))
+    return result;
+  const auto mode = u32(bytes.data());
   if (!source.field(entry_address, 76, 4, bytes.data()))
     return result;
   const auto index = std::bit_cast<std::int32_t>(u32(bytes.data()));
@@ -258,17 +352,20 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
     return result;
   const std::array<std::uint64_t, 2> flags{u64(bytes.data()), u64(bytes.data() + 8)};
   std::uint64_t resource_address = 0;
-  if (!output_resource(source, result, entry_address, view, resource_address) || !source.recheck())
+  std::array<std::int32_t, 2> output_dimensions{};
+  if (!output_resource(source, result, entry_address, view, resource_address, output_dimensions) || !source.recheck())
     return result;
   result.complete = true;
   result.ready = true;
   result.status = OwnedViewStatus::ready;
   result.view_index = index;
+  result.mode = mode;
   result.view_address = view;
   result.node_address = node;
   result.camera_address = camera;
   result.fov = fov;
   result.dimensions = dimensions;
+  result.output_dimensions = output_dimensions;
   result.flags = flags;
   result.resource_present = resource_address != 0;
   result.resource_address = resource_address;

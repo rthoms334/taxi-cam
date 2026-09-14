@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -101,6 +102,7 @@ struct Fixture {
     }
     reader.word(kEntry, kId);
     reader.word(kEntry + 16, kId);
+    reader.word(kEntry + 24, 2, 4);
     reader.word(kEntry + 8, 1, 1);
     reader.word(kEntry + 76, 0, 4);
     reader.handle(kEntry + 96, 0, kNode);
@@ -111,11 +113,38 @@ struct Fixture {
     reader.handle(kEntry + 80, 2, kMaterial);
     reader.handle(kView + 144, 3, kMaterial);
     reader.handle(kMaterial + 520, 4, kBitmap);
+    reader.word(kBitmap + 40, 736, 4);
+    reader.word(kBitmap + 44, 251, 4);
+    reader.permitted.emplace_back(kBitmap + 40, 8);
     reader.word(kBitmap + 88, kRecord);
     reader.word(kRecord + 16, kWrapper);
     reader.word(kWrapper + 168, kResource);
   }
 
+  OwnedViewCloseSnapshot run_close() {
+    reader.reads.clear();
+    const auto result = inspect_owned_view_for_close(reader, entry, id, pool);
+    std::uint32_t total = 0;
+    for (const auto& read : reader.reads) {
+      require(std::find(reader.permitted.begin(), reader.permitted.end(), read) != reader.permitted.end(),
+              "Close reader followed an unlisted field");
+      require(read.first <= std::numeric_limits<std::uint64_t>::max() - read.second, "Close reader received an overflowing range");
+      total += static_cast<std::uint32_t>(read.second);
+    }
+    require(total == result.read_bytes && total <= 8192 && result.read_failures <= 1, "Close reader budget/failure accounting changed");
+    if (result.complete) {
+      require(result.status == OwnedViewStatus::ready && result.read_failures == 0 && !*result.error && reader.reads.size() % 2 == 0,
+              "Close result completed without an error-free trace");
+      const auto half = reader.reads.size() / 2;
+      require(std::equal(reader.reads.begin(), reader.reads.begin() + half, reader.reads.begin() + half),
+              "Close result omitted a full exact trace reread");
+    } else {
+      require(result.view_address == 0 && result.view_index == -1 && result.flags == std::array<std::uint64_t, 2>{} &&
+                  result.dimensions == std::array<std::array<std::int32_t, 2>, 3>{},
+              "Refused close result published native authority");
+    }
+    return result;
+  }
   OwnedViewSnapshot run() {
     reader.reads.clear();
     const auto result = inspect_owned_view(reader, entry, id, pool);
@@ -135,9 +164,11 @@ struct Fixture {
               "A successful snapshot omitted or reordered its consistency trace");
       require(result.ready == (result.status == OwnedViewStatus::ready), "Ready status disagrees with ready flag");
     }
+    if (!result.resource_present)
+      require(result.output_dimensions == std::array<std::int32_t, 2>{}, "Unavailable output published bitmap dimensions");
     if (!result.ready) {
-      require(result.view_address == 0 && result.node_address == 0 && result.camera_address == 0 && result.resource_address == 0 && result.fov == 0 &&
-                  !result.resource_present && result.view_index == -1 &&
+      require(result.view_address == 0 && result.node_address == 0 && result.camera_address == 0 && result.resource_address == 0 &&
+                  result.fov == 0 && !result.resource_present && result.view_index == -1 && result.mode == 0 &&
                   result.dimensions == std::array<std::array<std::int32_t, 2>, 3>{} && result.flags == std::array<std::uint64_t, 2>{},
               "Unusable or pending result published borrowed addresses or output metadata");
     }
@@ -148,13 +179,18 @@ struct Fixture {
 void successful_and_pending() {
   Fixture full;
   const auto complete = full.run();
-  require(complete.complete && complete.ready && complete.resource_present && complete.resource_address == kResource && complete.view_address == kView &&
-              complete.node_address == kNode && complete.camera_address == kCamera && complete.view_index == 0 && complete.fov == 1.25f,
+  require(complete.complete && complete.ready && complete.resource_present && complete.resource_address == kResource &&
+              complete.view_address == kView && complete.node_address == kNode && complete.camera_address == kCamera &&
+              complete.view_index == 0 && complete.mode == 2 && complete.fov == 1.25f,
           "Full owned-view chain was not observed exactly");
-  require(complete.read_bytes == 494 && full.reader.reads.size() == 60, "Full trace read extent changed unexpectedly");
+  require(complete.read_bytes == 518 && full.reader.reads.size() == 64, "Full trace read extent changed unexpectedly");
   require(complete.dimensions == std::array<std::array<std::int32_t, 2>, 3>{{{768, 763}, {868, 863}, {968, 963}}} &&
               complete.flags == std::array<std::uint64_t, 2>{0x1234567890abcdefull, 0xfedcba0987654321ull},
           "Dimension pair order, signed scalar decoding or exact64-bit flag values changed");
+  require(complete.output_dimensions == std::array<std::int32_t, 2>{736, 251},
+          "Bitmap dimensions were confused with inherited view dimensions");
+  require(std::count(full.reader.reads.begin(), full.reader.reads.end(), std::pair<std::uint64_t, std::size_t>{kBitmap + 40, 8}) == 2,
+          "Bitmap dimensions are not included in the complete trace reread");
   Fixture shared_controls;
   shared_controls.reader.handle(kView + 104, 0, kNode);
   shared_controls.reader.handle(kView + 144, 2, kMaterial);
@@ -235,6 +271,59 @@ void numeric_diagnostics() {
   }
 }
 
+void mode_observations() {
+  for (const auto mode : {0u, 1u, 2u, 3u, 0x80000000u, 0xffffffffu}) {
+    Fixture test;
+    test.reader.word(kEntry + 24, mode, 4);
+    const auto result = test.run();
+    require(result.ready && result.mode == mode, "Ready-entry mode was guessed, clamped or rejected instead of observed exactly");
+    require(std::count(test.reader.reads.begin(), test.reader.reads.end(), std::pair<std::uint64_t, std::size_t>{kEntry + 24, 4}) == 2,
+            "Mode was omitted from the complete field reread");
+  }
+  for (unsigned byte = 0; byte < 4; ++byte) {
+    Fixture test;
+    test.reader.bytes.erase(kEntry + 24 + byte);
+    const auto result = test.run();
+    require(!result.ready && !result.complete && result.mode == 0 && result.status == OwnedViewStatus::read_failed,
+            "Unreadable mode published a usable snapshot");
+  }
+  Fixture pending;
+  pending.reader.word(kEntry + 8, 0, 1);
+  pending.reader.bytes.erase(kEntry + 24);
+  const auto result = pending.run();
+  require(result.complete && result.status == OwnedViewStatus::pending && result.mode == 0,
+          "Pending setup followed an unavailable mode field");
+}
+void output_dimension_observations() {
+  for (const auto width : {0u, 1u, 774u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+    for (const auto height : {0u, 496u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+      Fixture test;
+      test.reader.word(kBitmap + 40, width, 4);
+      test.reader.word(kBitmap + 44, height, 4);
+      const auto result = test.run();
+      require(result.ready && result.resource_present && result.output_dimensions[0] == std::bit_cast<std::int32_t>(width) &&
+                  result.output_dimensions[1] == std::bit_cast<std::int32_t>(height),
+              "Bitmap dimensions were clamped or treated as an unverified validity condition");
+    }
+  }
+  for (unsigned byte = 0; byte < 8; ++byte) {
+    Fixture test;
+    test.reader.bytes.erase(kBitmap + 40 + byte);
+    const auto result = test.run();
+    require(!result.complete && result.status == OwnedViewStatus::read_failed && result.read_failures == 1,
+            "Unreadable bitmap dimension bytes did not refuse the complete snapshot");
+  }
+  for (const auto missing : {kMaterial + 520, kControl + 0x400, kBitmap + 88, kRecord + 16, kWrapper + 168}) {
+    Fixture test;
+    test.reader.word(missing, 0);
+    test.reader.bytes.erase(kBitmap + 40);
+    const auto result = test.run();
+    require(result.ready && !result.resource_present && result.output_dimensions == std::array<std::int32_t, 2>{},
+            "Missing optional output demanded or published unavailable bitmap dimensions");
+    require(std::none_of(test.reader.reads.begin(), test.reader.reads.end(), [](const auto& read) { return read.first == kBitmap + 40; }),
+            "Bitmap dimensions were read without a present output resource member");
+  }
+}
 void refusals() {
   for (const auto address : {kEntry, kEntry + 16}) {
     Fixture test;
@@ -463,13 +552,130 @@ void failures_and_mutations() {
   }
 }
 
+template <typename T>
+concept HasCameraProof = requires(T value) {
+  value.camera_address;
+  value.resource_address;
+  value.fov;
+};
+static_assert(!std::is_convertible_v<OwnedViewCloseSnapshot, OwnedViewSnapshot>);
+static_assert(!HasCameraProof<OwnedViewCloseSnapshot>);
+
+void close_only_contract() {
+  Fixture fixture;
+  const auto result = fixture.run_close();
+  require(result.complete && result.view_address == kView && result.view_index == 0 && result.read_bytes == 258 &&
+              fixture.reader.reads.size() == 32,
+          "Close-only trace did not retain exactly its sixteen guarded fields");
+  const auto trace = fixture.reader.reads;
+  const auto full = fixture.run();
+  require(full.dimensions == result.dimensions && full.flags == result.flags && full.read_bytes == 518,
+          "Close-only numeric fields differ from the full inspection");
+
+  Fixture no_graph;
+  // Remove EVERY byte outside the actual close trace. A read of the excluded
+  // Node payload, Camera, material, Bitmap or resource chain must now fail.
+  for (auto it = no_graph.reader.bytes.begin(); it != no_graph.reader.bytes.end();) {
+    const auto address = it->first;
+    const bool retained = std::any_of(trace.begin(), trace.end(), [address](const auto& field) {
+      return address >= field.first && address - field.first < field.second;
+    });
+    if (retained)
+      ++it;
+    else
+      it = no_graph.reader.bytes.erase(it);
+  }
+  require(no_graph.run_close().complete, "Unavailable unrelated graphs prevented a validated gate closure");
+  require(no_graph.run().status == OwnedViewStatus::read_failed, "Unavailable Camera graph incorrectly produced a full snapshot");
+
+  for (std::size_t call = 0; call < trace.size(); ++call) {
+    Fixture failed;
+    failed.reader.fail_call = call + 1;
+    require(failed.run_close().status == OwnedViewStatus::read_failed && failed.reader.reads.size() == call + 1,
+            "A close read/recheck failure was retried or overlooked");
+    if (call < trace.size() / 2)
+      continue;
+    for (std::size_t byte = 0; byte < trace[call].second; ++byte) {
+      Fixture changed;
+      changed.reader.changed_call = call + 1;
+      changed.reader.changed_byte = byte;
+      require(changed.run_close().status == OwnedViewStatus::changed && changed.reader.reads.size() == call + 1,
+              "A changed close field escaped the complete trace recheck");
+    }
+  }
+  for (std::uint32_t mode : {0u, 1u, 3u, 0xffffffffu}) {
+    Fixture wrong_mode;
+    wrong_mode.reader.word(kEntry + 24, mode, 4);
+    require(!wrong_mode.run_close().complete, "Close-only API admitted a non-mode2 entry");
+  }
+  for (std::uint32_t ready : {0u, 2u, 255u}) {
+    Fixture pending;
+    pending.reader.word(kEntry + 8, ready, 1);
+    require(!pending.run_close().complete && pending.reader.reads.size() == 3,
+            "Close-only API followed a pending or malformed ready entry");
+  }
+  for (std::uint32_t index : {8u, 0x80000000u, 0xffffffffu}) {
+    Fixture invalid;
+    invalid.reader.word(kEntry + 76, index, 4);
+    require(invalid.run_close().status == OwnedViewStatus::invalid_view_index, "Close-only API admitted an invalid pool index");
+  }
+  for (unsigned index = 0; index < 8; ++index) {
+    Fixture selected;
+    selected.reader.word(kEntry + 76, index, 4);
+    selected.reader.handle(selected.pool.slots[index].view_address + 104, 1, kNode);
+    const auto observed = selected.run_close();
+    require(observed.complete && observed.view_index == static_cast<std::int32_t>(index) &&
+                observed.view_address == selected.pool.slots[index].view_address,
+            "Close-only API selected the wrong pool view");
+  }
+  for (const auto field : {kEntry, kEntry + 16}) {
+    Fixture mismatch;
+    mismatch.reader.word(field, kId + 1);
+    require(mismatch.run_close().status == OwnedViewStatus::id_mismatch, "Close-only API admitted a different owned ID");
+  }
+  for (unsigned which = 0; which < 2; ++which) {
+    for (std::uint64_t low = 0; low <= 7; ++low) {
+      Fixture packed;
+      const auto field = which == 0 ? kEntry + 96 : kView + 104;
+      const auto control = kControl + which * 0x100 + low;
+      packed.reader.word(field, control);
+      packed.reader.word(control + 28, 29, 4);
+      packed.reader.word(control, kNode);
+      require(packed.run_close().complete, "Close-only API rejected a valid byte-aligned control");
+      packed.reader.word(control + 28, 30, 4);
+      require(packed.run_close().status == OwnedViewStatus::node_unavailable, "Close-only API accepted a stale association");
+    }
+    Fixture missing;
+    missing.reader.word(which == 0 ? kEntry + 96 : kView + 104, 0);
+    require(missing.run_close().status == OwnedViewStatus::node_unavailable, "Close-only API accepted an absent association");
+  }
+  Fixture mismatch;
+  mismatch.reader.word(kControl + 0x100, kNode + 8);
+  require(mismatch.run_close().status == OwnedViewStatus::node_mismatch, "Close-only API lost entry/view identity equality");
+  Fixture invalid_pool;
+  invalid_pool.pool.valid = false;
+  require(invalid_pool.run_close().status == OwnedViewStatus::invalid_pool && invalid_pool.reader.reads.empty(),
+          "Close-only API trusted an invalid pool snapshot");
+  Fixture changed_pool;
+  changed_pool.reader.word(kArray, kView + 8);
+  require(changed_pool.run_close().status == OwnedViewStatus::pool_changed, "Close-only API used a changed pool slot");
+  Fixture malformed;
+  malformed.entry = std::numeric_limits<std::uint64_t>::max() - 3;
+  require(malformed.run_close().status == OwnedViewStatus::invalid_request && malformed.reader.reads.empty(),
+          "Close-only API read a malformed address");
+  std::printf(
+      "Close trace:32 exact reads/258 bytes; full trace:64 exact reads/518 bytes. OS query counts not measured by synthetic reader.\n");
+}
 }  // namespace
 
 int main() {
   try {
+    close_only_contract();
     successful_and_pending();
     absent_output();
     numeric_diagnostics();
+    output_dimension_observations();
+    mode_observations();
     refusals();
     pointer_and_pool_bounds();
     packed_control_records();

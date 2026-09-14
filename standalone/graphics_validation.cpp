@@ -13,14 +13,23 @@ namespace runtime = taxi_camera::scene_runtime;
 struct ClearStatePipeline {
   Reference<ID3D12RootSignature> root;
   Reference<ID3D12PipelineState> pipeline;
-  explicit ClearStatePipeline(ID3D12Device* device) {
+  explicit ClearStatePipeline(ID3D12Device* device, bool descriptor_case = false, DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM) {
     // Match the gradient's root layout, but make pipeline loss visible as
     // different GPU pixels rather than relying only on intercepted-call counts.
-    D3D12_ROOT_PARAMETER parameter{};
-    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameter.Constants.Num32BitValues = 4;
-    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    const D3D12_ROOT_SIGNATURE_DESC signature{1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    D3D12_ROOT_PARAMETER parameters[4]{};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[0].Constants.Num32BitValues = 4;
+    parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0}, {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0}};
+    for (UINT i = 0; i < 2; ++i) {
+      parameters[i + 1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      parameters[i + 1].DescriptorTable = {1, &ranges[i]};
+      parameters[i + 1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+    parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    parameters[3].Descriptor.ShaderRegister = 1;
+    parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    const D3D12_ROOT_SIGNATURE_DESC signature{descriptor_case ? 4u : 1u, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
     Reference<ID3DBlob> serialized, vertex, pixel;
     check(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, serialized.put(), nullptr),
           "Serialize ClearState signature");
@@ -32,14 +41,24 @@ float4 vs_main(uint id : SV_VertexID) : SV_Position {
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
 cbuffer Parameters : register(b0) { uint Width; uint Height; uint Mode; uint Frame; };
+#ifdef DESCRIPTOR_CASE
+Texture2D<float4> Texture : register(t0);
+SamplerState Sample : register(s0);
+cbuffer Colour : register(b1) { float4 Tint; };
+#endif
 float4 ps_main() : SV_Target {
-  return float4(Mode != 0 ? 1 : 0, Width == 64 && Height == 64 ? 1 : 0, Frame != 0 ? 1 : 0, 1);
+  float4 value = float4(Mode != 0 ? 1 : 0, Width == 64 && Height == 64 ? 1 : 0, Frame != 0 ? 1 : 0, 1);
+#ifdef DESCRIPTOR_CASE
+  value *= Texture.SampleLevel(Sample, float2(.5,.5), 0) * Tint;
+#endif
+  return value;
 }
 )";
-    check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", nullptr, nullptr, "vs_main", "vs_5_0",
+    const D3D_SHADER_MACRO macros[]{{"DESCRIPTOR_CASE", "1"}, {nullptr, nullptr}};
+    check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", descriptor_case ? macros : nullptr, nullptr, "vs_main", "vs_5_0",
                      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, vertex.put(), nullptr),
           "Compile ClearState vertex shader");
-    check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", nullptr, nullptr, "ps_main", "ps_5_0",
+    check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", descriptor_case ? macros : nullptr, nullptr, "ps_main", "ps_5_0",
                      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, pixel.put(), nullptr),
           "Compile ClearState pixel shader");
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
@@ -62,7 +81,7 @@ float4 ps_main() : SV_Target {
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     desc.NumRenderTargets = 1;
     desc.SampleDesc.Count = 1;
-    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.RTVFormats[0] = format;
     check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pipeline.put())), "Create ClearState pipeline");
   }
 };
@@ -263,7 +282,30 @@ void native_case(bool warp, bool a350) {
   }
   require(runtime::snapshot(key).frames > frames_before_interop, "Camera capture survives unrelated D3D11On12 Game Capture copy");
   win::set_target_mask(3);
+  Reference<ID3D12GraphicsCommandList7> enhanced;
+  check(list->QueryInterface(IID_PPV_ARGS(enhanced.put())), "Enhanced command list");
+  const auto enhanced_transition = [&](ID3D12Resource* target, D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_LAYOUT after,
+                                       D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_ACCESS access_after) {
+    D3D12_TEXTURE_BARRIER b{};
+    b.SyncBefore = b.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+    b.AccessBefore = access_before;
+    b.AccessAfter = access_after;
+    b.LayoutBefore = before;
+    b.LayoutAfter = after;
+    b.pResource = target;
+    b.Subresources = {0, 1, 0, 1, 0, 1};
+    D3D12_BARRIER_GROUP group{};
+    group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+    group.NumBarriers = 1;
+    group.pTextureBarriers = &b;
+    enhanced->Barrier(1, &group);
+  };
   for (UINT side = 0; side < 2; ++side) {
+    if (side) {
+      transition(list.get(), textures[3].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+      enhanced_transition(textures[3].get(), D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_COMMON,
+                          D3D12_BARRIER_ACCESS_RENDER_TARGET);
+    }
     generator.record(list.get(), rtvs[2 + side], display_width, 1024, false, 0, 0);
     if (a350) {
       const float grey[]{0.25f, 0.25f, 0.25f, 1};
@@ -279,7 +321,7 @@ void native_case(bool warp, bool a350) {
   list->RSSetScissorRects(1, &lower);
   for (unsigned draw = 0; draw < 1000; ++draw)
     list->DrawInstanced(3, 1, 0, 0);
-  require(runtime::snapshot(key).stamps == 1, "One overlay at target switch; repeated glyph draws stay deferred");
+  require(runtime::snapshot(key).stamps == 0, "Target switch supplies no barrier proof; repeated glyph draws stay deferred");
   std::array<Reference<ID3D12Resource>, 2> readbacks;
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
   UINT64 bytes{};
@@ -296,7 +338,11 @@ void native_case(bool warp, bool a350) {
     check(device->CreateCommittedResource(&bh, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                           IID_PPV_ARGS(readbacks[i].put())),
           "Test-only readback");
-    transition(list.get(), textures[i + 2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if (i)
+      enhanced_transition(textures[3].get(), D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                          D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_ACCESS_COPY_SOURCE);
+    else
+      transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     D3D12_TEXTURE_COPY_LOCATION src{};
     src.pResource = textures[i + 2].get();
     src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -305,17 +351,28 @@ void native_case(bool warp, bool a350) {
     dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     dst.PlacedFootprint = footprint;
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    transition(list.get(), textures[i + 2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if (i) {
+      enhanced_transition(textures[3].get(), D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_LAYOUT_COMMON,
+                          D3D12_BARRIER_ACCESS_COPY_SOURCE, D3D12_BARRIER_ACCESS_COMMON);
+      transition(list.get(), textures[3].get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    } else
+      transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
   submit();
-  require(runtime::snapshot(key).stamps == 2, "One overlay per completed PFD batch, including RT-to-copy boundary");
+  require(runtime::snapshot(key).stamps == 2, "One private patch per PFD: legacy and enhanced RT-exit boundaries");
+  ID3D12CommandList* replay[]{list.get()};
+  queue->ExecuteCommandLists(1, replay);
+  require(taxi_camera::drain_copy_queue(queue.get(), device.get()), "Recorded private-patch copies replay with stable buffers");
   reset();
   std::uint64_t pixels = 0;
+  std::vector<unsigned char> reference_patch;
   for (UINT side = 0; side < 2; ++side) {
     void* mapped{};
     const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
     check(readbacks[side]->Map(0, &range, &mapped), "Map verification readback");
     const auto* data = static_cast<const unsigned char*>(mapped);
+    if (!side)
+      reference_patch.assign(data, data + bytes);
     std::uint64_t border_pixels = 0, gs_padding_pixels = 0, gs_label_pixels = 0, guide_pixels = 0, tail_guide_pixels = 0;
     for (UINT y = 0; y < 1024; ++y)
       for (UINT x = 0; x < display_width; ++x) {
@@ -374,7 +431,7 @@ void native_case(bool warp, bool a350) {
           // Independent A350 default lower corners sit below/outside the bogies.
           if (a350 && (working_x == 207 || working_x == 560) && working_y == 728) {
             require(pixel[0] > 250 && pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3,
-                    "A350 lower brackets appear beside the bogies on both sides");
+                    "Configured A350 lower bracket corners render on both sides");
             ++tail_guide_pixels;
           }
           if (a350 && ((working_x == 234 && working_y == 637) || (working_x == 207 && working_y == 682)))
@@ -396,6 +453,74 @@ void native_case(bool warp, bool a350) {
             "Inset GS/guide pixel checks were not exercised");
     const D3D12_RANGE none{0, 0};
     readbacks[side]->Unmap(0, &none);
+  }
+  for (const auto format : {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
+    if (!a350)
+      break;  // The A380 profile positively admits only RGBA8 UNORM targets.
+    const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    const bool srgb = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    Reference<ID3D12Resource> typed;
+    auto desc = pd;
+    desc.Format = format;
+    create_texture(device.get(), desc, typed.put());
+    const auto candidates = win::pfd_inventory();
+    std::uint64_t selected = 0;
+    for (const auto& c : candidates)
+      if (c.id != first && c.id != second)
+        selected = std::max(selected, c.id);
+    require(selected && win::assign_targets(selected, second), "Typed PFD identity is explicitly selected");
+    const D3D12_CPU_DESCRIPTOR_HANDLE typed_rtv{base.ptr + 6 * stride};
+    device->CreateRenderTargetView(typed.get(), nullptr, typed_rtv);
+    const float background[]{0, 0, 0, 1};
+    list->ClearRenderTargetView(typed_rtv, background, 0, nullptr);
+    ClearStatePipeline typed_pipeline(device.get(), false, format);
+    list->SetPipelineState(typed_pipeline.pipeline.get());
+    list->SetGraphicsRootSignature(typed_pipeline.root.get());
+    const UINT constants[]{64, 64, 0, 0};
+    list->SetGraphicsRoot32BitConstants(0, 4, constants, 0);
+    const D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
+    const D3D12_RECT scissor{0, 0, 1, 1};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->OMSetRenderTargets(1, &typed_rtv, FALSE, nullptr);
+    list->DrawInstanced(3, 1, 0, 0);
+    const auto before = runtime::snapshot(key).stamps;
+    transition(list.get(), typed.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    require(runtime::snapshot(key).stamps == before + 1, "Typed target receives exactly one private copy");
+    D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+    source.pResource = typed.get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    destination.pResource = readbacks[0].get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    destination.PlacedFootprint.Footprint.Format = format;
+    list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    submit();
+    void* mapped{};
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)}, none{};
+    check(readbacks[0]->Map(0, &range, &mapped), "Map typed private patch pixels");
+    for (UINT y = 0; y < 1024; ++y)
+      for (UINT x = 0; x < display_width; ++x) {
+        const auto offset = SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
+        const auto* actual = static_cast<const unsigned char*>(mapped) + offset;
+        const auto* ref = reference_patch.data() + offset;
+        const bool inside = x < (a350 ? 806u : 768u) && y < 763;
+        for (UINT c = 0; c < 4; ++c) {
+          const UINT channel = bgra && c != 1 && c != 3 ? 2 - c : c;
+          double expected = c == 3 ? 255 : inside ? ref[channel] : 0;
+          if (srgb && c != 3) {
+            const auto v = expected / 255.;
+            expected = 255 * (v <= .0031308 ? 12.92 * v : 1.055 * std::pow(v, 1. / 2.4) - .055);
+          }
+          require(std::abs(actual[c] - std::round(expected)) <= (srgb ? 1 : 0),
+                  "Private typed patch preserves RGBA/BGRA/sRGB pixels and leaves outside pixels untouched");
+        }
+        ++pixels;
+      }
+    readbacks[0]->Unmap(0, &none);
+    reset();
+    require(win::assign_targets(first, second), "Restore initial PFD pair");
   }
   // ClearState changes bindings without starting a new command-list recording.
   // The next target switch must not flush the old PFD against now-unbound RTs,
@@ -480,7 +605,10 @@ void native_case(bool warp, bool a350) {
   list->OMSetRenderTargets(1, &rtvs[2], FALSE, nullptr);
   list->DrawInstanced(3, 1, 0, 0);
   const auto before_pass_stamp = runtime::snapshot(key).stamps;
-  list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);  // Flush the PFD before switching.
+  list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);
+  require(runtime::snapshot(key).stamps == before_pass_stamp, "OM switch alone cannot admit a PFD copy");
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
   require(runtime::snapshot(key).stamps == before_pass_stamp + 1, "PFD stamps after a completed ordinary render pass");
   list->DrawInstanced(3, 1, 0, 0);  // All graphics state still inherited from inside the pass.
   transition(list.get(), clear_target.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -497,6 +625,119 @@ void native_case(bool warp, bool a350) {
     }
   clear_readback->Unmap(0, &clear_none);
   reset();
+  // Exercise the native bridge with actual shader-visible descriptor heaps,
+  // texture/sampler tables and a root CBV. No application bindings are replayed
+  // by the fixture after a deferred stamp; the next draw must inherit them.
+  ClearStatePipeline textured(device.get(), true);
+  Reference<ID3D12DescriptorHeap> texture_heap, sampler_heap;
+  D3D12_DESCRIPTOR_HEAP_DESC texture_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+  check(device->CreateDescriptorHeap(&texture_heap_desc, IID_PPV_ARGS(texture_heap.put())), "Application texture descriptor heap");
+  texture_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+  check(device->CreateDescriptorHeap(&texture_heap_desc, IID_PPV_ARGS(sampler_heap.put())), "Application sampler descriptor heap");
+  Reference<ID3D12Resource> sampled_texture, tint_buffer;
+  create_texture(device.get(), texture_description(2, 2, DXGI_FORMAT_R8G8B8A8_UNORM), sampled_texture.put());
+  const D3D12_CPU_DESCRIPTOR_HANDLE sampled_rtv{base.ptr + 7 * stride};
+  device->CreateRenderTargetView(sampled_texture.get(), nullptr, sampled_rtv);
+  const float sampled_colour[]{.75f, .5f, .25f, 1};
+  list->ClearRenderTargetView(sampled_rtv, sampled_colour, 0, nullptr);
+  transition(list.get(), sampled_texture.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+  srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.Texture2D.MipLevels = 1;
+  device->CreateShaderResourceView(sampled_texture.get(), &srv, texture_heap->GetCPUDescriptorHandleForHeapStart());
+  D3D12_SAMPLER_DESC sampler{};
+  sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+  sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler.MaxLOD = D3D12_FLOAT32_MAX;
+  sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+  device->CreateSampler(&sampler, sampler_heap->GetCPUDescriptorHandleForHeapStart());
+  auto tint_desc = bd;
+  tint_desc.Width = 256;
+  const auto tint_heap = heap_properties(D3D12_HEAP_TYPE_UPLOAD);
+  check(device->CreateCommittedResource(&tint_heap, D3D12_HEAP_FLAG_NONE, &tint_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                        IID_PPV_ARGS(tint_buffer.put())),
+        "Application root CBV buffer");
+  void* tint_data{};
+  check(tint_buffer->Map(0, &clear_none, &tint_data), "Initialize application root CBV");
+  const float tint[]{.5f, .5f, 1, 1};
+  std::memcpy(tint_data, tint, sizeof(tint));
+  tint_buffer->Unmap(0, nullptr);
+  transition(list.get(), clear_target.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  list->ClearRenderTargetView(clear_rtv, pass_background, 0, nullptr);
+  pass_list->BeginRenderPass(1, &pass_target, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+  list->SetPipelineState(textured.pipeline.get());
+  list->SetGraphicsRootSignature(textured.root.get());
+  ID3D12DescriptorHeap* app_heaps[]{texture_heap.get(), sampler_heap.get()};
+  list->SetDescriptorHeaps(2, app_heaps);
+  list->SetGraphicsRootDescriptorTable(1, texture_heap->GetGPUDescriptorHandleForHeapStart());
+  list->SetGraphicsRootDescriptorTable(2, sampler_heap->GetGPUDescriptorHandleForHeapStart());
+  list->SetGraphicsRootConstantBufferView(3, tint_buffer->GetGPUVirtualAddress());
+  const UINT texture_parameters[]{64, 64, 1, 1};
+  list->SetGraphicsRoot32BitConstants(0, 4, texture_parameters, 0);
+  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  list->RSSetViewports(1, &clear_viewport);
+  list->RSSetScissorRects(1, &clear_scissor);
+  list->DrawInstanced(3, 1, 0, 0);
+  pass_list->EndRenderPass();
+  list->OMSetRenderTargets(1, &rtvs[2], FALSE, nullptr);
+  list->DrawInstanced(3, 1, 0, 0);
+  const auto before_descriptor_stamp = runtime::snapshot(key).stamps;
+  list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  require(runtime::snapshot(key).stamps == before_descriptor_stamp + 1, "Descriptor-bound PFD stamp was not exercised");
+  list->DrawInstanced(3, 1, 0, 0);
+  transition(list.get(), clear_target.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  list->CopyTextureRegion(&clear_destination, 0, 0, 0, &clear_source, nullptr);
+  submit();
+  check(clear_readback->Map(0, &clear_range, &clear_mapped), "Map descriptor restoration pixels");
+  for (UINT y = 0; y < 64; ++y)
+    for (UINT x = 0; x < 64; ++x) {
+      const auto* pixel = static_cast<const unsigned char*>(clear_mapped) + SIZE_T{y} * clear_footprint.Footprint.RowPitch + 4 * x;
+      if (!(pixel[0] >= 95 && pixel[0] <= 96 && pixel[1] >= 63 && pixel[1] <= 64 && pixel[2] == 64 && pixel[3] == 255))
+        std::fprintf(stderr, "Descriptor pixel (%u,%u): %u/%u/%u/%u\n", x, y, pixel[0], pixel[1], pixel[2], pixel[3]);
+      require(pixel[0] >= 95 && pixel[0] <= 96 && pixel[1] >= 63 && pixel[1] <= 64 && pixel[2] == 64 && pixel[3] == 255,
+              "Native texture/sampler heaps, descriptor tables and root CBV survive deferred stamp without app rebind");
+      ++pixels;
+    }
+  clear_readback->Unmap(0, &clear_none);
+  reset();
+  {
+    Reference<ID3D12QueryHeap> queries;
+    const D3D12_QUERY_HEAP_DESC query_desc{D3D12_QUERY_HEAP_TYPE_OCCLUSION, 2, 0};
+    check(device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(queries.put())), "Application occlusion query heap");
+    Reference<ID3D12Resource> results;
+    auto result_desc = bd;
+    result_desc.Width = 2 * sizeof(UINT64);
+    check(device->CreateCommittedResource(&bh, D3D12_HEAP_FLAG_NONE, &result_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(results.put())),
+          "Application query result readback");
+    for (UINT enabled = 0; enabled < 2; ++enabled) {
+      win::set_target_mask(enabled ? 3 : 0);
+      const auto copies_before = runtime::snapshot(key).stamps;
+      list->BeginQuery(queries.get(), D3D12_QUERY_TYPE_OCCLUSION, enabled);
+      generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+      list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);
+      transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      require(runtime::snapshot(key).stamps == copies_before + enabled, "Query comparison exercises one enabled copy and zero OFF copies");
+      list->EndQuery(queries.get(), D3D12_QUERY_TYPE_OCCLUSION, enabled);
+      list->ResolveQueryData(queries.get(), D3D12_QUERY_TYPE_OCCLUSION, enabled, 1, results.get(), enabled * sizeof(UINT64));
+      submit();
+      reset();
+    }
+    const D3D12_RANGE result_range{0, 2 * sizeof(UINT64)};
+    void* query_data{};
+    check(results->Map(0, &result_range, &query_data), "Read application occlusion results");
+    std::array<UINT64, 2> samples{};
+    std::memcpy(samples.data(), query_data, sizeof(samples));
+    results->Unmap(0, &clear_none);
+    std::printf("Application query OFF=%llu ON=%llu\n", samples[0], samples[1]);
+    require(samples[0] == UINT64{display_width} * 1024 && samples[1] == samples[0],
+            "PFD stamp changed the application's occlusion query result");
+  }
   // A real predicate must still refuse injection. Disabling it later cannot
   // revive this recording; only the next successful native Reset can do that.
   Reference<ID3D12Resource> predicate;
@@ -527,7 +768,7 @@ void native_case(bool warp, bool a350) {
   generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == before_predicate, "Fresh draw is deferred until list boundary");
   submit();
-  require(runtime::snapshot(key).stamps == before_predicate + 1, "Close flushes a valid pending overlay after fresh Reset");
+  require(runtime::snapshot(key).stamps == before_predicate, "Close without positive destination-state proof cannot copy");
   reset();
   win::set_target_mask(0);
   const auto stamps = runtime::snapshot(key).stamps;
@@ -555,7 +796,9 @@ void native_case(bool warp, bool a350) {
   }
   require(errors == 0, "D3D12 validation errors");
   std::printf(
-      "PASS native %s: two GPU feeds, two PFDs, pre-existing root/list/queue, partial state restoration, exact black borders, inset "
+      "PASS native %s: private patch copies, legacy/enhanced boundaries, replay, profile-admitted typed formats, query OFF==ON, exact "
+      "black borders, "
+      "inset "
       "GS/guides, A350 gutter/ND, lower trim, descriptor copies, "
       "OFF, D3D11On12 capture coexistence, ClearState and active-render-pass state pixels, predicate guards; %llu pixels; debug=%d "
       "errors=%llu\n",

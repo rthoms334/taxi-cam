@@ -1,10 +1,32 @@
 #include "scene_frame_output.hpp"
 #include "camera_compositor_d3d12.hpp"
+#include "pfd_stamp_d3d12.hpp"
 
 #include <limits>
 #include <new>
 
 namespace taxi_camera {
+namespace {
+constexpr std::array<DXGI_FORMAT, 4> PatchFormats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                  DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
+bool same_rect(const D3D12_RECT& a, const D3D12_RECT& b) noexcept {
+  return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+}
+}  // namespace
+bool SceneFrameOutput::set_patch_profile(std::uint32_t profile) noexcept {
+  if (!profiles::find(profile) || prepared_ || failed_)
+    return false;
+  patch_profile_ = profile;
+  return true;
+}
+SceneFrameOutput::Patch SceneFrameOutput::patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept {
+  if (!failed_ && submitted_)
+    for (const auto& p : patches_)
+      if (p.written && p.view.footprint.Footprint.Format == format && p.view.footprint.Footprint.Width == width &&
+          p.view.footprint.Footprint.Height == height && same_rect(p.content, content))
+        return p.view;
+  return {};
+}
 bool SceneFrameOutput::set_display_exposure(float ev) noexcept {
   return compositor_ && !prepared_ && !failed_ && compositor_->set_display_exposure(ev);
 }
@@ -61,6 +83,102 @@ bool SceneFrameOutput::initialize(ID3D12Device* device) noexcept {
   compositor_ = new (std::nothrow) CameraCompositorD3D12;
   if (!address_ || !compositor_ || FAILED(compositor_->initialize(device_)))
     return fail("Initializing the two-camera compositor failed.");
+  D3D12_DESCRIPTOR_HEAP_DESC patch_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, static_cast<UINT>(patches_.size()),
+                                             D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+  if (FAILED(device_->CreateDescriptorHeap(&patch_heap_desc, IID_PPV_ARGS(&patch_heap_))))
+    return fail("Creating the private patch descriptor heap failed.");
+  for (unsigned i = 0; i < patch_drawers_.size(); ++i) {
+    patch_drawers_[i] = new (std::nothrow) PfdStampD3D12;
+    if (!patch_drawers_[i] || FAILED(patch_drawers_[i]->initialize(device_, PatchFormats[i])))
+      return fail("Creating a private typed PFD patch pipeline failed.");
+  }
+  return true;
+}
+
+bool SceneFrameOutput::prepare_patches() noexcept {
+  const auto* profile = profiles::find(patch_profile_);
+  if (!profile)
+    return fail("The PFD patch profile is unavailable.");
+  const auto outer = profiles::display_rect(*profile, 0);
+  const auto inner = profiles::display_content_rect(*profile, 0);
+  const UINT width = outer.right - outer.left, height = outer.bottom - outer.top;
+  const D3D12_RECT content{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+  const D3D12_RECT destination{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+  if (!width || width > 16384 || !height || height > 16384)
+    return fail("The private PFD patch dimensions are invalid.");
+  const auto base = patch_heap_->GetCPUDescriptorHandleForHeapStart();
+  const auto stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  for (unsigned format = 0; format < PatchFormats.size(); ++format) {
+    if (!profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
+                                   static_cast<unsigned>(PatchFormats[format])))
+      continue;
+    PatchStorage* patch = nullptr;
+    for (auto& p : patches_)
+      if (p.view.buffer && p.view.footprint.Footprint.Format == PatchFormats[format] && p.view.footprint.Footprint.Width == width &&
+          p.view.footprint.Footprint.Height == height && same_rect(p.content, content)) {
+        patch = &p;
+        break;
+      }
+    if (!patch) {
+      for (auto& p : patches_)
+        if (!p.view.buffer && !p.texture) {
+          patch = &p;
+          break;
+        }
+      if (!patch)
+        return fail("The bounded private PFD patch storage is full.");
+      D3D12_HEAP_PROPERTIES heap{};
+      heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+      heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+      D3D12_RESOURCE_DESC desc{};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Width = width;
+      desc.Height = height;
+      desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+      desc.Format = PatchFormats[format];
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+      if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
+                                                  IID_PPV_ARGS(&patch->texture))))
+        return fail("Creating a private PFD patch texture failed.");
+      UINT64 bytes{};
+      device_->GetCopyableFootprints(&desc, 0, 1, 0, &patch->view.footprint, nullptr, nullptr, &bytes);
+      desc = {};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      desc.Width = bytes;
+      desc.Height = desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+      desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                  IID_PPV_ARGS(&patch->view.buffer))))
+        return fail("Creating a stable private PFD patch buffer failed.");
+      patch->rtv = {base.ptr + static_cast<SIZE_T>(patch - patches_.data()) * stride};
+      device_->CreateRenderTargetView(patch->texture, nullptr, patch->rtv);
+      patch->content = content;
+      patch->drawer = format;
+    }
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = {patch->texture, 0, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET};
+    list_->ResourceBarrier(1, &barrier);
+    list_->OMSetRenderTargets(1, &patch->rtv, FALSE, nullptr);
+    if (!patch_drawers_[patch->drawer]->record_private_patch(list_, device_, address_, width, height, &destination, &content))
+      return fail("Recording the private PFD patch failed.");
+    barrier.Transition = {patch->texture, 0, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
+    list_->ResourceBarrier(1, &barrier);
+    barrier.Transition = {patch->view.buffer, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST};
+    list_->ResourceBarrier(1, &barrier);
+    D3D12_TEXTURE_COPY_LOCATION source{}, target{};
+    source.pResource = patch->texture;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    target.pResource = patch->view.buffer;
+    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    target.PlacedFootprint = patch->view.footprint;
+    list_->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    list_->ResourceBarrier(1, &barrier);
+    patch->written = true;
+  }
   return true;
 }
 
@@ -95,12 +213,14 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
   source.pResource = compositor_->output();
   source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
   list_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-  // Buffers begin each ExecuteCommandLists scope in COMMON. The application
-  // stamp promotes this buffer for its root SRV read and it decays afterward.
+  // Buffers begin each ExecuteCommandLists scope in COMMON. Our private patch
+  // draw promotes this buffer for its root SRV read and it decays afterward.
   // https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
   list_->ResourceBarrier(1, &barrier);
+  if (!prepare_patches())
+    return false;
   if (FAILED(list_->Close()))
     return fail("Closing the private composition list failed.");
   prepared_ = true;

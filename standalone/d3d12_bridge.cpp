@@ -50,6 +50,7 @@ struct List : Metadata {
   std::uint64_t recording = 1;
   PfdGraphicsState graphics;
   std::array<View, 8> targets{};
+  std::array<View, 2> pending_pfds{};
   UINT count{};
   DXGI_FORMAT depth = DXGI_FORMAT_UNKNOWN;
   bool depth_known = true;
@@ -204,19 +205,16 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
   const auto it = r.lists.find(p);
   return it != r.lists.end() && it->second->alive ? it->second : nullptr;
 }
-void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = false) noexcept;
+void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t) noexcept;
+void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   const OwnedWork guard;
-  if (auto item = find_list(list);
-      item && item->id == id && item->count == 1 && item->targets[0].resource && item->targets[0].resource->native == b.pResource)
-    flush_pfd(list, id, true);
+  copy_pending_pfd(list, id, b.pResource);
   runtime::manager().record_render_target_before_transition(list, b.pResource, true, id);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
   const OwnedWork guard;
-  if (auto item = find_list(list);
-      item && item->id == id && item->count == 1 && item->targets[0].resource && item->targets[0].resource->native == b.pResource)
-    flush_pfd(list, id, true);
+  copy_pending_pfd(list, id, b.pResource, list);
   runtime::manager().record_render_target_before_enhanced_transition(list, b.pResource, true, id);
 }
 void observe_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_BARRIER& b, std::uint32_t) noexcept {
@@ -263,6 +261,10 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
   auto list = find_list(native);
   if (!list || list->id != id)
     return;
+  if (reasons == boundary::InvalidationPassBegin)
+    flush_pfd(native, id);
+  else
+    list->pending_pfds = {};
   list->pfd_dirty = false;
   const bool scoped =
       (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationSplitBarrier | boundary::InvalidationAliasOrDiscard)) == 0;
@@ -309,16 +311,43 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   list->pfd_dirty = allowed && list->count == 1 && list->depth_known;
   list->pfd_transition = false;
 }
-void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool proven_transition) noexcept {
+// A target switch or Close supplies no resource-state proof. Retain only the
+// selected identities; the exact native RT-exit callback below admits a copy.
+void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   auto list = find_list(native);
   if (!registry().ready || !list || list->id != id || !list->ready || !list->pfd_dirty)
     return;
   list->pfd_dirty = false;
-  if ((!proven_transition && list->pfd_transition) || list->count != 1 || !list->depth_known ||
-      !boundary::recording_allows_injection(native, id))
+  if (list->count != 1 || !list->depth_known)
     return;
   auto& r = registry();
   const auto& view = list->targets[0];
+  if (!view.resource || !view.resource->alive || view.mip)
+    return;
+  const std::lock_guard lock(r.mutex);
+  if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                                 view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
+    return;
+  for (unsigned side = 0; side < 2; ++side)
+    if (r.routes.targets[side] == view.resource->id && ((r.active_mask | r.calibration_mask) & (1u << side)))
+      list->pending_pfds[side] = view;
+}
+void copy_pending_pfd(ID3D12GraphicsCommandList* native,
+                      std::uint64_t id,
+                      ID3D12Resource* target,
+                      ID3D12GraphicsCommandList7* enhanced) noexcept {
+  flush_pfd(native, id);
+  auto list = find_list(native);
+  if (!registry().ready || !list || list->id != id || !list->ready || !boundary::recording_allows_injection(native, id))
+    return;
+  auto& r = registry();
+  View view;
+  for (auto& pending : list->pending_pfds)
+    if (pending.resource && pending.resource->native == target) {
+      view = pending;
+      pending = {};
+      break;
+    }
   if (!view.resource || !view.resource->alive || view.mip)
     return;
   bool selected = false, calibrate = false;
@@ -331,12 +360,11 @@ void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool proven_
     const auto side = r.routes.targets[1] == view.resource->id ? 1u : 0u;
     area = profiles::display_rect(*r.profile, side);
     content = profiles::display_content_rect(*r.profile, side);
-    calibrate = r.routes.matches(view.resource->id, r.calibration_mask) && r.calibration_budget.try_acquire(0, GetTickCount64());
+    const auto current_view = r.rtvs.find(view.rtv);
+    calibrate = current_view != r.rtvs.end() && current_view->second.resource == view.resource &&
+                current_view->second.format == view.format && current_view->second.mip == 0 &&
+                r.routes.matches(view.resource->id, r.calibration_mask) && r.calibration_budget.try_acquire(0, GetTickCount64());
     selected = r.routes.matches(view.resource->id, r.active_mask);
-    if (selected) {
-      const auto root = r.roots.find(list->graphics.root());
-      selected = root != r.roots.end() && root->second->alive && root->second->id == list->graphics.layout_generation();
-    }
   }
   if (calibrate) {
     record_calibration(native, {view.rtv}, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16, area.left);
@@ -349,8 +377,7 @@ void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool proven_
                                static_cast<LONG>(area.bottom)};
   const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
                          static_cast<LONG>(content.bottom)};
-  runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
-                 list->depth, &destination, &inner);
+  runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, view.format, destination, inner, enhanced);
 }
 void pass_targets(void*,
                   ID3D12GraphicsCommandList*,
@@ -360,6 +387,7 @@ void pass_targets(void*,
                   const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*) noexcept;
 void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   if (auto item = find_list(native); item && item->id == id) {
+    flush_pfd(native, id);
     item->pfd_dirty = false;
     item->targets = {};
     item->count = 0;
@@ -681,6 +709,7 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   const auto hr = list_reset.forward<F>()(native, allocator, pso);
   if (item) {
     item->pfd_dirty = false;
+    item->pending_pfds = {};
     item->targets = {};
     item->count = 0;
     item->depth = DXGI_FORMAT_UNKNOWN;
@@ -708,6 +737,7 @@ struct ClearState {
     // deferred stamp must not reuse the pre-clear bindings at the next target
     // switch, nor restore the old pipeline over the caller's supplied PSO.
     l.pfd_dirty = false;
+    l.pending_pfds = {};
     l.pfd_transition = false;
     l.targets = {};
     l.count = 0;
@@ -812,6 +842,7 @@ void pass_targets(void*,
   auto item = find_list(native);
   if (!item || item->id != id)
     return;
+  flush_pfd(native, id);
   if (count > 8 || (count && !targets)) {
     item->pfd_dirty = false;
     item->targets = {};
@@ -1066,11 +1097,15 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   if (!profile)
     return;
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
-  r.active_mask = r.calibration_mask = 0;
-  r.routes.targets = {};
-  r.profile = profile;
-  r.detector.configure(*profile);
+  {
+    const std::lock_guard lock(r.mutex);
+    r.active_mask = r.calibration_mask = 0;
+    r.routes.targets = {};
+    r.profile = profile;
+    r.detector.configure(*profile);
+  }
+  if (!runtime::set_patch_profile(r.key, id))
+    error("private_patch_profile_failed");
 }
 void discover_pfds(std::uint64_t now) noexcept {
   observe_safely([&] {

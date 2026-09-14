@@ -1,4 +1,5 @@
 #include "scene_runtime.hpp"
+#include "../engine-hook/render_boundary_observer.hpp"
 #include "../standalone/native_hooks.hpp"
 #include "scene_frame_output.hpp"
 
@@ -22,6 +23,7 @@ struct Device {
   std::array<SceneCaptureManager::Frame, 2> pending;
   std::array<SceneCopyMatch, 2> committed;
   Snapshot status;
+  std::uint32_t patch_profile = 1;
 };
 struct Runtime {
   std::mutex mutex;
@@ -131,6 +133,8 @@ bool prepare(std::uint64_t key) {
     item->status.message = item->output.error();
     return false;
   }
+  if (!item->output.set_patch_profile(item->patch_profile))
+    return false;
   for (std::size_t i = 0; i < Formats.size(); ++i) {
     for (std::size_t depth = 0; depth < DepthFormats.size(); ++depth) {
       const auto slot = i * DepthFormats.size() + depth;
@@ -146,6 +150,93 @@ bool prepare(std::uint64_t key) {
   }
   item->status.initialized = true;
   item->status.message = "Waiting for two completed camera snapshots; select the PFD and enable its camera feed.";
+  return true;
+}
+bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
+  if (!profiles::find(profile))
+    return false;
+  const std::lock_guard lock(runtime().mutex);
+  if (auto* item = find(key)) {
+    if (item->status.initialized && !item->output.set_patch_profile(profile))
+      return false;
+    if (item->patch_profile != profile)
+      item->status.output = false;
+    item->patch_profile = profile;
+    return true;
+  }
+  return false;
+}
+
+bool copy_patch(ID3D12GraphicsCommandList* list,
+                std::uint64_t key,
+                ID3D12Resource* target,
+                const D3D12_RESOURCE_DESC& desc,
+                DXGI_FORMAT format,
+                const D3D12_RECT& destination,
+                const D3D12_RECT& content,
+                ID3D12GraphicsCommandList7* enhanced) {
+  const std::lock_guard lock(runtime().mutex);
+  auto* item = find(key);
+  if (!list || !target || !item || !current_output(*item) || item->status.failed ||
+      (enhanced && static_cast<ID3D12GraphicsCommandList*>(enhanced) != list) || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+      desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 || !desc.MipLevels || !desc.Width || desc.Width > 16384 || !desc.Height ||
+      desc.Height > 16384 || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 || destination.left < 0 || destination.top < 0 ||
+      destination.right <= destination.left || destination.bottom <= destination.top ||
+      static_cast<UINT64>(destination.right) > desc.Width || static_cast<UINT>(destination.bottom) > desc.Height ||
+      content.left < destination.left || content.top < destination.top || content.right > destination.right ||
+      content.bottom > destination.bottom || content.right <= content.left || content.bottom <= content.top)
+    return false;
+  const bool rgba = format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+  const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  const bool compatible = rgba ? desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+                                     desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+                               : bgra && (desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                                          desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+  if (!compatible)
+    return false;
+  const UINT width = static_cast<UINT>(destination.right - destination.left),
+             height = static_cast<UINT>(destination.bottom - destination.top);
+  const D3D12_RECT local{content.left - destination.left, content.top - destination.top, content.right - destination.left,
+                         content.bottom - destination.top};
+  const auto patch = item->output.patch(format, width, height, local);
+  if (!patch.buffer || patch.buffer == target || patch.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT ||
+      patch.footprint.Footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT || !manager().register_consumer_recording(list)) {
+    ++item->status.state_skips;
+    return false;
+  }
+  const engine_hook::render_boundary::ScopedBypass bypass;
+  const auto transition = [&](bool begin) {
+    if (enhanced) {
+      D3D12_TEXTURE_BARRIER barrier{};
+      barrier.SyncBefore = begin ? D3D12_BARRIER_SYNC_RENDER_TARGET : D3D12_BARRIER_SYNC_COPY;
+      barrier.SyncAfter = begin ? D3D12_BARRIER_SYNC_COPY : D3D12_BARRIER_SYNC_RENDER_TARGET;
+      barrier.AccessBefore = begin ? D3D12_BARRIER_ACCESS_RENDER_TARGET : D3D12_BARRIER_ACCESS_COPY_DEST;
+      barrier.AccessAfter = begin ? D3D12_BARRIER_ACCESS_COPY_DEST : D3D12_BARRIER_ACCESS_RENDER_TARGET;
+      barrier.LayoutBefore = begin ? D3D12_BARRIER_LAYOUT_RENDER_TARGET : D3D12_BARRIER_LAYOUT_COPY_DEST;
+      barrier.LayoutAfter = begin ? D3D12_BARRIER_LAYOUT_COPY_DEST : D3D12_BARRIER_LAYOUT_RENDER_TARGET;
+      barrier.pResource = target;
+      barrier.Subresources = {0, 1, 0, 1, 0, 1};
+      const D3D12_BARRIER_GROUP group{D3D12_BARRIER_TYPE_TEXTURE, 1, {.pTextureBarriers = &barrier}};
+      enhanced->Barrier(1, &group);
+    } else {
+      D3D12_RESOURCE_BARRIER barrier{};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition = {target, 0, begin ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COPY_DEST,
+                            begin ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_RENDER_TARGET};
+      list->ResourceBarrier(1, &barrier);
+    }
+  };
+  transition(true);
+  D3D12_TEXTURE_COPY_LOCATION source{}, dest{};
+  source.pResource = patch.buffer;
+  source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  source.PlacedFootprint = patch.footprint;
+  dest.pResource = target;
+  dest.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  const D3D12_BOX box{0, 0, 0, width, height, 1};
+  list->CopyTextureRegion(&dest, static_cast<UINT>(destination.left), static_cast<UINT>(destination.top), 0, &source, &box);
+  transition(false);
+  ++item->status.stamps;
   return true;
 }
 void set_composition(std::uint64_t key, const profiles::Composition& layout) {

@@ -2,7 +2,7 @@
 
 Taxi Cam creates two additional camera views inside MSFS and draws their images into the aircraft's Primary Flight Display (PFD) screen texture. MSFS supplies the scene rendering: aircraft geometry, airport surfaces and lighting. Taxi Cam controls where the cameras look and how their images are presented.
 
-A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD using another texture. Taxi Cam connects them by combining the camera images and drawing the result into the PFD texture.
+A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD using another texture. Taxi Cam connects them by combining the camera images and copying the result into the PFD texture.
 
 The left and right PFDs share **one nose camera and one tail camera**. Each EFIS TAXI button controls whether its own PFD receives the combined image.
 
@@ -14,7 +14,7 @@ flowchart TD
     Control --> Cameras["MSFS renders nose and tail views"]
     Cameras --> Capture["Bridge captures the GPU images"]
     Capture --> Combine["GPU combines views, guides and ground speed"]
-    Combine --> Display["Bridge draws into the enabled PFD texture"]
+    Combine --> Display["Bridge copies into the enabled PFD texture"]
 ~~~
 
 There are three interfaces in this path:
@@ -23,7 +23,7 @@ There are three interfaces in this path:
 | --- | --- |
 | **SimConnect** | Read aircraft data and TAXI state; send TAXI-button events |
 | **Internal MSFS camera functions** | Create the extra views and set their position, direction, field of view and render size |
-| **Direct3D 12** | Find camera and display textures, copy images, combine them and draw into the PFD |
+| **Direct3D 12** | Find camera and display textures, copy images, combine them and copy the result into the PFD |
 
 SimConnect carries data and control events. The camera images come from MSFS's renderer and travel through Direct3D 12.
 
@@ -76,7 +76,7 @@ The bridge calls internal MSFS camera functions to create two scene views. These
 
 Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair. A transient inspection failure pauses new camera work. Removal requires a fresh, complete view inspection and a closed render gate observed across distinct manager updates. Pending or unreadable views retain their IDs; they cannot be erased or replaced until validation recovers. The engine handles deferred renderer release after an accepted removal. TAXI OFF, speed cutoff, service pause and companion disconnection close render gates and hide the PFD feed while retaining the pair. A subsequent ON reuses those same owned views. Aircraft/profile changes still require guarded cleanup before selecting the next adapter. Losing GPU capture-state evidence reports a stalled feed; it does not authorize camera removal or recreation. Capture resumes only when ordered GPU observations establish a valid source state again.
 
-Each bounded private-memory inspection caches memory-region metadata, never field contents. Metadata queries begin at the containing 64 KiB window when that region covers the requested field; protection or allocation splits fall back to the exact field address. Every field read and trace reread still runs, and each cached region must pass a fresh endpoint check before results are used. No cache survives an inspection stage.
+Each bounded private-memory inspection caches memory-region metadata, never field contents. Metadata queries begin at the containing 64 KiB window when that region covers the requested field; protection or allocation splits fall back to the exact field address. Every field read and trace reread still runs, and each cached region must pass a fresh endpoint check before results are used. No cache survives an inspection stage. A scheduled closing pulse uses a separate inspection contract that validates ownership, the selected view and its render flags without reading camera or output objects. It can only close render gates; opening, pose changes, resizing and image publication still require the full inspection. The native close result and resulting flags are checked again before the closed state is accepted.
 
 ### Following the aircraft
 
@@ -98,6 +98,8 @@ The aircraft transform is applied to each mount on camera updates. A camera ther
 | Tail | A380: 736 x 496; A350: 774 x 496 | Lower camera pane inside the black border |
 
 MSFS renders each view at its pane size. The image does not need to be rendered at the main window's resolution and reduced afterward.
+
+Changing graphics settings can overwrite an established camera's size fields. The bridge closes both render gates and retains their entry IDs. When a fresh inspection proves both entries are mode2 and their existing output bitmaps still match the profile's pane sizes, it restores only the size fields and projection. It neither allocates replacement textures nor recreates the camera pair. Fresh captures are required before the PFD resumes. If the existing outputs or identities cannot be verified, the cameras stay closed and the app reports that MSFS must be restarted.
 
 The rate setting limits activation opportunities to **15–60 per camera per second**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images.
 
@@ -140,13 +142,15 @@ The guides have aircraft-specific fixed positions in the image. Changing the cam
 
 Exposure controls operate in the compositor. For the HDR `R11G11B10_FLOAT` camera format, the shader applies the selected exposure, tone mapping and colour encoding. Automatic exposure adjusts the requested EV from ambient-light data, with a gradual transition. It can brighten captured content but cannot supply lighting that MSFS omitted from the scene.
 
-The result is copied into a GPU buffer with a stable address. This buffer is the image source used by PFD drawing commands.
+The compositor result feeds private rendering of patches sized for each PFD rectangle and pixel format. Each patch includes the border, image, GS and guides. The finished patch is copied into a GPU buffer with a stable address for the simulator-side texture copy.
 
 Source: [compositor](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp), [exposure](../src/display_exposure.hpp).
 
-## 6. Draw the result into the PFD
+## 6. Copy the result into the PFD
 
-The bridge tracks drawing into the selected PFD texture and adds the camera image at the end of each eligible display batch: before a target change, a verified transition out of render-target state, or command-list closure. It draws once for the batch, covering the upper PFD region while preserving the rest of a shared PFD/navigation texture. That same draw fills a black top/left/right border and maps the complete camera image into the inner rectangle. Native camera sizes match the smaller panes.
+The bridge tracks drawing into each selected PFD texture. At a verified transition out of render-target state, it copies the prepared patch into the exact profile rectangle, then restores the state required by the simulator's original transition. It requires positive resource-state evidence for the applicable barrier model. A target change or command-list closure alone does not authorize the copy.
+
+All camera-image shader drawing occurs on Taxi Cam's private command list. Simulator command lists receive bounded texture copies and resource transitions; Taxi Cam does not change their graphics pipeline, root arguments, viewport or clipping rectangle, and does not add samples to application occlusion queries. The copy excludes the navigation area, central gutter and lower trim display.
 
 | PFD region | Content |
 | --- | --- |
@@ -155,7 +159,7 @@ The bridge tracks drawing into the selected PFD texture and adds the camera imag
 
 This is why the camera appears on the cockpit's physical screen: the cockpit model samples the texture that Taxi Cam has just updated. The camera is part of the image rendered on the aircraft display.
 
-The bridge tracks state setters in both the normal command-list table and the native render-pass table, discovered on an owned bootstrap list. Each hook forwards the exact original for its table. It saves and restores the graphics state it changes, including the pipeline, shader inputs, viewport and clipping rectangle. It only inserts the draw when enough application state is known to restore it. A native `ClearState` discards pending overlay work and clears the tracked bindings, retaining only the pipeline supplied by that call. It does not reset command-list lifetime or revive a recording that was unsafe for injection.
+The native adapter continues tracking command-list lifetimes, target bindings and render boundaries. Hooks forward the exact captured original for their table. A native `ClearState` discards pending overlay work and clears tracked bindings. It does not reset command-list lifetime or revive a recording that was unsafe for injection.
 
 ### Keeping readers and writers in order
 
@@ -163,9 +167,9 @@ MSFS can record a GPU command list once and execute it again later. Taxi Cam the
 
 A shared per-device fence timeline orders output writes and PFD reads, including work submitted on different queues. The output cannot be overwritten while an earlier tracked PFD read still needs it. Resources remain alive while recorded commands can reference them.
 
-Turning off one TAXI side stops further camera draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
+Turning off one TAXI side stops recording further camera copies to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
 
-Source: [native graphics adapter](../standalone/d3d12_bridge.cpp), [PFD draw](../src/pfd_stamp_d3d12.hpp), [graphics-state restoration](../src/pfd_stamp_state.hpp), [runtime coordination](../src/scene_runtime.cpp).
+Source: [native graphics adapter](../standalone/d3d12_bridge.cpp), [private PFD patch rendering](../src/pfd_stamp_d3d12.hpp), [runtime coordination](../src/scene_runtime.cpp).
 
 ## Behaviour during interruptions
 

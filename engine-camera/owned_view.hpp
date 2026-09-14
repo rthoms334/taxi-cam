@@ -73,10 +73,13 @@ struct OwnedViewSnapshot {
   bool ready = false;
   OwnedViewStatus status = OwnedViewStatus::not_inspected;
   const char* error = "";
-  // Attempted bytes including failed reads; cap 8192, current full trace 494.
+  // Attempted bytes including failed reads; cap 8192, current full trace 518.
   std::uint32_t read_bytes = 0;
   std::uint32_t read_failures = 0;
   std::int32_t view_index = -1;
+  // Exact ready-entry E24 mode, reread with the full trace. Raw observation;
+  // callers that require independent-pose semantics must require mode == 2.
+  std::uint32_t mode = 0;
   // Internal, borrowed addresses, published only after the entire trace reread.
   // Never log/serialize or retain them beyond the caller's proven engine phase.
   std::uint64_t view_address = 0;
@@ -91,6 +94,11 @@ struct OwnedViewSnapshot {
   // primary-view dimensions into these pairs; the third is used for output
   // allocation. These observations are not a resource description or setters.
   std::array<std::array<std::int32_t, 2>, 3> dimensions{};
+  // Slot0 Bitmap+40/+44 metadata, read only when a nonnull resource member is
+  // present, and published only after the complete trace reread. Zero when
+  // output is unavailable. Signed values are observations, not size validation
+  // or a native GPU resource description; callers must check desired bounds.
+  std::array<std::int32_t, 2> output_dimensions{};
   // Exact P+48/P+56 flag words. Preserve as integers/hexadecimal strings in
   // consumers; no guessed meanings, masking, writes or floating conversion.
   std::array<std::uint64_t, 2> flags{};
@@ -99,6 +107,31 @@ struct OwnedViewSnapshot {
   bool resource_present = false;
 };
 
+// Separate authority for an owned mode2 gate closure only. Never convertible to
+// OwnedViewSnapshot: no Camera, pose or output-resource proof is supplied.
+// Every retained field, including both Node handles, is exactly reread before
+// complete becomes true. Pending/unavailable/mismatching results publish no
+// borrowed address. Current full close trace:16 fields,32 reads,258 bytes.
+struct OwnedViewCloseSnapshot {
+  bool complete = false;
+  OwnedViewStatus status = OwnedViewStatus::not_inspected;
+  const char* error = "";
+  std::uint32_t read_bytes = 0, read_failures = 0;
+  std::int32_t view_index = -1;
+  // Borrowed only in this observer phase, for verifying the close's flag write.
+  std::uint64_t view_address = 0;
+  std::array<std::array<std::int32_t, 2>, 3> dimensions{};
+  std::array<std::uint64_t, 2> flags{};
+};
+
+// Caller retains the full current manager/table/pool/lifetime guards. This only
+// admits E8==1/E24==2, matching E0/E16, a current pool index and equal nonnull
+// generation-resolved E96/P104 Node identities. It does not dereference Node,
+// Camera, material or Bitmap. No native call, publication or ownership acquired.
+OwnedViewCloseSnapshot inspect_owned_view_for_close(MemoryReader& reader,
+                                                    std::uint64_t entry_address,
+                                                    std::uint64_t expected_id,
+                                                    const ViewPoolSnapshot& pool) noexcept;
 // Fixed captured layout, not a general engine ABI. The caller must supply a
 // freshly verified owned entry and complete pool from the same renderer/update
 // phase. Check E+0/+16 IDs, E+8 ready, E+76 pool index and its current array slot.

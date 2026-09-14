@@ -189,8 +189,21 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                   UINT height,
                                   const D3D12_RECT* destination,
                                   const D3D12_RECT* content) noexcept {
-  if (!list || !pipeline_ || !state.complete() || !address || address % 4 || buffer_device != device_ || width < 1 || height < 2 ||
-      width > 16384 || height > 16384 || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+  const engine_hook::pfd_state::ScopedBypass bypass;
+  if (!state.complete() || !record_private_patch(list, buffer_device, address, width, height, destination, content))
+    return false;
+  state.restore(list);
+  return true;
+}
+bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
+                                         ID3D12Device* buffer_device,
+                                         D3D12_GPU_VIRTUAL_ADDRESS address,
+                                         UINT width,
+                                         UINT height,
+                                         const D3D12_RECT* destination,
+                                         const D3D12_RECT* content) noexcept {
+  if (!list || !pipeline_ || !address || address % 4 || buffer_device != device_ || width < 1 || height < 2 || width > 16384 ||
+      height > 16384 || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return false;
   const UINT upper = static_cast<UINT>((static_cast<UINT64>(height) * 763) / 1024);
   if (!upper)
@@ -210,10 +223,14 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                 0,
                                 1};
   const D3D12_RECT scissor = rect;
-  const UINT constants[8]{static_cast<UINT>(rect.right - rect.left), static_cast<UINT>(rect.bottom - rect.top),
-                          static_cast<UINT>(rect.left), static_cast<UINT>(rect.top),
-                          static_cast<UINT>(inner.left - rect.left), static_cast<UINT>(inner.top - rect.top),
-                          static_cast<UINT>(rect.right - inner.right), static_cast<UINT>(rect.bottom - inner.bottom)};
+  const UINT constants[8]{static_cast<UINT>(rect.right - rect.left),
+                          static_cast<UINT>(rect.bottom - rect.top),
+                          static_cast<UINT>(rect.left),
+                          static_cast<UINT>(rect.top),
+                          static_cast<UINT>(inner.left - rect.left),
+                          static_cast<UINT>(inner.top - rect.top),
+                          static_cast<UINT>(rect.right - inner.right),
+                          static_cast<UINT>(rect.bottom - inner.bottom)};
   const engine_hook::pfd_state::ScopedBypass bypass;
   list->SetPipelineState(pipeline_);
   list->SetGraphicsRootSignature(root_);
@@ -223,7 +240,6 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
   list->DrawInstanced(3, 1, 0, 0);
-  state.restore(list);
   return true;
 }
 void PfdStampD3D12::release() noexcept {

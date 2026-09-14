@@ -1,19 +1,27 @@
 #pragma once
 
 #include <d3d12.h>
+#include <array>
 #include <cstdint>
 #include "../profiles/catalog.hpp"
 
 namespace taxi_camera {
 class CameraCompositorD3D12;
+class PfdStampD3D12;
 
-// One stable GPU buffer for the PFD root-SRV stamp. All application recordings
-// referencing it must join the capture manager's per-device submission timeline.
+// Stable GPU buffers for the composed image and bounded typed PFD patches.
+// All application recordings copying a patch must join the capture manager's
+// per-device submission timeline. Buffers/descriptors remain allocated until
+// process exit, including old profile/settings versions referenced by replay.
 // The caller brackets submit with begin/end_private_submission on that SAME
 // timeline; this orders prior PFD reads before writes and future reads afterward.
 // No engine resources are passed here: inputs are completed owned snapshots.
 class SceneFrameOutput {
  public:
+  struct Patch {
+    ID3D12Resource* buffer = nullptr;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  };
   static constexpr UINT Width = 768;
   static constexpr UINT Height = 763;
   static constexpr UINT RowPitch = Width * 4;
@@ -30,6 +38,10 @@ class SceneFrameOutput {
   bool set_display_exposure(float ev) noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
+  bool set_patch_profile(std::uint32_t profile) noexcept;
+  // Stable process-retained buffer; consumer registration/timeline is required
+  // before every recorded copy. No allocation or CPU image access here.
+  Patch patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   float display_exposure() const noexcept;
   bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept;
   // Discard a closed prepared list which was NEVER submitted (e.g. the manager
@@ -47,6 +59,15 @@ class SceneFrameOutput {
 
  private:
   bool fail(const char* error) noexcept;
+  bool prepare_patches() noexcept;
+  struct PatchStorage {
+    Patch view;
+    ID3D12Resource* texture = nullptr;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+    D3D12_RECT content{};
+    unsigned drawer = 0;
+    bool written = false;
+  };
   ID3D12Device* device_ = nullptr;
   ID3D12CommandQueue* queue_ = nullptr;
   ID3D12CommandAllocator* allocator_ = nullptr;
@@ -54,6 +75,10 @@ class SceneFrameOutput {
   ID3D12Fence* fence_ = nullptr;
   ID3D12Resource* buffer_ = nullptr;
   CameraCompositorD3D12* compositor_ = nullptr;
+  std::array<PfdStampD3D12*, 4> patch_drawers_{};
+  std::array<PatchStorage, 8> patches_{};
+  ID3D12DescriptorHeap* patch_heap_ = nullptr;
+  std::uint32_t patch_profile_ = 1;
   D3D12_GPU_VIRTUAL_ADDRESS address_ = 0;
   std::uint64_t submitted_ = 0;
   bool prepared_ = false;
