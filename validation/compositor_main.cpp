@@ -529,9 +529,16 @@ void pixel_case(ID3D12Device* device,
                   is_magenta(488, 641) && !is_magenta(245, 631),
               "Tail reference brackets missed the reference photograph landmarks");
     }
+    reference_overlay_oracle::FontCoverage font_coverage;
     for (UINT y = 0; y < 1024; ++y) {
       const auto* row = static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch;
       for (UINT x = 0; x < 768; ++x) {
+        const int font_cell = reference_overlay_oracle::font_cell(x, y, overlay_case && frame == 0, 11);
+        if (font_cell >= 0) {
+          require(font_coverage.observe(font_cell, row + x * 4), "GS font lost its opaque white-label/green-value colour contract");
+          ++result.checked_pixels;
+          continue;
+        }
         std::array<unsigned char, 4> expected{0, 0, 0, 255};
         int tolerance = 0;
         if (y >= 763) {
@@ -566,6 +573,7 @@ void pixel_case(ID3D12Device* device,
         ++result.checked_pixels;
       }
     }
+    require(font_coverage.complete(overlay_case && frame == 0, 11), "GS glyphs are missing, filled rectangles or missing antialiasing");
     const D3D12_RANGE no_writes{0, 0};
     readbacks[frame]->Unmap(0, &no_writes);
     ++result.frames;
@@ -634,7 +642,7 @@ Result run(bool force_warp) {
   const std::array<Source, 2> mixed{pairs[0][0], pairs.back()[1]};
   pixel_case(device.get(), compositor, generator, mixed, false, result);
   // Record on/off states before one submit. Pixel oracle covers magenta
-  // dots/bracket landmarks, mirror symmetry, permanent24px divider, GS11 versus '--', and
+  // dots/bracket landmarks, mirror symmetry, divider, opaque GS11/'--' glyph coverage, and
   // every unmarked camera/lower-trim pixel. No descriptor or shader changes.
   pixel_case(device.get(), compositor, generator, pairs[0], false, result, {-8, -8}, true);
   auto night = pairs.back();

@@ -201,14 +201,20 @@ void run(bool warp) {
     void* mapped = nullptr;
     D3D12_RANGE range{0, static_cast<SIZE_T>(Output::BufferBytes)};
     check(readback->Map(0, &range, &mapped), "Read composed output");
+    reference_overlay_oracle::FontCoverage font_coverage;
     for (unsigned y = 0; y < Output::Height; ++y)
       for (unsigned x = 0; x < Output::Width; ++x) {
         auto expected = y < 255 ? colors[0] : colors[1];
         reference_overlay_oracle::pixel(x, y, expected);
         const auto* pixel = static_cast<unsigned char*>(mapped) + y * Output::RowPitch + x * 4;
-        require(std::memcmp(pixel, expected.data(), 4) == 0, "Nose/divider/tail output pixels mismatch");
+        const int font_cell = reference_overlay_oracle::font_cell(x, y);
+        if (font_cell >= 0)
+          require(font_coverage.observe(font_cell, pixel), "GS font lost opaque white-label/green-value colour contract");
+        else
+          require(std::memcmp(pixel, expected.data(), 4) == 0, "Nose/divider/tail output pixels mismatch");
         ++checked_pixels;
       }
+    require(font_coverage.complete(), "GS glyphs are missing, filled rectangles or missing antialiasing");
     D3D12_RANGE none{0, 0};
     readback->Unmap(0, &none);
   }

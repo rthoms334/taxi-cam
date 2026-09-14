@@ -1374,7 +1374,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
           // Both coordinates move with the inner rectangle, including the GS
           // panel's own independent padding. Its default unavailable value is--.
           const bool camera_margin = (working_x == 0 && working_y == 0) || (working_x == 4 && working_y == 30) ||
-                                     (working_x == 40 && working_y == 4) || (working_x == 108 && working_y == 30) ||
+                                     (working_x == 40 && working_y == 4) || (working_x == 136 && working_y == 30) ||
                                      (working_x == 40 && working_y == 52);
           if (camera_margin)
             require(pixel[2] >= 50 && pixel[2] <= 52, "Camera image around inset GS panel");
@@ -1382,9 +1382,10 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
             require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "GS panel internal padding");
             ++gs_padding_pixels;
           }
-          if (working_x == 26 && working_y == 21) {
-            require(pixel[0] > 250 && pixel[1] > 250 && pixel[2] > 250, "GS label scales with inset content in both axes");
-            ++gs_label_pixels;
+          if (working_x >= 24 && working_x < 36 && working_y >= 20 && working_y < 40) {
+            require(pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 255,
+                    "Antialiased GS label stays white on opaque black after inset scaling");
+            gs_label_pixels += pixel[0] > 200;
           }
           // These pixels verify configured coordinates, not alignment to aircraft geometry.
           if (a350 && (working_x == 199 || working_x == 568) && working_y == 697) {

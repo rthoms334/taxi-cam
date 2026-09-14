@@ -4,36 +4,48 @@
 #include <array>
 #include <cmath>
 namespace reference_overlay_oracle {
-inline bool glyph(unsigned x, unsigned y, unsigned left, const char* rows) {
-  if (x < left || x >= left + 12 || y < 8 || y >= 28)
-    return false;
-  return rows[((y - 8) / 4) * 3 + (x - left) / 4] == '1';
+// Validate font layout and colour independently of the production vector paths.
+// Only these bounded glyph cells admit antialiased pixels; all padding, the
+// opaque panel, guides and source imagery still use the exact pixel oracle.
+inline unsigned number_count(bool valid, unsigned speed) {
+  return !valid || speed >= 10 ? 2 : 1;
 }
+inline int font_cell(unsigned x, unsigned y, bool valid = false, unsigned speed = 0) {
+  if (y < 20 || y >= 40)
+    return -1;
+  for (unsigned index = 0; index < 2 + number_count(valid, speed); ++index) {
+    const unsigned left = index < 2 ? 24 + 16 * index : 88 + 16 * (index - 2);
+    if (x >= left && x < left + 12)
+      return static_cast<int>(index);
+  }
+  return -1;
+}
+struct FontCoverage {
+  std::array<unsigned, 4> lit{}, core{}, antialiased{};
+  bool observe(int cell, const unsigned char* pixel) {
+    if (cell < 0 || cell >= static_cast<int>(lit.size()) || pixel[3] != 255)
+      return false;
+    const bool label = cell < 2;
+    if ((label && (pixel[0] != pixel[1] || pixel[1] != pixel[2])) || (!label && (pixel[0] != 0 || pixel[2] != 0)))
+      return false;
+    const unsigned coverage = pixel[1];
+    lit[cell] += coverage > 12;
+    core[cell] += coverage >= 216;
+    antialiased[cell] += coverage > 0 && coverage < 240;
+    return true;
+  }
+  bool complete(bool valid = false, unsigned speed = 0) const {
+    for (unsigned index = 0; index < 2 + number_count(valid, speed); ++index)
+      if (lit[index] < 12 || lit[index] > 180 || core[index] < 4 || antialiased[index] < 4)
+        return false;
+    return true;
+  }
+};
 inline bool pixel(unsigned x, unsigned y, std::array<unsigned char, 4>& out, bool guides = true, bool valid = false, unsigned speed = 0) {
-  const unsigned count = !valid ? 2 : speed >= 100 ? 3 : speed >= 10 ? 2 : 1;
-  const unsigned panel_width = count == 1 ? 72 : count == 2 ? 88 : 104;
+  const unsigned count = number_count(valid, speed);
+  const unsigned panel_width = count == 1 ? 96 : 112;
   if (x >= 16 && x < 16 + panel_width && y >= 12 && y < 48) {
-    x -= 16;
-    y -= 12;
     out = {0, 0, 0, 255};
-    if (glyph(x, y, 8, "111100101101111") || glyph(x, y, 24, "111100111001111")) {
-      out = {255, 255, 255, 255};
-      return true;
-    }
-    bool number = false;
-    if (!valid)
-      number = glyph(x, y, 52, "000000111000000") || glyph(x, y, 68, "000000111000000");
-    else {
-      constexpr const char* digits[]{"111101101101111", "010110010010111", "111001111100111", "111001111001111", "101101111001001",
-                                     "111100111001111", "111100111101111", "111001010010010", "111101111101111", "111101111001111"};
-      unsigned divisor = count == 3 ? 100 : count == 2 ? 10 : 1;
-      for (unsigned n = 0; n < count; ++n) {
-        number |= glyph(x, y, 52 + 16 * n, digits[(speed / divisor) % 10]);
-        divisor /= 10;
-      }
-    }
-    if (number)
-      out = {0, 255, 0, 255};
     return true;
   }
   if (y >= 251 && y < 263) {

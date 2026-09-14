@@ -123,6 +123,15 @@ if ($Validate) {
         & $gpu @grayArgs
         if ($LASTEXITCODE -ne 0) { throw "Textured gray PFD fallback regression failed: $grayAdapter" }
     }
+    $fontGpu = Join-Path $out 'gs-font-validation.exe'
+    & $compiler @common '-municode' (Join-Path $taskRoot 'validation/gs_font_validation.cpp') @libs '-o' $fontGpu
+    if ($LASTEXITCODE -ne 0) { throw 'GS font validation compilation failed.' }
+    if (-not $WarpOnly) {
+        & $fontGpu
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware GS font validation failed.' }
+    }
+    & $fontGpu '--warp'
+    if ($LASTEXITCODE -ne 0) { throw 'WARP GS font validation failed.' }
     $dynamicGpu = Join-Path $out 'dynamic-state-validation.exe'
     & $compiler @common (Join-Path $taskRoot 'standalone/dynamic_state_validation.cpp') (Join-Path $out 'src_pfd_stamp_state.cpp.o') (Join-Path $out 'src_pfd_stamp_d3d12.cpp.o') (Join-Path $out 'engine-hook_pfd_state_observer.cpp.o') @libs '-o' $dynamicGpu
     if ($LASTEXITCODE -ne 0) { throw 'Dynamic graphics-state validation compilation failed.' }
@@ -253,7 +262,7 @@ if ($Validate) {
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         dynamicGraphicsStateTests=@($dynamicStateResults)
         samplePositionTests=@($sampleResults)
-        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','textured gray alpha and mip preservation under forced shader fallback','scoped barrier metadata lookup caching','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','temporary graphics state diagnostic pixel preservation and controls','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
+        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','textured gray alpha and mip preservation under forced shader fallback','scoped barrier metadata lookup caching','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','temporary graphics state diagnostic pixel preservation and controls','camera border and inset composition','antialiased GS glyphs and two-character spacing','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));

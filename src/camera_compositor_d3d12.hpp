@@ -73,8 +73,9 @@ class CameraCompositorD3D12 {
   bool reference_guides() const noexcept { return reference_guides_; }
   void set_reference_guides(bool enabled) noexcept { reference_guides_ = enabled; }
   void set_ground_speed(float knots, bool valid) noexcept {
-    ground_speed_valid_ = valid && std::isfinite(knots) && knots >= 0 && knots <= 999;
-    ground_speed_ = ground_speed_valid_ ? static_cast<UINT>(std::floor(knots + 0.5f)) : 0;
+    const float rounded = std::floor(knots + 0.5f);
+    ground_speed_valid_ = valid && std::isfinite(knots) && knots >= 0 && rounded <= 99;
+    ground_speed_ = ground_speed_valid_ ? static_cast<UINT>(rounded) : 0;
   }
   // Recorded root constants capture this value. No resource/descriptors change.
   bool set_display_exposure(float ev) noexcept {
@@ -474,36 +475,93 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight; };
-bool glyph_pixel(float2 position, float2 origin, uint glyph) {
-  int2 cell = int2(floor((position - origin) / 4));
-  return all(cell >= 0) && cell.x < 3 && cell.y < 5 && ((glyph >> (cell.y * 3 + cell.x)) & 1u) != 0;
-}
-uint ground_speed_digits() {
-  return GroundSpeedValid == 0 ? 2 : GroundSpeed >= 100 ? 3 : GroundSpeed >= 10 ? 2 : 1;
-}
-float2 ground_speed_extent() {
-  return float2(max(SpeedMinimumWidth, SpeedPaddingX * 2 + 40 + 16 * ground_speed_digits()), max(SpeedMinimumHeight, SpeedPaddingY * 2 + 20));
-}
-float4 ground_speed_pixel(float2 position) {
-  position -= float2(SpeedPaddingX, SpeedPaddingY);
-  if (glyph_pixel(position, float2(0, 0), 31567u) || glyph_pixel(position, float2(16, 0), 31183u)) return float4(1, 1, 1, 1);
-  static const uint digits[10] = {31599u,29850u,29671u,31207u,18925u,31183u,31695u,9383u,31727u,31215u};
-  bool lit = false;
-  if (GroundSpeedValid == 0) {
-    lit = glyph_pixel(position, float2(44, 0), 448u) || glyph_pixel(position, float2(60, 0), 448u);
-  } else {
-    uint count = ground_speed_digits();
-    uint divisor = count == 3 ? 100 : count == 2 ? 10 : 1;
-    for (uint n = 0; n < count; ++n) {
-      lit = lit || glyph_pixel(position, float2(44 + 16 * n, 0), digits[(GroundSpeed / divisor) % 10]);
-      divisor /= 10;
-    }
-  }
-  return lit ? float4(SpeedRed, SpeedGreen, SpeedBlue, 1) : float4(0, 0, 0, 1);
-}
 float segment_distance(float2 sample_position, float2 first, float2 last) {
   float2 delta = last - first;
   return length(sample_position - (first + saturate(dot(sample_position - first, delta) / dot(delta, delta)) * delta));
+}
+// Original stroke lettering, defined in a 12 x 20 pixel cell. Chamfered turns
+// and 1.8 pixel strokes keep the small readout legible without enlarged bitmap
+// blocks. Indices 0..9 are digits, followed by G, S and the unavailable dash.
+static const uint2 GlyphPaths[13] = {
+  uint2(0, 9), uint2(9, 3), uint2(12, 7), uint2(19, 9), uint2(28, 4), uint2(32, 9), uint2(41, 11), uint2(52, 3), uint2(55, 16),
+  uint2(71, 11), uint2(82, 10), uint2(92, 12), uint2(104, 2)
+};
+static const float2 GlyphVertices[106] = {
+  // 0
+  float2(3.5, 1.5), float2(8.5, 1.5), float2(10.5, 3.5), float2(10.5, 16.5), float2(8.5, 18.5), float2(3.5, 18.5), float2(1.5, 16.5),
+  float2(1.5, 3.5), float2(3.5, 1.5),
+  // 1
+  float2(3.5, 5.5), float2(6, 1.5), float2(6, 18.5),
+  // 2
+  float2(1.5, 4), float2(3.5, 1.5), float2(8.5, 1.5), float2(10.5, 3.5), float2(10.5, 7), float2(1.5, 18.5), float2(10.5, 18.5),
+  // 3
+  float2(1.5, 1.5), float2(8.5, 1.5), float2(10.5, 3.5), float2(10.5, 7.5), float2(7.5, 10), float2(10.5, 12.5), float2(10.5, 16.5),
+  float2(8.5, 18.5), float2(1.5, 18.5),
+  // 4
+  float2(8.5, 18.5), float2(8.5, 1.5), float2(1.5, 12.5), float2(10.5, 12.5),
+  // 5
+  float2(10.5, 1.5), float2(1.5, 1.5), float2(1.5, 9.5), float2(8.5, 9.5), float2(10.5, 11.5), float2(10.5, 16.5), float2(8.5, 18.5),
+  float2(3.5, 18.5), float2(1.5, 16.5),
+  // 6
+  float2(10.5, 3.5), float2(8.5, 1.5), float2(3.5, 1.5), float2(1.5, 3.5), float2(1.5, 16.5), float2(3.5, 18.5), float2(8.5, 18.5),
+  float2(10.5, 16.5), float2(10.5, 11.5), float2(8.5, 9.5), float2(1.5, 9.5),
+  // 7
+  float2(1.5, 1.5), float2(10.5, 1.5), float2(4.5, 18.5),
+  // 8
+  float2(3.5, 10), float2(1.5, 7.5), float2(1.5, 3.5), float2(3.5, 1.5), float2(8.5, 1.5), float2(10.5, 3.5), float2(10.5, 7.5),
+  float2(8.5, 10), float2(3.5, 10), float2(1.5, 12.5), float2(1.5, 16.5), float2(3.5, 18.5), float2(8.5, 18.5), float2(10.5, 16.5),
+  float2(10.5, 12.5), float2(8.5, 10),
+  // 9
+  float2(1.5, 16.5), float2(3.5, 18.5), float2(8.5, 18.5), float2(10.5, 16.5), float2(10.5, 3.5), float2(8.5, 1.5), float2(3.5, 1.5),
+  float2(1.5, 3.5), float2(1.5, 8.5), float2(3.5, 10.5), float2(10.5, 10.5),
+  // G
+  float2(10.5, 4), float2(8.5, 1.5), float2(3.5, 1.5), float2(1.5, 3.5), float2(1.5, 16.5), float2(3.5, 18.5), float2(8.5, 18.5),
+  float2(10.5, 16.5), float2(10.5, 10.5), float2(6.5, 10.5),
+  // S
+  float2(10.5, 4), float2(8.5, 1.5), float2(3.5, 1.5), float2(1.5, 3.5), float2(1.5, 7.5), float2(3.5, 9.5), float2(8.5, 10.5),
+  float2(10.5, 12.5), float2(10.5, 16.5), float2(8.5, 18.5), float2(3.5, 18.5), float2(1.5, 16),
+  // dash
+  float2(1.5, 10), float2(10.5, 10)
+};
+float glyph_coverage(float2 position, float2 origin, uint glyph) {
+  float2 local = position - origin;
+  if (any(local < 0) || any(local >= float2(12, 20))) return 0;
+  uint2 path = GlyphPaths[glyph];
+  float distance = 100;
+  // A fixed unroll also covers the one-segment dash without the shader
+  // compiler's single-iteration warning. Short paths repeat their last segment.
+  [unroll] for (uint n = 1; n < 16; ++n) {
+    uint last = path.x + min(n, path.y - 1);
+    distance = min(distance, segment_distance(local, GlyphVertices[last - 1], GlyphVertices[last]));
+  }
+  // The one has a short base; the three has a distinct middle bar.
+  if (glyph == 1) distance = min(distance, segment_distance(local, float2(1.5, 18.5), float2(10.5, 18.5)));
+  if (glyph == 3) distance = min(distance, segment_distance(local, float2(4.5, 10), float2(7.5, 10)));
+  // One pixel of edge coverage around the 0.9 pixel stroke radius. The box
+  // remains opaque: coverage scales the text colour, never its output alpha.
+  return saturate(1.4 - distance);
+}
+uint ground_speed_digits() {
+  return GroundSpeedValid == 0 || GroundSpeed >= 10 ? 2 : 1;
+}
+float2 ground_speed_extent() {
+  return float2(max(SpeedMinimumWidth, SpeedPaddingX * 2 + 64 + 16 * ground_speed_digits()), max(SpeedMinimumHeight, SpeedPaddingY * 2 + 20));
+}
+float4 ground_speed_pixel(float2 position) {
+  position -= float2(SpeedPaddingX, SpeedPaddingY);
+  float label = max(glyph_coverage(position, float2(0, 0), 10), glyph_coverage(position, float2(16, 0), 11));
+  float speed = 0;
+  if (GroundSpeedValid == 0) {
+    speed = max(glyph_coverage(position, float2(64, 0), 12), glyph_coverage(position, float2(80, 0), 12));
+  } else {
+    uint count = ground_speed_digits();
+    uint divisor = count == 2 ? 10 : 1;
+    for (uint n = 0; n < count; ++n) {
+      speed = max(speed, glyph_coverage(position, float2(64 + 16 * n, 0), (GroundSpeed / divisor) % 10));
+      divisor /= 10;
+    }
+  }
+  return float4(label.xxx + float3(SpeedRed, SpeedGreen, SpeedBlue) * speed, 1);
 }
 // Screen-space references matched to the supplied ETACS photograph. These
 // marks do not claim metric clearance after mount, attitude or FOV changes.
