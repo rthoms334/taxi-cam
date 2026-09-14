@@ -14,17 +14,14 @@ struct Composition {
   std::array<float, 3> guide_color{1, 0, 1};
   std::array<float, 3> speed_color{0, 1, 0};
   // Working-image pixels; padding surrounds the GS label and current value.
-  std::array<float, 2> speed_panel_origin{0, 0}, speed_panel_padding{8, 12};
-  std::array<float, 2> speed_panel_min_size{140, 48};
+  std::array<float, 2> speed_panel_origin{16, 12}, speed_panel_padding{8, 8};
+  std::array<float, 2> speed_panel_min_size{0, 0};
 };
 enum class TaxiControl { push_event, lvar_off };
 inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.guide_color = {1, 0.55f, 0};
   c.speed_color = {0, 0.94f, 0.28f};
-  c.speed_panel_origin = {16, 12};
-  c.speed_panel_padding = {8, 8};
-  c.speed_panel_min_size = {0, 0};
   return c;
 }();
 struct AircraftProfile {

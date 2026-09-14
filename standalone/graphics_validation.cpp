@@ -266,11 +266,7 @@ void native_case(bool warp, bool a350) {
           else
             require(pixel[2] >= 50 && pixel[2] <= 52, "A350 navigation area preserved");
         }
-        if (!a350 && local_x == 20 && y == 46)
-          require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "A380 retains its full-height GS panel");
-        if (!a350 && local_x == 20 && y == 50)
-          require(pixel[2] >= 50 && pixel[2] <= 52, "A380 camera below GS panel");
-        if (a350 && camera_region) {
+        if (camera_region) {
           const auto working_x = static_cast<int>((local_x + .5) * 768 / region_width);
           // Default unavailable GS renders "--" in an inset, padded panel.
           // Surrounding pixels must continue to show the nose camera on both sides.

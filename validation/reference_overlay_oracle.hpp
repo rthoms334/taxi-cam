@@ -5,12 +5,16 @@
 #include <cmath>
 namespace reference_overlay_oracle {
 inline bool glyph(unsigned x, unsigned y, unsigned left, const char* rows) {
-  if (x < left || x >= left + 12 || y < 12 || y >= 32)
+  if (x < left || x >= left + 12 || y < 8 || y >= 28)
     return false;
-  return rows[((y - 12) / 4) * 3 + (x - left) / 4] == '1';
+  return rows[((y - 8) / 4) * 3 + (x - left) / 4] == '1';
 }
 inline bool pixel(unsigned x, unsigned y, std::array<unsigned char, 4>& out, bool guides = true, bool valid = false, unsigned speed = 0) {
-  if (x < 140 && y < 48) {
+  const unsigned count = !valid ? 2 : speed >= 100 ? 3 : speed >= 10 ? 2 : 1;
+  const unsigned panel_width = count == 1 ? 72 : count == 2 ? 88 : 104;
+  if (x >= 16 && x < 16 + panel_width && y >= 12 && y < 48) {
+    x -= 16;
+    y -= 12;
     out = {0, 0, 0, 255};
     if (glyph(x, y, 8, "111100101101111") || glyph(x, y, 24, "111100111001111")) {
       out = {255, 255, 255, 255};
@@ -22,7 +26,6 @@ inline bool pixel(unsigned x, unsigned y, std::array<unsigned char, 4>& out, boo
     else {
       constexpr const char* digits[]{"111101101101111", "010110010010111", "111001111100111", "111001111001111", "101101111001001",
                                      "111100111001111", "111100111101111", "111001010010010", "111101111101111", "111101111001111"};
-      const unsigned count = speed >= 100 ? 3 : speed >= 10 ? 2 : 1;
       unsigned divisor = count == 3 ? 100 : count == 2 ? 10 : 1;
       for (unsigned n = 0; n < count; ++n) {
         number |= glyph(x, y, 52 + 16 * n, digits[(speed / divisor) % 10]);

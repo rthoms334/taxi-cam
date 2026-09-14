@@ -64,7 +64,7 @@ Source: [aircraft defaults](../profiles/catalog.hpp), [mount transforms](../nati
 
 ## Display geometry
 
-Pixel coordinates start at the top left. Row ranges below are inclusive. The table gives the A380 defaults and common working-canvas contract. The A350 uses 1644 x 1024 EFIS targets, 822 x 255 / 822 x 504 sources and an 822 x 763 destination on the outer PFD half. See [Aircraft integration](aircraft-profiles.md).
+Pixel coordinates start at the top left. Row ranges below are inclusive. The table gives the A380 defaults and common working-canvas contract. The A350 uses 1644 x 1024 EFIS targets, 806 x 255 / 806 x 504 sources and an 806 x 763 destination within the PFD area, preserving the central separator. See [Aircraft integration](aircraft-profiles.md).
 
 | Element | Geometry |
 | --- | --- |
@@ -74,7 +74,7 @@ Pixel coordinates start at the top left. Row ranges below are inclusive. The tab
 | Tail pane | Rows 259–762; source 768 × 504 |
 | Visible divider | Black rows 245–268 |
 | Preserved aircraft display | Rows 763–1023 |
-| Ground-speed panel | Top-left 140 × 48 pixels |
+| Ground-speed panel (A380 and A350) | Origin (16, 12); 8-pixel internal padding; height 36; width 72 / 88 / 104 for 1 / 2 / 3 digits (`--` uses 88) |
 | Stable output buffer | Row pitch 3072 bytes; total 2,343,936 bytes |
 
 The logical gap between panes is four rows. The visible divider covers ten additional rows of each pane; the camera render sizes and tail sampling origin remain unchanged.

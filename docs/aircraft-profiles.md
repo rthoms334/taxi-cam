@@ -33,7 +33,7 @@ The profile defines accepted texture dimensions, mip policy and formats. Resourc
 
 The renderer captures two independently sized scene textures. It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's destination rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. The A350's 806-pixel sources preserve the destination aspect ratio through composition and presentation.
 
-Profiles supply the pane division, visible separator, reference dot/bracket coordinates and colour. A380 uses magenta marks; A350 uses amber marks from the Airbus diagram. The A350 ground-speed panel is inset from the camera edges, with internal padding and a width that fits the current value. Panel layout belongs to the aircraft profile. The ground-speed text has its own saved RGB colour, editable on **Display**; changing it does not change exposure or the reference marks. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
+Profiles supply the pane division, visible separator, reference dot/bracket coordinates and colour. A380 uses magenta marks; A350 uses amber marks from the Airbus diagram. On both A380 and A350, the ground-speed panel is inset from the camera edges, with internal padding and a width that fits the current value. The same layout applies to both PFDs. Panel layout belongs to the aircraft profile. The ground-speed text has its own saved RGB colour, editable on **Display**; changing it does not change exposure or the reference marks. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
 
 ## Geometry and settings
 

@@ -130,7 +130,7 @@ Source dimensions come from the aircraft profile. The compositor takes a complet
 - nose view above and tail view below;
 - a black horizontal divider;
 - two magenta nose reference dots and mirrored tail brackets;
-- an opaque ground-speed panel at the top left.
+- an opaque ground-speed panel inset from the top-left camera edges, with internal padding and a width that fits the current value on both A380 and A350.
 
 Ground speed is read from SimConnect and rendered by Taxi Cam. It is rounded to whole knots; unavailable data displays `--`. The original PFD's GS text is covered by this panel.
 
