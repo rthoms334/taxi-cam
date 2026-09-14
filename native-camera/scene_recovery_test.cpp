@@ -1,4 +1,5 @@
 #include "scene_recovery.hpp"
+#include "view_retirement_test.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +35,7 @@ struct Engine {
 }  // namespace
 
 int main() {
+  test_view_retirement();
   SceneRecovery recovery;
   ec::Snapshot clean;
   require(!recovery.retry(9999, clean, true), "No initial invented request");
@@ -48,9 +50,8 @@ int main() {
     recovery.failed(reason, 10);
     require(!recovery.pending() && !recovery.retry(99999, clean, true), "Fatal failure cannot retry");
   }
-  for (const auto reason :
-       {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent, SceneStopReason::resolution_changed,
-        SceneStopReason::capture_stalled}) {
+  for (const auto reason : {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent,
+                            SceneStopReason::resolution_changed, SceneStopReason::capture_stalled}) {
     recovery.start();
     recovery.failed(reason, 100);
     require(recovery.pending() && recovery.reason() == reason, "Recoverable reason is recorded");

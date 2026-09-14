@@ -64,6 +64,7 @@ struct ProbeSnapshot {
   std::uint32_t thread_id = 0;
   std::uint32_t free_views = 0;
   std::array<bool, 2> ready{};
+  std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};
   bool outputs_matched = false;
   std::array<std::array<std::array<std::int32_t, 2>, 3>, 2> dimensions{};

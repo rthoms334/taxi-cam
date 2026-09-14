@@ -49,6 +49,18 @@ inline void test_view_readiness_wait() {
     assert(!wait.observe(20, pair, true, {pending, failed}));
     assert(!wait.observe(20, pair, true, {failed, pending}));
   }
+  // A pending feed plus an interrupted read was previously sent straight to
+  // removal, skipping the grace period. Failed snapshots are never made ready.
+  for (auto status : {ec::OwnedViewStatus::read_failed, ec::OwnedViewStatus::changed, ec::OwnedViewStatus::pool_changed,
+                      ec::OwnedViewStatus::not_inspected}) {
+    wait.clear();
+    ec::OwnedViewSnapshot interrupted;
+    interrupted.status = status;
+    assert(wait.observe(30, pair, true, {pending, interrupted}));
+    assert(wait.observe(31, pair, true, {interrupted, ready}));
+    assert(!wait.observe(1030, pair, true, {interrupted, pending}));
+    assert(!wait.observe(1031, pair, true, {ready, ready}));
+  }
   auto incomplete = pending;
   incomplete.complete = false;
   assert(!wait.observe(20, pair, true, {pending, incomplete}));

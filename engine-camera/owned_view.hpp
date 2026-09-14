@@ -25,6 +25,48 @@ enum class OwnedViewStatus {
   read_budget_exhausted
 };
 
+inline const char* owned_view_status_name(OwnedViewStatus status) noexcept {
+  switch (status) {
+    case OwnedViewStatus::not_inspected:
+      return "not_inspected";
+    case OwnedViewStatus::pending:
+      return "pending";
+    case OwnedViewStatus::ready:
+      return "ready";
+    case OwnedViewStatus::invalid_request:
+      return "invalid_request";
+    case OwnedViewStatus::invalid_pool:
+      return "invalid_pool";
+    case OwnedViewStatus::invalid_pointer:
+      return "invalid_pointer";
+    case OwnedViewStatus::id_mismatch:
+      return "id_mismatch";
+    case OwnedViewStatus::invalid_ready_byte:
+      return "invalid_ready_byte";
+    case OwnedViewStatus::invalid_view_index:
+      return "invalid_view_index";
+    case OwnedViewStatus::pool_changed:
+      return "pool_changed";
+    case OwnedViewStatus::node_unavailable:
+      return "node_unavailable";
+    case OwnedViewStatus::node_mismatch:
+      return "node_mismatch";
+    case OwnedViewStatus::wrong_camera_type:
+      return "wrong_camera_type";
+    case OwnedViewStatus::invalid_fov:
+      return "invalid_fov";
+    case OwnedViewStatus::material_mismatch:
+      return "material_mismatch";
+    case OwnedViewStatus::read_failed:
+      return "read_failed";
+    case OwnedViewStatus::changed:
+      return "changed";
+    case OwnedViewStatus::read_budget_exhausted:
+      return "read_budget_exhausted";
+  }
+  return "unknown";
+}
+
 struct OwnedViewSnapshot {
   // complete includes a stable pending entry; ready requires the camera chain.
   bool complete = false;

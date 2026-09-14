@@ -13,6 +13,7 @@
 #include "source_view.hpp"
 #include "view_readiness_wait.hpp"
 #include "view_resize.hpp"
+#include "view_retirement.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -70,6 +71,7 @@ struct Runtime {
   std::array<ViewDimensions, 2> resized_dimensions{};
   ViewResizeWarmup resize_warmup;
   ViewReadinessWait view_wait;
+  ViewRetirement retirement;
   ULONGLONG last_inspection = 0;
   std::uint64_t manager = 0;
   std::uint64_t control = 0;
@@ -298,6 +300,7 @@ void inspect_pair(Runtime& runtime,
       return inspected(runtime, [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool); });
     });
     views[i] = view;
+    report.inspection_status[i] = ec::owned_view_status_name(view.status);
     report.ready[i] = view.complete && view.ready;
     if (!report.ready[i]) {
       refuse((runtime.inspection_changed && view.status == ec::OwnedViewStatus::not_inspected) ||
@@ -487,14 +490,33 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
     return false;
   LocalMemoryReader reader;
   auto entries = inspected(runtime, [&] { return ec::inspect_owned_entries(reader, token.identity, {id, 0}); });
-  if (!entries.complete)
+  if (!entries.complete) {
+    runtime.retirement.forget(token, id);
     return false;
-  if (!entries.entries[0].found)
+  }
+  if (!entries.entries[0].found) {
+    runtime.retirement.forget(token, id);
     return true;
+  }
+  // An ID-table match alone does not authorize native removal. Its ready path
+  // indexes the view pool; its pending path skips normal view detachment while
+  // still destroying entry-held references. Never enter either with an
+  // unavailable chain, or erase on the same update that closes an active gate.
+  const auto view = inspect_entry(runtime, id);
+  const auto action = runtime.retirement.observe(token, id, runtime.updates, view);
+  if (action == ViewRetirement::Action::close_gate) {
+    function<void (*)(void*, std::uint64_t, bool)>(runtime, 17641776)(reinterpret_cast<void*>(token.identity), id, false);
+    return false;
+  }
+  if (action != ViewRetirement::Action::erase)
+    return false;
   function<void (*)(void*, std::uint64_t)>(runtime, 17646000)(reinterpret_cast<void*>(token.identity), id);
   reader.reset_budget();
   entries = inspected(runtime, [&] { return ec::inspect_owned_entries(reader, token.identity, {id, 0}); });
-  return entries.complete && !entries.entries[0].found;
+  const bool absent = entries.complete && !entries.entries[0].found;
+  if (absent)
+    runtime.retirement.forget(token, id);
+  return absent;
 }
 
 void record_stop(Runtime& runtime, SceneStopReason reason, const char* detail, std::uint64_t now) {
@@ -729,6 +751,7 @@ void observer(void* manager) noexcept {
         runtime.resized_dimensions = {};
         runtime.resize_warmup.clear();
         runtime.view_wait.clear();
+        runtime.retirement.clear();
         runtime.gates = {};
         runtime.schedule.reset();
       }
@@ -749,7 +772,7 @@ void observer(void* manager) noexcept {
       else if (pair.state == ec::State::active)
         report.message = "Nose and tail scene views use separate aircraft mounts and refresh before alternating activation pulses.";
       else if (pair.state == ec::State::cleanup_pending)
-        report.message = "Removal is pending; owned IDs are retained until confirmed absent.";
+        report.message = "Removal waits for freshly validated, closed views; owned IDs remain retained until confirmed absent.";
       else if (pair.state == ec::State::disabled)
         report.message = "Scene test stopped; owned IDs are confirmed absent.";
       else if (!runtime.message.empty())

@@ -5,8 +5,9 @@
 
 namespace taxi_camera::native_camera {
 
-// Only a stable pending ready byte on an already scheduled/resized pair gets a
-// grace period. No borrowed view or resource pointers survive this policy.
+// Established views may briefly be pending or fail a consistency read during
+// allocation. Waiting grants no permission to use the failed snapshot. The
+// caller must classify the inspection as transient; no borrowed pointers survive.
 class ViewReadinessWait {
  public:
   static constexpr std::uint64_t grace_ms = 1000;
@@ -20,8 +21,12 @@ class ViewReadinessWait {
                  pair.failure == engine_camera::Failure::none && pair.blocked == engine_camera::Blocked::none;
     for (const auto& view : views) {
       const bool stable_pending = view.complete && !view.ready && view.status == engine_camera::OwnedViewStatus::pending;
-      valid &= stable_pending || (view.complete && view.ready && view.status == engine_camera::OwnedViewStatus::ready);
-      pending |= stable_pending;
+      const bool transient_read =
+          !view.complete && !view.ready &&
+          (view.status == engine_camera::OwnedViewStatus::read_failed || view.status == engine_camera::OwnedViewStatus::changed ||
+           view.status == engine_camera::OwnedViewStatus::pool_changed || view.status == engine_camera::OwnedViewStatus::not_inspected);
+      valid &= stable_pending || transient_read || (view.complete && view.ready && view.status == engine_camera::OwnedViewStatus::ready);
+      pending |= stable_pending || transient_read;
     }
     if (!valid || !pending) {
       clear();

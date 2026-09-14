@@ -74,7 +74,7 @@ Source: [aircraft profile](../profiles/catalog.hpp), [PFD detector](../src/pfd_t
 
 The bridge calls internal MSFS camera functions to create two scene views. These functions are outside the public camera SDK. Before any private call, the bridge verifies the loaded image structure, 29 required code fingerprints, activation data and manager update pointer. It uses the observed image size and section bounds. Simulator version, timestamp and section count are not allowlists.
 
-Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair.
+Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair. A transient inspection failure pauses new camera work. Removal requires a fresh, complete view inspection and a closed render gate observed across distinct manager updates. Pending or unreadable views retain their IDs; they cannot be erased or replaced until validation recovers. The engine handles deferred renderer release after an accepted removal.
 
 ### Following the aircraft
 
