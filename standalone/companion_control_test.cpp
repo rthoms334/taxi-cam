@@ -63,10 +63,10 @@ int main() {
     publish(owner, 10000, settings);
     control.refresh(reader);
     require(control.connected(10000), "Fresh companion accepted");
-    require(ProtocolVersion == 4 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 5 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
-            "Protocol4 guide coordinates roundtrip");
+            "Protocol5 guide coordinates roundtrip");
     for (auto member : {&Settings::nose_dot, &Settings::tail_upper, &Settings::tail_corner, &Settings::tail_inner}) {
       for (unsigned axis = 0; axis < 2; ++axis) {
         for (float value :

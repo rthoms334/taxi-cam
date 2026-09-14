@@ -42,6 +42,9 @@ struct LightingSample {
 // private engine callbacks. Never acquires or changes the simulator camera.
 bool select_aircraft_profile(std::uint32_t id) noexcept;
 AircraftIdentitySample get_aircraft_identity() noexcept;
+// Changes only when the flight/aircraft session changes. Selecting the
+// adapter does not itself change this epoch.
+std::uint64_t get_aircraft_session_epoch() noexcept;
 bool aircraft_matches_profile() noexcept;
 bool initialize_body_pose_provider() noexcept;
 void shutdown_body_pose_provider() noexcept;
@@ -71,6 +74,8 @@ TaxiCutoffStatus get_taxi_cutoff() noexcept;
 LightingSample get_lighting() noexcept;
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
+bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept;
+bool accept_identity_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 bool accept_aircraft_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept;
 bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;

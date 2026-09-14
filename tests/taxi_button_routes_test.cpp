@@ -136,11 +136,22 @@ int main() {
   profile_routes.forget(279);
   assert(!profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
   assert(profile_routes.active_mask(true, true, true) == 0);  // Ordinary both-lost remains ambiguous.
+  profile_routes.reset();                                     // A deliberate reload of the same aircraft releases old ownership.
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
+  assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
+  profile_routes.reset();
+  live = {{{380, 0, 768, 1024, 5, 28}, {379, 0, 768, 1024, 5, 28}}};
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A380)));
+  assert(profile_routes.matches(380, 1) && profile_routes.matches(379, 2));
+  profile_routes.reset();
+  live = {{{480, 0, 1644, 1024, 1, 27}, {479, 0, 1644, 1024, 1, 27}}};
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
+  assert(profile_routes.matches(480, 1) && profile_routes.matches(479, 2));
   profile_routes.reset();
   assert(!profile_routes.adopt_detected({0, 279}));
   assert(!profile_routes.adopt_detected({280, 280}));
   assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A35K)));
-  std::puts("A35K -> A359 existing-resource profile reacquisition: PASS; same-profile both-lost still refused");
+  std::puts("Aircraft session reacquisition: PASS; same-aircraft reload, A350/A380 round trip, ordinary both-lost still refused");
   // An explicit partial choice is authoritative for that side, independent of
   // detector ordering. Zero is Auto, never a resource identity.
   taxi_camera::TaxiButtonRoutes selections;

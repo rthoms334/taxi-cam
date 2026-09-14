@@ -138,8 +138,18 @@ inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, 
   return false;
 }
 inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) noexcept {
+  const auto equal = [](std::string_view a, std::string_view b) {
+    if (a.size() != b.size())
+      return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+      const auto upper = [](char c) { return c >= 'a' && c <= 'z' ? char(c - ('a' - 'A')) : c; };
+      if (upper(a[i]) != upper(b[i]))
+        return false;
+    }
+    return true;
+  };
   for (auto supported : p.aircraft_types)
-    if (!supported.empty() && type == supported)
+    if (!supported.empty() && equal(type, supported))
       return true;
   return false;
 }
@@ -165,6 +175,13 @@ inline bool path_contains(std::string_view path, std::string_view marker) noexce
   return false;
 }
 inline std::uint32_t detect_aircraft(std::string_view type, std::string_view path) noexcept {
+  // ATC TYPE is an ATC brand, not an ICAO designator. The live FBW aircraft
+  // returns "ATCCOM.ATC_NAME AIRBUS.0.text". Its public AircraftLoaded path
+  // identifies the actual product, including the MSFS2024 modular/livery tree.
+  // Exact components keep generic Airbus/A380 and similarly named packages out.
+  if (path_contains(path, "flybywire-aircraft-a380-842") || path_contains(path, "simobjects/airplanes/flybywire_a380x") ||
+      path_contains(path, "simobjects/airplanes/flybywire_a380_842"))
+    return A380.id;
   std::uint32_t match = 0;
   for (const auto* p : Catalog) {
     if (!matches_aircraft(*p, type))

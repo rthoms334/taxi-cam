@@ -36,6 +36,86 @@ bool same_guides(const standalone::Settings& a, const standalone::Settings& b) {
       return false;
   return true;
 }
+void aircraft_swap_tests() {
+  // Read-only IPC capture from the installed FBW A380, 2026-09-14. The brand
+  // string is not the A388 ICAO designator that the old matcher required.
+  constexpr char fbw_type[] = "ATCCOM.ATC_NAME AIRBUS.0.text";
+  constexpr char fbw_path[] = "SimObjects\\Airplanes\\FlyByWire_A380X\\presets\\flybywire\\FlyByWire_A380_842\\config\\aircraft.CFG";
+  assert(profiles::detect_aircraft(fbw_type, fbw_path) == 1);
+  assert(profiles::detect_aircraft("Airbus", "SIMOBJECTS/AIRPLANES/FLYBYWIRE_A380X/liveries/Custom Airline/aircraft.cfg") == 1);
+  assert(profiles::detect_aircraft(
+             fbw_type, "SimObjects/Airplanes/FlyByWire_A380X/presets/flybywire/FlyByWire_A380_842_NoCabin/config/aircraft.cfg") == 1);
+  assert(!profiles::detect_aircraft(fbw_type, "SimObjects/Airplanes/Other_A380/aircraft.cfg"));
+  assert(!profiles::detect_aircraft(fbw_type, "SimObjects/Airplanes/FlyByWire_A380X-copy/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("A388", "SimObjects/Airplanes/not_FlyByWire_A380X/aircraft.cfg"));
+  assert(profiles::detect_aircraft("a359 ulr", "SimObjects/Airplanes/A350/presets/iniBuilds/A350-900/config/aircraft.cfg") == 2);
+  assert(!profiles::detect_aircraft("AIRBUS", "SimObjects/Airplanes/A350/presets/iniBuilds/A350-900/config/aircraft.cfg"));
+
+  native_camera::AircraftIdentityCache identity;
+  std::array<unsigned char, 296> type_packet{};
+  std::array<unsigned char, 284> path_packet{};
+  const auto type = [&](std::uint32_t request, const char* text, std::uint64_t now) {
+    type_packet = {};
+    const std::array<std::uint32_t, 10> h{296, 0, 8, request, 0, 5, 0, 0, 1, 1};
+    std::memcpy(type_packet.data(), h.data(), sizeof(h));
+    std::strcpy(reinterpret_cast<char*>(type_packet.data() + 40), text);
+    return identity.accept(type_packet.data(), type_packet.size(), now);
+  };
+  const auto path = [&](std::uint32_t request, const char* text, std::uint64_t now) {
+    path_packet = {};
+    const std::array<std::uint32_t, 6> h{284, 0, 15, request, 0, 0};
+    std::memcpy(path_packet.data(), h.data(), sizeof(h));
+    std::strcpy(reinterpret_cast<char*>(path_packet.data() + 24), text);
+    return identity.accept(path_packet.data(), path_packet.size(), now);
+  };
+  identity.begin_request(1000, 1001);
+  assert(type(1000, fbw_type, 1000) && path(1001, fbw_path, 1001));
+  assert(identity.sample(1001).detected_profile == 1);
+  identity.begin_request(1002, 1003);
+  assert(type(1002, "C172", 2000));
+  assert(identity.sample(2000).detected_profile == 1);  // Last complete observation only.
+  assert(!path(1001, fbw_path, 2001));                  // Delayed previous response.
+  assert(path(1003, "SimObjects/Airplanes/Asobo_C172/aircraft.cfg", 2002));
+  assert(!identity.sample(2002).detected_profile && identity.sample(2002).fresh);
+  identity.begin_request(1004, 1005);
+  assert(path(1005, fbw_path, 3000) && type(1004, fbw_type, 3001));
+  assert(identity.sample(3001).detected_profile == 1);
+  identity.begin_request(1006, 1007);
+  assert(type(1006, "A35K", 4000));
+  identity.begin_request(1008, 1009);  // Timed-out incomplete poll cannot mix with the next one.
+  assert(!path(1007, "SimObjects/Airplanes/A350/presets/iniBuilds/A350-1000/config/aircraft.cfg", 4001));
+  assert(type(1008, "A359", 4002) && path(1009, "SimObjects/Airplanes/A350/presets/iniBuilds/A350-900/config/aircraft.cfg", 4003));
+  assert(identity.sample(4003).detected_profile == 2);
+  identity = {};  // Manual adapter reconnect starts with no previous metadata.
+  assert(!identity.sample(4004).fresh && !identity.sample(4004).detected_profile);
+
+  native_camera::AircraftSessionLifecycle session;
+  const auto sim = [&](std::uint32_t running) {
+    const std::array<std::uint32_t, 6> h{24, 0, 4, 0, session.SimEvent, running};
+    return session.accept(h.data(), sizeof(h));
+  };
+  assert(!sim(0) && session.epoch() == 0 && !session.running());
+  assert(!sim(0) && session.epoch() == 0);
+  assert(sim(1) && session.epoch() == 1 && session.running());
+  assert(!sim(1) && session.epoch() == 1);  // Initial event after reconnect.
+  assert(!sim(2) && session.epoch() == 1 && session.running());
+  std::array<unsigned char, 288> event{};
+  std::array<std::uint32_t, 6> h{288, 0, 6, 0, session.AircraftEvent, 0};
+  std::memcpy(event.data(), h.data(), sizeof(h));
+  std::strcpy(reinterpret_cast<char*>(event.data() + 24), fbw_path);
+  assert(session.accept(event.data(), event.size()) && session.epoch() == 2);
+  assert(session.accept(event.data(), event.size()) && session.epoch() == 3);  // Same aircraft reload.
+  for (std::uint32_t size = 0; size < event.size(); ++size)
+    assert(!session.accept(event.data(), size));
+  std::memset(event.data() + 24, 'X', 260);
+  assert(!session.accept(event.data(), event.size()) && session.epoch() == 3);
+  event[24] = 0;
+  h[4] = session.FlightEvent;
+  std::memcpy(event.data(), h.data(), sizeof(h));
+  assert(session.accept(event.data(), event.size()) && session.epoch() == 4);
+  assert(sim(0) && session.epoch() == 5 && !session.running());
+  assert(sim(1) && session.epoch() == 6 && session.running());
+}
 void guide_settings_tests() {
   using namespace standalone;
   std::array<Settings, 3> saved{};
@@ -109,6 +189,7 @@ void guide_settings_tests() {
 }
 }  // namespace
 int main() {
+  aircraft_swap_tests();
   using namespace standalone;
   wchar_t temporary[32768];
   assert(GetTempPathW(32768, temporary));

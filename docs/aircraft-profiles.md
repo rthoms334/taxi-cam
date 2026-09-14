@@ -1,6 +1,6 @@
 # Aircraft integration
 
-**Auto aircraft** on Overview selects a supported profile from public SimConnect metadata. The matcher requires the variant's `ATC TYPE` and an add-on path component in the `AircraftLoaded` response. Two distinct samples must agree before switching. A missing response does not select a default aircraft. Choosing a profile manually turns automatic selection off.
+**Auto aircraft** on Overview selects a supported profile from public SimConnect metadata. The matcher requires an add-on path component in the `AircraftLoaded` response. The FBW A380's own aircraft path identifies that integration; its `ATC TYPE` can be the Airbus brand string `ATCCOM.ATC_NAME AIRBUS.0.text`, not the ICAO code `A388`. The A350 profiles additionally require the variant's type. Type and path must come from the same metadata poll, and two distinct samples must agree before switching. A missing response does not select a default aircraft. Manual selection uses the same aircraft identity checks and turns automatic selection off.
 
 Each profile owns its camera calibration, display colour and exposure settings. Before switching, the companion saves edits to the departing profile and loads the arriving profile's own file. Invalid unfinished input delays a switch rather than discarding edits.
 
@@ -46,6 +46,8 @@ The A350-900 defaults are nose **right/up/forward 0 / -2 / 16 m, pitch/yaw -15 /
 The A350-1000 retains the same height, pitch, yaw and lens for each camera, with nose forward position **19.81 m** and tail **-36.17 m** for its longer fuselage. It shares the A350 guide defaults above, but their alignment on the -1000 has **not been checked live**. The geometry check projects the installed iniBuilds 1.2.6 `flight_model.cfg` gear contact points; it does not replace a cockpit comparison. Existing saved mount and guide settings take precedence over profile defaults.
 
 Changing profiles stops output and retires owned views through the engine update callback before changing the control subscription or render dimensions. The bridge clears texture routes, button intent, pose calibration and capture history. A new profile cannot inherit another aircraft's saved mounts or stale ON state. The application stores the selected profile separately from each profile's INI file.
+
+Flight/aircraft load notifications and changes in simulation running state also trigger cleanup, including reloads of the same aircraft. Confirming the current profile again in the dropdown explicitly retries its connection and display discovery. Manual texture IDs and preview/calibration requests belong to one flight and are cleared at the transition; saved mounts, guides and exposure remain intact. Native owned-view removal and GPU lifetime checks still apply. If the old native manager becomes unavailable before cleanup can confirm removal, switching remains blocked rather than abandoning retained camera IDs.
 
 ## Adding an aircraft
 
