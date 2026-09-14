@@ -10,6 +10,10 @@ struct GraphicsStatus {
   std::uint64_t selected_draws{}, selected_rt_metadata{}, selected_rt_callbacks{}, selected_pending_matches{};
   std::uint64_t selected_view_resolved{}, selected_view_rejected{}, copy_attempts{}, copy_rejected{};
   const char* copy_error = "not_attempted";
+  std::array<std::uint64_t, 32> selected_exit_scopes{};
+  std::uint64_t calibration_clears{};
+  std::uint64_t selected_exit_base{}, selected_exit_nonbase{}, selected_exit_split{};
+  std::uint64_t fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
 };
 bool initialize_graphics() noexcept;
 // Isolated validation supplies a real hardware/WARP device. This never calls

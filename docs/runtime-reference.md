@@ -100,7 +100,9 @@ Source: [compositor and guides](../src/camera_compositor_d3d12.hpp), [output buf
 
 The bridge log reports `PFD copy admission` alongside the normal camera counters. `rt_metadata` counts selected-target RT exits seen in native barrier metadata; `rt_callbacks` counts those admitted by the recording/pass checks. `pending_matches` shows same-recording PFD evidence. `view_resolved` also includes verified selected targets whose earlier draw was recorded elsewhere. `attempts`, `rejected`, `state_skips` and `reason` distinguish missing/conflicting typed-view evidence from output or recording rejection. These are cumulative observations, not completed GPU-frame counts.
 
-Camera composition can succeed while PFD copies are refused. When images exist but no PFD copy has yet been recorded, the app reports that it is waiting for a verified copy opportunity.
+The `PFD scope` line records selected RT-exit scope flags (enabled=1, active pass=2, suspended pass=4, invalid recording=8, prior work=16), base/nonbase subresource counts and split barriers. It also reports completed calibration-clear recordings and the automatic/manual/calibration control masks.
+
+Camera composition can succeed while PFD writes are refused. The `PFD guarded draw` line counts deferred draw attempts, successful stamps and query/state refusals separately from texture copies. When images exist but no PFD write has yet been recorded, the app reports that it is waiting for a verified write opportunity.
 
 ## Exposure
 

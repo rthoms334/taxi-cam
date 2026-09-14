@@ -13,7 +13,10 @@ namespace runtime = taxi_camera::scene_runtime;
 struct ClearStatePipeline {
   Reference<ID3D12RootSignature> root;
   Reference<ID3D12PipelineState> pipeline;
-  explicit ClearStatePipeline(ID3D12Device* device, bool descriptor_case = false, DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM) {
+  explicit ClearStatePipeline(ID3D12Device* device,
+                              bool descriptor_case = false,
+                              DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                              DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN) {
     // Match the gradient's root layout, but make pipeline loss visible as
     // different GPU pixels rather than relying only on intercepted-call counts.
     D3D12_ROOT_PARAMETER parameters[4]{};
@@ -75,7 +78,10 @@ float4 ps_main() : SV_Target {
     desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     desc.RasterizerState.DepthClipEnable = TRUE;
-    desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    desc.DepthStencilState.DepthEnable = depth_format != DXGI_FORMAT_UNKNOWN;
+    desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    desc.DepthStencilState.DepthFunc = depth_format == DXGI_FORMAT_UNKNOWN ? D3D12_COMPARISON_FUNC_ALWAYS : D3D12_COMPARISON_FUNC_LESS;
+    desc.DSVFormat = depth_format;
     desc.DepthStencilState.FrontFace = desc.DepthStencilState.BackFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
                                                                           D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -154,7 +160,7 @@ void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   require(taxi_camera::drain_copy_queue(queue, device), "Interop capture completion");
 }
 
-void native_case(bool warp, bool a350) {
+void native_case(bool warp, bool a350, bool query_fallback) {
   const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
   const UINT pane_width = profile.camera_panes[0][0], display_width = profile.width;
   const UINT nose_height = profile.camera_panes[0][1], tail_height = profile.camera_panes[1][1];
@@ -187,6 +193,10 @@ void native_case(bool warp, bool a350) {
   win::set_aircraft_profile(profile.id);
   check(list->Reset(allocator.get(), nullptr), "Observe first actual Reset of pre-existing list");
   const auto key = win::graphics_status().device;
+  const auto successful_copies = [] {
+    const auto s = win::graphics_status();
+    return s.copy_attempts - s.copy_rejected;
+  };
   require(runtime::prepare(key), "Native compositor prepare");
   runtime::set_composition(key, profile.composition);
   runtime::manager().begin_source_tracking();
@@ -281,7 +291,202 @@ void native_case(bool warp, bool a350) {
     Sleep(1);
   }
   require(runtime::snapshot(key).frames > frames_before_interop, "Camera capture survives unrelated D3D11On12 Game Capture copy");
+  if (query_fallback) {
+    Reference<ID3D12Resource> other_a, other_b, depth_a, depth_b;
+    Reference<ID3D12DescriptorHeap> raw_rtvs, raw_dsvs;
+    D3D12_CPU_DESCRIPTOR_HANDLE raw_rtv{}, raw_dsv{};
+    {
+      const win::OwnedWork unobserved;
+      create_texture(device.get(), texture_description(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM), other_a.put());
+      create_texture(device.get(), texture_description(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM), other_b.put());
+      auto depth = texture_description(64, 64, DXGI_FORMAT_D32_FLOAT);
+      depth.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+      const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+      check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &depth, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr,
+                                            IID_PPV_ARGS(depth_a.put())),
+            "Depth A");
+      check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &depth, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr,
+                                            IID_PPV_ARGS(depth_b.put())),
+            "Depth B");
+      D3D12_DESCRIPTOR_HEAP_DESC h{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+      check(device->CreateDescriptorHeap(&h, IID_PPV_ARGS(raw_rtvs.put())), "Untracked RTV heap");
+      h.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+      check(device->CreateDescriptorHeap(&h, IID_PPV_ARGS(raw_dsvs.put())), "Untracked DSV heap");
+      raw_rtv = raw_rtvs->GetCPUDescriptorHandleForHeapStart();
+      raw_dsv = raw_dsvs->GetCPUDescriptorHandleForHeapStart();
+    }
+    ClearStatePipeline green(device.get(), false, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_D32_FLOAT);
+    Reference<ID3D12QueryHeap> occlusion, statistics;
+    const D3D12_QUERY_HEAP_DESC oh{D3D12_QUERY_HEAP_TYPE_OCCLUSION, 4, 0}, sh{D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, 2, 0};
+    check(device->CreateQueryHeap(&oh, IID_PPV_ARGS(occlusion.put())), "Overlapping occlusion queries");
+    check(device->CreateQueryHeap(&sh, IID_PPV_ARGS(statistics.put())), "Overlapping pipeline query");
+    const auto read_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = 512;
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    Reference<ID3D12Resource> query_results, pixels, other_pixels;
+    check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(query_results.put())),
+          "Query results");
+    const auto desc = textures[2]->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 bytes{};
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    buffer.Width = bytes;
+    check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(pixels.put())),
+          "Query PFD pixels");
+    buffer.Width = 2 * 256 * 64;
+    check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(other_pixels.put())),
+          "Restored target pixels");
+    std::uint64_t checked = 0;
+    std::vector<unsigned char> off_image;
+    for (UINT on = 0; on < 2; ++on) {
+      win::set_target_mask(on ? 1 : 0);
+      {
+        const win::OwnedWork unobserved;
+        device->CreateRenderTargetView(other_a.get(), nullptr, raw_rtv);
+        device->CreateRenderTargetView(other_b.get(), nullptr, {raw_rtv.ptr + stride});
+        device->CreateDepthStencilView(depth_a.get(), nullptr, raw_dsv);
+        device->CreateDepthStencilView(depth_b.get(), nullptr,
+                                       {raw_dsv.ptr + device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV)});
+      }
+      const float red[]{1, 0, 0, 1};
+      list->ClearRenderTargetView(raw_rtv, red, 0, nullptr);
+      list->ClearRenderTargetView({raw_rtv.ptr + stride}, red, 0, nullptr);
+      list->ClearDepthStencilView(raw_dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+      list->ClearDepthStencilView({raw_dsv.ptr + device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV)},
+                                  D3D12_CLEAR_FLAG_DEPTH, 0, 0, 0, nullptr);
+      const auto before = runtime::snapshot(key).stamps;
+      list->BeginQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2);
+      list->BeginQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2 + 1);
+      list->BeginQuery(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on);
+      generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+      list->OMSetRenderTargets(1, &raw_rtv, FALSE, &raw_dsv);
+      list->SetPipelineState(green.pipeline.get());
+      list->SetGraphicsRootSignature(green.root.get());
+      const UINT values[]{64, 64, 0, 0};
+      list->SetGraphicsRoot32BitConstants(0, 4, values, 0);
+      const D3D12_VIEWPORT vp{0, 0, 64, 64, 0, 1};
+      const D3D12_RECT scissor{0, 0, 64, 64};
+      list->RSSetViewports(1, &vp);
+      list->RSSetScissorRects(1, &scissor);
+      list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      // Legal immediate descriptor reuse. Native OM captured A; our later
+      // restoration must not bind newly written B through these old handles.
+      {
+        const win::OwnedWork unobserved;
+        device->CreateRenderTargetView(other_b.get(), nullptr, raw_rtv);
+        device->CreateDepthStencilView(depth_b.get(), nullptr, raw_dsv);
+      }
+      if (on) {
+        raw_rtvs.get()->Release();
+        *raw_rtvs.put() = nullptr;
+        raw_dsvs.get()->Release();
+        *raw_dsvs.put() = nullptr;
+      }  // Legal CPU descriptor heap retirement after OM.
+      list->EndQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2 + 1);
+      require(runtime::snapshot(key).stamps == before, "Inner EndQuery cannot drain while other queries remain");
+      list->EndQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2);
+      require(runtime::snapshot(key).stamps == before, "Occlusion End cannot drain active pipeline-statistics query");
+      list->EndQuery(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on);
+      std::printf("Query-aware PFD delivery enabled=%u: %llu -> %llu\n", on, before, runtime::snapshot(key).stamps);
+      require(runtime::snapshot(key).stamps == before + on, "Final EndQuery delivers exactly one deferred PFD image");
+      list->ResolveQueryData(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2, 2, query_results.get(), on * 16);
+      list->ResolveQueryData(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on, 1, query_results.get(),
+                             64 + on * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+      list->DrawInstanced(3, 1, 0, 0);  // No OM/PSO/root/viewport rebind; A and its DSV must survive.
+      submit();
+      reset();
+      // Separate transition-only recording reproduces the live rejected copy route.
+      const auto before_exit = runtime::snapshot(key).stamps;
+      transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      require(runtime::snapshot(key).stamps == before_exit, "Empty exit list remains ineligible for private copy");
+      D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+      src.pResource = textures[2].get();
+      src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      dst.pResource = pixels.get();
+      dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      dst.PlacedFootprint = footprint;
+      list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      for (UINT i = 0; i < 2; ++i) {
+        auto* target = i ? other_b.get() : other_a.get();
+        transition(list.get(), target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        src.pResource = target;
+        dst.pResource = other_pixels.get();
+        dst.PlacedFootprint = {UINT64{i} * 256 * 64, {DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, 256}};
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        transition(list.get(), target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      }
+      submit();
+      reset();
+      void* data{};
+      D3D12_RANGE range{0, 2 * 256 * 64}, none{};
+      check(other_pixels->Map(0, &range, &data), "Restored OM pixels");
+      for (UINT i = 0; i < 2; ++i)
+        for (UINT n = 0; n < 64 * 64; ++n) {
+          const auto* pixel = static_cast<unsigned char*>(data) + i * 256 * 64 + n * 4;
+          require(pixel[0] == (i ? 255 : 0) && pixel[1] == (i ? 0 : 255) && pixel[2] == 0 && pixel[3] == 255,
+                  "Current untracked RTV+DSV contents restored despite handle reuse");
+          ++checked;
+        }
+      other_pixels->Unmap(0, &none);
+      range = {0, static_cast<SIZE_T>(bytes)};
+      check(pixels->Map(0, &range, &data), "Deferred PFD pixels");
+      if (!on)
+        off_image.assign(static_cast<unsigned char*>(data), static_cast<unsigned char*>(data) + bytes);
+      if (on) {
+        const auto* image = static_cast<unsigned char*>(data);
+        const UINT width = a350 ? 806 : 768;
+        for (UINT y = 0; y < 1024; ++y)
+          for (UINT x = 0; x < display_width; ++x) {
+            const auto* pixel = image + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
+            if (x < width && y < 763) {
+              if (x < 16 || x >= width - 16 || y < 12)
+                require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Deferred camera patch black border");
+            } else {
+              require(std::memcmp(pixel, off_image.data() + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x, 4) == 0,
+                      "Deferred camera preserves exact OFF pixels outside rectangle (ND/gutter/trim)");
+            }
+            ++checked;
+          }
+        const auto* nose = image + SIZE_T{150} * footprint.Footprint.RowPitch + 4 * (width / 2);
+        require(nose[2] >= 49 && nose[2] <= 53, "Deferred PFD contains actual composed nose pixels");
+        const auto* tail = image + SIZE_T{650} * footprint.Footprint.RowPitch + 4 * (width / 2);
+        require(tail[2] >= 202 && tail[2] <= 206, "Deferred PFD contains actual composed tail pixels");
+      }
+      pixels->Unmap(0, &none);
+    }
+    void* data{};
+    const D3D12_RANGE range{0, 512}, none{};
+    check(query_results->Map(0, &range, &data), "Compare native query results");
+    std::array<UINT64, 4> samples{};
+    std::memcpy(samples.data(), data, 32);
+    require(samples[0] == UINT64{display_width} * 1024 && samples[1] == samples[0] && samples[2] == samples[0] && samples[3] == samples[0],
+            "Overlapping occlusion queries unchanged OFF versus ON");
+    D3D12_QUERY_DATA_PIPELINE_STATISTICS off{}, on{};
+    std::memcpy(&off, static_cast<unsigned char*>(data) + 64, sizeof(off));
+    std::memcpy(&on, static_cast<unsigned char*>(data) + 64 + sizeof(off), sizeof(on));
+    require(std::memcmp(&off, &on, sizeof(off)) == 0 && off.IAVertices == 3, "Pipeline statistics unchanged OFF versus ON");
+    query_results->Unmap(0, &none);
+    std::printf(
+        "PASS query fallback %s: overlap blocked, final End delivered, independent exit refused, raw RTV+DSV descriptor reuse restored; "
+        "query OFF=ON=%llu; %llu pixels\n",
+        warp ? "WARP" : "hardware", samples[0], checked);
+    win::set_target_mask(0);
+    list->Close();
+    return;
+  }
   win::set_target_mask(3);
+  Reference<ID3D12QueryHeap> private_copy_guard;
+  const D3D12_QUERY_HEAP_DESC private_guard_desc{D3D12_QUERY_HEAP_TYPE_OCCLUSION, 1, 0};
+  check(device->CreateQueryHeap(&private_guard_desc, IID_PPV_ARGS(private_copy_guard.put())), "Private-copy-only fixture query");
+  list->BeginQuery(private_copy_guard.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
   Reference<ID3D12GraphicsCommandList7> enhanced;
   check(list->QueryInterface(IID_PPV_ARGS(enhanced.put())), "Enhanced command list");
   const auto enhanced_transition = [&](ID3D12Resource* target, D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_LAYOUT after,
@@ -323,7 +528,7 @@ void native_case(bool warp, bool a350) {
   list->RSSetScissorRects(1, &lower);
   for (unsigned draw = 0; draw < 1000; ++draw)
     list->DrawInstanced(3, 1, 0, 0);
-  require(runtime::snapshot(key).stamps == 0, "Target switch supplies no barrier proof; repeated glyph draws stay deferred");
+  require(runtime::snapshot(key).stamps == 0, "Active query defers fallback; repeated glyph draws do not stamp");
   std::array<Reference<ID3D12Resource>, 2> readbacks;
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
   UINT64 bytes{};
@@ -365,10 +570,10 @@ void native_case(bool warp, bool a350) {
       barriers[0].Transition = {ordinary_target.get(), 0, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
       barriers.back().Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       barriers.back().Transition = {textures[2].get(), 0, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
-      const auto before = runtime::snapshot(key).stamps;
+      const auto before = successful_copies();
       list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
-      std::printf("7105-barrier selected PFD copies: %llu -> %llu\n", before, runtime::snapshot(key).stamps);
-      require(runtime::snapshot(key).stamps == before + 1, "Selected PFD near end of7105barriers receives exactly one copy");
+      std::printf("7105-barrier selected PFD copies: %llu -> %llu\n", before, successful_copies());
+      require(successful_copies() == before + 1, "Selected PFD near end of7105barriers receives exactly one copy");
       D3D12_TEXTURE_COPY_LOCATION ordinary_source{}, ordinary_destination{};
       ordinary_source.pResource = ordinary_target.get();
       ordinary_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -393,8 +598,10 @@ void native_case(bool warp, bool a350) {
     } else
       transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
+  list->EndQuery(private_copy_guard.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
   submit();
-  require(runtime::snapshot(key).stamps == 2, "One private patch per PFD: legacy and enhanced RT-exit boundaries");
+  require(successful_copies() == 2 && runtime::snapshot(key).stamps == 2,
+          "One private patch per PFD: legacy and enhanced RT-exit boundaries");
   ID3D12CommandList* replay[]{list.get()};
   queue->ExecuteCommandLists(1, replay);
   require(taxi_camera::drain_copy_queue(queue.get(), device.get()), "Recorded private-patch copies replay with stable buffers");
@@ -513,13 +720,12 @@ void native_case(bool warp, bool a350) {
   reset();
   generator.record(list.get(), ordinary_rtv, 64, 64, false, 0, 0);
   const auto cross_before = win::graphics_status();
-  const auto cross_stamps = runtime::snapshot(key).stamps;
+  const auto cross_copies = successful_copies();
   transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
   const auto cross_after = win::graphics_status();
-  std::printf("Cross-recording selected PFD copies: %llu -> %llu; pending matches: %llu -> %llu\n", cross_stamps,
-              runtime::snapshot(key).stamps, cross_before.selected_pending_matches, cross_after.selected_pending_matches);
-  require(runtime::snapshot(key).stamps == cross_stamps + 1 &&
-              cross_after.selected_pending_matches == cross_before.selected_pending_matches &&
+  std::printf("Cross-recording selected PFD copies: %llu -> %llu; pending matches: %llu -> %llu\n", cross_copies, successful_copies(),
+              cross_before.selected_pending_matches, cross_after.selected_pending_matches);
+  require(successful_copies() == cross_copies + 1 && cross_after.selected_pending_matches == cross_before.selected_pending_matches &&
               cross_after.selected_view_resolved == cross_before.selected_view_resolved + 1,
           "Safe cross-recording RT exit resolves unique observed typed view without pending draw");
   D3D12_TEXTURE_COPY_LOCATION cross_source{}, cross_destination{};
@@ -919,7 +1125,8 @@ void native_case(bool warp, bool a350) {
   generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == before_predicate, "Fresh draw is deferred until list boundary");
   submit();
-  require(runtime::snapshot(key).stamps == before_predicate, "Close without positive destination-state proof cannot copy");
+  require(runtime::snapshot(key).stamps == before_predicate + 1,
+          "Observed Reset recovers query-safe Close fallback without a guessed resource barrier");
   reset();
   win::set_target_mask(0);
   const auto stamps = runtime::snapshot(key).stamps;
@@ -975,7 +1182,8 @@ void native_case(bool warp, bool a350) {
             "Guide adjustment retains camera IDs, owner, scene and source resource generations");
   require(handoff.diagnostics().publications == publications_before, "Guide adjustment needs no new camera publication");
   win::set_target_mask(3);
-  const auto stamps_before_guides = runtime::snapshot(key).stamps;
+  const auto stamps_before_guides = successful_copies();
+  list->BeginQuery(private_copy_guard.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
   for (UINT side = 0; side < 2; ++side) {
     generator.record(list.get(), rtvs[side + 2], display_width, 1024, false, 0, 0);
     if (a350) {
@@ -995,8 +1203,9 @@ void native_case(bool warp, bool a350) {
     list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
     transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
+  list->EndQuery(private_copy_guard.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
   submit();
-  require(runtime::snapshot(key).stamps == stamps_before_guides + 2, "Both PFDs receive the adjusted private patch");
+  require(successful_copies() == stamps_before_guides + 2, "Both PFDs receive the adjusted private patch");
   // Independent working-pixel centres for the chosen normalized test inputs:
   // nose pair, upper L endpoints, outside corners, and inner L endpoints.
   constexpr std::array<std::array<double, 2>, 8> new_points{{{176.64, 86.70},
@@ -1060,6 +1269,74 @@ void native_case(bool warp, bool a350) {
   runtime::set_composition(key, profile.composition);
   win::set_target_mask(0);
   reset();
+  // Calibration is clear-only on the actual draw recording, so it remains
+  // available when its later RT exit is recorded on a separate barrier list.
+  win::set_calibration(3, 4096);
+  const auto calibration_before = win::graphics_status().calibration_clears;
+  const auto copies_before_calibration = runtime::snapshot(key).stamps;
+  const float calibration_background[]{.125f, .25f, .5f, 1};
+  for (UINT side = 0; side < 2; ++side) {
+    list->ClearRenderTargetView(rtvs[side + 2], calibration_background, 0, nullptr);
+    list->SetPipelineState(cleared.pipeline.get());
+    list->SetGraphicsRootSignature(cleared.root.get());
+    const UINT constants[]{64, 64, 0, 0};
+    list->SetGraphicsRoot32BitConstants(0, 4, constants, 0);
+    const float origin = a350 && side ? 838.f : 0.f;
+    const D3D12_VIEWPORT viewport{origin, 0, 1, 1, 0, 1};
+    const D3D12_RECT scissor{static_cast<LONG>(origin), 0, static_cast<LONG>(origin) + 1, 1};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->OMSetRenderTargets(1, &rtvs[side + 2], FALSE, nullptr);
+    list->DrawInstanced(3, 1, 0, 0);
+    if (!side) {
+      list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);
+      require(win::graphics_status().calibration_clears == calibration_before + 1, "Calibration clears at safe OM switch without RT exit");
+    }
+  }
+  submit();
+  require(win::graphics_status().calibration_clears == calibration_before + 2, "Calibration clears at safe Close without RT exit");
+  require(runtime::snapshot(key).stamps == copies_before_calibration, "Calibration does not restore application overlay Draw");
+  win::set_calibration(0, 4096);
+  reset();
+  for (UINT side = 0; side < 2; ++side) {
+    transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+    source.pResource = textures[side + 2].get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    destination.pResource = readbacks[side].get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  }
+  submit();
+  reset();
+  for (UINT side = 0; side < 2; ++side) {
+    void* mapped{};
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)}, none{};
+    check(readbacks[side]->Map(0, &range, &mapped), "Calibration pixels");
+    const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u;
+    for (UINT y = 0; y < 1024; ++y)
+      for (UINT x = 0; x < display_width; ++x) {
+        const auto* pixel = static_cast<unsigned char*>(mapped) + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
+        if (x >= left && x < left + width && y < 763) {
+          const bool blue = pixel[0] >= 4 && pixel[0] <= 6 && pixel[1] >= 40 && pixel[1] <= 42 && pixel[2] >= 96 && pixel[2] <= 98;
+          const bool green = pixel[0] >= 30 && pixel[0] <= 32 && pixel[1] >= 81 && pixel[1] <= 83 && pixel[2] >= 7 && pixel[2] <= 9;
+          const bool cyan = pixel[0] == 0 && pixel[1] >= 229 && pixel[1] <= 230 && pixel[2] == 255;
+          const bool yellow = pixel[0] == 255 && pixel[1] == 204 && pixel[2] == 0;
+          const bool white = pixel[0] == 255 && pixel[1] == 255 && pixel[2] == 255;
+          require(blue || green || cyan || yellow || white, "Calibration pattern reaches selected upper rectangle");
+        } else
+          require(
+              pixel[0] >= 31 && pixel[0] <= 32 && pixel[1] >= 63 && pixel[1] <= 64 && pixel[2] >= 127 && pixel[2] <= 128 && pixel[3] == 255,
+              "Calibration leaves lower trim, gutter, and other atlas side unchanged");
+        ++pixels;
+      }
+    readbacks[side]->Unmap(0, &none);
+  }
+  std::printf("Calibration OM/Close clears: %llu -> %llu; image copies unchanged\n", calibration_before,
+              win::graphics_status().calibration_clears);
   list->Close();
   runtime::manager().stop_source_tracking();
   handoff.stop_scene();
@@ -1091,16 +1368,18 @@ void native_case(bool warp, bool a350) {
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   try {
-    bool warp = false, a350 = false;
+    bool warp = false, a350 = false, query_fallback = false;
     for (int i = 1; i < argc; ++i) {
       if (std::wcscmp(argv[i], L"--warp") == 0)
         warp = true;
       else if (std::wcscmp(argv[i], L"--a350") == 0)
         a350 = true;
+      else if (std::wcscmp(argv[i], L"--query-fallback") == 0)
+        query_fallback = true;
       else
         return 2;
     }
-    native_case(warp, a350);
+    native_case(warp, a350, query_fallback);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL native graphics: %s\n", e.what());

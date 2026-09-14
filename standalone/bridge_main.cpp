@@ -311,18 +311,20 @@ DWORD run_impl() {
     for (UINT i = 0; i < status.candidate_count; ++i)
       status.candidates[i] = {inventory[i].id,     inventory[i].draws,  inventory[i].width,
                               inventory[i].height, inventory[i].levels, inventory[i].format};
-    const char* message = !connected                        ? "Waiting for Windows companion heartbeat."
-                          : !settings.enabled               ? "Camera service paused."
-                          : !aircraft_matches               ? "Waiting for a supported aircraft identity or profile switch."
-                          : cutoff.inhibited                ? "Above 60 knots: TAXI buttons commanded off."
-                          : failed                          ? scene.message.c_str()
-                          : !buttons.valid                  ? buttons.error
-                          : (!targets[0] || !targets[1])    ? "Detecting display textures for the selected aircraft profile."
-                          : !active                         ? "Ready. Use the aircraft's left or right TAXI button."
-                          : !requested || failed            ? scene.message.c_str()
-                          : progress.stalled()              ? "Capture paused: waiting for verified GPU state; camera views retained."
-                          : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD copy opportunity."
-                                                            : output.message;
+    const char* message = !connected                             ? "Waiting for Windows companion heartbeat."
+                          : !settings.enabled                    ? "Camera service paused."
+                          : !aircraft_matches                    ? "Waiting for a supported aircraft identity or profile switch."
+                          : cutoff.inhibited                     ? "Above 60 knots: TAXI buttons commanded off."
+                          : failed                               ? scene.message.c_str()
+                          : !buttons.valid                       ? buttons.error
+                          : (!targets[0] || !targets[1])         ? "Detecting display textures for the selected aircraft profile."
+                          : !active && settings.calibration_mask ? "Calibration requested on the selected display."
+                          : !active && !settings.follow_taxi     ? "Manual control selected. Enable a preview or TAXI buttons on Overview."
+                          : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
+                          : !requested || failed                 ? scene.message.c_str()
+                          : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
+                          : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
+                                                                 : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     if (mailbox.lock()) {
       mailbox.data()->status = status;
@@ -382,6 +384,33 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(output.state_skips), static_cast<unsigned long long>(boundaries.batch_refusals),
                     static_cast<unsigned long long>(boundaries.pass_refusals), graphics.copy_error);
       log_status(status, pfd_detail);
+      char scopes[896]{};
+      std::size_t used = 0;
+      for (unsigned i = 0; i < graphics.selected_exit_scopes.size(); ++i) {
+        if (!graphics.selected_exit_scopes[i])
+          continue;
+        const auto written = std::snprintf(scopes + used, sizeof(scopes) - used, "%s%u:%llu", used ? "," : "", i,
+                                           static_cast<unsigned long long>(graphics.selected_exit_scopes[i]));
+        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(scopes) - used)
+          break;
+        used += static_cast<std::size_t>(written);
+      }
+      char scope_detail[1280];
+      std::snprintf(scope_detail, sizeof(scope_detail),
+                    "PFD scope: flags=count [%s] base=%llu nonbase=%llu split=%llu calibration_clears=%llu "
+                    "follow_taxi=%u manual_mask=%u calibration_mask=%u",
+                    scopes, static_cast<unsigned long long>(graphics.selected_exit_base),
+                    static_cast<unsigned long long>(graphics.selected_exit_nonbase),
+                    static_cast<unsigned long long>(graphics.selected_exit_split),
+                    static_cast<unsigned long long>(graphics.calibration_clears), settings.follow_taxi, settings.manual_mask,
+                    settings.calibration_mask);
+      log_status(status, scope_detail);
+      char draw_detail[384];
+      std::snprintf(draw_detail, sizeof(draw_detail), "PFD guarded draw: attempts=%llu stamps=%llu query_refused=%llu state_refused=%llu",
+                    static_cast<unsigned long long>(graphics.fallback_attempts), static_cast<unsigned long long>(graphics.fallback_stamps),
+                    static_cast<unsigned long long>(graphics.fallback_query_refused),
+                    static_cast<unsigned long long>(graphics.fallback_state_refused));
+      log_status(status, draw_detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
         char identity_detail[640];

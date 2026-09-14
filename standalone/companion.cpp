@@ -518,7 +518,7 @@ void draw_page(HDC dc) {
     text(dc, L"RIGHT PFD", 635, 207, 315, 25, small, Muted);
     panel(dc, 244, 368, 766, 112);
     text(dc, L"Manual camera preview", 260, 381, 705, 29, heading);
-    text(dc, L"Using a preview turns off automatic TAXI-button control.", 260, 410, 705, 22, small, Muted);
+    text(dc, L"Manual preview and calibration turn off automatic TAXI-button control.", 260, 410, 705, 22, small, Muted);
     panel(dc, 244, 500, 766, 112);
     text(dc, L"Target calibration", 260, 507, 705, 29, heading);
     text(dc, L"Animated bars identify each screen before enabling a live feed.", 260, 581, 705, 23, small, Muted);

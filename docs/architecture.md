@@ -148,11 +148,16 @@ Source: [compositor](../src/camera_compositor_d3d12.hpp), [output buffer](../src
 
 Reference-guide positions are saved separately for each aircraft profile. The **Reference guides** settings page provides X/Y controls for the nose dots and the tail brackets’ upper, outside-corner and inner endpoints. Coordinates are percentages of the relevant camera pane: X starts at its left edge and Y at its top. The configured left marker is mirrored to the right. **Apply live** previews edits on subsequent composed camera frames without changing the camera mounts or recreating views; **Save changes** persists them. **Reset guide positions** restores only the selected profile’s shipped marker coordinates.
 
-## 6. Copy the result into the PFD
+## 6. Deliver the result to the PFD
 
-The bridge tracks drawing into each selected PFD texture. At a verified transition out of render-target state, it copies the prepared patch into the exact profile rectangle, then restores the state required by the simulator's original transition. It requires positive resource-state evidence for the applicable barrier model. A target change or command-list closure alone does not authorize the copy. The PFD draw and its verified exit may occur on different command lists; copying requires a current selected resource and verified typed-view information, alongside the same pass and recording checks.
+The bridge tracks drawing into each selected PFD texture and supports two delivery paths:
 
-All camera-image shader drawing occurs on Taxi Cam's private command list. Simulator command lists receive bounded texture copies and resource transitions; Taxi Cam does not change their graphics pipeline, root arguments, viewport or clipping rectangle, and does not add samples to application occlusion queries. The copy excludes the navigation area, central gutter and lower trim display.
+- **Texture copy:** at a verified transition out of render-target state, copy the prepared patch into the exact profile rectangle, then restore the state required by the simulator's original transition. This requires positive state evidence for the applicable barrier model, a current resource and typed view, and safe recording/pass state. A target change or command-list closure alone does not authorize a copy.
+- **Guarded draw:** use a verified PFD render target after native drawing has established its contents, while it has no intervening transition and the recording is outside a render pass and all paired GPU queries. Pending PFD updates can be delivered after the final query ends or at command-list closure. The bridge binds the selected PFD for this draw and restores the simulator's exact render-target/depth bindings, graphics pipeline, root arguments, viewport and clipping rectangle.
+
+Query tracking starts from an observed recording creation or successful native Reset. Unknown, mismatched or overflowing query scopes block camera drawing until a successful Reset. Timestamp queries do not open a paired scope. This prevents camera drawing from adding samples to the simulator's visibility and pipeline-statistics queries.
+
+Both paths exclude the navigation area, central gutter and lower trim display. Calibration uses bounded render-target clears at a verified PFD draw boundary; it does not depend on camera capture or shader drawing.
 
 | PFD region | Content |
 | --- | --- |

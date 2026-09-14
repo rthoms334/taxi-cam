@@ -40,9 +40,11 @@ SLOT(ID3D12GraphicsCommandList7, ExecuteBundle, 27);
 SLOT(ID3D12GraphicsCommandList7, ExecuteIndirect, 59);
 SLOT(ID3D12GraphicsCommandList7, SetPredication, 55);
 SLOT(ID3D12GraphicsCommandList7, DiscardResource, 51);
+SLOT(ID3D12GraphicsCommandList7, BeginQuery, 52);
+SLOT(ID3D12GraphicsCommandList7, EndQuery, 53);
 SLOT(ID3D12GraphicsCommandList7, BeginRenderPass, 68);
 SLOT(ID3D12GraphicsCommandList7, EndRenderPass, 69);
 SLOT(ID3D12GraphicsCommandList7, Barrier, 80);
 int main() {
-  std::puts("PASS native ABI: 40 vtable slots checked against pinned public Windows COM declarations.");
+  std::puts("PASS native ABI: 42 vtable slots checked against pinned public Windows COM declarations.");
 }

@@ -12,6 +12,7 @@
 #include "../src/write_budget.hpp"
 #include "native_hooks.hpp"
 #include "root_layout.hpp"
+#include "query_scope.hpp"
 
 namespace taxi_camera::standalone {
 namespace {
@@ -52,6 +53,20 @@ struct List : Metadata {
   PfdGraphicsState graphics;
   std::array<View, 8> targets{};
   std::array<View, 2> pending_pfds{};
+  std::array<bool, 2> pending_rt{};
+  QueryScope queries;
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> raw_rtvs{};
+  D3D12_CPU_DESCRIPTOR_HANDLE raw_dsv{};
+  UINT raw_rtv_count{};
+  bool raw_om_known = false, raw_has_dsv = false;
+  ID3D12DescriptorHeap* snapshot_rtvs{};
+  ID3D12DescriptorHeap* snapshot_dsvs{};
+  ~List() override {
+    if (snapshot_rtvs)
+      snapshot_rtvs->Release();
+    if (snapshot_dsvs)
+      snapshot_dsvs->Release();
+  }
   UINT count{};
   DXGI_FORMAT depth = DXGI_FORMAT_UNKNOWN;
   bool depth_known = true;
@@ -114,6 +129,10 @@ struct Registry {
   std::atomic<std::uint64_t> selected_draws{}, selected_rt_metadata{}, selected_rt_callbacks{}, selected_pending_matches{};
   std::atomic<std::uint64_t> selected_view_resolved{}, selected_view_rejected{}, copy_attempts{}, copy_rejected{};
   std::atomic<const char*> copy_error{"not_attempted"};
+  std::array<std::atomic<std::uint64_t>, 32> selected_exit_scopes{};
+  std::atomic<std::uint64_t> calibration_clears{};
+  std::atomic<std::uint64_t> selected_exit_base{}, selected_exit_nonbase{}, selected_exit_split{};
+  std::atomic<std::uint64_t> fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
   WriteBudget calibration_budget;
 };
 Registry& registry() {
@@ -180,7 +199,7 @@ bool maybe_selected(ID3D12Resource* native) noexcept {
   return native && (((mask & 1) && r.selected_native[0].load(std::memory_order_relaxed) == native) ||
                     ((mask & 2) && r.selected_native[1].load(std::memory_order_relaxed) == native));
 }
-void selected_metadata(ID3D12Resource* native) noexcept {
+void selected_metadata(ID3D12Resource* native, std::uint32_t scope, bool base, bool split) noexcept {
   if (!maybe_selected(native))
     return;
   auto& r = registry();
@@ -190,6 +209,10 @@ void selected_metadata(ID3D12Resource* native) noexcept {
     if (((r.active_mask | r.calibration_mask) & (1u << side)) && r.selected_resources[side] && r.selected_resources[side]->alive &&
         r.selected_resources[side]->native == native) {
       ++r.selected_rt_metadata;
+      ++r.selected_exit_scopes[scope & 31u];
+      ++(base ? r.selected_exit_base : r.selected_exit_nonbase);
+      if (split)
+        ++r.selected_exit_split;
       return;
     }
 }
@@ -287,7 +310,7 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
   const auto it = r.lists.find(p);
   return it != r.lists.end() && it->second->alive ? it->second : nullptr;
 }
-void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t) noexcept;
+void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = true) noexcept;
 void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   const OwnedWork guard;
@@ -299,7 +322,11 @@ void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, 
   copy_pending_pfd(list, id, b.pResource, list);
   runtime::manager().record_render_target_before_enhanced_transition(list, b.pResource, true, id);
 }
-void observe_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_BARRIER& b, std::uint32_t) noexcept {
+void observe_legacy(void*,
+                    ID3D12GraphicsCommandList* list,
+                    std::uint64_t id,
+                    const D3D12_RESOURCE_BARRIER& b,
+                    std::uint32_t scope) noexcept {
   const OwnedWork guard;
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
     if (auto item = find_list(list); item && item->id == id)
@@ -308,17 +335,38 @@ void observe_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, co
           item->pfd_transition = true;
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET &&
       b.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET)
-    selected_metadata(b.Transition.pResource);
+    selected_metadata(b.Transition.pResource, scope,
+                      b.Transition.Subresource == 0 || b.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                      (b.Flags & (D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY | D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)) != 0);
+  if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
+    if (auto item = find_list(list); item && item->id == id)
+      for (unsigned side = 0; side < 2; ++side)
+        if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.Transition.pResource)
+          item->pending_rt[side] = false;
   runtime::manager().observe_source_legacy(list, id, b);
 }
-void observe_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b, std::uint32_t) noexcept {
+void observe_enhanced(void*,
+                      ID3D12GraphicsCommandList7* list,
+                      std::uint64_t id,
+                      const D3D12_TEXTURE_BARRIER& b,
+                      std::uint32_t scope) noexcept {
   const OwnedWork guard;
   if (auto item = find_list(list); item && item->id == id)
     for (UINT i = 0; i < item->count; ++i)
       if (item->targets[i].resource && item->targets[i].resource->native == b.pResource)
         item->pfd_transition = true;
   if (b.LayoutBefore == D3D12_BARRIER_LAYOUT_RENDER_TARGET && b.LayoutAfter != D3D12_BARRIER_LAYOUT_RENDER_TARGET)
-    selected_metadata(b.pResource);
+    selected_metadata(b.pResource, scope,
+                      !b.Subresources.NumMipLevels
+                          ? b.Subresources.IndexOrFirstMipLevel == 0 || b.Subresources.IndexOrFirstMipLevel == UINT_MAX
+                          : b.Subresources.IndexOrFirstMipLevel == 0 && b.Subresources.NumMipLevels == 1 &&
+                                b.Subresources.FirstArraySlice == 0 && b.Subresources.NumArraySlices == 1 &&
+                                b.Subresources.FirstPlane == 0 && b.Subresources.NumPlanes == 1,
+                      ((b.SyncBefore | b.SyncAfter) & D3D12_BARRIER_SYNC_SPLIT) != 0);
+  if (auto item = find_list(list); item && item->id == id)
+    for (unsigned side = 0; side < 2; ++side)
+      if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.pResource)
+        item->pending_rt[side] = false;
   runtime::manager().observe_source_enhanced(list, id, b);
 }
 void copy_resource(void*,
@@ -352,6 +400,7 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
     flush_pfd(native, id);
   else
     list->pending_pfds = {};
+  list->pending_rt = {};
   list->pfd_dirty = false;
   const bool scoped =
       (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationSplitBarrier | boundary::InvalidationAliasOrDiscard)) == 0;
@@ -402,9 +451,8 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   list->pfd_dirty = allowed && list->count == 1 && list->depth_known;
   list->pfd_transition = false;
 }
-// A target switch or Close supplies no resource-state proof. Retain only the
-// selected identities; the exact native RT-exit callback below admits a copy.
-void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
+// Stage only actual typed RTVs established by a nonzero native draw.
+void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   auto list = find_list(native);
   if (!registry().ready || !list || list->id != id || !list->ready || !list->pfd_dirty)
     return;
@@ -420,8 +468,93 @@ void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
                                  view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
     return;
   for (unsigned side = 0; side < 2; ++side)
-    if (r.routes.targets[side] == view.resource->id && ((r.active_mask | r.calibration_mask) & (1u << side)))
+    if (r.routes.targets[side] == view.resource->id && ((r.active_mask | r.calibration_mask) & (1u << side))) {
       list->pending_pfds[side] = view;
+      list->pending_rt[side] = !list->pfd_transition && list->raw_om_known && list->snapshot_rtvs;
+      D3D12_CPU_DESCRIPTOR_HANDLE retained{};
+      if (list->raw_om_known && list->snapshot_rtvs) {
+        retained = {list->snapshot_rtvs->GetCPUDescriptorHandleForHeapStart().ptr + SIZE_T{8 + side} * r.rtv_stride};
+        r.device->CopyDescriptorsSimple(1, retained, list->raw_rtvs[0], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+      }
+      // A nonzero native draw established this bound RTV as render-target data.
+      // Clear-only calibration needs no guessed legacy/enhanced transition and
+      // changes no graphics bindings. An intervening transition or unsafe pass
+      // still refuses; calibration changes no graphics or query state.
+      const auto current = r.rtvs.find(view.rtv);
+      if ((r.calibration_mask & (1u << side)) && retained.ptr && !list->pfd_transition &&
+          boundary::recording_allows_injection(native, id) && current != r.rtvs.end() && current->second.resource == view.resource &&
+          current->second.format == view.format && !current->second.mip && r.calibration_budget.try_acquire(0, GetTickCount64())) {
+        const auto area = profiles::display_rect(*r.profile, side);
+        const boundary::ScopedBypass bypass;
+        if (record_calibration(native, retained, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16, area.left))
+          ++r.calibration_clears;
+      }
+    }
+}
+void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
+  auto list = find_list(native);
+  if (!registry().ready || !list || list->id != id || !list->ready)
+    return;
+  bool pending = false;
+  for (unsigned side = 0; side < 2; ++side)
+    pending |= list->pending_rt[side] && bool(list->pending_pfds[side].resource);
+  if (!pending)
+    return;
+  auto& r = registry();
+  if (!list->queries.known_empty()) {
+    ++r.fallback_query_refused;
+    return;
+  }
+  if (!boundary::recording_allows_injection(native, id) || !list->raw_om_known || !list->graphics.complete()) {
+    ++r.fallback_state_refused;
+    return;
+  }
+  const std::lock_guard lock(r.mutex);
+  const auto root = r.roots.find(list->graphics.root());
+  if (root == r.roots.end() || !root->second->alive || root->second->id != list->graphics.layout_generation()) {
+    ++r.fallback_state_refused;
+    return;
+  }
+  for (unsigned side = 0; side < 2; ++side) {
+    const auto view = list->pending_pfds[side];
+    if (!list->pending_rt[side] || !view.resource || !view.resource->alive || !view.rtv || view.mip || !(r.active_mask & (1u << side)) ||
+        (r.calibration_mask & (1u << side)) || r.routes.targets[side] != view.resource->id)
+      continue;
+    const auto current = r.rtvs.find(view.rtv);
+    if (current == r.rtvs.end() || current->second.resource != view.resource || current->second.format != view.format ||
+        current->second.mip || std::find(TypedFormats.begin(), TypedFormats.end(), view.format) == TypedFormats.end() ||
+        !profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                                   view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format))) {
+      list->pending_rt[side] = false;
+      ++r.fallback_state_refused;
+      continue;
+    }
+    const auto area = profiles::display_rect(*r.profile, side), content = profiles::display_content_rect(*r.profile, side);
+    const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
+                                 static_cast<LONG>(area.bottom)};
+    const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
+                           static_cast<LONG>(content.bottom)};
+    const boundary::ScopedBypass bypass;
+    const D3D12_CPU_DESCRIPTOR_HANDLE target{list->snapshot_rtvs->GetCPUDescriptorHandleForHeapStart().ptr +
+                                             SIZE_T{8 + side} * r.rtv_stride};
+    native->OMSetRenderTargets(1, &target, FALSE, nullptr);
+    ++r.fallback_attempts;
+    const bool stamped = runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
+                                        view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner);
+    // Restore the CURRENT raw OM bindings, including valid descriptors that
+    // predate tracking. Never replay the bindings from when the PFD was queued.
+    native->OMSetRenderTargets(list->raw_rtv_count, list->raw_rtvs.data(), FALSE, list->raw_has_dsv ? &list->raw_dsv : nullptr);
+    if (stamped) {
+      ++r.fallback_stamps;
+      list->pending_rt[side] = false;
+      list->pending_pfds[side] = {};
+    }
+  }
+}
+void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool draw_fallback) noexcept {
+  stage_pfd(native, id);
+  if (draw_fallback)
+    drain_pfds(native, id);
 }
 UINT selected_legacy_targets(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, ID3D12Resource** targets, UINT capacity) noexcept {
   if (!targets || capacity < 2 || !registry().ready)
@@ -448,7 +581,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
                       ID3D12GraphicsCommandList7* enhanced) noexcept {
   if (!maybe_selected(target))
     return;
-  flush_pfd(native, id);
+  flush_pfd(native, id, false);
   auto list = find_list(native);
   if (!registry().ready || !list || list->id != id || !list->ready || !boundary::recording_allows_injection(native, id))
     return;
@@ -457,11 +590,12 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
   for (auto& view : list->pending_pfds)
     if (view.resource && view.resource->native == target) {
       pending = view;
+      list->pending_rt[static_cast<unsigned>(&view - list->pending_pfds.data())] = false;
       view = {};
       break;
     }
   View view;
-  bool selected = false, calibrate = false;
+  bool selected = false;
   profiles::DisplayRect area{}, content{};
   {
     const std::lock_guard lock(r.mutex);
@@ -501,13 +635,9 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     ++r.selected_view_resolved;
     area = profiles::display_rect(*r.profile, side);
     content = profiles::display_content_rect(*r.profile, side);
-    calibrate = view.rtv && r.routes.matches(item->id, r.calibration_mask) && r.calibration_budget.try_acquire(0, GetTickCount64());
     selected = r.routes.matches(item->id, r.active_mask);
   }
-  if (calibrate) {
-    record_calibration(native, {view.rtv}, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16, area.left);
-    return;
-  }
+  // Calibration is delivered only from the retained descriptor snapshot in stage_pfd.
   if (!selected)
     return;
   const boundary::ScopedBypass bypass;
@@ -535,6 +665,8 @@ void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noex
     item->targets = {};
     item->count = 0;
     item->depth_known = false;
+    item->raw_om_known = false;
+    item->pending_rt = {};
   }
 }
 const boundary::Callbacks Boundaries{nullptr,          before_legacy, before_enhanced, observe_legacy,
@@ -558,6 +690,8 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     item->id = ++r.next_id;
     item->ready = observed;
     item->graphics.reset(item->recording, observed);
+    item->queries.reset(observed);
+    item->raw_om_known = observed;
     r.lists[native] = item;
   }
   const auto hooked = boundary::register_list(native, item->id, Boundaries);
@@ -850,11 +984,18 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   if (item) {
     item->pfd_dirty = false;
     item->pending_pfds = {};
+    item->pending_rt = {};
+    item->raw_rtvs = {};
+    item->raw_dsv = {};
+    item->raw_rtv_count = 0;
+    item->raw_has_dsv = false;
     item->targets = {};
     item->count = 0;
     item->depth = DXGI_FORMAT_UNKNOWN;
     item->depth_known = true;
     item->ready = hr == S_OK && item->recording < UINT64_MAX;
+    item->queries.reset(item->ready);
+    item->raw_om_known = item->ready;
     if (item->ready) {
       item->graphics.reset(++item->recording, true);
       item->graphics.bind_pipeline(pso);
@@ -878,6 +1019,12 @@ struct ClearState {
     // switch, nor restore the old pipeline over the caller's supplied PSO.
     l.pfd_dirty = false;
     l.pending_pfds = {};
+    l.pending_rt = {};
+    l.raw_rtvs = {};
+    l.raw_dsv = {};
+    l.raw_rtv_count = 0;
+    l.raw_has_dsv = false;
+    l.raw_om_known = l.ready;
     l.pfd_transition = false;
     l.targets = {};
     l.count = 0;
@@ -937,14 +1084,12 @@ struct Scissors {
   static void apply(List& l, UINT n, const D3D12_RECT* p) { l.graphics.scissors(0, n, p); }
 };
 struct Targets {
-  static void before(List& l, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*) {
-    flush_pfd(l.native, l.id);
-  }
-  static void apply(List& l,
-                    UINT count,
-                    const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
-                    BOOL contiguous,
-                    const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+  static void record(List& l,
+                     UINT count,
+                     const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
+                     BOOL contiguous,
+                     const D3D12_CPU_DESCRIPTOR_HANDLE* depth,
+                     bool snapshots) {
     auto& r = registry();
     const std::lock_guard lock(r.mutex);
     l.pfd_dirty = false;
@@ -953,6 +1098,11 @@ struct Targets {
     l.count = 0;
     l.depth = DXGI_FORMAT_UNKNOWN;
     l.depth_known = depth == nullptr;
+    l.raw_om_known = false;
+    l.raw_rtvs = {};
+    l.raw_rtv_count = 0;
+    l.raw_has_dsv = depth != nullptr;
+    l.raw_dsv = {};
     if (depth) {
       const auto found = r.dsvs.find(depth->ptr);
       if (found != r.dsvs.end()) {
@@ -960,18 +1110,62 @@ struct Targets {
         l.depth_known = true;
       }
     }
-    if (count > 8 || (count && !handles))
+    if (count > 8 || (count && !handles) || (contiguous && count && handles[0].ptr > SIZE_MAX - SIZE_T{count - 1} * r.rtv_stride))
       return;
+    bool relevant = false;
+    for (unsigned side = 0; side < 2; ++side)
+      relevant |= l.pending_rt[side];
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> input{};
     l.count = count;
     for (UINT i = 0; i < count; ++i) {
       const auto handle = contiguous ? handles[0].ptr + SIZE_T{i} * r.rtv_stride : handles[i].ptr;
+      if (!handle)
+        return;
+      input[i] = {handle};
       const auto it = r.rtvs.find(handle);
       if (it != r.rtvs.end()) {
         l.targets[i] = it->second;
         l.targets[i].rtv = handle;
+        if (it->second.resource && r.routes.matches(it->second.resource->id, r.active_mask | r.calibration_mask))
+          relevant = true;
       }
     }
+    if (!snapshots || !relevant)
+      return;
+    // Non-shader-visible input descriptors may be reused immediately after the
+    // native OM call. Snapshot their contents BEFORE forwarding, never retain
+    // only their borrowed CPU handle values for a later query-end restoration.
+    if (!l.snapshot_rtvs) {
+      D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 10, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+      if (FAILED(r.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&l.snapshot_rtvs))))
+        return;
+    }
+    if (!l.snapshot_dsvs) {
+      D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+      if (FAILED(r.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&l.snapshot_dsvs))))
+        return;
+    }
+    const auto base = l.snapshot_rtvs->GetCPUDescriptorHandleForHeapStart();
+    for (UINT i = 0; i < count; ++i) {
+      l.raw_rtvs[i] = {base.ptr + SIZE_T{i} * r.rtv_stride};
+      r.device->CopyDescriptorsSimple(1, l.raw_rtvs[i], input[i], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    }
+    if (depth) {
+      l.raw_dsv = l.snapshot_dsvs->GetCPUDescriptorHandleForHeapStart();
+      r.device->CopyDescriptorsSimple(1, l.raw_dsv, *depth, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    }
+    l.raw_rtv_count = count;
+    l.raw_om_known = true;
   }
+  static void before(List& l,
+                     UINT count,
+                     const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
+                     BOOL contiguous,
+                     const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+    flush_pfd(l.native, l.id);
+    record(l, count, handles, contiguous, depth, true);
+  }
+  static void apply(List&, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*) {}
 };
 void pass_targets(void*,
                   ID3D12GraphicsCommandList* native,
@@ -982,7 +1176,9 @@ void pass_targets(void*,
   auto item = find_list(native);
   if (!item || item->id != id)
     return;
-  flush_pfd(native, id);
+  item->queries.invalidate();
+  item->pending_rt = {};
+  flush_pfd(native, id, false);
   if (count > 8 || (count && !targets)) {
     item->pfd_dirty = false;
     item->targets = {};
@@ -993,8 +1189,23 @@ void pass_targets(void*,
   std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> handles{};
   for (UINT i = 0; i < count; ++i)
     handles[i] = targets[i].cpuDescriptor;
-  Targets::apply(*item, count, handles.data(), FALSE, depth ? &depth->cpuDescriptor : nullptr);
+  item->queries.invalidate();
+  item->pending_rt = {};
+  Targets::record(*item, count, handles.data(), FALSE, depth ? &depth->cpuDescriptor : nullptr, false);
 }
+struct QueryBegin {
+  static void before(List& l, ID3D12QueryHeap* heap, D3D12_QUERY_TYPE type, UINT index) {
+    l.queries.begin(reinterpret_cast<std::uint64_t>(heap), static_cast<std::uint32_t>(type), index);
+  }
+  static void apply(List&, ID3D12QueryHeap*, D3D12_QUERY_TYPE, UINT) {}
+};
+struct QueryEnd {
+  static void apply(List& l, ID3D12QueryHeap* heap, D3D12_QUERY_TYPE type, UINT index) {
+    l.queries.end(reinterpret_cast<std::uint64_t>(heap), static_cast<std::uint32_t>(type), index);
+    if (l.queries.known_empty())
+      drain_pfds(l.native, l.id);
+  }
+};
 struct Unsupported {
   template <class... Args>
   static void apply(List& l, Args...) {
@@ -1087,6 +1298,8 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   ok &= STATE(27, ExecuteBundle, Unsupported)::install(list, active);
   ok &= STATE(59, ExecuteIndirect, Unsupported)::install(list, active);
   ok &= STATE(55, SetPredication, Predication)::install(list, active);
+  ok &= STATE(52, BeginQuery, QueryBegin)::install(list, active);
+  ok &= STATE(53, EndQuery, QueryEnd)::install(list, active);
   ok &= STATE(51, DiscardResource, Unsupported)::install(list, active);
   return ok;
 }
@@ -1183,23 +1396,34 @@ bool initialize_graphics() noexcept {
 GraphicsStatus graphics_status() noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  return {r.ready,
-          r.key,
-          r.resources.size(),
-          r.lists.size(),
-          r.draws,
-          r.failures,
-          r.clear_states,
-          r.error,
-          r.selected_draws,
-          r.selected_rt_metadata,
-          r.selected_rt_callbacks,
-          r.selected_pending_matches,
-          r.selected_view_resolved,
-          r.selected_view_rejected,
-          r.copy_attempts,
-          r.copy_rejected,
-          r.copy_error};
+  GraphicsStatus result{r.ready,
+                        r.key,
+                        r.resources.size(),
+                        r.lists.size(),
+                        r.draws,
+                        r.failures,
+                        r.clear_states,
+                        r.error,
+                        r.selected_draws,
+                        r.selected_rt_metadata,
+                        r.selected_rt_callbacks,
+                        r.selected_pending_matches,
+                        r.selected_view_resolved,
+                        r.selected_view_rejected,
+                        r.copy_attempts,
+                        r.copy_rejected,
+                        r.copy_error};
+  for (unsigned i = 0; i < result.selected_exit_scopes.size(); ++i)
+    result.selected_exit_scopes[i] = r.selected_exit_scopes[i].load(std::memory_order_relaxed);
+  result.calibration_clears = r.calibration_clears.load(std::memory_order_relaxed);
+  result.selected_exit_base = r.selected_exit_base.load(std::memory_order_relaxed);
+  result.selected_exit_nonbase = r.selected_exit_nonbase.load(std::memory_order_relaxed);
+  result.selected_exit_split = r.selected_exit_split.load(std::memory_order_relaxed);
+  result.fallback_attempts = r.fallback_attempts.load();
+  result.fallback_stamps = r.fallback_stamps.load();
+  result.fallback_query_refused = r.fallback_query_refused.load();
+  result.fallback_state_refused = r.fallback_state_refused.load();
+  return result;
 }
 std::vector<PfdTargetObservation> pfd_inventory() {
   auto& r = registry();
