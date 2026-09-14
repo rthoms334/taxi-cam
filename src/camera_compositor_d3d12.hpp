@@ -203,8 +203,8 @@ class CameraCompositorD3D12 {
               ground_speed_,
               ground_speed_valid_ ? 1u : 0u,
               composition_};
-    static_assert(sizeof(display) == 23 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 23, &display, 0);
+    static_assert(sizeof(display) == 29 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 29, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -405,7 +405,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 23;
+    parameters[1].Constants.Num32BitValues = 29;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -472,22 +472,30 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float NoseDotX; float NoseDotY; float TailCornerX; float TailCornerY;
  float TailUpperX; float TailUpperY; float TailInnerX; float TailInnerY;
  float GuideRed; float GuideGreen; float GuideBlue;
- float SpeedRed; float SpeedGreen; float SpeedBlue; };
+ float SpeedRed; float SpeedGreen; float SpeedBlue;
+ float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight; };
 bool glyph_pixel(float2 position, float2 origin, uint glyph) {
   int2 cell = int2(floor((position - origin) / 4));
   return all(cell >= 0) && cell.x < 3 && cell.y < 5 && ((glyph >> (cell.y * 3 + cell.x)) & 1u) != 0;
 }
+uint ground_speed_digits() {
+  return GroundSpeedValid == 0 ? 2 : GroundSpeed >= 100 ? 3 : GroundSpeed >= 10 ? 2 : 1;
+}
+float2 ground_speed_extent() {
+  return float2(max(SpeedMinimumWidth, SpeedPaddingX * 2 + 40 + 16 * ground_speed_digits()), max(SpeedMinimumHeight, SpeedPaddingY * 2 + 20));
+}
 float4 ground_speed_pixel(float2 position) {
-  if (glyph_pixel(position, float2(8, 12), 31567u) || glyph_pixel(position, float2(24, 12), 31183u)) return float4(1, 1, 1, 1);
+  position -= float2(SpeedPaddingX, SpeedPaddingY);
+  if (glyph_pixel(position, float2(0, 0), 31567u) || glyph_pixel(position, float2(16, 0), 31183u)) return float4(1, 1, 1, 1);
   static const uint digits[10] = {31599u,29850u,29671u,31207u,18925u,31183u,31695u,9383u,31727u,31215u};
   bool lit = false;
   if (GroundSpeedValid == 0) {
-    lit = glyph_pixel(position, float2(52, 12), 448u) || glyph_pixel(position, float2(68, 12), 448u);
+    lit = glyph_pixel(position, float2(44, 0), 448u) || glyph_pixel(position, float2(60, 0), 448u);
   } else {
-    uint count = GroundSpeed >= 100 ? 3 : GroundSpeed >= 10 ? 2 : 1;
+    uint count = ground_speed_digits();
     uint divisor = count == 3 ? 100 : count == 2 ? 10 : 1;
     for (uint n = 0; n < count; ++n) {
-      lit = lit || glyph_pixel(position, float2(52 + 16 * n, 12), digits[(GroundSpeed / divisor) % 10]);
+      lit = lit || glyph_pixel(position, float2(44 + 16 * n, 0), digits[(GroundSpeed / divisor) % 10]);
       divisor /= 10;
     }
   }
@@ -524,7 +532,8 @@ float4 vs_main(uint id : SV_VertexID) : SV_Position {
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
-  if (position.x < 140 && position.y < 48) return ground_speed_pixel(position.xy);
+  float2 speed_position = position.xy - float2(SpeedLeft, SpeedTop);
+  if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
   if (position.y >= DividerTop && position.y < DividerBottom) return float4(0, 0, 0, 1);
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {

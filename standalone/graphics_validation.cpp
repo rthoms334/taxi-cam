@@ -255,6 +255,24 @@ void native_case(bool warp, bool a350) {
           require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Black divider");
         if (a350 && !camera_region && y < 763)
           require(pixel[2] >= 50 && pixel[2] <= 52, "A350 navigation half preserved");
+        if (!a350 && local_x == 20 && y == 46)
+          require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "A380 retains its full-height GS panel");
+        if (!a350 && local_x == 20 && y == 50)
+          require(pixel[2] >= 50 && pixel[2] <= 52, "A380 camera below GS panel");
+        if (a350 && camera_region) {
+          const auto working_x = static_cast<int>((local_x + .5) * 768 / region_width);
+          // Default unavailable GS renders "--" in an inset, padded panel.
+          // Surrounding pixels must continue to show the nose camera on both sides.
+          const bool camera_margin = (working_x == 0 && y == 0) || (working_x == 4 && y == 30) ||
+                                     (working_x == 40 && y == 4) || (working_x == 108 && y == 30) ||
+                                     (working_x == 40 && y == 52);
+          if (camera_margin)
+            require(pixel[2] >= 50 && pixel[2] <= 52, "Camera image around inset GS panel");
+          if (working_x == 20 && y == 16)
+            require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "GS panel internal padding");
+          if (working_x == 26 && y == 21)
+            require(pixel[0] > 250 && pixel[1] > 250 && pixel[2] > 250, "GS label moves with its padded panel");
+        }
         // Nose dot verifies profile-dependent overlay colour reaches the GPU.
         if (camera_region && local_x == static_cast<int>(region_width * .14) && y == 122)
           require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),
