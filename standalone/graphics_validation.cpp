@@ -16,7 +16,8 @@ struct ClearStatePipeline {
   explicit ClearStatePipeline(ID3D12Device* device,
                               bool descriptor_case = false,
                               DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM,
-                              DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN) {
+                              DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
+                              bool gray_case = false) {
     // Match the gradient's root layout, but make pipeline loss visible as
     // different GPU pixels rather than relying only on intercepted-call counts.
     D3D12_ROOT_PARAMETER parameters[4]{};
@@ -49,15 +50,20 @@ Texture2D<float4> Texture : register(t0);
 SamplerState Sample : register(s0);
 cbuffer Colour : register(b1) { float4 Tint; };
 #endif
-float4 ps_main() : SV_Target {
+float4 ps_main(float4 position : SV_Position) : SV_Target {
   float4 value = float4(Mode != 0 ? 1 : 0, Width == 64 && Height == 64 ? 1 : 0, Frame != 0 ? 1 : 0, 1);
 #ifdef DESCRIPTOR_CASE
+#ifdef GRAY_CASE
+  float2 uv = frac(position.xy / float2(7,9));
+  value = Texture.SampleLevel(Sample, uv, Frame) * Tint;
+#else
   value *= Texture.SampleLevel(Sample, float2(.5,.5), 0) * Tint;
+#endif
 #endif
   return value;
 }
 )";
-    const D3D_SHADER_MACRO macros[]{{"DESCRIPTOR_CASE", "1"}, {nullptr, nullptr}};
+    const D3D_SHADER_MACRO macros[]{{"DESCRIPTOR_CASE", "1"}, {gray_case ? "GRAY_CASE" : nullptr, "1"}, {nullptr, nullptr}};
     check(D3DCompile(shader, sizeof(shader) - 1, "clear_state_pipeline", descriptor_case ? macros : nullptr, nullptr, "vs_main", "vs_5_0",
                      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, vertex.put(), nullptr),
           "Compile ClearState vertex shader");
@@ -74,6 +80,11 @@ float4 ps_main() : SV_Target {
     blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
     blend.LogicOp = D3D12_LOGIC_OP_NOOP;
     blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (gray_case) {
+      blend.BlendEnable = TRUE;
+      blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+      blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    }
     desc.SampleMask = UINT_MAX;
     desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -419,7 +430,243 @@ void active_profile_switch_case(bool warp) {
       warp ? "WARP" : "hardware", checked_pixels, debug_enabled, errors);
 }
 
-void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy) {
+// Exercise actual Draw fallback on a fresh ordinary recording, then a native
+// alpha-blended gray texture draw with every binding left untouched. Both typed
+// views of a typeless SRV/RTV and all mip levels carry non-endpoint values.
+void textured_gray_fallback(ID3D12Device* device,
+                            ID3D12CommandQueue* queue,
+                            ID3D12CommandAllocator* allocator,
+                            ID3D12GraphicsCommandList* list,
+                            std::uint64_t key,
+                            std::uint64_t other_id,
+                            bool warp) {
+  using namespace taxi_camera;
+  const auto& profile = profiles::A359;
+  win::set_target_mask(0);
+  win::set_aircraft_profile(profile.id);
+  Reference<ID3D12Resource> target, sampled, tint, readback;
+  auto target_desc = texture_description(profile.width, profile.height, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+  target_desc.MipLevels = 4;
+  create_texture(device, target_desc, target.put());
+  auto source_desc = texture_description(16, 16, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+  source_desc.MipLevels = 4;
+  create_texture(device, source_desc, sampled.put());
+  std::uint64_t target_id = 0;
+  for (const auto& c : win::pfd_inventory())
+    if (c.levels == 4)
+      target_id = c.id;
+  require(target_id && win::assign_targets(target_id, other_id), "Select typeless multi-mip gray fixture PFD");
+  Reference<ID3D12DescriptorHeap> rtvs, srvs, samplers;
+  D3D12_DESCRIPTOR_HEAP_DESC heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 12, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+  check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(rtvs.put())), "Gray RTV heap");
+  heap_desc = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+  check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(srvs.put())), "Gray SRV heap");
+  heap_desc = {D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+  check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(samplers.put())), "Gray sampler heap");
+  const auto rtv_base = rtvs->GetCPUDescriptorHandleForHeapStart();
+  const auto rtv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  const auto rtv = [&](UINT index) { return D3D12_CPU_DESCRIPTOR_HANDLE{rtv_base.ptr + SIZE_T{index} * rtv_stride}; };
+  const std::array<DXGI_FORMAT, 2> formats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+  for (UINT f = 0; f < 2; ++f) {
+    D3D12_RENDER_TARGET_VIEW_DESC d{};
+    d.Format = formats[f];
+    d.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    device->CreateRenderTargetView(target.get(), &d, rtv(f));
+    D3D12_SHADER_RESOURCE_VIEW_DESC s{};
+    s.Format = formats[f];
+    s.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    s.Texture2D.MipLevels = 4;
+    auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += SIZE_T{f} * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    device->CreateShaderResourceView(sampled.get(), &s, handle);
+  }
+  const std::array<float, 4> grays{.18f, .35f, .5f, .7f};
+  for (UINT mip = 0; mip < 4; ++mip) {
+    D3D12_RENDER_TARGET_VIEW_DESC d{};
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    d.Texture2D.MipSlice = mip;
+    device->CreateRenderTargetView(sampled.get(), &d, rtv(4 + mip));
+    const float gray[]{grays[mip], grays[mip], grays[mip], .65f};
+    list->ClearRenderTargetView(rtv(4 + mip), gray, 0, nullptr);
+    const UINT width = 16u >> mip;
+    const D3D12_RECT half{0, 0, static_cast<LONG>(std::max(1u, width / 2)), static_cast<LONG>(width)};
+    const float lighter[]{grays[mip] + .1f, grays[mip] + .1f, grays[mip] + .1f, .4f};
+    list->ClearRenderTargetView(rtv(4 + mip), lighter, 1, &half);
+    device->CreateRenderTargetView(target.get(), &d, rtv(8 + mip));
+    const float sentinel[]{.13f, .17f, .21f, .9f};
+    list->ClearRenderTargetView(rtv(8 + mip), sentinel, 0, nullptr);
+  }
+  D3D12_RESOURCE_BARRIER sample_barrier{};
+  sample_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  sample_barrier.Transition = {sampled.get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+  list->ResourceBarrier(1, &sample_barrier);
+  D3D12_SAMPLER_DESC sampler{};
+  sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+  sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+  sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+  sampler.MaxLOD = D3D12_FLOAT32_MAX;
+  device->CreateSampler(&sampler, samplers->GetCPUDescriptorHandleForHeapStart());
+  auto buffer_desc = texture_description(1, 1, DXGI_FORMAT_UNKNOWN);
+  buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer_desc.Width = 256;
+  buffer_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  const auto upload = heap_properties(D3D12_HEAP_TYPE_UPLOAD), read_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+  check(device->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                        IID_PPV_ARGS(tint.put())),
+        "Gray tint CBV");
+  void* mapped{};
+  const D3D12_RANGE none{0, 0};
+  check(tint->Map(0, &none, &mapped), "Gray tint map");
+  const float tint_value[]{.8f, .8f, .8f, .75f};
+  std::memcpy(mapped, tint_value, sizeof(tint_value));
+  tint->Unmap(0, nullptr);
+  std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 4> footprints{};
+  UINT64 bytes{};
+  device->GetCopyableFootprints(&target_desc, 0, 4, 0, footprints.data(), nullptr, nullptr, &bytes);
+  buffer_desc.Width = bytes;
+  check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(readback.put())),
+        "Gray pixels readback");
+  const auto submit = [&] {
+    check(list->Close(), "Close gray recording");
+    ID3D12CommandList* lists[]{list};
+    queue->ExecuteCommandLists(1, lists);
+    require(drain_copy_queue(queue, device), "Gray GPU completion");
+    check(allocator->Reset(), "Reset gray allocator");
+    check(list->Reset(allocator, nullptr), "Fresh ordinary gray recording");
+  };
+  submit();  // Source preparation cannot supply tested PFD RT-entry evidence.
+  std::uint64_t checked = 0, fallback_count = 0;
+  std::array<double, 16> means{};
+  unsigned case_index = 0;
+  for (UINT output_format = 0; output_format < 2; ++output_format) {
+    ClearStatePipeline pipeline(device, true, formats[output_format], DXGI_FORMAT_UNKNOWN, true);
+    for (UINT input_format = 0; input_format < 2; ++input_format) {
+      for (UINT mip = 0; mip < 4; ++mip) {
+        std::vector<unsigned char> baseline;
+        for (UINT on = 0; on < 2; ++on) {
+          win::set_target_mask(on);
+          const auto before = win::graphics_status();
+          const float background[]{.15f, .15f, .15f, 1};
+          list->ClearRenderTargetView(rtv(output_format), background, 0, nullptr);
+          list->SetPipelineState(pipeline.pipeline.get());
+          list->SetGraphicsRootSignature(pipeline.root.get());
+          ID3D12DescriptorHeap* heaps[]{srvs.get(), samplers.get()};
+          list->SetDescriptorHeaps(2, heaps);
+          auto gpu = srvs->GetGPUDescriptorHandleForHeapStart();
+          gpu.ptr += UINT64{input_format} * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+          list->SetGraphicsRootDescriptorTable(1, gpu);
+          list->SetGraphicsRootDescriptorTable(2, samplers->GetGPUDescriptorHandleForHeapStart());
+          list->SetGraphicsRootConstantBufferView(3, tint->GetGPUVirtualAddress());
+          const UINT parameters[]{64, 64, 1, mip};
+          list->SetGraphicsRoot32BitConstants(0, 4, parameters, 0);
+          list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+          // Native trim quad is outside the camera patch, with alpha accumulating
+          // twice. The second native draw must use the unchanged pre-stamp state.
+          const D3D12_VIEWPORT viewport{812, 800, 64, 64, 0, 1};
+          const D3D12_RECT scissor{812, 800, 876, 864};
+          list->RSSetViewports(1, &viewport);
+          list->RSSetScissorRects(1, &scissor);
+          const auto target_rtv = rtv(output_format);
+          list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);
+          list->DrawInstanced(3, 1, 0, 0);
+          list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);  // Actual guarded fallback, no RT-entry proof.
+          const auto delivered = win::graphics_status();
+          require(
+              delivered.fallback_stamps == before.fallback_stamps + on && delivered.preferred_copy_stamps == before.preferred_copy_stamps,
+              "Gray test must exercise one real shader fallback, never a private copy");
+          list->DrawInstanced(3, 1, 0, 0);  // No application state rebind at all.
+          win::set_target_mask(0);
+          submit();
+          fallback_count += on;
+          for (UINT level = 0; level < 4; ++level) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition = {target.get(), level, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
+            list->ResourceBarrier(1, &barrier);
+            D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+            source.pResource = target.get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            source.SubresourceIndex = level;
+            destination.pResource = readback.get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint = footprints[level];
+            list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            list->ResourceBarrier(1, &barrier);
+          }
+          submit();  // Next OFF/ON also has no RT-entry evidence in its recording.
+          const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+          check(readback->Map(0, &range, &mapped), "Read gray native pixels");
+          const auto* actual = static_cast<const unsigned char*>(mapped);
+          if (!on)
+            baseline.assign(actual, actual + bytes);
+          double sum = 0;
+          std::uint64_t changed_patch = 0;
+          for (UINT level = 0; level < 4; ++level) {
+            const auto& fp = footprints[level];
+            for (UINT y = 0; y < fp.Footprint.Height; ++y)
+              for (UINT x = 0; x < fp.Footprint.Width; ++x) {
+                const SIZE_T offset = fp.Offset + SIZE_T{y} * fp.Footprint.RowPitch + 4 * x;
+                const bool inside = !level && x < 806 && y < 763;
+                if (on && !inside) {
+                  require(std::memcmp(actual + offset, baseline.data() + offset, 4) == 0,
+                          "Native textured gray/alpha pixels, gutter, trim or lower mip changed after shader fallback");
+                  ++checked;
+                }
+                if (on && inside && std::memcmp(actual + offset, baseline.data() + offset, 4))
+                  ++changed_patch;
+                if (!level && x >= 812 && x < 876 && y >= 800 && y < 864)
+                  sum += actual[offset];
+              }
+          }
+          if (on)
+            require(changed_patch > 1000, "The tested shader fallback must visibly write the camera patch");
+          else
+            means[case_index] = sum / 4096.;
+          readback->Unmap(0, &none);
+          std::printf("Gray case RTV=%s SRV=%s mip=%u enabled=%u mean=%.6f fallback+%u\n", output_format ? "sRGB" : "UNORM",
+                      input_format ? "sRGB" : "UNORM", mip, on, sum / 4096., on);
+        }
+        ++case_index;
+      }
+    }
+  }
+  for (unsigned output = 0; output < 2; ++output) {
+    require(means[output * 8] > means[output * 8 + 4] + 5, "sRGB SRV control must measurably change sampled gray");
+    for (unsigned input = 0; input < 2; ++input)
+      require(means[output * 8 + input * 4 + 3] > means[output * 8 + input * 4] + 15, "Mip control must measurably change sampled gray");
+  }
+  require(means[8] > means[0] + 15, "sRGB RTV control must measurably change encoded gray");
+  check(device->GetDeviceRemovedReason(), "Gray fixture device health");
+  Reference<ID3D12InfoQueue> messages;
+  const bool debug_messages = SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(messages.put())));
+  unsigned debug_errors = 0;
+  if (debug_messages)
+    for (UINT64 i = 0; i < messages->GetNumStoredMessages(); ++i) {
+      SIZE_T size{};
+      messages->GetMessage(i, nullptr, &size);
+      std::vector<unsigned char> storage(size);
+      auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+      if (SUCCEEDED(messages->GetMessage(i, message, &size)) && message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+        ++debug_errors;
+        std::fprintf(stderr, "Gray GPU error %u: %s\n", static_cast<unsigned>(message->ID), message->pDescription);
+      }
+    }
+  require(!debug_errors, "Gray fixture GPU debug errors");
+  std::printf("Gray GPU debug messages available=%u errors=%u\n", debug_messages, debug_errors);
+  check(list->Close(), "Finish gray fixture recording");
+  runtime::manager().stop_source_tracking();
+  scene_handoff().stop_scene();
+  runtime::reset_feed(key);
+  std::printf("PASS textured gray %s: 16 UNORM/sRGB/mip/alpha cases; fallback=%llu preferredcopy=0; outside/mip pixels=%llu\n",
+              warp ? "WARP" : "hardware", fallback_count, checked);
+}
+void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bool textured_gray = false) {
   const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
   const UINT pane_width = profile.camera_panes[0][0], display_width = profile.width;
   const UINT nose_height = profile.camera_panes[0][1], tail_height = profile.camera_panes[1][1];
@@ -543,6 +790,10 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy) {
               static_cast<unsigned long long>(capture.frames), static_cast<unsigned long long>(capture.capture.source_draws),
               capture.capture.tail_status);
   require(capture.output && capture.frames, "Actual native draw -> queue -> capture -> composition");
+  if (textured_gray) {
+    textured_gray_fallback(device.get(), queue.get(), allocator.get(), list.get(), key, second, warp);
+    return;
+  }
   // OBS Game Capture uses D3D11On12 to copy the swap-chain backbuffer on the
   // application's queue. Exercise that API sequence without launching OBS.
   const auto before_interop = runtime::manager().statistics();
@@ -1816,7 +2067,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy) {
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   try {
-    bool warp = false, a350 = false, query_fallback = false, prefer_copy = false, profile_switch = false;
+    bool warp = false, a350 = false, query_fallback = false, prefer_copy = false, profile_switch = false, textured_gray = false;
     for (int i = 1; i < argc; ++i) {
       if (std::wcscmp(argv[i], L"--warp") == 0)
         warp = true;
@@ -1824,6 +2075,8 @@ int wmain(int argc, wchar_t** argv) {
         a350 = true;
       else if (std::wcscmp(argv[i], L"--query-fallback") == 0)
         query_fallback = true;
+      else if (std::wcscmp(argv[i], L"--textured-gray") == 0)
+        textured_gray = a350 = true;
       else if (std::wcscmp(argv[i], L"--profile-switch") == 0)
         profile_switch = true;
       else if (std::wcscmp(argv[i], L"--prefer-copy") == 0)
@@ -1834,7 +2087,7 @@ int wmain(int argc, wchar_t** argv) {
     if (profile_switch)
       active_profile_switch_case(warp);
     else
-      native_case(warp, a350, query_fallback, prefer_copy);
+      native_case(warp, a350, query_fallback, prefer_copy, textured_gray);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL native graphics: %s\n", e.what());

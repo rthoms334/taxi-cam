@@ -13,6 +13,7 @@
 #include "../src/write_budget.hpp"
 #include "native_hooks.hpp"
 #include "root_layout.hpp"
+#include "metadata_batch_cache.hpp"
 #include "query_scope.hpp"
 #include "pfd_copy_proof.hpp"
 
@@ -311,11 +312,35 @@ std::shared_ptr<Resource> resource(ID3D12Resource* p) {
   const auto it = r.resources.find(p);
   return it != r.resources.end() && it->second->alive ? it->second : nullptr;
 }
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+thread_local std::uint64_t metadata_lookup_calls{};
+#endif
 std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+  ++metadata_lookup_calls;
+#endif
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
   const auto it = r.lists.find(p);
   return it != r.lists.end() && it->second->alive ? it->second : nullptr;
+}
+thread_local MetadataBatchCache<List, ID3D12GraphicsCommandList*> metadata_batches;
+void metadata_begin(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
+  const OwnedWork guard;
+  std::shared_ptr<List> item;
+  observe_safely([&] { item = find_list(native); });
+  metadata_batches.begin(native, id, std::move(item));
+}
+void metadata_end(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept {
+  const OwnedWork guard;
+  metadata_batches.end();
+}
+List* metadata_list(ID3D12GraphicsCommandList* native, std::uint64_t id, std::shared_ptr<List>& fallback) {
+  if (auto* item = metadata_batches.current(native, id))
+    return item;
+  // No scope, overflow, retirement, or Reset uses the original fresh lookup.
+  fallback = find_list(native);
+  return fallback && fallback->id == id ? fallback.get() : nullptr;
 }
 void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = true) noexcept;
 void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
@@ -332,14 +357,12 @@ void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, 
 // The observations below are before native barrier forwarding. They only stage
 // evidence; after_draw promotes it after that barrier and the application draw
 // have both returned. No GPU command is admitted from a pending observation.
-void stage_copy_model(ID3D12GraphicsCommandList* native,
-                      std::uint64_t id,
+void stage_copy_model(List* list,
                       ID3D12Resource* target,
                       PfdCopyProof::Mode model,
                       const char* reason,
                       std::uint32_t scope) noexcept {
-  const auto list = find_list(native);
-  if (!list || list->id != id)
+  if (!list)
     return;
   // One selection sample decides both paths; a concurrent routing update must
   // not leave pre-existing proof intact while suppressing the new transition.
@@ -361,8 +384,10 @@ void observe_legacy(void*,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
   const OwnedWork guard;
+  std::shared_ptr<List> fallback;
+  auto* item = b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ? metadata_list(list, id, fallback) : nullptr;
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
-    if (auto item = find_list(list); item && item->id == id) {
+    if (item) {
       for (UINT i = 0; i < item->count; ++i)
         if (item->targets[i].resource && item->targets[i].resource->native == b.Transition.pResource)
           item->pfd_transition = true;
@@ -373,17 +398,17 @@ void observe_legacy(void*,
                       b.Transition.Subresource == 0 || b.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                       (b.Flags & (D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY | D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)) != 0);
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
-    if (auto item = find_list(list); item && item->id == id)
+    if ((item = metadata_list(list, id, fallback)))
       for (unsigned side = 0; side < 2; ++side)
         if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.Transition.pResource)
           item->pending_rt[side] = false;
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
-    if (const auto item = find_list(list); item && item->id == id)
+    if ((item = metadata_list(list, id, fallback)))
       item->copy_proof.invalidate();
   } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
     const bool complete = b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE &&
                           (b.Transition.Subresource == 0 || b.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
-    stage_copy_model(list, id, b.Transition.pResource,
+    stage_copy_model(metadata_list(list, id, fallback), b.Transition.pResource,
                      complete && b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ? PfdCopyProof::Mode::legacy_rt
                                                                                                : PfdCopyProof::Mode::unknown,
                      complete ? "not_rt_entry" : "split_or_partial_transition", scope);
@@ -396,7 +421,9 @@ void observe_enhanced(void*,
                       const D3D12_TEXTURE_BARRIER& b,
                       std::uint32_t scope) noexcept {
   const OwnedWork guard;
-  if (auto item = find_list(list); item && item->id == id) {
+  std::shared_ptr<List> fallback;
+  auto* item = metadata_list(list, id, fallback);
+  if (item) {
     for (UINT i = 0; i < item->count; ++i)
       if (item->targets[i].resource && item->targets[i].resource->native == b.pResource)
         item->pfd_transition = true;
@@ -409,7 +436,7 @@ void observe_enhanced(void*,
                                 b.Subresources.FirstArraySlice == 0 && b.Subresources.NumArraySlices == 1 &&
                                 b.Subresources.FirstPlane == 0 && b.Subresources.NumPlanes == 1,
                       ((b.SyncBefore | b.SyncAfter) & D3D12_BARRIER_SYNC_SPLIT) != 0);
-  if (auto item = find_list(list); item && item->id == id)
+  if ((item = metadata_list(list, id, fallback)))
     for (unsigned side = 0; side < 2; ++side)
       if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.pResource)
         item->pending_rt[side] = false;
@@ -418,7 +445,7 @@ void observe_enhanced(void*,
                                          : range.IndexOrFirstMipLevel == 0 && range.NumMipLevels == 1 && range.FirstArraySlice == 0 &&
                                                range.NumArraySlices == 1 && range.FirstPlane == 0 && range.NumPlanes == 1;
   const bool complete = whole && b.Flags == D3D12_TEXTURE_BARRIER_FLAG_NONE && !((b.SyncBefore | b.SyncAfter) & D3D12_BARRIER_SYNC_SPLIT);
-  stage_copy_model(list, id, b.pResource,
+  stage_copy_model(metadata_list(list, id, fallback), b.pResource,
                    complete && b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET && b.AccessAfter == D3D12_BARRIER_ACCESS_RENDER_TARGET
                        ? PfdCopyProof::Mode::enhanced_rt
                        : PfdCopyProof::Mode::unknown,
@@ -756,7 +783,7 @@ void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noex
 }
 const boundary::Callbacks Boundaries{nullptr,          before_legacy, before_enhanced, observe_legacy,
                                      observe_enhanced, copy_resource, copy_texture,    after_draw,
-                                     invalidate,       pass_targets,  pass_ended,      selected_legacy_targets};
+                                     invalidate,       pass_targets,  pass_ended,      selected_legacy_targets, metadata_begin, metadata_end};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;

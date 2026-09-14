@@ -191,6 +191,8 @@ Private-code mismatch diagnostics include the failed RVA and byte count. Code th
 
 A counter measures work at its stage, not frames visibly presented. For example, increasing compositions with zero stamps points to display routing or PFD draw eligibility.
 
+The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. At low simulator update rates, opening and closing can therefore require work on every manager update even at the 15 fps setting; the setting does not guarantee 15 completed frames per camera or remove the cost of those updates. Compare render-thread and GPU timings with TAXI off/on at the same cockpit view when investigating stutter.
+
 `probe_ms`, `query_ms` and `read_ms` describe the last serviced inspection callback, not every simulator frame. `inspections` counts serviced callbacks; its change over a log interval gives their frequency. Skipped callbacks leave the last timings visible. `clear_states` counts observed application graphics-state resets. These measurements exclude MSFS scene rendering and GPU time.
 
 | Symptom | Inspect |

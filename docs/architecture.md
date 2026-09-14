@@ -166,6 +166,8 @@ Both paths exclude the navigation area, central gutter and lower trim display. C
 
 This is why the camera appears on the cockpit's physical screen: the cockpit model samples the texture that Taxi Cam has just updated. The camera is part of the image rendered on the aircraft display.
 
+Barrier metadata uses one command-list lookup per native batch. A thread-local scope retains the tracking record during the batch; each item still checks its identity and recording generation. Nested batches have separate scopes. A changed or retired recording, a mismatched identity or exhausted scope capacity uses the ordinary lookup path. The scope does not hold the registry lock while processing callbacks.
+
 The native adapter continues tracking command-list lifetimes, target bindings and render boundaries. Hooks forward the exact captured original for their table. A native `ClearState` discards pending overlay work and clears tracked bindings. It does not reset command-list lifetime or revive a recording that was unsafe for injection.
 
 ### Keeping readers and writers in order

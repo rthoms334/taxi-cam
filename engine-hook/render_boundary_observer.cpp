@@ -121,6 +121,24 @@ void notify_invalidation(ID3D12GraphicsCommandList* list, std::uint64_t generati
   if (reasons && callbacks.recording_invalidated && same_identity(list, generation))
     callbacks.recording_invalidated(callbacks.context, list, generation, reasons);
 }
+// Keep optional client cache scopes balanced even when identity changes during
+// metadata callbacks. The guard is destroyed before any injection or native call.
+struct MetadataScope {
+  ID3D12GraphicsCommandList* list;
+  std::uint64_t generation;
+  void* context;
+  void (*end)(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept;
+  MetadataScope(ID3D12GraphicsCommandList* value, std::uint64_t id) noexcept
+      : list(value), generation(id), context(callbacks.context),
+        end(callbacks.metadata_begin && callbacks.metadata_end ? callbacks.metadata_end : nullptr) {
+    if (end)
+      callbacks.metadata_begin(context, list, generation);
+  }
+  ~MetadataScope() {
+    if (end)
+      end(context, list, generation);
+  }
+};
 bool global_uncertainty(std::uint32_t reasons) noexcept {
   return (reasons & ~(InvalidationPassBegin | InvalidationSplitBarrier | InvalidationAliasOrDiscard)) != 0;
 }
@@ -333,6 +351,7 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
     }
   }
   if (identity.generation && metadata_complete && callbacks.observe_legacy && barriers) {
+    const MetadataScope metadata(list, identity.generation);
     const auto count_observed = count;
     const auto scope = scope_flags(identity) | (global_uncertainty(uncertainty) ? ScopeInvalidRecording : 0u);
     for (UINT n = 0; n < count_observed; ++n) {
@@ -544,6 +563,7 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
     if (!metadata_complete)
       ++metadata_truncated_calls;
     else {
+      const MetadataScope metadata(list, identity.generation);
       const auto scope = scope_flags(identity) | (global_uncertainty(uncertainty) ? ScopeInvalidRecording : 0u);
       for (UINT g = 0; g < count; ++g) {
         if (groups[g].Type != D3D12_BARRIER_TYPE_TEXTURE)
@@ -680,7 +700,7 @@ bool same_callbacks(const Callbacks& a, const Callbacks& b) noexcept {
          a.observe_legacy == b.observe_legacy && a.observe_enhanced == b.observe_enhanced &&
          a.after_copy_resource == b.after_copy_resource && a.after_copy_texture == b.after_copy_texture && a.after_draw == b.after_draw &&
          a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended &&
-         a.selected_legacy_targets == b.selected_legacy_targets;
+         a.selected_legacy_targets == b.selected_legacy_targets && a.metadata_begin == b.metadata_begin && a.metadata_end == b.metadata_end;
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
   {

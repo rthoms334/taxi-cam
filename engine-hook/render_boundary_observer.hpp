@@ -113,6 +113,13 @@ struct Callbacks {
                                   std::uint64_t object_generation,
                                   ID3D12Resource** targets,
                                   UINT capacity) noexcept = nullptr;
+  // Optional paired metadata scope, outside observer locks. Begin/end bracket
+  // only the complete metadata loop, including early identity refusal. No GPU
+  // work or retained native-object ownership is granted. Implementations may
+  // cache lifetime-qualified metadata until end; individual guards still apply.
+  // Both callbacks must be provided; a partial pair is ignored.
+  void (*metadata_begin)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
+  void (*metadata_end)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;
