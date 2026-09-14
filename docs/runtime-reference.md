@@ -85,7 +85,7 @@ Pixel coordinates start at the top left. Row ranges below are inclusive. The tab
 | Tail pane | Working rows 259-762; native source 736 x 496 |
 | Visible divider | Black working rows 251-262 (12 pixels) |
 | Preserved aircraft display | Rows 763–1023 |
-| Ground-speed panel (A380 and A350) | Origin (16, 12); 8-pixel internal padding; height 36; width 72 / 88 / 104 for 1 / 2 / 3 digits (`--` uses 88) |
+| Ground-speed panel (A380 and A350) | Origin (16, 12); 8-pixel internal padding; height 36; width 96 / 112 for 1 / 2 digits (`--` uses 112) |
 | Stable output buffer | Row pitch 3072 bytes; total 2,343,936 bytes |
 
 The logical gap between panes is four working-image rows. The visible divider covers four additional working rows of each pane. The whole 768 x 763 composition, including GS and guides, maps into the inner bordered area; working-image coordinates scale with it. Native source dimensions above match the resulting pane sizes to the nearest pixel.
@@ -96,11 +96,9 @@ The **Reference guides** page edits `nose_dot`, `tail_upper`, `tail_corner` and 
 
 The nose dots have a 4.5-pixel radius; tail brackets use a two-pixel distance threshold in the working image. Their positions should be calibrated against the visible tyres at the chosen camera framing before being promoted to shipped defaults.
 
-Ground speed is rounded to whole knots in the range 0–999. Invalid or stale data displays `--`.
+The GS box uses thin antialiased lettering with two character spaces between the white `GS` label and the coloured speed value. Ground speed is rounded to whole knots in the range 0–99. Invalid, stale or overflowing values display `--`. The existing 60-knot automatic cutoff controls camera activation independently.
 
 Source: [compositor and guides](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp).
-
-The GS box uses thin antialiased lettering with two character spaces between the white `GS` label and the coloured speed value. Speed is rounded to whole knots and uses at most two digits; unavailable or overflowing values show `--`. The existing 60-knot automatic cutoff controls camera activation independently.
 
 ## PFD-copy diagnostics
 
