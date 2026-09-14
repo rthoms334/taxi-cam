@@ -83,9 +83,13 @@ if ($Validate) {
     if (-not $WarpOnly) {
         & $gpu
         if ($LASTEXITCODE -ne 0) { throw 'Hardware native graphics validation failed.' }
+        & $gpu --a350
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware A350 graphics validation failed.' }
     } else { Write-Output 'Hardware GPU validation not run: explicit WARP-only CI mode.' }
     & $gpu --warp
     if ($LASTEXITCODE -ne 0) { throw 'WARP native graphics validation failed.' }
+    & $gpu --warp --a350
+    if ($LASTEXITCODE -ne 0) { throw 'WARP A350 graphics validation failed.' }
 
     $smoke = Join-Path $out 'native-smoke-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'standalone/smoke_validation.cpp') '-ladvapi32' '-o' $smoke
@@ -94,6 +98,7 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Exact native DLL smoke failed.' }
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('standalone/launcher_path_test.cpp')},
+        @{Name='aircraft-profiles'; Sources=@('standalone/aircraft_profiles_test.cpp','native-camera/view_resize.cpp')},
         @{Name='companion-control'; Sources=@('standalone/companion_control_test.cpp')},
         @{Name='aircraft-layout'; Sources=@('discovery/aircraft_inventory.cpp','discovery/aircraft_inventory_test.cpp')},
         @{Name='native-slots'; Sources=@('standalone/native_slots_test.cpp')},

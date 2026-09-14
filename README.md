@@ -26,7 +26,7 @@ Nose-wheel and tail cameras for Microsoft Flight Simulator 2024, controlled by t
 
 The camera image occupies the upper part of the Primary Flight Display (PFD): nose-wheel view above, tail view below, with ground speed, magenta reference marks and a black divider. The lower trim display remains visible.
 
-- **Aircraft:** FlyByWire A380X
+- **Aircraft:** FlyByWire A380X; iniBuilds A350-900 / ULR and A350-1000 adapters under live validation
 - **Platform:** Windows x64, MSFS 2024
 - **Delivery:** Windows tray application and an in-simulator DLL.
 
@@ -55,7 +55,7 @@ The download must pass SHA-256 verification before setup can launch. Accepting t
 
 ## Use
 
-1. Start MSFS and load the A380X.
+1. Start MSFS and load the aircraft. Select its matching profile in **Overview**.
 2. Allow a few seconds for the app to identify the PFD textures.
 3. Press the left or right EFIS **TAXI** button to enable that display. Press it again to switch the camera off.
 
@@ -75,7 +75,7 @@ If the camera appears on the wrong display, open **PFD routing** to identify, as
 | PFD routing | Left/right display assignment, preview and target identification |
 | Diagnostics | Scene test, single-camera test and runtime counters |
 
-Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDATA%\Taxi Cam\profiles\fbw-a380x.ini`.
+Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini`.
 
 The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Camera size is **768 × 255** for the nose and **768 × 504** for the tail.
 
@@ -113,7 +113,7 @@ Every push to `main` runs the [Windows release workflow](.github/workflows/relea
 | --- | --- |
 | [Architecture](docs/architecture.md) | How the app creates camera views and puts them on the PFD |
 | [Runtime reference](docs/runtime-reference.md) | Setting values, timing, IPC and diagnostics |
-| [Aircraft integration](docs/aircraft-profiles.md) | The A380 controls, display identification and camera geometry |
+| [Aircraft integration](docs/aircraft-profiles.md) | Aircraft controls, display identification, camera geometry and profile selection |
 | [Releases](docs/releases.md) | Automated builds, package contents and publication |
 
 This project is maintained independently of the aircraft package. Dependency notices are in [Third-party notices](THIRD_PARTY_NOTICES.md).

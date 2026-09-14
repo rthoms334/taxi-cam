@@ -16,9 +16,10 @@ class TaxiSpeedCutoff {
                   double knots,
                   bool buttons_valid,
                   unsigned on,
-                  std::uint64_t button_sample) noexcept {
+                  std::uint64_t button_sample,
+                  double limit_knots = 60.0) noexcept {
     if (speed_valid && std::isfinite(knots) && knots >= 0)
-      over_ = knots > 60.0;
+      over_ = knots > limit_knots;
     // Latch the crossing even when button telemetry is briefly missing. A
     // later low-speed sample must not silently cancel the required OFF.
     if (over_)

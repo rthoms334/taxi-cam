@@ -70,7 +70,8 @@ class PfdStampD3D12 {
                      ID3D12Device* buffer_device,
                      D3D12_GPU_VIRTUAL_ADDRESS,
                      UINT width,
-                     UINT height) noexcept;
+                     UINT height,
+                     const D3D12_RECT* destination = nullptr) noexcept;
   DXGI_FORMAT format() const noexcept { return format_; }
   DXGI_FORMAT depth_format() const noexcept { return depth_format_; }
   void release() noexcept;

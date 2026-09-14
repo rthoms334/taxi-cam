@@ -9,7 +9,7 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 1;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 2;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
@@ -21,6 +21,7 @@ struct Settings {
 };
 struct Candidate {
   std::uint64_t id{}, draws{};
+  std::uint32_t width{}, height{}, mips{}, format{};
 };
 struct Status {
   std::uint64_t heartbeat{}, captures{}, composed{}, stamps{}, left_id{}, right_id{}, hook_failures{};

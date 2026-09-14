@@ -148,6 +148,11 @@ bool prepare(std::uint64_t key) {
   item->status.message = "Waiting for two completed camera snapshots; select the PFD and enable its camera feed.";
   return true;
 }
+void set_composition(std::uint64_t key, const profiles::Composition& layout) {
+  const std::lock_guard lock(runtime().mutex);
+  if (auto* item = find(key))
+    item->output.set_composition(layout);
+}
 void reset_feed(std::uint64_t key) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key); item && !item->status.failed) {
@@ -263,7 +268,8 @@ bool stamp(ID3D12GraphicsCommandList* list,
            DXGI_FORMAT format,
            UINT width,
            UINT height,
-           DXGI_FORMAT depth_format) {
+           DXGI_FORMAT depth_format,
+           const D3D12_RECT* destination) {
   const std::lock_guard lock(runtime().mutex);
   auto* item = find(key);
   if (!item || !current_output(*item) || item->status.failed)
@@ -276,7 +282,7 @@ bool stamp(ID3D12GraphicsCommandList* list,
         continue;
       const auto slot = i * DepthFormats.size() + d;
       if (item->stamp_ready[slot] && state.complete() && manager().register_consumer_recording(list) &&
-          item->stamps[slot].record_buffer(list, state, item->native, item->output.address(), width, height)) {
+          item->stamps[slot].record_buffer(list, state, item->native, item->output.address(), width, height, destination)) {
         ++item->status.stamps;
         return true;
       }

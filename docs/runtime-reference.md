@@ -7,10 +7,12 @@ Use this page to look up values and diagnose the current runtime. For the explan
 The companion saves settings to:
 
 ~~~text
-%LOCALAPPDATA%\Taxi Cam\profiles\fbw-a380x.ini
+%LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The INI contains `[service]`, `[display]`, `[nose]` and `[tail]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it reads `taxi-camera-mounts.cfg` beside the companion, with compiled defaults as fallback.
+The selected aircraft ID is saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900` and `ini-a350-1000`; each has its own calibration file.
+
+The INI contains `[service]`, `[display]`, `[nose]` and `[tail]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it uses that aircraft's defaults. Only the A380 profile imports `taxi-camera-mounts.cfg` beside the companion.
 
 Saves validate the complete settings object, flush a temporary UTF-16 file and replace the INI atomically.
 
@@ -61,7 +63,7 @@ Source: [aircraft defaults](../profiles/catalog.hpp), [mount transforms](../nati
 
 ## Display geometry
 
-Pixel coordinates start at the top left. Row ranges below are inclusive.
+Pixel coordinates start at the top left. Row ranges below are inclusive. The table gives the A380 defaults and common working-canvas contract. The A350 uses 1644 x 1024 EFIS targets, 822 x 255 / 822 x 504 sources and an 822 x 763 destination on the outer PFD half. See [Aircraft integration](aircraft-profiles.md).
 
 | Element | Geometry |
 | --- | --- |
@@ -106,7 +108,7 @@ Mutex:   Local\380TaxiCamera.Control.<MSFS_PID>
 Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 ~~~
 
-The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `1` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
+The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `2` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
 
 The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 
@@ -116,6 +118,7 @@ The mapping carries values, IDs and bounded text. It carries no camera pixels or
 | Startup header/Windows-loader preflight retry | 1 second; at most 60 attempts; no retry after a remote load/start may have begun |
 | Bridge control/output-service loop | 25 ms delay |
 | Companion heartbeat acceptance | At most 5000 ms old |
+| Aircraft identity sampling / freshness | 1000 ms / 3000 ms |
 | Aircraft pose and GS updates | SimConnect `SIM_FRAME` |
 | GS and TAXI sample freshness | 500 ms |
 | Ambient-light sampling / freshness | 500 ms / 1500 ms |
@@ -171,7 +174,7 @@ A counter measures work at its stage, not frames visibly presented. For example,
 | PFD draws increase, wrong display | Target identification, left/right assignment and display layer |
 | Camera inhibited below 60 knots | Pending TAXI OFF acknowledgement |
 
-Status also contains the active side mask, target IDs, hook failures, applied exposure and GS. A status GS of −1 means unavailable. The candidate list contains up to 16 IDs and cumulative draw counts.
+Status also contains the active side mask, target IDs, hook failures, applied exposure and GS. A status GS of −1 means unavailable. The candidate list contains up to 16 IDs, cumulative draw counts, dimensions, mip counts and formats for the selected profile.
 
 `probe_cpu_ms` and `probe_max_ms` measure camera-observer CPU time. They exclude engine rendering and GPU time. The ten `stage_ms` values are manager, pool, lifecycle, entries, view 1, view 2, handoff, pose, activation and publication.
 

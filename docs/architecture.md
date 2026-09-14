@@ -51,7 +51,7 @@ Source: [launcher](../standalone/launcher.hpp), [bridge startup and control loop
 
 ## 2. Read the TAXI buttons and select the displays
 
-The A380 provides one TAXI-light state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request.
+Each aircraft profile supplies one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request.
 
 The bridge also needs to know which GPU texture represents each PFD. A cockpit screen is rendered into an off-screen texture before the cockpit model displays it. Many simulator textures have similar dimensions, so Taxi Cam observes their draw activity.
 
@@ -62,7 +62,7 @@ For the A380, detection selects candidates with:
 - **RGBA8** format;
 - a consistently dominant pair of draw rates across three one-second windows.
 
-Initial assignment treats the higher ID of that pair as left. This is a heuristic, so **PFD routing** provides identification, explicit assignment and swap controls. The material-name hints in the aircraft profile do not provide guaranteed GPU labels.
+Initial assignment uses the profile's resource-ID ordering rule. This is a heuristic, so **PFD routing** provides identification, explicit assignment and swap controls. The material-name hints in the aircraft profile do not provide guaranteed GPU labels.
 
 Each resource gets an ID for its current lifetime. If one PFD is replaced, routing keeps the surviving side's identity. If both assigned textures disappear, manual reassignment can be required. Texture IDs are never saved between simulator sessions.
 
@@ -121,7 +121,7 @@ Source: [scene/resource matching](../src/scene_handoff.hpp), [capture manager](.
 
 ## 5. Combine the views and display information
 
-The compositor takes a completed nose image and a completed tail image from the current camera pair. It draws a **768 × 763** output containing:
+Source dimensions come from the aircraft profile. The compositor takes a completed nose image and a completed tail image from the current camera pair. It draws a **768 × 763** output containing:
 
 - nose view above and tail view below;
 - a black horizontal divider;
@@ -179,7 +179,7 @@ Recovery is conditional. It does not infer a valid camera image from a non-null 
 
 ## Aircraft-specific parts
 
-The active profile is **FlyByWire A380X**. It supplies TAXI variables/events, camera mounts and display metadata. The texture detector and presentation code also implement the A380 display layout.
+The companion selects **FlyByWire A380X**, **iniBuilds A350-900 / ULR** or **iniBuilds A350-1000**. Each profile supplies aircraft identity, TAXI controls, camera mounts and dimensions, texture constraints, side ordering, display rectangles, composition marks and speed cutoff. Switching profiles retires owned cameras before resetting telemetry, routing and pose calibration. The A350 adapters require live simulator validation in addition to their GPU fixtures.
 
 Windows startup, settings transport, private camera integration and GPU capture are shared components. Adding an aircraft requires its control, display and geometry integration; changing two variable names is not sufficient. See [Aircraft integration](aircraft-profiles.md).
 
@@ -190,5 +190,7 @@ Windows startup, settings transport, private camera integration and GPU capture 
 - Camera motion follows received aircraft telemetry; increasing the rate limit does not remove telemetry timing differences.
 - Scene content and lighting depend on what MSFS renders for these views.
 - Build receipts report automated checks. Hardware rendering and live MSFS behaviour are separate validation scopes.
+
+The 768 x 763 GPU buffer is a common working canvas; final placement comes from each profile. A350 presentation covers the outer PFD half of each combined EFIS texture and preserves the neighbouring ND.
 
 Exact settings, dimensions, timeouts and IPC fields are in the [runtime reference](runtime-reference.md). Build and publication behaviour is in [Releases](releases.md).

@@ -94,14 +94,14 @@ HRESULT PfdStampD3D12::initialize(ID3D12Device* device, DXGI_FORMAT format, DXGI
     return E_INVALIDARG;
   constexpr char shader[] = R"(
 ByteAddressBuffer Pixels : register(t0);
-cbuffer Parameters : register(b0) { uint TargetWidth; uint TargetHeight; };
+cbuffer Parameters : register(b0) { uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY; };
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
-  uint x = min((uint)(position.x * 768 / TargetWidth), 767);
-  uint y = min((uint)(position.y * 763 / TargetHeight), 762);
+  uint x = min((uint)((position.x - OriginX) * 768 / TargetWidth), 767);
+  uint y = min((uint)((position.y - OriginY) * 763 / TargetHeight), 762);
   uint rgba = Pixels.Load(y * 3072 + x * 4);
   return float4(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255, 255) / 255.0;
 }
@@ -112,7 +112,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
   params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-  params[1].Constants.Num32BitValues = 2;
+  params[1].Constants.Num32BitValues = 4;
   D3D12_ROOT_SIGNATURE_DESC desc{};
   desc.NumParameters = 2;
   desc.pParameters = params;
@@ -178,21 +178,32 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                   ID3D12Device* buffer_device,
                                   D3D12_GPU_VIRTUAL_ADDRESS address,
                                   UINT width,
-                                  UINT height) noexcept {
+                                  UINT height,
+                                  const D3D12_RECT* destination) noexcept {
   if (!list || !pipeline_ || !state.complete() || !address || address % 4 || buffer_device != device_ || width < 1 || height < 2 ||
       width > 16384 || height > 16384 || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return false;
   const UINT upper = static_cast<UINT>((static_cast<UINT64>(height) * 763) / 1024);
   if (!upper)
     return false;
-  const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(width), static_cast<float>(upper), 0, 1};
-  const D3D12_RECT scissor{0, 0, static_cast<LONG>(width), static_cast<LONG>(upper)};
-  const UINT constants[2]{width, upper};
+  const D3D12_RECT rect = destination ? *destination : D3D12_RECT{0, 0, static_cast<LONG>(width), static_cast<LONG>(upper)};
+  if (rect.left < 0 || rect.top < 0 || rect.right <= rect.left || rect.bottom <= rect.top || rect.right > static_cast<LONG>(width) ||
+      rect.bottom > static_cast<LONG>(height))
+    return false;
+  const D3D12_VIEWPORT viewport{static_cast<float>(rect.left),
+                                static_cast<float>(rect.top),
+                                static_cast<float>(rect.right - rect.left),
+                                static_cast<float>(rect.bottom - rect.top),
+                                0,
+                                1};
+  const D3D12_RECT scissor = rect;
+  const UINT constants[4]{static_cast<UINT>(rect.right - rect.left), static_cast<UINT>(rect.bottom - rect.top),
+                          static_cast<UINT>(rect.left), static_cast<UINT>(rect.top)};
   const engine_hook::pfd_state::ScopedBypass bypass;
   list->SetPipelineState(pipeline_);
   list->SetGraphicsRootSignature(root_);
   list->SetGraphicsRootShaderResourceView(0, address);
-  list->SetGraphicsRoot32BitConstants(1, 2, constants, 0);
+  list->SetGraphicsRoot32BitConstants(1, 4, constants, 0);
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);

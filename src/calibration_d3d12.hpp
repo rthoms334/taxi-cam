@@ -14,12 +14,14 @@ inline bool record_calibration(ID3D12GraphicsCommandList* command_list,
                                D3D12_CPU_DESCRIPTOR_HANDLE rtv,
                                std::uint32_t width,
                                std::uint32_t height,
-                               std::uint64_t frame) {
-  if (command_list == nullptr || rtv.ptr == 0 || width < 32 || width > 16384 || height < 32 || height > 16384) {
+                               std::uint64_t frame,
+                               std::uint32_t origin_x = 0) {
+  if (command_list == nullptr || rtv.ptr == 0 || width < 32 || width > 16384 || origin_x > 16384 - width || height < 32 || height > 16384) {
     return false;
   }
   for (const auto& rectangle : calibration_rectangles(width, height, frame)) {
-    const D3D12_RECT native_rect{rectangle.left, rectangle.top, rectangle.right, rectangle.bottom};
+    const D3D12_RECT native_rect{rectangle.left + static_cast<LONG>(origin_x), rectangle.top, rectangle.right + static_cast<LONG>(origin_x),
+                                 rectangle.bottom};
     command_list->ClearRenderTargetView(rtv, rectangle.color.data(), 1, &native_rect);
   }
   return true;

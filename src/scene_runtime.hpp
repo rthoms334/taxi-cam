@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../profiles/catalog.hpp"
 #include "pfd_stamp_d3d12.hpp"
 #include "scene_capture_manager.hpp"
 
@@ -28,6 +29,7 @@ bool set_display_exposure(std::uint64_t key, float ev);
 // A fresh public SimConnect sample; unavailable samples render GS --.
 void set_ground_speed(std::uint64_t key, float knots, bool valid);
 void reset_feed(std::uint64_t key);
+void set_composition(std::uint64_t key, const profiles::Composition& layout);
 void service();
 Snapshot snapshot(std::uint64_t key);
 bool stamp(ID3D12GraphicsCommandList*,
@@ -36,5 +38,6 @@ bool stamp(ID3D12GraphicsCommandList*,
            DXGI_FORMAT format,
            UINT width,
            UINT height,
-           DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN);
+           DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
+           const D3D12_RECT* destination = nullptr);
 }  // namespace taxi_camera::scene_runtime

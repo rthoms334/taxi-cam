@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../profiles/catalog.hpp"
 #include "native_device_identity.hpp"
 
 #include <d3d12.h>
@@ -68,6 +69,7 @@ class CameraCompositorD3D12 {
   const Statistics& statistics() const noexcept { return statistics_; }
   const char* last_error() const noexcept { return error_.data(); }
   float display_exposure() const noexcept { return exposure_ev_; }
+  void set_composition(const profiles::Composition& layout) noexcept { composition_ = layout; }
   bool reference_guides() const noexcept { return reference_guides_; }
   void set_reference_guides(bool enabled) noexcept { reference_guides_ = enabled; }
   void set_ground_speed(float knots, bool valid) noexcept {
@@ -194,10 +196,15 @@ class CameraCompositorD3D12 {
       UINT guides;
       UINT ground_speed;
       UINT ground_speed_valid;
+      profiles::Composition composition;
     } display{(formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u),
-              std::exp2(exposure_ev_), reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_valid_ ? 1u : 0u};
-    static_assert(sizeof(display) == 5 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 5, &display, 0);
+              std::exp2(exposure_ev_),
+              reference_guides_ ? 1u : 0u,
+              ground_speed_,
+              ground_speed_valid_ ? 1u : 0u,
+              composition_};
+    static_assert(sizeof(display) == 20 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 20, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -398,7 +405,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 5;
+    parameters[1].Constants.Num32BitValues = 20;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -460,7 +467,11 @@ class CameraCompositorD3D12 {
 Texture2D<float4> Nose : register(t0);
 Texture2D<float4> Tail : register(t1);
 SamplerState LinearClamp : register(s0);
-cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGuides; uint GroundSpeed; uint GroundSpeedValid; };
+cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGuides; uint GroundSpeed; uint GroundSpeedValid;
+ float NoseHeight; float TailTop; float DividerTop; float DividerBottom;
+ float NoseDotX; float NoseDotY; float TailCornerX; float TailCornerY;
+ float TailUpperX; float TailUpperY; float TailInnerX; float TailInnerY;
+ float GuideRed; float GuideGreen; float GuideBlue; };
 bool glyph_pixel(float2 position, float2 origin, uint glyph) {
   int2 cell = int2(floor((position - origin) / 4));
   return all(cell >= 0) && cell.x < 3 && cell.y < 5 && ((glyph >> (cell.y * 3 + cell.x)) & 1u) != 0;
@@ -488,13 +499,13 @@ float segment_distance(float2 sample_position, float2 first, float2 last) {
 // Screen-space references matched to the supplied ETACS photograph. These
 // marks do not claim metric clearance after mount, attitude or FOV changes.
 bool reference_guide(float2 position, bool nose) {
-  float2 local = float2(min(position.x, 768 - position.x), nose ? position.y : position.y - 259);
-  if (nose) return length(local - float2(0.14 * 768, 0.48 * 255)) <= 4.5;
+  float2 local = float2(min(position.x, 768 - position.x), nose ? position.y : position.y - TailTop);
+  if (nose) return length(local - float2(NoseDotX * 768, NoseDotY * NoseHeight)) <= 4.5;
   // The reference bracket's bounding-box centre is near (0.335, 0.69);
   // its outside lower corner is farther out and below that centre.
-  float2 corner = float2(0.305 * 768, 0.75 * 504);
-  float2 upper = float2(0.33 * 768, 0.625 * 504);
-  float2 inner = float2(0.365 * 768, 0.758 * 504);
+  float2 corner = float2(TailCornerX * 768, TailCornerY * (763 - TailTop));
+  float2 upper = float2(TailUpperX * 768, TailUpperY * (763 - TailTop));
+  float2 inner = float2(TailInnerX * 768, TailInnerY * (763 - TailTop));
   return min(segment_distance(local, upper, corner), segment_distance(local, corner, inner)) <= 2;
 }
 float hdr_channel(float value) {
@@ -513,14 +524,14 @@ float4 vs_main(uint id : SV_VertexID) : SV_Position {
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
   if (position.x < 140 && position.y < 48) return ground_speed_pixel(position.xy);
-  if (position.y >= 245 && position.y < 269) return float4(0, 0, 0, 1);
-  if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < 255)) return float4(1, 0, 1, 1);
-  if (position.y < 255) {
-    float2 uv = float2(position.x / 768, position.y / 255);
+  if (position.y >= DividerTop && position.y < DividerBottom) return float4(0, 0, 0, 1);
+  if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
+  if (position.y < NoseHeight) {
+    float2 uv = float2(position.x / 768, position.y / NoseHeight);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
-  if (position.y < 259) return float4(0, 0, 0, 1);
-  float2 uv = float2(position.x / 768, (position.y - 259) / 504);
+  if (position.y < TailTop) return float4(0, 0, 0, 1);
+  float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
   return float4(display_rgb(Tail.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
 }
 )";
@@ -538,6 +549,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   Statistics statistics_;
   float exposure_ev_ = DefaultExposureEv;
   bool reference_guides_ = true;
+  profiles::Composition composition_{};
   UINT ground_speed_ = 0;
   bool ground_speed_valid_ = false;
   std::array<char, 1024> error_{};

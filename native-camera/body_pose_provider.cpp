@@ -4,6 +4,7 @@
 #include "body_pose_provider.hpp"
 #include <windows.h>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <cwchar>
 #include "../profiles/catalog.hpp"
@@ -20,6 +21,7 @@ using Dispatch = HRESULT(WINAPI*)(HANDLE, void**, DWORD*);
 using CameraGet = HRESULT(WINAPI*)(HANDLE, DWORD);
 using LastPacket = HRESULT(WINAPI*)(HANDLE, DWORD*);
 using MapEvent = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
+using SetData = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD, void*);
 using TransmitEvent = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD);
 // Public SDK SIMCONNECT_DATA_CAMERA is packed: XYZ24, references/object IDs,
 // XYZ24, FLOAT32 PBH12, references/object IDs, FOVdouble. Confirmed current
@@ -53,6 +55,8 @@ struct State {
   std::uint64_t ground_speed_ms = 0;
   const char* ground_speed_error = "not_initialized";
   bool taxi_left = false, taxi_right = false;
+  std::array<char, 256> aircraft_type{};
+  std::uint64_t aircraft_type_ms = 0;
   std::uint64_t taxi_ms = 0;
   const char* taxi_error = "not_initialized";
   TaxiSpeedCutoff speed_cutoff;
@@ -70,6 +74,7 @@ struct State {
   const char* error = "not_initialized";
 };
 State state;
+std::atomic<std::uint32_t> profile_id{1};
 SRWLOCK lifecycle = SRWLOCK_INIT;
 void lighting_failure(const char* text) noexcept {
   AcquireSRWLockExclusive(&state.lock);
@@ -192,6 +197,7 @@ bool accept_lighting_packet(const void* raw, DWORD bytes, std::uint64_t sample_m
   return true;
 }
 DWORD WINAPI worker(void*) noexcept {
+  const auto& profile = *profiles::find(profile_id.load());
   wchar_t path[32768]{};
   const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
   if (!length || length >= 32768) {
@@ -228,6 +234,7 @@ DWORD WINAPI worker(void*) noexcept {
   const auto get = reinterpret_cast<CameraGet>(GetProcAddress(dll, "SimConnect_CameraGet"));
   const auto last_packet = reinterpret_cast<LastPacket>(GetProcAddress(dll, "SimConnect_GetLastSentPacketID"));
   const auto map_event = reinterpret_cast<MapEvent>(GetProcAddress(dll, "SimConnect_MapClientEventToSimEvent"));
+  const auto set_data = reinterpret_cast<SetData>(GetProcAddress(dll, "SimConnect_SetDataOnSimObject"));
   const auto transmit_event = reinterpret_cast<TransmitEvent>(GetProcAddress(dll, "SimConnect_TransmitClientEvent"));
   if (!open || !close || !define || !request || !dispatch || !get) {
     failure("simconnect_exports");
@@ -278,7 +285,7 @@ DWORD WINAPI worker(void*) noexcept {
       taxi_packets[taxi_packet_cursor++ % taxi_packets.size()] = id;
   };
   bool taxi_defined = last_packet != nullptr;
-  for (const auto name : profiles::active().taxi_lvars) {
+  for (const auto name : profile.taxi_lvars) {
     if (!taxi_defined)
       break;
     taxi_defined = SUCCEEDED(define(session, 3, name, "number", 4, 0, 0xffffffffu));
@@ -290,15 +297,25 @@ DWORD WINAPI worker(void*) noexcept {
   // Isolated telemetry readers never control the aircraft. Production sends
   // the aircraft's real input event; its own controller updates the light.
 #if !defined(TAXI_BODY_POSE_PROVIDER_VALIDATION) && !defined(TAXI_BODY_POSE_PROVIDER_EXTERNAL_VALIDATION)
-  if (map_event && transmit_event) {
+  if (profile.taxi_control == profiles::TaxiControl::push_event && map_event && transmit_event) {
     for (unsigned side = 0; side < 2; ++side) {
-      taxi_events[side] = SUCCEEDED(map_event(session, 10 + side, profiles::active().taxi_events[side]));
+      taxi_events[side] = SUCCEEDED(map_event(session, 10 + side, profile.taxi_events[side]));
+      remember_taxi_packet();
+    }
+  }
+  if (profile.taxi_control == profiles::TaxiControl::lvar_off && set_data) {
+    for (unsigned side = 0; side < 2; ++side) {
+      // iniBuilds uses this exact latch for TAXI state and its lamp. A separate
+      // single-field definition permits idempotent OFF without touching the
+      // opposite side or generating a second toggle while awaiting an ACK.
+      taxi_events[side] = SUCCEEDED(define(session, 10 + side, profile.taxi_lvars[side], "number", 4, 0, 0xffffffffu));
       remember_taxi_packet();
     }
   }
 #else
   (void)map_event;
 #endif
+  const bool type_defined = SUCCEEDED(define(session, 5, "ATC TYPE", nullptr, 9, 0, 0xffffffffu));
   // Both public Number values were observed through separate requests in the
   // parked simulator. Official Asobo Emissive.xml maps ambient1..4000; the
   // documented glass-cockpit brightness is0..1. This is optional display data.
@@ -319,7 +336,7 @@ DWORD WINAPI worker(void*) noexcept {
   if (!lighting_defined)
     lighting_failure("lighting_definition_unavailable");
   std::uint64_t previous = 0;
-  std::uint64_t previous_lighting = 0;
+  std::uint64_t previous_lighting = 0, previous_type = 0;
   const HANDLE waits[]{state.stop, notification};
   while (true) {
     // Incoming packets wake the worker immediately. The50ms timeout only
@@ -332,6 +349,10 @@ DWORD WINAPI worker(void*) noexcept {
       break;
     }
     const auto now = GetTickCount64();
+    if (type_defined && now - previous_type >= 1000) {
+      previous_type = now;
+      request(session, 5, 5, 0, 1, 0, 0, 0, 0);
+    }
     if (lighting_defined && now - previous_lighting >= 500) {
       previous_lighting = now;
       const auto lighting_hr = request(session, 4, 4, 0, 1, 0, 0, 0, 0);
@@ -376,7 +397,15 @@ DWORD WINAPI worker(void*) noexcept {
         continue;
       }
       if (header[2] == 8) {
-        if (bytes >= 40 && (header[3] == 4 || header[5] == 4)) {
+        if (bytes == 296 && header[0] == 296 && header[3] == 5 && header[5] == 5 && header[6] == 0 && header[9] == 1) {
+          const auto* text = static_cast<const char*>(raw) + 40;
+          if (std::memchr(text, 0, 256)) {
+            AcquireSRWLockExclusive(&state.lock);
+            std::memcpy(state.aircraft_type.data(), text, 256);
+            state.aircraft_type_ms = GetTickCount64();
+            ReleaseSRWLockExclusive(&state.lock);
+          }
+        } else if (bytes >= 40 && (header[3] == 4 || header[5] == 4)) {
           if (!accept_lighting_packet(raw, bytes, GetTickCount64()))
             lighting_failure("lighting_packet_layout");
         } else if (bytes >= 40 && (header[3] == 3 || header[5] == 3)) {
@@ -431,7 +460,8 @@ DWORD WINAPI worker(void*) noexcept {
     const auto buttons = get_taxi_buttons();
     AcquireSRWLockExclusive(&state.lock);
     const auto commands = state.speed_cutoff.update(GetTickCount64(), speed.valid, speed.knots, buttons.valid,
-                                                    (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms);
+                                                    (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms,
+                                                    profile.speed_cutoff_knots);
     state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
                           : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
                                                            : "below_speed_limit";
@@ -441,7 +471,11 @@ DWORD WINAPI worker(void*) noexcept {
         continue;
       // Public SimConnect priority flag: GroupID is an explicit priority.
       // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_transmitclientevent/
-      const bool accepted = taxi_events[side] && transmit_event && SUCCEEDED(transmit_event(session, 0, 10 + side, 0, 1, 16));
+      double off = 0;
+      const bool accepted = taxi_events[side] && aircraft_matches_profile() &&
+                            (profile.taxi_control == profiles::TaxiControl::lvar_off
+                                 ? set_data && SUCCEEDED(set_data(session, 10 + side, 0, 0, 0, sizeof(off), &off))
+                                 : transmit_event && SUCCEEDED(transmit_event(session, 0, 10 + side, 0, 1, 16)));
       if (taxi_events[side])
         remember_taxi_packet();
       AcquireSRWLockExclusive(&state.lock);
@@ -499,6 +533,21 @@ LightingSample lighting_locked(std::uint64_t now) noexcept {
   return out;
 }
 }  // namespace
+bool select_aircraft_profile(std::uint32_t id) noexcept {
+  if (!profiles::find(id))
+    return false;
+  shutdown_body_pose_provider();
+  profile_id.store(id);
+  return true;
+}
+bool aircraft_matches_profile() noexcept {
+  AcquireSRWLockShared(&state.lock);
+  const auto now = GetTickCount64();
+  const bool matches = state.aircraft_type_ms && now >= state.aircraft_type_ms && now - state.aircraft_type_ms <= 3000 &&
+                       profiles::matches_aircraft(*profiles::find(profile_id.load()), state.aircraft_type.data());
+  ReleaseSRWLockShared(&state.lock);
+  return matches;
+}
 bool initialize_body_pose_provider() noexcept {
   AcquireSRWLockExclusive(&lifecycle);
   if (state.worker && WaitForSingleObject(state.worker, 0) == WAIT_OBJECT_0) {
@@ -543,7 +592,7 @@ void shutdown_body_pose_provider() noexcept {
     state.stop = nullptr;
   }
   AcquireSRWLockExclusive(&state.lock);
-  state.aircraft_ms = state.camera_ms = 0;
+  state.aircraft_ms = state.camera_ms = state.aircraft_type_ms = 0;
   state.ground_speed_ms = 0;
   state.ground_speed_error = "not_initialized";
   state.taxi_ms = 0;

@@ -39,8 +39,15 @@ inline std::wstring settings_path(const Settings& s) {
       name += wchar_t(c);
   return folder + L"\\" + name + L".ini";
 }
-inline bool load_settings(Settings& s, const std::wstring& installation) {
+inline bool load_settings(Settings& s, const std::wstring& installation, std::uint32_t profile_id = 0) {
+  if (!profile_id)
+    profile_id = GetPrivateProfileIntW(L"aircraft", L"profile", 1, (settings_directory() + L"\\settings.ini").c_str());
+  const auto* profile = profiles::find(profile_id);
+  if (!profile)
+    profile = &profiles::A380;
   Settings value;
+  value.profile = profile->id;
+  value.mounts = profile->mounts;
   auto path = settings_path(value);
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
     const auto legacy = legacy_settings_path(path);
@@ -54,6 +61,10 @@ inline bool load_settings(Settings& s, const std::wstring& installation) {
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
     // Import the user's existing camera calibration once. The companion becomes
     // the settings owner; stale installer defaults never override later UI edits.
+    if (profile->id != profiles::A380.id) {
+      s = value;
+      return true;
+    }
     const auto mount_path = installation + L"\\taxi-camera-mounts.cfg";
     HANDLE file = CreateFileW(mount_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE) {
@@ -130,6 +141,10 @@ inline bool save_settings(const Settings& s) {
   const DWORD bytes = static_cast<DWORD>(count * sizeof(wchar_t));
   ok = ok && WriteFile(file, text, bytes, &wrote, nullptr) && wrote == bytes && FlushFileBuffers(file);
   CloseHandle(file);
-  return ok && MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+  if (!ok || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return false;
+  wchar_t profile_text[16];
+  std::swprintf(profile_text, 16, L"%u", s.profile);
+  return WritePrivateProfileStringW(L"aircraft", L"profile", profile_text, (settings_directory() + L"\\settings.ini").c_str()) != FALSE;
 }
 }  // namespace taxi_camera::standalone

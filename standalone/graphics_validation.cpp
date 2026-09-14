@@ -69,7 +69,9 @@ void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   require(taxi_camera::drain_copy_queue(queue, device), "Interop capture completion");
 }
 
-void native_case(bool warp) {
+void native_case(bool warp, bool a350) {
+  const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
+  const UINT pane_width = profile.camera_panes[0][0], display_width = profile.width;
   Reference<ID3D12Debug> debug;
   const bool debug_enabled = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debug.put())));
   if (debug_enabled)
@@ -96,16 +98,18 @@ void native_case(bool warp) {
   check(device->CreateCommandList(0, qd.Type, allocator.get(), nullptr, IID_PPV_ARGS(list.put())), "Pre-existing list");
   check(list->Close(), "Close pre-existing list");
   require(win::initialize_graphics(device.get()), win::graphics_status().error);
+  win::set_aircraft_profile(profile.id);
   check(list->Reset(allocator.get(), nullptr), "Observe first actual Reset of pre-existing list");
   const auto key = win::graphics_status().device;
   require(runtime::prepare(key), "Native compositor prepare");
+  runtime::set_composition(key, profile.composition);
   runtime::manager().begin_source_tracking();
   runtime::manager().set_source_rate(60);
   std::array<Reference<ID3D12Resource>, 4> textures;
   for (UINT i = 0; i < 4; ++i) {
-    auto d = texture_description(768, i == 0 ? 255 : i == 1 ? 504 : 1024, DXGI_FORMAT_R8G8B8A8_UNORM);
+    auto d = texture_description(i < 2 ? pane_width : display_width, i == 0 ? 255 : i == 1 ? 504 : 1024, DXGI_FORMAT_R8G8B8A8_UNORM);
     if (i > 1)
-      d.MipLevels = 5;
+      d.MipLevels = a350 ? 1 : 5;
     create_texture(device.get(), d, textures[i].put());
   }
   D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -136,7 +140,11 @@ void native_case(bool warp) {
           "Native source creation identities published");
   const auto inventory = win::pfd_inventory();
   require(inventory.size() == 2, "Two native PFD candidates");
-  require(win::assign_targets(inventory[0].id, inventory[1].id), "Explicit PFD pair");
+  // IDs are monotonically assigned at creation, but unordered inventory order
+  // is not a side label. Bind the first created PFD to the left for this oracle.
+  const auto first = std::min(inventory[0].id, inventory[1].id);
+  const auto second = std::max(inventory[0].id, inventory[1].id);
+  require(win::assign_targets(first, second), "Explicit PFD pair");
   require(!win::assign_targets(inventory[0].id, inventory[0].id), "Reject duplicate PFD identity");
 
   auto submit = [&] {
@@ -149,8 +157,8 @@ void native_case(bool warp) {
     check(allocator->Reset(), "Allocator Reset");
     check(list->Reset(allocator.get(), nullptr), "Observed native Reset");
   };
-  generator.record(list.get(), rtvs[0], 768, 255, false, 0, 0);
-  generator.record(list.get(), rtvs[1], 768, 504, false, 0, 1);
+  generator.record(list.get(), rtvs[0], pane_width, 255, false, 0, 0);
+  generator.record(list.get(), rtvs[1], pane_width, 504, false, 0, 1);
   submit();
   reset();
   const auto deadline = GetTickCount64() + 10000;
@@ -173,8 +181,8 @@ void native_case(bool warp) {
               after_interop.invalid_source_recordings, before_interop.unknown_submitted_lists, after_interop.unknown_submitted_lists);
   Sleep(20);  // Next permitted 60-Hz capture opportunity.
   const auto frames_before_interop = runtime::snapshot(key).frames;
-  generator.record(list.get(), rtvs[0], 768, 255, false, 0, 0);
-  generator.record(list.get(), rtvs[1], 768, 504, false, 0, 1);
+  generator.record(list.get(), rtvs[0], pane_width, 255, false, 0, 0);
+  generator.record(list.get(), rtvs[1], pane_width, 504, false, 0, 1);
   submit();
   reset();
   const auto interop_deadline = GetTickCount64() + 1000;
@@ -184,13 +192,13 @@ void native_case(bool warp) {
   }
   require(runtime::snapshot(key).frames > frames_before_interop, "Camera capture survives unrelated D3D11On12 Game Capture copy");
   win::set_target_mask(3);
-  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
-  generator.record(list.get(), rtvs[3], 768, 1024, false, 0, 0);
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+  generator.record(list.get(), rtvs[3], display_width, 1024, false, 0, 0);
   // Only change root constants and scissor. Original pipeline, signature,
   // topology and viewport must have survived the injected PFD draw.
   // Update one word only: previously set words must survive our root change.
   list->SetGraphicsRoot32BitConstant(0, 1, 2);
-  const D3D12_RECT lower{0, 763, 768, 1024};
+  const D3D12_RECT lower{0, 763, static_cast<LONG>(display_width), 1024};
   list->RSSetScissorRects(1, &lower);
   list->DrawInstanced(3, 1, 0, 0);
   require(runtime::snapshot(key).stamps == 3, "Three automatic native PFD stamps");
@@ -230,15 +238,25 @@ void native_case(bool warp) {
     check(readbacks[side]->Map(0, &range, &mapped), "Map verification readback");
     const auto* data = static_cast<const unsigned char*>(mapped);
     for (UINT y = 0; y < 1024; ++y)
-      for (UINT x = 0; x < 768; ++x) {
+      for (UINT x = 0; x < display_width; ++x) {
         const auto* pixel = data + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
+        const UINT left = a350 && side ? 822u : 0u;
+        const UINT region_width = a350 ? 822u : 768u;
+        const bool camera_region = x >= left && x < left + region_width;
+        const auto local_x = static_cast<int>(x) - static_cast<int>(left);
         // Independent broad regions deliberately exclude reference marks and GS.
-        if (x >= 350 && x < 400 && y >= 100 && y < 150)
+        if (local_x >= 350 && local_x < 400 && y >= 100 && y < 150)
           require(pixel[2] >= 49 && pixel[2] <= 53, "Nose frame on PFD");
-        if (x >= 350 && x < 400 && y >= 400 && y < 450)
+        if (local_x >= 350 && local_x < 400 && y >= 400 && y < 450)
           require(pixel[2] >= 202 && pixel[2] <= 206, "Tail frame on PFD");
-        if (y >= 255 && y < 259)
+        if (camera_region && y >= 255 && y < 259)
           require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Black divider");
+        if (a350 && !camera_region && y < 763)
+          require(pixel[2] >= 50 && pixel[2] <= 52, "A350 navigation half preserved");
+        // Nose dot verifies profile-dependent overlay colour reaches the GPU.
+        if (camera_region && local_x == static_cast<int>(region_width * .14) && y == 122)
+          require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),
+                  "Aircraft reference-marker style");
         if (y >= 800) {
           const UINT blue = side ? 153 : 51;
           require(pixel[2] >= blue - 1 && pixel[2] <= blue + 1, "Lower trim and application graphics state preserved");
@@ -264,18 +282,18 @@ void native_case(bool warp) {
   predicate->Unmap(0, nullptr);
   const auto before_predicate = runtime::snapshot(key).stamps;
   list->SetPredication(predicate.get(), 0, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
-  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == before_predicate, "Real predication refuses PFD injection");
   list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
-  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == before_predicate, "Disable predication cannot revive invalid recording");
   submit();
   reset();
-  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == before_predicate + 1, "Fresh Reset restores PFD injection");
   win::set_target_mask(0);
   const auto stamps = runtime::snapshot(key).stamps;
-  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
   require(runtime::snapshot(key).stamps == stamps, "OFF state stops new PFD stamping");
   submit();
   reset();
@@ -306,7 +324,16 @@ void native_case(bool warp) {
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   try {
-    native_case(argc == 2 && std::wcscmp(argv[1], L"--warp") == 0);
+    bool warp = false, a350 = false;
+    for (int i = 1; i < argc; ++i) {
+      if (std::wcscmp(argv[i], L"--warp") == 0)
+        warp = true;
+      else if (std::wcscmp(argv[i], L"--a350") == 0)
+        a350 = true;
+      else
+        return 2;
+    }
+    native_case(warp, a350);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL native graphics: %s\n", e.what());

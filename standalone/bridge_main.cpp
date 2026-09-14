@@ -68,7 +68,8 @@ DWORD run_impl() {
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
-  unsigned rate{}, feeds{};
+  unsigned rate{}, feeds{}, applied_profile{};
+  bool changing_profile = false;
   win::CompanionControl control;
   win::Status last_logged{};
   bool logged = false, last_connected = false, last_requested = false;
@@ -79,6 +80,45 @@ DWORD run_impl() {
     const auto now = GetTickCount64();
     const auto& settings = control.settings();
     const bool connected = control.connected(now);
+    if (connected && (changing_profile || settings.profile != applied_profile)) {
+      if (!changing_profile) {
+        win::set_target_mask(0);
+        win::set_calibration(0, settings.calibration_budget);
+        scene_runtime::manager().stop_source_tracking();
+        if (native_camera::scene_snapshot().hook_installed)
+          native_camera::request_scene_stop(true);
+        scene_runtime::reset_feed(key);
+        changing_profile = true;
+        requested = failed = false;
+      }
+      const auto pair = native_camera::scene_snapshot().pair;
+      // Engine cleanup owns the IDs. Never switch adapters beneath live views.
+      if (pair.owned_ids[0] || pair.owned_ids[1] || pair.creation_pending) {
+        win::Status pending{};
+        pending.heartbeat = now;
+        std::snprintf(pending.message, sizeof(pending.message), "Waiting for camera cleanup before switching aircraft profile.");
+        if (mailbox.lock()) {
+          mailbox.data()->status = pending;
+          mailbox.unlock();
+        }
+        scene_runtime::service();
+        Sleep(25);
+        continue;
+      }
+      if (!native_camera::request_scene_profile(settings.profile)) {
+        Sleep(25);
+        continue;
+      }
+      native_camera::select_aircraft_profile(settings.profile);
+      win::set_aircraft_profile(settings.profile);
+      applied_profile = settings.profile;
+      applied_mounts = {};
+      intent = {};
+      progress = {};
+      exposure = {};
+      route_request = next_telemetry = next_discovery = 0;
+      changing_profile = false;
+    }
     if (now >= next_telemetry) {
       native_camera::initialize_body_pose_provider();
       next_telemetry = now + 2000;
@@ -91,19 +131,21 @@ DWORD run_impl() {
       if (win::assign_targets(settings.left_id, settings.right_id))
         route_request = settings.route_request;
     }
+    const bool aircraft_matches = native_camera::aircraft_matches_profile();
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
-    const unsigned mask = connected && settings.enabled && win::graphics_status().ready && !cutoff.inhibited
+    const unsigned mask = connected && settings.enabled && aircraft_matches && win::graphics_status().ready && !cutoff.inhibited
                               ? (settings.follow_taxi ? desired.buttons : settings.manual_mask)
                               : 0;
-    const bool test_scene = connected && settings.enabled && settings.scene_test && !cutoff.inhibited;
+    const bool test_scene = connected && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
     if (!mask && !test_scene)
       failed = false;
     const auto targets = win::target_ids();
     const unsigned active = ((mask & 1) && targets[0] ? 1u : 0u) | ((mask & 2) && targets[1] ? 2u : 0u);
     win::set_target_mask(failed ? 0 : active);
-    win::set_calibration(connected && settings.enabled && !cutoff.inhibited ? settings.calibration_mask : 0, settings.calibration_budget);
+    win::set_calibration(connected && settings.enabled && aircraft_matches && !cutoff.inhibited ? settings.calibration_mask : 0,
+                         settings.calibration_budget);
     const win::OwnedWork owned;
     if (connected && (rate != settings.camera_rate || feeds != (settings.single_camera ? 1u : 2u))) {
       rate = settings.camera_rate;
@@ -122,6 +164,7 @@ DWORD run_impl() {
     }
     if ((active || test_scene) && !requested && !failed) {
       if (scene_runtime::prepare(key)) {
+        scene_runtime::set_composition(key, profiles::find(applied_profile)->composition);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
@@ -180,13 +223,15 @@ DWORD run_impl() {
     const auto inventory = win::pfd_inventory();
     status.candidate_count = static_cast<UINT>(std::min<size_t>(inventory.size(), 16));
     for (UINT i = 0; i < status.candidate_count; ++i)
-      status.candidates[i] = {inventory[i].id, inventory[i].draws};
-    const char* message = !connected                     ? "Waiting for Windows companion heartbeat."
-                          : !settings.enabled            ? "Camera service paused."
-                          : cutoff.inhibited             ? "Above 60 knots: TAXI buttons commanded off."
-                          : failed                       ? scene.message.c_str()
-                          : !buttons.valid               ? buttons.error
-                          : (!targets[0] || !targets[1]) ? "Detecting the two PFD textures; load the A380."
+      status.candidates[i] = {inventory[i].id,     inventory[i].draws,  inventory[i].width,
+                              inventory[i].height, inventory[i].levels, inventory[i].format};
+    const char* message = !connected          ? "Waiting for Windows companion heartbeat."
+                          : !settings.enabled ? "Camera service paused."
+                          : !aircraft_matches ? "Select the profile matching the loaded aircraft; waiting for aircraft telemetry."
+                          : cutoff.inhibited  ? "Above 60 knots: TAXI buttons commanded off."
+                          : failed            ? scene.message.c_str()
+                          : !buttons.valid    ? buttons.error
+                          : (!targets[0] || !targets[1]) ? "Detecting display textures for the selected aircraft profile."
                           : !active                      ? "Ready. Use the aircraft's left or right TAXI button."
                           : !requested || failed         ? scene.message.c_str()
                                                          : output.message;
@@ -203,11 +248,12 @@ DWORD run_impl() {
     if (changed || now >= next_log) {
       char detail[1536];
       std::snprintf(detail, sizeof(detail),
-                    "connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u stop_seq=%llu stop=%s "
+                    "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
+                    "stop_seq=%llu stop=%s "
                     "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u entries=%llu/%llu tail=%s "
                     "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu | %.256s",
-                    connected, requested, static_cast<unsigned long long>(control.busy_reads()), buttons.valid, desired.held,
-                    desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
+                    applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()),
+                    buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
                     native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
                     scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
                     scene.ready[1], static_cast<unsigned long long>(scene.pair.owned_ids[0]),

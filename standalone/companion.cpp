@@ -220,7 +220,13 @@ void target_combos(const win::Settings& s) {
     int selection = 0;
     for (size_t i = 0; i < combo_ids.size(); ++i) {
       wchar_t name[80];
-      std::swprintf(name, 80, L"Texture #%llu", static_cast<unsigned long long>(combo_ids[i]));
+      const win::Candidate* candidate = nullptr;
+      for (UINT j = 0; j < std::min(sample.candidate_count, 16u); ++j)
+        if (sample.candidates[j].id == combo_ids[i])
+          candidate = &sample.candidates[j];
+      std::swprintf(name, 80, L"#%llu | %ux%u | %llu draws", static_cast<unsigned long long>(combo_ids[i]),
+                    candidate ? candidate->width : 0, candidate ? candidate->height : 0,
+                    candidate ? static_cast<unsigned long long>(candidate->draws) : 0);
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
       if (combo_ids[i] == selected)
         selection = static_cast<int>(i + 1);
@@ -245,7 +251,9 @@ void build_controls() {
     HWND combo = child(L"COMBOBOX", L"", 210, 260, 312, 430, 220, CBS_DROPDOWNLIST | WS_VSCROLL);
     for (const auto* profile : profiles::Catalog)
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(profile->name));
-    SendMessageW(combo, CB_SETCURSEL, 0, 0);
+    for (size_t i = 0; i < profiles::Catalog.size(); ++i)
+      if (profiles::Catalog[i]->id == s.profile)
+        SendMessageW(combo, CB_SETCURSEL, i, 0);
     toggle(L"Service", 220, s.enabled, 830, 304, 150);
     toggle(L"TAXI buttons", 221, s.follow_taxi, 800, 412, 180);
     edit(s.camera_rate, 200, 855, 528, 100);
@@ -781,7 +789,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const int id = LOWORD(w);
       if (refreshing)
         return 0;
-      if (HIWORD(w) == EN_CHANGE || HIWORD(w) == CBN_SELCHANGE) {
+      if (HIWORD(w) == EN_CHANGE || (HIWORD(w) == CBN_SELCHANGE && id != 210)) {
         dirty_notice();
         return 0;
       }
@@ -799,6 +807,22 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 602) {
         PostMessageW(hwnd, TrayMessage, 0, WM_CONTEXTMENU);
+        return 0;
+      }
+      if (id == 210 && HIWORD(w) == CBN_SELCHANGE) {
+        const auto index = SendDlgItemMessageW(hwnd, 210, CB_GETCURSEL, 0, 0);
+        if (index < 0 || static_cast<size_t>(index) >= profiles::Catalog.size())
+          return 0;
+        if (!apply())
+          return 0;
+        win::Settings next;
+        if (!win::load_settings(next, installation, profiles::Catalog[index]->id)) {
+          notice = L"Could not load that aircraft profile.";
+          return 0;
+        }
+        publish(next);
+        dirty_notice();
+        build_controls();
         return 0;
       }
       if (id == 500) {
@@ -868,7 +892,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 350) {
         auto s = draft();
-        s.mounts = profiles::active().mounts;
+        s.mounts = profiles::find(s.profile)->mounts;
         publish(s);
         dirty_notice();
         build_controls();

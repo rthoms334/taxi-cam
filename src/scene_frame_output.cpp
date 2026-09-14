@@ -8,6 +8,12 @@ namespace taxi_camera {
 bool SceneFrameOutput::set_display_exposure(float ev) noexcept {
   return compositor_ && !prepared_ && !failed_ && compositor_->set_display_exposure(ev);
 }
+bool SceneFrameOutput::set_composition(const profiles::Composition& layout) noexcept {
+  if (!compositor_ || prepared_ || failed_)
+    return false;
+  compositor_->set_composition(layout);
+  return true;
+}
 bool SceneFrameOutput::set_ground_speed(float knots, bool valid) noexcept {
   if (!compositor_ || prepared_ || failed_)
     return false;

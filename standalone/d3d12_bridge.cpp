@@ -102,6 +102,7 @@ struct Registry {
   std::unordered_map<SIZE_T, DXGI_FORMAT> dsvs;
   TaxiButtonRoutes routes;
   PfdTargetDetector detector;
+  const profiles::AircraftProfile* profile = &profiles::A380;
   unsigned active_mask{}, calibration_mask{};
   WriteBudget calibration_budget;
 };
@@ -134,8 +135,11 @@ void observe_safely(F&& action) noexcept {
   }
 }
 bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
-  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Width == 768 && (d.Height == 255 || d.Height == 504 || d.Height == 1024) &&
-         d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 && (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+  bool dimensions = profiles::camera_candidate(static_cast<UINT>(d.Width), d.Height);
+  for (const auto* profile : profiles::Catalog)
+    dimensions |= d.Width == profile->width && d.Height == profile->height;
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
+         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
 }
 bool same_device(ID3D12Device* device) noexcept {
   IUnknown *a{}, *b{};
@@ -285,11 +289,16 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   if (!allowed || list->count != 1 || !list->depth_known)
     return;
   const auto& view = list->targets[0];
-  if (!view.resource || !view.resource->alive || view.mip || view.resource->desc.Height != 1024)
+  if (!view.resource || !view.resource->alive || view.mip)
     return;
   bool selected = false, calibrate = false;
+  profiles::DisplayRect area{};
   {
     const std::lock_guard lock(r.mutex);
+    if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                                   view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
+      return;
+    area = profiles::display_rect(*r.profile, r.routes.targets[1] == view.resource->id ? 1u : 0u);
     calibrate = r.routes.matches(view.resource->id, r.calibration_mask) && r.calibration_budget.try_acquire(0, GetTickCount64());
     selected = r.routes.matches(view.resource->id, r.active_mask);
     if (selected) {
@@ -298,13 +307,16 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
     }
   }
   if (calibrate) {
-    record_calibration(native, {view.rtv}, 768, 1024, GetTickCount64() / 16);
+    record_calibration(native, {view.rtv}, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16, area.left);
     return;
   }
   if (!selected)
     return;
   const boundary::ScopedBypass bypass;
-  runtime::stamp(native, list->graphics, r.key, view.format, 768, 1024, list->depth);
+  const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
+                               static_cast<LONG>(area.bottom)};
+  runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                 list->depth, &destination);
 }
 void pass_targets(void*,
                   ID3D12GraphicsCommandList*,
@@ -884,8 +896,10 @@ std::vector<PfdTargetObservation> pfd_inventory() {
   std::vector<PfdTargetObservation> result;
   for (const auto& [p, item] : r.resources) {
     (void)p;
-    if (item->alive && item->desc.Height == 1024)
-      result.push_back({item->id, item->draws, 768, 1024, item->desc.MipLevels, static_cast<UINT>(item->desc.Format)});
+    if (item->alive && profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                                                 static_cast<UINT>(item->desc.Format)))
+      result.push_back({item->id, item->draws, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                        static_cast<UINT>(item->desc.Format)});
   }
   std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.draws > b.draws; });
   return result;
@@ -896,7 +910,8 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
   bool l = !left, rr = !right;
   for (const auto& [p, item] : r.resources) {
     (void)p;
-    if (!item->alive || item->desc.Height != 1024 || item->desc.MipLevels != 5 || item->desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+    if (!item->alive || !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                                                   static_cast<UINT>(item->desc.Format)))
       continue;
     l |= item->id == left;
     rr |= item->id == right;
@@ -921,6 +936,17 @@ std::array<std::uint64_t, 2> target_ids() noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
   return r.routes.targets;
+}
+void set_aircraft_profile(std::uint32_t id) noexcept {
+  const auto* profile = profiles::find(id);
+  if (!profile)
+    return;
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  r.active_mask = r.calibration_mask = 0;
+  r.routes.targets = {};
+  r.profile = profile;
+  r.detector.configure(*profile);
 }
 void discover_pfds(std::uint64_t now) noexcept {
   observe_safely([&] {

@@ -95,6 +95,7 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 void request_scene_rate(unsigned rate, unsigned feeds = 2) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
+bool request_scene_profile(std::uint32_t id) noexcept;
 bool request_scene_mounts(const MountPair& mounts) noexcept;
 ProbeSnapshot scene_snapshot();
 

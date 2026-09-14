@@ -2,6 +2,7 @@
 
 #include <d3d12.h>
 #include <cstdint>
+#include "../profiles/catalog.hpp"
 
 namespace taxi_camera {
 class CameraCompositorD3D12;
@@ -28,6 +29,7 @@ class SceneFrameOutput {
   // prepared recording must first be submitted or discarded.
   bool set_display_exposure(float ev) noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
+  bool set_composition(const profiles::Composition& layout) noexcept;
   float display_exposure() const noexcept;
   bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept;
   // Discard a closed prepared list which was NEVER submitted (e.g. the manager

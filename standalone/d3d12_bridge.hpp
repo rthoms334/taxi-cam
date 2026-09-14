@@ -18,5 +18,6 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
 std::array<std::uint64_t, 2> target_ids() noexcept;
+void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;
 }  // namespace taxi_camera::standalone

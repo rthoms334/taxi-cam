@@ -1,5 +1,6 @@
 #include "scene_capture_manager.hpp"
 #include "../engine-hook/render_boundary_observer.hpp"
+#include "../profiles/catalog.hpp"
 #include "native_device_identity.hpp"
 
 #include <chrono>
@@ -236,9 +237,9 @@ bool SceneCaptureManager::register_source_candidate(std::uint64_t key,
                                                     std::uint64_t generation,
                                                     const D3D12_RESOURCE_DESC& desc,
                                                     source_state::Model initial) noexcept {
-  if (!resource || !generation || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.Width != 768 ||
-      (desc.Height != 255 && desc.Height != 504) || desc.MipLevels != 1 || desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 ||
-      desc.SampleDesc.Quality || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
+  if (!resource || !generation || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+      !profiles::camera_candidate(static_cast<UINT>(desc.Width), desc.Height) || desc.MipLevels != 1 || desc.DepthOrArraySize != 1 ||
+      desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
       (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) != 0 ||
       (desc.Format != DXGI_FORMAT_R11G11B10_FLOAT && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
        desc.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT))

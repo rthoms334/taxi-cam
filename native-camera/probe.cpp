@@ -42,6 +42,8 @@ struct Runtime {
   std::atomic<unsigned> requested_settings{15u | (2u << 8)};
   // Protected by mutex; never used directly by a native engine call.
   MountPair requested_mounts = default_mounts();
+  const profiles::AircraftProfile* requested_profile = &profiles::A380;
+  const profiles::AircraftProfile* aircraft_profile = &profiles::A380;
   std::uint64_t requested_mount_revision = 0;
   bool requested_start = false;
   std::uint64_t requested_start_revision = 0;
@@ -431,7 +433,7 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     }
     apply_pose(runtime, view, runtime.mounted_poses[runtime.creations - 1]);
     ViewDimensions desired{};
-    if (!plan_view_resize(view.dimensions, runtime.creations - 1, desired)) {
+    if (!plan_view_resize(view.dimensions, runtime.creations - 1, desired, runtime.aircraft_profile->camera_panes)) {
       runtime.creation_valid = false;
       runtime.stage_error = "The owned view dimensions cannot be validated for its requested PFD pane.";
       return id;
@@ -461,7 +463,7 @@ bool resize_new_entry(Runtime& runtime, ec::EntryId id, unsigned index) {
         auto& current = *static_cast<Runtime*>(opaque);
         return reinterpret_cast<std::uintptr_t>(function<void* (*)(void*)>(current, 66809728)(reinterpret_cast<void*>(address)));
       }};
-  const auto resized = resize_owned_view(view, index, desired, resize_callbacks);
+  const auto resized = resize_owned_view(view, index, desired, resize_callbacks, runtime.aircraft_profile->camera_panes);
   if (!resized.complete) {
     runtime.stage_error = view_resize_status_name(resized.status);
     return false;
@@ -523,6 +525,8 @@ void observer(void* manager) noexcept {
     std::uint64_t start_revision = 0;
     {
       const std::lock_guard lock(runtime.mutex);
+      if (!before.owned_ids[0] && !before.owned_ids[1] && !before.creation_pending)
+        runtime.aircraft_profile = runtime.requested_profile;
       requested_start = runtime.requested_start;
       start_revision = runtime.requested_start_revision;
       if (runtime.mount_revision != runtime.requested_mount_revision) {
@@ -957,6 +961,18 @@ void request_scene_rate(unsigned rate, unsigned feeds) noexcept {
   state().requested_settings.store(settings, std::memory_order_release);
 }
 
+bool request_scene_profile(std::uint32_t id) noexcept {
+  const auto* profile = profiles::find(id);
+  if (!profile)
+    return false;
+  auto& runtime = state();
+  const std::lock_guard lock(runtime.mutex);
+  const auto pair = runtime.pair.snapshot();
+  if (pair.owned_ids[0] || pair.owned_ids[1] || pair.creation_pending)
+    return false;
+  runtime.requested_profile = profile;
+  return true;
+}
 bool request_scene_mounts(const MountPair& mounts) noexcept {
   if (!valid_mounts(mounts))
     return false;
