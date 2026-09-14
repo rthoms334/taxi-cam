@@ -36,7 +36,7 @@ inline bool pixel(unsigned x, unsigned y, std::array<unsigned char, 4>& out, boo
       out = {0, 255, 0, 255};
     return true;
   }
-  if (y >= 245 && y < 269) {
+  if (y >= 251 && y < 263) {
     out = {0, 0, 0, 255};
     return true;
   }

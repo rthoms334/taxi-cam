@@ -130,7 +130,7 @@ Source: [scene/resource matching](../src/scene_handoff.hpp), [capture manager](.
 Source dimensions come from the aircraft profile. The compositor takes a completed nose image and a completed tail image from the current camera pair. It draws a **768 × 763** output containing:
 
 - nose view above and tail view below;
-- a black horizontal divider;
+- a 12-pixel black horizontal divider in the composed image;
 - nose reference dots and mirrored tail brackets: magenta for the A380, amber for the A350;
 - an opaque ground-speed panel inset from the top-left camera edges, with internal padding and a width that fits the current value on both A380 and A350.
 

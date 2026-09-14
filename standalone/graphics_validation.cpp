@@ -350,8 +350,12 @@ void native_case(bool warp, bool a350) {
             require(pixel[2] >= 49 && pixel[2] <= 53, "Nose frame within inset PFD content");
           if (working_x >= 350 && working_x < 400 && working_y >= 400 && working_y < 450)
             require(pixel[2] >= 202 && pixel[2] <= 206, "Tail frame within inset PFD content");
-          if (working_y >= 245 && working_y < 269)
+          if (working_y >= 251 && working_y < 263)
             require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Black divider scales with the complete working image");
+          if (working_x >= 350 && working_x < 400 && working_y >= 245 && working_y < 251)
+            require(pixel[2] >= 49 && pixel[2] <= 53, "Thinner divider exposes the restored nose edge");
+          if (working_x >= 350 && working_x < 400 && working_y >= 263 && working_y < 269)
+            require(pixel[2] >= 202 && pixel[2] <= 206, "Thinner divider exposes the restored tail edge");
           // Both coordinates move with the inner rectangle, including the GS
           // panel's own independent padding. Its default unavailable value is--.
           const bool camera_margin = (working_x == 0 && working_y == 0) || (working_x == 4 && working_y == 30) ||
@@ -368,12 +372,12 @@ void native_case(bool warp, bool a350) {
             ++gs_label_pixels;
           }
           // Independent A350 default lower corners sit below/outside the bogies.
-          if (a350 && (working_x == 207 || working_x == 560) && working_y == 682) {
+          if (a350 && (working_x == 207 || working_x == 560) && working_y == 728) {
             require(pixel[0] > 250 && pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3,
                     "A350 lower brackets appear beside the bogies on both sides");
             ++tail_guide_pixels;
           }
-          if (a350 && working_x == 234 && working_y == 637)
+          if (a350 && ((working_x == 234 && working_y == 637) || (working_x == 207 && working_y == 682)))
             require(pixel[2] >= 202 && pixel[2] <= 206, "Old A350 bracket position is camera imagery");
           if (working_x >= 106 && working_x <= 109 && working_y >= 121 && working_y <= 123) {
             require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),

@@ -538,7 +538,7 @@ void pixel_case(ID3D12Device* device,
           expected = SentinelBytes;
           ++result.lower_pixels;
         } else if (reference_overlay_oracle::pixel(x, y, expected, overlay_case && frame == 0, overlay_case && frame == 0, 11)) {
-          if (y >= 245 && y < 269)
+          if (y >= 251 && y < 263)
             ++result.divider_pixels;
           if (expected == std::array<unsigned char, 4>{255, 0, 255, 255})
             ++result.magenta_pixels;

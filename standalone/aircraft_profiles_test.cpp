@@ -140,21 +140,26 @@ int main() {
     const auto nose = project_landmark(*profile, 0, {0, (longer ? -15.5 : -15.6) * 0.3048, (longer ? 92.045 : 79.46) * 0.3048});
     // Preserve the user's accepted nose calibration on both variants, with
     // the -1000's forward offset keeping the equivalent gear-relative mount.
-    assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == (longer ? 20.36 : 16.55));
+    assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == (longer ? 19.81 : 16));
     assert(profile->mounts[0][3] == -15 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 0.55);
     assert(std::abs(nose[0] - 0.5) < 1e-6 && nose[1] > 0.55 && nose[1] < 0.75);
     const auto gear = project_landmark(*profile, 1, {-20.200737 * 0.3048, -16.45 * 0.3048, -17.63 * 0.3048});
-    assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > 0.77 && gear[1] < 0.84);
+    assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > (longer ? 0.77 : 0.85) && gear[1] < (longer ? 0.84 : 0.90));
     assert(profile->composition.tail_corner[0] < gear[0] && profile->composition.tail_inner[0] > gear[0]);
     assert(profile->composition.tail_corner[1] > gear[1] && profile->composition.tail_upper[1] < gear[1]);
     const auto& tail_mount = profile->mounts[1];
-    assert(tail_mount[3] * (3.14159265358979323846 / 180) + tail_mount[5] / 2 < 0);  // Tail horizon stays above the pane.
+    assert(tail_mount[0] == 0 && tail_mount[1] == 10 && tail_mount[2] == (longer ? -36.17 : -33));
+    assert(tail_mount[3] == -15 && tail_mount[4] == 0 && tail_mount[5] == 0.62);
   }
-  // Independent bounds from the -900 live framing trial. The lower legs clear
-  // the whole visible bogie instead of crossing its tyres as the old marks did.
+  // Earlier -900 live bounds projected into the accepted tail view. The lower
+  // legs clear the predicted bogie bounds; final guide alignment needs a live check.
   const auto& a359_guides = profiles::A359.composition;
-  assert(a359_guides.tail_corner[0] < 0.284 && a359_guides.tail_corner[1] > 0.817);
-  assert(a359_guides.tail_inner[0] > 0.345 && a359_guides.tail_inner[1] > 0.817);
+  assert(a359_guides.tail_corner[0] < 0.280 && a359_guides.tail_corner[1] > 0.864);
+  assert(a359_guides.tail_inner[0] > 0.343 && a359_guides.tail_inner[1] > 0.864);
+  for (const auto* profile : profiles::Catalog) {
+    assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);
+    assert(profile->composition.nose_height == 255 && profile->composition.tail_top == 259);
+  }
   static PfdTargetDetector detector;
   detector.configure(profiles::A359);
   std::array<PfdTargetObservation, 4> observations{

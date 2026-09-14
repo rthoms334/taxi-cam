@@ -11,7 +11,7 @@ struct DisplayInsets {
 };
 using CameraPanes = std::array<std::array<std::int32_t, 2>, 2>;
 struct Composition {
-  float nose_height = 255, tail_top = 259, divider_top = 245, divider_bottom = 269;
+  float nose_height = 255, tail_top = 259, divider_top = 251, divider_bottom = 263;
   std::array<float, 2> nose_dot{0.14f, 0.48f};
   std::array<float, 2> tail_corner{0.305f, 0.75f}, tail_upper{0.33f, 0.625f}, tail_inner{0.365f, 0.758f};
   std::array<float, 3> guide_color{1, 0, 1};
@@ -25,11 +25,19 @@ inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.guide_color = {1, 0.55f, 0};
   c.speed_color = {0, 0.94f, 0.28f};
-  // A350 bogies occupy roughly x[.284,.345], y[.657,.817] in the
-  // default -900 tail view. Put the mirrored L marks outside and below them.
-  c.tail_upper = {0.29f, 0.67f};
-  c.tail_corner = {0.27f, 0.84f};
-  c.tail_inner = {0.36f, 0.845f};
+  // The -900 main-gear contact projects near (.299,.875). Put the
+  // mirrored lower legs outside and below it with the accepted tail mount.
+  c.tail_upper = {0.29f, 0.76f};
+  c.tail_corner = {0.27f, 0.93f};
+  c.tail_inner = {0.36f, 0.935f};
+  return c;
+}();
+inline constexpr Composition AmberEtacsA35K = [] {
+  Composition c = AmberEtacs;
+  // The longer fuselage moves the same pitch/lens view's main gear higher.
+  c.tail_upper = {0.31f, 0.69f};
+  c.tail_corner = {0.29f, 0.85f};
+  c.tail_inner = {0.37f, 0.855f};
   return c;
 }();
 struct AircraftProfile {
@@ -65,9 +73,9 @@ inline constexpr AircraftProfile A380{1,
                                       1024,
                                       5};
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
-// Mount positions follow the exterior camera meshes. The -900 pitch/lens fit
-// the cockpit ETACS reference and a live simulator comparison; -1000 tail
-// framing accounts for its longer camera-to-gear distance and needs a live check.
+// The accepted -900 calibration transfers to the -1000 with its physical
+// longitudinal offsets, retaining the same height, pitch and lens. The -1000
+// and the resulting fixed guide placement still need a live check.
 // The compositor retains its bounded 768px working image.
 // Preserve a 32px central gap around the PFD/MFDDivider artwork on both sides.
 inline constexpr AircraftProfile A359{2,
@@ -76,7 +84,7 @@ inline constexpr AircraftProfile A359{2,
                                       {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                                       {"", ""},
                                       {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -2, 16.55, -15, 0, 0.55}, {0, 10.85, -33.0, -18, 0, 0.62}}},
+                                      {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}}},
                                       1644,
                                       1024,
                                       0,
@@ -95,7 +103,7 @@ inline constexpr AircraftProfile A35K{3,
                                       {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                                       {"", ""},
                                       {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -2, 20.36, -15, 0, 0.55}, {0, 10.85, -36.17, -16.4, 0, 0.57}}},
+                                      {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}}},
                                       1644,
                                       1024,
                                       0,
@@ -105,7 +113,7 @@ inline constexpr AircraftProfile A35K{3,
                                       {{{774, 251}, {774, 496}}},
                                       true,
                                       60,
-                                      AmberEtacs,
+                                      AmberEtacsA35K,
                                       {28, 29, 87, 91, 27, 90},
                                       {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
 inline constexpr std::array<const AircraftProfile*, 3> Catalog{&A380, &A359, &A35K};

@@ -43,10 +43,10 @@ class CameraCompositorD3D12 {
   static constexpr UINT Height = 763;
   static constexpr UINT NoseHeight = 255;
   static constexpr UINT DividerHeight = 4;
-  // Paint over ten existing pixels at each pane edge without changing camera
+  // Paint over four existing pixels at each pane edge without changing camera
   // resource dimensions, sampling coordinates or the 763-row output contract.
-  static constexpr UINT VisibleDividerTop = 245;
-  static constexpr UINT VisibleDividerHeight = 24;
+  static constexpr UINT VisibleDividerTop = 251;
+  static constexpr UINT VisibleDividerHeight = 12;
   static constexpr UINT TailHeight = 504;
   static constexpr float MinimumExposureEv = -16;
   static constexpr float MaximumExposureEv = 4;

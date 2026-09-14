@@ -55,14 +55,14 @@ Each mount stores six values: **right, up, forward, pitch, yaw, lens**.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | A380 nose | 0 | −1.75 | 26.950668984 | −17.5 | 0 | 1.24 |
 | A380 tail | 0 | 18 | −25 | −32 | 0 | 1.02 |
-| A350-900 nose | 0 | -2 | 16.55 | -15 | 0 | 0.55 |
-| A350-900 tail | 0 | 10.85 | -33 | -18 | 0 | 0.62 |
-| A350-1000 nose | 0 | -2 | 20.36 | -15 | 0 | 0.55 |
-| A350-1000 tail | 0 | 10.85 | -36.17 | -16.4 | 0 | 0.57 |
+| A350-900 nose | 0 | -2 | 16 | -15 | 0 | 0.55 |
+| A350-900 tail | 0 | 10 | -33 | -15 | 0 | 0.62 |
+| A350-1000 nose | 0 | -2 | 19.81 | -15 | 0 | 0.55 |
+| A350-1000 tail | 0 | 10 | -36.17 | -15 | 0 | 0.62 |
 
 Positions are relative to the aircraft datum. Positive pitch looks up; positive yaw turns right. A larger lens value widens the field of view.
 
-The A350-900 nose uses the accepted live calibration, transferred to the -1000 with its 3.81 m forward offset. The -900 tail was compared live with a cockpit ETACS reference; the -1000 tail is derived from model geometry and still needs a live check. Saved mounts override the defaults above.
+The A350-900 mounts use the accepted calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets, and still needs a live check. Saved mounts override the defaults above.
 
 Position components are bounded to ±500 m, pitch to ±89°, yaw to ±180° and lens to 0.05–1.55 radians. Both mounts are saved in the profile.
 
@@ -79,14 +79,14 @@ Pixel coordinates start at the top left. Row ranges below are inclusive. The tab
 | Camera border (both aircraft) | 16 target pixels left/right, 12 top, 0 bottom; inner height 751 |
 | Nose pane | Working rows 0-254; native source 736 x 251 |
 | Tail pane | Working rows 259-762; native source 736 x 496 |
-| Visible divider | Black rows 245–268 |
+| Visible divider | Black working rows 251-262 (12 pixels) |
 | Preserved aircraft display | Rows 763–1023 |
 | Ground-speed panel (A380 and A350) | Origin (16, 12); 8-pixel internal padding; height 36; width 72 / 88 / 104 for 1 / 2 / 3 digits (`--` uses 88) |
 | Stable output buffer | Row pitch 3072 bytes; total 2,343,936 bytes |
 
-The logical gap between panes is four working-image rows. The visible divider covers ten additional working rows of each pane. The whole 768 x 763 composition, including GS and guides, maps into the inner bordered area; working-image coordinates scale with it. Native source dimensions above match the resulting pane sizes to the nearest pixel.
+The logical gap between panes is four working-image rows. The visible divider covers four additional working rows of each pane. The whole 768 x 763 composition, including GS and guides, maps into the inner bordered area; working-image coordinates scale with it. Native source dimensions above match the resulting pane sizes to the nearest pixel.
 
-Nose reference dots are at 14% and 86% of image width, 48% of nose-pane height, with a 4.5-pixel radius. Each tail bracket consists of two segments mirrored across the image centre. The A380 uses normalized tail-pane points `(0.33, 0.625)`, `(0.305, 0.75)` and `(0.365, 0.758)`. The A350 uses `(0.29, 0.67)`, `(0.27, 0.84)` and `(0.36, 0.845)` to place the lower corners outside and below the main bogies in its default framing. The stroke uses a two-pixel distance threshold. These fixed guide positions do not reproject when camera settings change.
+Nose reference dots are at 14% and 86% of image width, 48% of nose-pane height, with a 4.5-pixel radius. Each tail bracket consists of two segments mirrored across the image centre. The A380 uses normalized tail-pane points `(0.33, 0.625)`, `(0.305, 0.75)` and `(0.365, 0.758)`. The A350-900 uses `(0.29, 0.76)`, `(0.27, 0.93)` and `(0.36, 0.935)`; the -1000 uses `(0.31, 0.69)`, `(0.29, 0.85)` and `(0.37, 0.855)`. The A350 lower legs are positioned outside and below the projected main bogies; final alignment requires a live check. The stroke uses a two-pixel distance threshold. These fixed guide positions do not reproject when camera settings change.
 
 Ground speed is rounded to whole knots in the range 0–999. Invalid or stale data displays `--`.
 
