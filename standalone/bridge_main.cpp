@@ -9,6 +9,8 @@
 #include "../src/taxi_button_routes.hpp"
 #include "d3d12_bridge.hpp"
 #include "companion_control.hpp"
+#include "crash_evidence.hpp"
+#include "scene_demand.hpp"
 #include "native_hooks.hpp"
 #include "protocol.hpp"
 
@@ -48,6 +50,7 @@ DWORD run_impl() {
   if (!mailbox.open(GetCurrentProcessId(), false))
     return ERROR_INVALID_DATA;
   win::Status status{};
+  const bool fault_evidence_ready = win::crash_evidence::initialize();
   if (!win::initialize_graphics()) {
     const auto graphics = win::graphics_status();
     std::snprintf(status.message, sizeof(status.message), "Native graphics refused: %s", graphics.error);
@@ -60,6 +63,7 @@ DWORD run_impl() {
     log_status(status);
     return ERROR_NOT_SUPPORTED;
   }
+  log_status(status, fault_evidence_ready ? "Renderer fault evidence armed." : "Renderer fault evidence unavailable.");
   const auto key = win::graphics_status().device;
   // The Windows companion owns mount settings for native sessions.
   TaxiButtonIntent intent;
@@ -164,7 +168,11 @@ DWORD run_impl() {
       if (native_camera::request_scene_mounts(mounts))
         applied_mounts = settings.mounts;
     }
-    if ((active || test_scene) && !requested && !failed) {
+    const auto demand = win::scene_demand(active || test_scene, requested, failed);
+    // Close render gates on OFF, cutoff, service pause or a lost heartbeat.
+    // Keep the owned pair and ordered source-state evidence for the next ON.
+    native_camera::suspend_scene_rendering(demand.suspend);
+    if (demand.start) {
       if (scene_runtime::prepare(key)) {
         scene_runtime::set_composition(key, profiles::find(applied_profile)->composition);
         scene_runtime::reset_feed(key);
@@ -176,17 +184,9 @@ DWORD run_impl() {
         failed = true;
         win::set_target_mask(0);
       }
-    } else if (!active && !test_scene && requested &&
-               !(connected && settings.enabled && aircraft_matches && !cutoff.inhibited && settings.follow_taxi && !buttons.valid)) {
-      scene_runtime::manager().stop_source_tracking();
-      native_camera::request_scene_stop(true);
-      scene_runtime::reset_feed(key);
-      requested = false;
     }
-    // Unknown button state hides the output after its existing grace period,
-    // but does not retire a valid scene pair. Fresh OFF and real profile/service
-    // changes still take the normal cleanup path above.
-    native_camera::suspend_scene_rendering(!active && !test_scene);
+    // Normal button changes never call request_scene_stop/reset_feed or release
+    // source leases. The profile-change transaction above still owns teardown.
     auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
     composition.speed_color = settings.speed_color;
     scene_runtime::set_composition(key, composition);
@@ -206,10 +206,11 @@ DWORD run_impl() {
       if (eligible && output.frames != last_frames)
         native_camera::note_scene_capture_progress(now);
       last_frames = output.frames;
-      if (progress.observe(now, eligible, output.frames, output.capture.source_draws,
-                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0) &&
-          native_camera::request_capture_recovery())
-        scene_runtime::reset_feed(key);
+      // Lost GPU-state evidence says nothing about native camera lifetime.
+      // Keep the pair and its resource generations; only observed barriers and
+      // fresh recordings can restore capture. Never erase/recreate cameras here.
+      progress.observe(now, eligible, output.frames, output.capture.source_draws,
+                       std::strcmp(output.capture.tail_status, "unknown_source_state") == 0);
       next_recovery = now + 250;
     }
     const auto graphics = win::graphics_status();
@@ -249,6 +250,7 @@ DWORD run_impl() {
                           : (!targets[0] || !targets[1]) ? "Detecting display textures for the selected aircraft profile."
                           : !active                      ? "Ready. Use the aircraft's left or right TAXI button."
                           : !requested || failed         ? scene.message.c_str()
+                          : progress.stalled()           ? "Capture paused: waiting for verified GPU state; camera views retained."
                                                          : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     if (mailbox.lock()) {
@@ -265,19 +267,26 @@ DWORD run_impl() {
       std::snprintf(detail, sizeof(detail),
                     "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
                     "stop_seq=%llu stop=%s "
-                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u inspection=%s/%s entries=%llu/%llu tail=%s "
-                    "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu | %.256s",
+                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u inspection=%s/%s entries=%llu/%llu suspended=%u "
+                    "gates=%u/%u tail=%s "
+                    "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
+                    "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u | %.256s",
                     applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()),
                     buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
                     native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
                     scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
                     scene.ready[1], scene.inspection_status[0], scene.inspection_status[1],
                     static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
-                    output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
+                    demand.suspend, scene.gates[0], scene.gates[1], output.capture.tail_status,
+                    static_cast<unsigned long long>(output.capture.source_draws),
                     static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
                     static_cast<unsigned long long>(output.capture.invalid_source_recordings),
                     static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
-                    scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
+                    static_cast<unsigned long long>(output.capture.invalid_draws),
+                    static_cast<unsigned long long>(output.capture.source_lease_failures),
+                    static_cast<unsigned long long>(output.capture.global_aliases),
+                    static_cast<unsigned long long>(output.capture.recording_overflows), output.capture.last_invalidation_reasons,
+                    progress.stalled(), scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {

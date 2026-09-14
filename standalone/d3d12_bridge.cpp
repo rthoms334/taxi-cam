@@ -264,7 +264,7 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
       return;
     }
   }
-  runtime::manager().invalidate_source_recording(native, id, true);
+  runtime::manager().invalidate_source_recording(native, id, true, reasons);
 }
 void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool allowed) noexcept {
   const OwnedWork guard;

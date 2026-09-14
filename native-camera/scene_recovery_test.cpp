@@ -44,14 +44,15 @@ int main() {
   for (const auto* error : {"", "invalid_basis", "outside_calibration_radius", "identity_mismatch"})
     require(!temporary_pose_unavailable(error), "Identity and numeric failures remain fatal");
   require(!temporary_pose_unavailable(nullptr), "Null error never classified temporary");
-  for (const auto reason : {SceneStopReason::none, SceneStopReason::explicit_stop, SceneStopReason::identity_refused,
-                            SceneStopReason::pose_invalid, SceneStopReason::creation_failed, SceneStopReason::exception}) {
+  for (const auto reason :
+       {SceneStopReason::none, SceneStopReason::explicit_stop, SceneStopReason::identity_refused, SceneStopReason::pose_invalid,
+        SceneStopReason::creation_failed, SceneStopReason::exception, SceneStopReason::capture_stalled}) {
     recovery.start();
     recovery.failed(reason, 10);
     require(!recovery.pending() && !recovery.retry(99999, clean, true), "Fatal failure cannot retry");
   }
-  for (const auto reason : {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent,
-                            SceneStopReason::resolution_changed, SceneStopReason::capture_stalled}) {
+  for (const auto reason :
+       {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent, SceneStopReason::resolution_changed}) {
     recovery.start();
     recovery.failed(reason, 100);
     require(recovery.pending() && recovery.reason() == reason, "Recoverable reason is recorded");
@@ -123,7 +124,7 @@ int main() {
   require(!recovery.pending() && !recovery.retry(99999, clean, true), "Retry storm is bounded");
   recovery.start();
   require(recovery.attempts() == 0 && recovery.reason() == SceneStopReason::none, "Explicit new Start resets retry budget");
-  recovery.failed(SceneStopReason::capture_stalled, 1000);
+  recovery.failed(SceneStopReason::inspection_unavailable, 1000);
   require(recovery.retry(3000, clean, true), "Capture stall uses confirmed cleanup policy");
   recovery.capture_progress(4000);
   recovery.capture_progress(20000);

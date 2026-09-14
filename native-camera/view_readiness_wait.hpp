@@ -10,7 +10,6 @@ namespace taxi_camera::native_camera {
 // caller must classify the inspection as transient; no borrowed pointers survive.
 class ViewReadinessWait {
  public:
-  static constexpr std::uint64_t grace_ms = 1000;
   bool observe(std::uint64_t now,
                const engine_camera::Snapshot& pair,
                bool established,
@@ -39,9 +38,9 @@ class ViewReadinessWait {
       since_ = now;
       ++episodes_;
     }
-    // Alternating pending feeds never renew the deadline. A different pair or
+    // Time passing cannot authorize destruction of an unavailable view. A different pair or
     // manager cannot inherit the previous wait, even if native addresses recur.
-    return pair.owner == owner_ && pair.owned_ids == ids_ && now >= since_ && now - since_ < grace_ms;
+    return pair.owner == owner_ && pair.owned_ids == ids_ && now >= since_;
   }
   void clear() noexcept {
     waiting_ = false;

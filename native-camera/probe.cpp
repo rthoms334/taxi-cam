@@ -766,7 +766,7 @@ void observer(void* manager) noexcept {
       if (body_pose_failed || waiting_for_body)
         report.message = runtime.message.empty() ? runtime.stage_error : runtime.message;
       else if (report.view_waiting)
-        report.message = "Owned view temporarily pending; waiting up to one second while retaining the last valid camera image.";
+        report.message = "Owned view inspection unavailable; camera IDs retained while waiting for fresh validation.";
       else if (pair.state == ec::State::active && runtime.resize_warmup.pending())
         report.message = "New scene views are closed for their initial engine update; final resizing is pending.";
       else if (pair.state == ec::State::active)
@@ -956,22 +956,6 @@ void request_scene_stop(bool keep_telemetry) noexcept {
   }
   if (!keep_telemetry)
     shutdown_body_pose_provider();
-}
-
-bool request_capture_recovery() noexcept {
-  auto& runtime = state();
-  const std::lock_guard start_lock(runtime.start_mutex);
-  const std::lock_guard lock(runtime.mutex);
-  if (!runtime.recovery.requested() || runtime.recovery.pending() || runtime.requested_start ||
-      runtime.recovery.attempts() >= SceneRecovery::maximum_retries ||
-      (runtime.recovery.reason() != SceneStopReason::none && !retryable_scene_stop(runtime.recovery.reason())) ||
-      runtime.pair.snapshot().state != ec::State::active)
-    return false;
-  runtime.recovery.failed(SceneStopReason::capture_stalled, GetTickCount64());
-  runtime.stop_detail = "Source draws continued but capture state stayed unknown; retiring owned views for fresh allocation.";
-  scene_handoff().stop_scene();
-  runtime.pair.request_disable();
-  return true;
 }
 
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept {

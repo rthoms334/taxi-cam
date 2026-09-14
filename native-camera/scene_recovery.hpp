@@ -48,7 +48,7 @@ inline const char* scene_stop_reason_name(SceneStopReason reason) noexcept {
 
 inline bool retryable_scene_stop(SceneStopReason reason) noexcept {
   return reason == SceneStopReason::inspection_unavailable || reason == SceneStopReason::owned_entry_absent ||
-         reason == SceneStopReason::resolution_changed || reason == SceneStopReason::capture_stalled;
+         reason == SceneStopReason::resolution_changed;
 }
 
 inline bool temporary_pose_unavailable(const char* reason) noexcept {

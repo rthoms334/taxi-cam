@@ -38,6 +38,7 @@ bool Recording::append(Effect effect) noexcept {
     }
   }
   if (count == effects.size()) {
+    overflowed = true;
     invalidate();
     return false;
   }

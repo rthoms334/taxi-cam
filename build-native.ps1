@@ -100,8 +100,10 @@ if ($Validate) {
         @{Name='native-launcher-path'; Sources=@('standalone/launcher_path_test.cpp')},
         @{Name='aircraft-profiles'; Sources=@('standalone/aircraft_profiles_test.cpp','native-camera/view_resize.cpp')},
         @{Name='companion-control'; Sources=@('standalone/companion_control_test.cpp')},
+        @{Name='scene-demand'; Sources=@('standalone/scene_demand_test.cpp','engine-camera/entry_pair.cpp')},
         @{Name='aircraft-layout'; Sources=@('discovery/aircraft_inventory.cpp','discovery/aircraft_inventory_test.cpp')},
         @{Name='native-slots'; Sources=@('standalone/native_slots_test.cpp')},
+        @{Name='crash-evidence'; Sources=@('standalone/crash_evidence_test.cpp')},
         @{Name='native-root-state'; Sources=@('standalone/root_state_test.cpp','src/pfd_stamp_state.cpp')},
         @{Name='taxi-routes'; Sources=@('tests/taxi_button_routes_test.cpp')},
         @{Name='pfd-detector'; Sources=@('tests/pfd_target_detector_test.cpp')},
@@ -160,7 +162,7 @@ if ($Validate) {
     [ordered]@{
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','exact DLL smoke',
-            'settings persistence and IPC','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
+            'settings persistence and IPC','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};

@@ -323,24 +323,31 @@ void SceneCaptureManager::after_source_draw(ID3D12GraphicsCommandList* native, s
     if (!source || source->generation != key.generation || source->device_key != item->device_key)
       continue;
     item->source_touched = true;
-    if (!allowed)
+    if (!allowed) {
+      ++stats_.invalid_draws;
       item->source_effects.invalidate();
-    else {
+    } else {
       item->source_effects.append({key, source_state::Effect::Kind::draw});
       // The exact application Draw has completed but has not returned to its
       // caller: its actual bound RTV source is still a live resource argument.
       // Keep one reference per recording, never a registry-lifetime reference.
-      if (source_tracking_ && !retain_source_lease(item->source_leases, item->source_lease_count, key, source->native))
+      if (source_tracking_ && !retain_source_lease(item->source_leases, item->source_lease_count, key, source->native)) {
+        ++stats_.source_lease_failures;
         item->source_effects.invalidate();
+      }
       ++stats_.source_draws;
     }
   }
 }
-void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList* native, std::uint64_t generation, bool global) noexcept {
+void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList* native,
+                                                      std::uint64_t generation,
+                                                      bool global,
+                                                      std::uint32_t reasons) noexcept {
   if (source_stage.owner == this && source_stage.list == native)
     source_stage = {};
   const std::lock_guard lock(mutex_);
   if (auto* item = list(native); item && item->object_generation == generation) {
+    stats_.last_invalidation_reasons = reasons;
     item->source_effects.invalidate();
     item->source_touched |= global;
   }
@@ -385,6 +392,7 @@ void SceneCaptureManager::observe_source_legacy(ID3D12GraphicsCommandList* nativ
     return;
   if (barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
     if (!barrier.Aliasing.pResourceBefore || !barrier.Aliasing.pResourceAfter) {
+      ++stats_.global_aliases;
       item->source_touched = true;
       item->source_effects.invalidate();
     } else {
@@ -921,8 +929,10 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
       for (UINT index = 0; index < count; ++index) {
         const auto* item = list(static_cast<ID3D12GraphicsCommandList*>(native_lists[index]));
         if (item && item->source_touched) {
-          if (!owner->source_states.apply(item->source_effects))
+          if (!owner->source_states.apply(item->source_effects)) {
             ++stats_.invalid_source_recordings;
+            stats_.recording_overflows += item->source_effects.overflowed;
+          }
           // The source reference is already owned by the recording. Snapshot
           // it before original Execute so concurrent successful Reset cannot
           // retire the only lease before the post-submit tail acquires it.

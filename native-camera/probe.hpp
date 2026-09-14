@@ -87,9 +87,6 @@ struct ProbeSnapshot {
 void request_scene_test(bool reuse_calibration = false) noexcept;
 // Button mode retains public telemetry so another button press can restart.
 void request_scene_stop(bool keep_telemetry = false) noexcept;
-// Retire a ready pair whose capture state was lost. Uses the same bounded
-// cleanup/fresh-pose recovery policy; never resets native identity failures.
-bool request_capture_recovery() noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
 // Limits activation opportunities to 15..60 per second per selected feed.
