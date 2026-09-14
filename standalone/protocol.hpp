@@ -9,12 +9,14 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 2;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 3;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
   float exposure = -8.8f, night_boost = 4.f;
   std::uint64_t route_request{}, left_id{}, right_id{};
+  std::uint32_t auto_profile = 1;
+  std::array<float, 3> speed_color = profiles::A380.composition.speed_color;
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
   std::array<std::array<double, 6>, 2> mounts = profiles::A380.mounts;
@@ -26,6 +28,9 @@ struct Candidate {
 struct Status {
   std::uint64_t heartbeat{}, captures{}, composed{}, stamps{}, left_id{}, right_id{}, hook_failures{};
   std::uint32_t graphics_ready{}, scene_ready{}, taxi_mask{}, speed_inhibited{}, candidate_count{};
+  std::uint32_t active_profile{}, detected_profile{};
+  std::uint64_t identity_sample_ms{};
+  char aircraft_type[256]{}, aircraft_path[260]{};
   float speed{}, exposure{};
   double probe_cpu_ms{}, probe_max_ms{};
   std::array<double, 10> stage_ms{};
@@ -39,8 +44,11 @@ struct Shared {
   Status status;
 };
 inline bool valid_settings(const Settings& s) noexcept {
-  if (!profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 || s.scene_test > 1 ||
-      s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 || s.calibration_budget > 16384)
+  for (const float c : s.speed_color)
+    if (!std::isfinite(c) || c < 0 || c > 1)
+      return false;
+  if (s.auto_profile > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
+      s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 || s.calibration_budget > 16384)
     return false;
   for (const auto& m : s.mounts) {
     for (const double v : m)

@@ -18,6 +18,7 @@ using Close = HRESULT(WINAPI*)(HANDLE);
 using Define = HRESULT(WINAPI*)(HANDLE, DWORD, const char*, const char*, DWORD, float, DWORD);
 using Request = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD);
 using Dispatch = HRESULT(WINAPI*)(HANDLE, void**, DWORD*);
+using SystemState = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
 using CameraGet = HRESULT(WINAPI*)(HANDLE, DWORD);
 using LastPacket = HRESULT(WINAPI*)(HANDLE, DWORD*);
 using MapEvent = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
@@ -55,8 +56,7 @@ struct State {
   std::uint64_t ground_speed_ms = 0;
   const char* ground_speed_error = "not_initialized";
   bool taxi_left = false, taxi_right = false;
-  std::array<char, 256> aircraft_type{};
-  std::uint64_t aircraft_type_ms = 0;
+  AircraftIdentityCache identity;
   std::uint64_t taxi_ms = 0;
   const char* taxi_error = "not_initialized";
   TaxiSpeedCutoff speed_cutoff;
@@ -231,6 +231,7 @@ DWORD WINAPI worker(void*) noexcept {
   const auto define = reinterpret_cast<Define>(GetProcAddress(dll, "SimConnect_AddToDataDefinition"));
   const auto request = reinterpret_cast<Request>(GetProcAddress(dll, "SimConnect_RequestDataOnSimObject"));
   const auto dispatch = reinterpret_cast<Dispatch>(GetProcAddress(dll, "SimConnect_GetNextDispatch"));
+  const auto system_state = reinterpret_cast<SystemState>(GetProcAddress(dll, "SimConnect_RequestSystemState"));
   const auto get = reinterpret_cast<CameraGet>(GetProcAddress(dll, "SimConnect_CameraGet"));
   const auto last_packet = reinterpret_cast<LastPacket>(GetProcAddress(dll, "SimConnect_GetLastSentPacketID"));
   const auto map_event = reinterpret_cast<MapEvent>(GetProcAddress(dll, "SimConnect_MapClientEventToSimEvent"));
@@ -352,6 +353,8 @@ DWORD WINAPI worker(void*) noexcept {
     if (type_defined && now - previous_type >= 1000) {
       previous_type = now;
       request(session, 5, 5, 0, 1, 0, 0, 0, 0);
+      if (system_state)
+        system_state(session, 6, "AircraftLoaded");
     }
     if (lighting_defined && now - previous_lighting >= 500) {
       previous_lighting = now;
@@ -396,16 +399,12 @@ DWORD WINAPI worker(void*) noexcept {
         failure("simconnect_packet_bounds");
         continue;
       }
-      if (header[2] == 8) {
-        if (bytes == 296 && header[0] == 296 && header[3] == 5 && header[5] == 5 && header[6] == 0 && header[9] == 1) {
-          const auto* text = static_cast<const char*>(raw) + 40;
-          if (std::memchr(text, 0, 256)) {
-            AcquireSRWLockExclusive(&state.lock);
-            std::memcpy(state.aircraft_type.data(), text, 256);
-            state.aircraft_type_ms = GetTickCount64();
-            ReleaseSRWLockExclusive(&state.lock);
-          }
-        } else if (bytes >= 40 && (header[3] == 4 || header[5] == 4)) {
+      if ((header[2] == 15 && bytes >= 24 && header[3] == 6) || (header[2] == 8 && bytes >= 40 && (header[3] == 5 || header[5] == 5))) {
+        AcquireSRWLockExclusive(&state.lock);
+        state.identity.accept(raw, bytes, GetTickCount64());
+        ReleaseSRWLockExclusive(&state.lock);
+      } else if (header[2] == 8) {
+        if (bytes >= 40 && (header[3] == 4 || header[5] == 4)) {
           if (!accept_lighting_packet(raw, bytes, GetTickCount64()))
             lighting_failure("lighting_packet_layout");
         } else if (bytes >= 40 && (header[3] == 3 || header[5] == 3)) {
@@ -540,13 +539,17 @@ bool select_aircraft_profile(std::uint32_t id) noexcept {
   profile_id.store(id);
   return true;
 }
-bool aircraft_matches_profile() noexcept {
+AircraftIdentitySample get_aircraft_identity() noexcept {
   AcquireSRWLockShared(&state.lock);
-  const auto now = GetTickCount64();
-  const bool matches = state.aircraft_type_ms && now >= state.aircraft_type_ms && now - state.aircraft_type_ms <= 3000 &&
-                       profiles::matches_aircraft(*profiles::find(profile_id.load()), state.aircraft_type.data());
+  const auto result = state.identity.sample(GetTickCount64());
   ReleaseSRWLockShared(&state.lock);
-  return matches;
+  return result;
+}
+bool aircraft_matches_profile() noexcept {
+  // Type is stable metadata, not a render pose. Missing packets cannot change
+  // its meaning; camera pose and button data retain their own freshness rules.
+  const auto identity = get_aircraft_identity();
+  return profiles::matches_aircraft(*profiles::find(profile_id.load()), identity.type.data());
 }
 bool initialize_body_pose_provider() noexcept {
   AcquireSRWLockExclusive(&lifecycle);
@@ -592,7 +595,8 @@ void shutdown_body_pose_provider() noexcept {
     state.stop = nullptr;
   }
   AcquireSRWLockExclusive(&state.lock);
-  state.aircraft_ms = state.camera_ms = state.aircraft_type_ms = 0;
+  state.aircraft_ms = state.camera_ms = 0;
+  state.identity = {};
   state.ground_speed_ms = 0;
   state.ground_speed_error = "not_initialized";
   state.taxi_ms = 0;

@@ -51,6 +51,8 @@ Source: [launcher](../standalone/launcher.hpp), [bridge startup and control loop
 
 ## 2. Read the TAXI buttons and select the displays
 
+The companion can select the aircraft profile automatically. SimConnect supplies the aircraft type and loaded aircraft path; catalog rules match the variant and add-on identity. Two distinct matching samples trigger a switch. The bridge retires the old camera pair before changing subscriptions, geometry or display routing, and the companion loads that aircraft's saved settings. Unknown aircraft remain inactive.
+
 Each aircraft profile supplies one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request.
 
 The bridge also needs to know which GPU texture represents each PFD. A cockpit screen is rendered into an off-screen texture before the cockpit model displays it. Many simulator textures have similar dimensions, so Taxi Cam observes their draw activity.

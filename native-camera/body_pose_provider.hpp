@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <limits>
+#include "aircraft_identity.hpp"
 #include "aircraft_mounts.hpp"
 namespace taxi_camera::native_camera {
 struct BodyPoseSnapshot {
@@ -40,6 +41,7 @@ struct LightingSample {
 // Public SimConnect worker only. Call lifecycle functions outside DllMain and
 // private engine callbacks. Never acquires or changes the simulator camera.
 bool select_aircraft_profile(std::uint32_t id) noexcept;
+AircraftIdentitySample get_aircraft_identity() noexcept;
 bool aircraft_matches_profile() noexcept;
 bool initialize_body_pose_provider() noexcept;
 void shutdown_body_pose_provider() noexcept;

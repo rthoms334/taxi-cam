@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include "../native-camera/aircraft_identity.hpp"
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <uxtheme.h>
@@ -30,6 +32,7 @@ int page = 0;
 std::vector<HWND> controls;
 std::vector<HWND> navigation;
 std::vector<std::uint64_t> combo_ids;
+native_camera::AutoProfileSelection profile_selection;
 std::wstring installation, expected_simulator, notice = L"Changes are saved for this aircraft.";
 std::mutex app_mutex;
 win::Settings current;
@@ -209,30 +212,84 @@ void target_combos(const win::Settings& s) {
     const std::lock_guard lock(app_mutex);
     sample = status;
   }
-  combo_ids.clear();
+  // A dropped list belongs to the user until it closes. Do not replace its
+  // item order while it is being selected or turn a redraw into a selection.
+  for (unsigned side = 0; side < 2; ++side)
+    if (SendDlgItemMessageW(window, 400 + side, CB_GETDROPPEDSTATE, 0, 0))
+      return;
+  std::vector<std::uint64_t> next;
   for (UINT i = 0; i < std::min(sample.candidate_count, 16u); ++i)
-    combo_ids.push_back(sample.candidates[i].id);
-  std::sort(combo_ids.begin(), combo_ids.end());
+    next.push_back(sample.candidates[i].id);
+  std::sort(next.begin(), next.end());
+  const bool existing = GetDlgItem(window, 400) != nullptr;
+  if (existing && next == combo_ids)
+    return;
+  std::array<std::uint64_t, 2> selected{s.left_id, s.right_id};
+  if (existing) {
+    for (unsigned side = 0; side < 2; ++side) {
+      const auto index = SendDlgItemMessageW(window, 400 + side, CB_GETCURSEL, 0, 0);
+      selected[side] = index > 0 && size_t(index - 1) < combo_ids.size() ? combo_ids[index - 1] : 0;
+    }
+  }
+  combo_ids = std::move(next);
+  const bool was_refreshing = refreshing;
+  refreshing = true;
   for (unsigned side = 0; side < 2; ++side) {
-    HWND combo = child(L"COMBOBOX", L"", 400 + side, 260 + static_cast<int>(side) * 375, 237, 315, 240, CBS_DROPDOWNLIST | WS_VSCROLL);
+    HWND combo = GetDlgItem(window, 400 + side);
+    if (!combo)
+      combo = child(L"COMBOBOX", L"", 400 + side, 260 + static_cast<int>(side) * 375, 237, 315, 240, CBS_DROPDOWNLIST | WS_VSCROLL);
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
     SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Automatic assignment"));
-    const auto selected = side ? (s.right_id ? s.right_id : sample.right_id) : (s.left_id ? s.left_id : sample.left_id);
+    SendMessageW(combo, CB_SETDROPPEDWIDTH, scale(420), 0);
     int selection = 0;
     for (size_t i = 0; i < combo_ids.size(); ++i) {
-      wchar_t name[80];
       const win::Candidate* candidate = nullptr;
       for (UINT j = 0; j < std::min(sample.candidate_count, 16u); ++j)
         if (sample.candidates[j].id == combo_ids[i])
           candidate = &sample.candidates[j];
-      std::swprintf(name, 80, L"#%llu | %ux%u | %llu draws", static_cast<unsigned long long>(combo_ids[i]),
-                    candidate ? candidate->width : 0, candidate ? candidate->height : 0,
-                    candidate ? static_cast<unsigned long long>(candidate->draws) : 0);
+      wchar_t name[96];
+      std::swprintf(name, 96, L"#%llu | %ux%u | %u mips | format %u", static_cast<unsigned long long>(combo_ids[i]),
+                    candidate ? candidate->width : 0, candidate ? candidate->height : 0, candidate ? candidate->mips : 0,
+                    candidate ? candidate->format : 0);
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-      if (combo_ids[i] == selected)
+      if (combo_ids[i] == selected[side])
         selection = static_cast<int>(i + 1);
     }
     SendMessageW(combo, CB_SETCURSEL, selection, 0);
   }
+  refreshing = was_refreshing;
+}
+// Runs on the UI thread, including when hidden to the tray.
+void auto_profile() {
+  const auto s = draft();
+  if (!s.auto_profile) {
+    profile_selection = {};
+    return;
+  }
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto now = GetTickCount64();
+  if (!sample.heartbeat || now < sample.heartbeat || now - sample.heartbeat > 3000)
+    return;
+  const auto detected = profile_selection.observe(sample.detected_profile, sample.identity_sample_ms);
+  if (!detected || detected == s.profile)
+    return;
+  // Preserve edits on the departing profile; invalid unfinished fields delay
+  // switching instead of silently discarding the user's calibration.
+  if (!apply())
+    return;
+  win::Settings next;
+  if (!win::load_settings(next, installation, detected))
+    return;
+  next.auto_profile = 1;
+  if (!win::save_settings(next))
+    return;
+  publish(next);
+  notice = L"Aircraft detected. Its saved calibration is active.";
+  build_controls();
 }
 void build_controls() {
   refreshing = true;
@@ -248,13 +305,14 @@ void build_controls() {
   button(L"Save changes", 500, 835, 686, 175, 42);
   button(L"Hide to tray", 501, 650, 686, 165, 42);
   if (page == 0) {
-    HWND combo = child(L"COMBOBOX", L"", 210, 260, 312, 430, 220, CBS_DROPDOWNLIST | WS_VSCROLL);
+    HWND combo = child(L"COMBOBOX", L"", 210, 260, 312, 420, 220, CBS_DROPDOWNLIST | WS_VSCROLL);
     for (const auto* profile : profiles::Catalog)
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(profile->name));
     for (size_t i = 0; i < profiles::Catalog.size(); ++i)
       if (profiles::Catalog[i]->id == s.profile)
         SendMessageW(combo, CB_SETCURSEL, i, 0);
-    toggle(L"Service", 220, s.enabled, 830, 304, 150);
+    toggle(L"Auto aircraft", 230, s.auto_profile, 707, 304, 140);
+    toggle(L"Service", 220, s.enabled, 860, 304, 135);
     toggle(L"TAXI buttons", 221, s.follow_taxi, 800, 412, 180);
     edit(s.camera_rate, 200, 855, 528, 100);
   } else if (page == 1) {
@@ -273,6 +331,7 @@ void build_controls() {
     toggle(L"Auto exposure", 222, s.automatic_exposure, 785, 318, 190);
     edit(s.night_boost, 202, 840, 430, 120);
     edit(s.camera_rate, 200, 840, 547, 120);
+    button(L"Ground-speed colour", 231, 740, 630, 235);
   } else if (page == 3) {
     toggle(L"Auto detect", 223, s.auto_detect, 795, 126, 180);
     target_combos(s);
@@ -425,7 +484,7 @@ void draw_page(HDC dc) {
     }
     wchar_t value[96];
     std::swprintf(value, 96, L"Currently applied exposure: %.2f EV", sample.exposure);
-    text(dc, sample.heartbeat ? value : L"Applied exposure appears when the camera bridge connects.", 251, 630, 680, 24, small, Muted);
+    text(dc, sample.heartbeat ? value : L"Applied exposure appears when the camera bridge connects.", 251, 630, 480, 24, small, Muted);
   } else if (page == 3) {
     panel(dc, 244, 119, 766, 226);
     text(dc, L"PFD assignment", 262, 127, 420, 30, heading);
@@ -595,12 +654,14 @@ void poll_updates() {
         else
           update_balloon();
       } else {
-        const auto prompt = L"Taxi Cam " + result.tag +
-                            L" has been downloaded and verified.\n\nClose Taxi Cam and start the installer now?";
+        const auto prompt =
+            L"Taxi Cam " + result.tag + L" has been downloaded and verified.\n\nClose Taxi Cam and start the installer now?";
         if (MessageBoxW(window, prompt.c_str(), L"Taxi Cam update ready", MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) {
           bool proceed = true;
           if (dirty) {
-            const int choice = MessageBoxW(window, L"Save your unsaved settings before installing?\n\nYes: save and continue.\nNo: discard changes.\nCancel: keep the app open.",
+            const int choice = MessageBoxW(window,
+                                           L"Save your unsaved settings before installing?\n\nYes: save and continue.\nNo: discard "
+                                           L"changes.\nCancel: keep the app open.",
                                            L"Unsaved settings", MB_YESNOCANCEL | MB_ICONQUESTION);
             proceed = choice == IDNO || (choice == IDYES && apply());
           }
@@ -625,6 +686,8 @@ void poll_updates() {
 }
 bool is_on(int id, const win::Settings& s) {
   switch (id) {
+    case 230:
+      return s.auto_profile;
     case 220:
       return s.enabled;
     case 221:
@@ -753,6 +816,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       return TRUE;
     }
     case StatusMessage:
+      auto_profile();
+      if (page == 3)
+        target_combos(draft());
       if (IsWindowVisible(hwnd))
         InvalidateRect(hwnd, nullptr, FALSE);
       return 0;
@@ -820,9 +886,38 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           notice = L"Could not load that aircraft profile.";
           return 0;
         }
+        next.auto_profile = 0;
         publish(next);
         dirty_notice();
         build_controls();
+        return 0;
+      }
+      if (id == 230) {
+        if (!apply(false))
+          return 0;
+        auto s = draft();
+        s.auto_profile = !s.auto_profile;
+        publish(s);
+        apply();
+        build_controls();
+        return 0;
+      }
+      if (id == 231) {
+        if (!apply(false))
+          return 0;
+        auto s = draft();
+        static COLORREF custom[16]{};
+        CHOOSECOLORW choice{};
+        choice.lStructSize = sizeof(choice);
+        choice.hwndOwner = hwnd;
+        choice.lpCustColors = custom;
+        choice.Flags = CC_FULLOPEN | CC_RGBINIT;
+        choice.rgbResult = RGB(UINT(s.speed_color[0] * 255), UINT(s.speed_color[1] * 255), UINT(s.speed_color[2] * 255));
+        if (ChooseColorW(&choice)) {
+          s.speed_color = {GetRValue(choice.rgbResult) / 255.f, GetGValue(choice.rgbResult) / 255.f, GetBValue(choice.rgbResult) / 255.f};
+          publish(s);
+          dirty_notice();
+        }
         return 0;
       }
       if (id == 500) {

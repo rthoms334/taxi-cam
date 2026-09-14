@@ -1,6 +1,8 @@
 # Aircraft integration
 
-Select an aircraft in **Overview**, then save the selection. Each profile owns its camera calibration and display settings. The native bridge checks the loaded aircraft's public `ATC TYPE` before enabling the camera or sending a cutoff command.
+**Auto aircraft** on Overview selects a supported profile from public SimConnect metadata. The matcher requires the variant's `ATC TYPE` and an add-on path component in the `AircraftLoaded` response. Two distinct samples must agree before switching. A missing response does not select a default aircraft. Choosing a profile manually turns automatic selection off.
+
+Each profile owns its camera calibration, display colour and exposure settings. Before switching, the companion saves edits to the departing profile and loads the arriving profile's own file. Invalid unfinished input delays a switch rather than discarding edits.
 
 ## Profiles
 
@@ -31,16 +33,16 @@ The profile defines accepted texture dimensions, mip policy and formats. Resourc
 
 The renderer captures two independently sized scene textures. It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's destination rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. The A350's 822-pixel sources preserve the destination aspect ratio through composition and presentation.
 
-Profiles supply the pane division, visible separator, reference dot/bracket coordinates and colour. A380 uses magenta marks; A350 uses amber marks from the Airbus diagram. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
+Profiles supply the pane division, visible separator, reference dot/bracket coordinates and colour. A380 uses magenta marks; A350 uses amber marks from the Airbus diagram. The ground-speed text has its own saved RGB colour, editable on **Display**; changing it does not change exposure or the reference marks. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
 
 ## Geometry and settings
 
-Each camera mount supplies right/up/forward metres, pitch/yaw degrees and lens radians. A350-900 and -1000 have separate mount presets and settings files. The presets use the exterior model's camera-mesh locations; framing remains adjustable under **Camera views**.
+Each camera mount supplies right/up/forward metres, pitch/yaw degrees and lens radians. A350-900 and -1000 have separate mount presets and settings files. The presets start from the exterior model's camera-mesh locations, with a forward adjustment for the belly camera. The -900/ULR and longer -1000 keep independent nose and tail mounts; matching the -900 does not validate -1000 framing. **Camera views** adjusts each profile separately. The Airbus planning diagram establishes display placement and guide colour for both variants, but does not establish identical perspective or field of view. Final framing requires a cockpit ETACS reference for the specific variant; passenger entertainment camera images can have a different crop.
 
 Changing profiles stops output and retires owned views through the engine update callback before changing the control subscription or render dimensions. The bridge clears texture routes, button intent, pose calibration and capture history. A new profile cannot inherit another aircraft's saved mounts or stale ON state. The application stores the selected profile separately from each profile's INI file.
 
 ## Adding an aircraft
 
-Define an `AircraftProfile` in [the catalog](../profiles/catalog.hpp): accepted aircraft types, control strategy and variables, texture constraints, side-order rule, destination rectangles, camera dimensions, mounts, composition and speed limit. Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
+Define an `AircraftProfile` in [the catalog](../profiles/catalog.hpp): accepted aircraft types and add-on path markers, control strategy and variables, texture constraints, side-order rule, destination rectangles, camera dimensions, mounts, composition and speed limit. Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
 
 Add profile/settings tests and a GPU fixture that checks both camera regions and every preserved display region. Then verify actual cockpit buttons, texture identity, framing, cutoff and aircraft reload. An aircraft with different control semantics needs a control adapter; an aircraft without two camera views needs a different composition contract.

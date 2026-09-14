@@ -92,6 +92,8 @@ bool request_capture_recovery() noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
 // Limits activation opportunities to 15..60 per second per selected feed.
+// Close activation gates while retaining owned views; no ownership changes.
+void suspend_scene_rendering(bool suspended) noexcept;
 void request_scene_rate(unsigned rate, unsigned feeds = 2) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.

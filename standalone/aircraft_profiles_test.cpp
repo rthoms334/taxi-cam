@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdio>
 #include <filesystem>
+#include "../native-camera/aircraft_identity.hpp"
 #include "settings_store.hpp"
 #include "../native-camera/view_resize.hpp"
 #include "../src/pfd_target_detector.hpp"
@@ -22,14 +23,56 @@ int main() {
   assert(a350.profile == 2 && a350.mounts == profiles::A359.mounts);
   a350.mounts[1][3] = -19.125;
   a350.exposure = -7;
+  a350.auto_profile = 0;
+  a350.speed_color = {0.125f, 0.875f, 0.25f};
   assert(save_settings(a350));
   Settings loaded;
   assert(load_settings(loaded, L"missing") && loaded.profile == 2 && loaded.mounts == a350.mounts && loaded.exposure == -7);
+  assert(loaded.speed_color == a350.speed_color && loaded.auto_profile == 0);
+  auto invalid = loaded;
+  invalid.speed_color[0] = 1.1f;
+  assert(!valid_settings(invalid));
   assert(load_settings(loaded, L"missing", 1) && loaded.mounts == a380.mounts && loaded.exposure == a380.exposure);
   assert(settings_path(a380) != settings_path(a350));
   assert(profiles::matches_aircraft(profiles::A359, "A359 ULR"));
   assert(!profiles::matches_aircraft(profiles::A35K, "A359 ULR"));
   assert(!profiles::matches_aircraft(profiles::A359, ""));
+  const char* ini_path = "SimObjects/airplanes/A350/presets/iniBuilds/A350-900_Default_Cabin_ULR/config/aircraft.cfg";
+  assert(profiles::detect_aircraft("A359 ULR", ini_path) == 2);
+  assert(profiles::detect_aircraft("A35K", ini_path) == 3);
+  assert(profiles::detect_aircraft("A388", "D:\\Community\\flybywire-aircraft-a380-842\\aircraft.cfg") == 1);
+  assert(!profiles::detect_aircraft("A359", "D:/Community/other-a350/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("A359", "D:/Community/not-inibuilds-aircraft-a350/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("A359", "D:/Community/inibuilds-aircraft-a350-copy/aircraft.cfg"));
+  native_camera::AircraftIdentityCache identity;
+  std::array<unsigned char, 296> packet{};
+  std::array<std::uint32_t, 10> h{296, 0, 8, 5, 0, 5, 0, 0, 1, 1};
+  std::memcpy(packet.data(), h.data(), 40);
+  std::strcpy(reinterpret_cast<char*>(packet.data() + 40), "A359 ULR");
+  assert(identity.accept(packet.data(), packet.size(), 1000));
+  assert(!identity.sample(1000).detected_profile);
+  for (unsigned n = 0; n < packet.size(); ++n)
+    assert(!identity.accept(packet.data(), n, 1000));
+  auto malformed = packet;
+  malformed[296 - 1] = 1;
+  std::memset(malformed.data() + 40, 'X', 256);
+  assert(!identity.accept(malformed.data(), malformed.size(), 1000));
+  std::array<unsigned char, 284> path_packet{};
+  std::array<std::uint32_t, 6> ph{284, 0, 15, 6, 0, 0};
+  std::memcpy(path_packet.data(), ph.data(), 24);
+  std::strcpy(reinterpret_cast<char*>(path_packet.data() + 24), ini_path);
+  assert(identity.accept(path_packet.data(), path_packet.size(), 1100));
+  assert(identity.sample(1100).detected_profile == 2 && identity.sample(1100).fresh);
+  assert(identity.sample(4001).detected_profile == 2 && !identity.sample(4001).fresh);
+  assert(!identity.sample(999).fresh);
+  native_camera::AutoProfileSelection selection;
+  assert(!selection.observe(2, 1000));
+  assert(!selection.observe(2, 1000));
+  assert(selection.observe(2, 2000) == 2);
+  assert(!selection.observe(3, 3000));
+  assert(!selection.observe(0, 0));
+  assert(!selection.observe(3, 4000));
+  assert(selection.observe(3, 5000) == 3);
   for (const auto* profile : profiles::Catalog) {
     Settings s;
     s.profile = profile->id;

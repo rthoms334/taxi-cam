@@ -12,11 +12,13 @@ struct Composition {
   std::array<float, 2> nose_dot{0.14f, 0.48f};
   std::array<float, 2> tail_corner{0.305f, 0.75f}, tail_upper{0.33f, 0.625f}, tail_inner{0.365f, 0.758f};
   std::array<float, 3> guide_color{1, 0, 1};
+  std::array<float, 3> speed_color{0, 1, 0};
 };
 enum class TaxiControl { push_event, lvar_off };
 inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.guide_color = {1, 0.55f, 0};
+  c.speed_color = {0, 0.94f, 0.28f};
   return c;
 }();
 struct AircraftProfile {
@@ -37,6 +39,7 @@ struct AircraftProfile {
   double speed_cutoff_knots = 60;
   Composition composition{};
   std::array<unsigned, 6> formats{28};
+  std::array<std::string_view, 3> package_markers{"flybywire-aircraft-a380-842", "flybywire_a380_842"};
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -57,7 +60,7 @@ inline constexpr AircraftProfile A359{2,
                                       {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                                       {"", ""},
                                       {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -1.98, 13.55, -12, 0, 1.24}, {0, 10.85, -33.0, -22, 0, 1.02}}},
+                                      {{{0, -1.98, 16.55, -12, 0, 1.24}, {0, 10.85, -33.0, -22, 0, 1.02}}},
                                       1644,
                                       1024,
                                       0,
@@ -68,14 +71,15 @@ inline constexpr AircraftProfile A359{2,
                                       true,
                                       60,
                                       AmberEtacs,
-                                      {28, 29, 87, 91, 27, 90}};
+                                      {28, 29, 87, 91, 27, 90},
+                                      {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
 inline constexpr AircraftProfile A35K{3,
                                       "ini-a350-1000",
                                       L"iniBuilds A350-1000",
                                       {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                                       {"", ""},
                                       {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -1.98, 17.36, -12, 0, 1.24}, {0, 10.85, -36.17, -22, 0, 1.02}}},
+                                      {{{0, -1.98, 20.36, -12, 0, 1.24}, {0, 10.85, -36.17, -22, 0, 1.02}}},
                                       1644,
                                       1024,
                                       0,
@@ -86,7 +90,8 @@ inline constexpr AircraftProfile A35K{3,
                                       true,
                                       60,
                                       AmberEtacs,
-                                      {28, 29, 87, 91, 27, 90}};
+                                      {28, 29, 87, 91, 27, 90},
+                                      {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
 inline constexpr std::array<const AircraftProfile*, 3> Catalog{&A380, &A359, &A35K};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < 2 ? side : 0];
@@ -117,6 +122,37 @@ inline const AircraftProfile* find(std::uint32_t id) noexcept {
     if (p->id == id)
       return p;
   return nullptr;
+}
+// Match a complete path component (or component sequence), independent of drive,
+// slash direction and case. Aircraft type alone does not identify its vendor.
+inline bool path_contains(std::string_view path, std::string_view marker) noexcept {
+  const auto fold = [](char c) { return c == '\\' ? '/' : c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) : c; };
+  for (size_t i = 0; i + marker.size() <= path.size(); ++i) {
+    if (i && fold(path[i - 1]) != '/')
+      continue;
+    size_t n = 0;
+    while (n < marker.size() && fold(path[i + n]) == fold(marker[n]))
+      ++n;
+    if (n == marker.size() && (i + n == path.size() || fold(path[i + n]) == '/'))
+      return true;
+  }
+  return false;
+}
+inline std::uint32_t detect_aircraft(std::string_view type, std::string_view path) noexcept {
+  std::uint32_t match = 0;
+  for (const auto* p : Catalog) {
+    if (!matches_aircraft(*p, type))
+      continue;
+    bool vendor = false;
+    for (const auto marker : p->package_markers)
+      vendor = vendor || (!marker.empty() && path_contains(path, marker));
+    if (vendor) {
+      if (match)
+        return 0;
+      match = p->id;
+    }
+  }
+  return match;
 }
 // Legacy adapter default. Native sessions choose their explicit profile through
 // the companion and pass it into control and display adapters.

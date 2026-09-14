@@ -203,8 +203,8 @@ class CameraCompositorD3D12 {
               ground_speed_,
               ground_speed_valid_ ? 1u : 0u,
               composition_};
-    static_assert(sizeof(display) == 20 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 20, &display, 0);
+    static_assert(sizeof(display) == 23 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 23, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -405,7 +405,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 20;
+    parameters[1].Constants.Num32BitValues = 23;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -471,7 +471,8 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float NoseHeight; float TailTop; float DividerTop; float DividerBottom;
  float NoseDotX; float NoseDotY; float TailCornerX; float TailCornerY;
  float TailUpperX; float TailUpperY; float TailInnerX; float TailInnerY;
- float GuideRed; float GuideGreen; float GuideBlue; };
+ float GuideRed; float GuideGreen; float GuideBlue;
+ float SpeedRed; float SpeedGreen; float SpeedBlue; };
 bool glyph_pixel(float2 position, float2 origin, uint glyph) {
   int2 cell = int2(floor((position - origin) / 4));
   return all(cell >= 0) && cell.x < 3 && cell.y < 5 && ((glyph >> (cell.y * 3 + cell.x)) & 1u) != 0;
@@ -490,7 +491,7 @@ float4 ground_speed_pixel(float2 position) {
       divisor /= 10;
     }
   }
-  return lit ? float4(0, 1, 0, 1) : float4(0, 0, 0, 1);
+  return lit ? float4(SpeedRed, SpeedGreen, SpeedBlue, 1) : float4(0, 0, 0, 1);
 }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
   float2 delta = last - first;

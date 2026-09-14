@@ -39,6 +39,7 @@ struct Runtime {
   ec::PairController pair;
   std::atomic<bool> hooked{false};
   std::atomic<bool> enabled{false};
+  std::atomic<bool> suspended{false};
   std::atomic<unsigned> requested_settings{15u | (2u << 8)};
   // Protected by mutex; never used directly by a native engine call.
   MountPair requested_mounts = default_mounts();
@@ -539,7 +540,7 @@ void observer(void* manager) noexcept {
     std::array<bool, 2> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     if (scheduled_pair)
-      desired = next_schedule.tick(now);
+      desired = next_schedule.tick(now, runtime.suspended.load());
     const bool gate_change = scheduled_pair && desired != runtime.gates;
     if (!before.request_pending && !gate_change && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
       runtime.schedule = next_schedule;
@@ -659,7 +660,7 @@ void observer(void* manager) noexcept {
             // creation. Only this lifecycle transition resets pulse deadlines.
             next_schedule.reset();
           }
-          desired = next_schedule.tick(GetTickCount64());
+          desired = next_schedule.tick(GetTickCount64(), runtime.suspended.load());
           const bool needs_pose = desired[0] || desired[1];
           const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
           if (pose_ready) {
@@ -954,6 +955,10 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
   auto& runtime = state();
   const std::lock_guard lock(runtime.mutex);
   runtime.recovery.capture_progress(now_ms);
+}
+
+void suspend_scene_rendering(bool suspended) noexcept {
+  state().suspended.store(suspended);
 }
 
 void request_scene_rate(unsigned rate, unsigned feeds) noexcept {

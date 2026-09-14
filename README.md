@@ -69,9 +69,9 @@ If the camera appears on the wrong display, open **PFD routing** to identify, as
 
 | Page | Controls |
 | --- | --- |
-| Overview | Camera service, TAXI-button control and camera rate |
+| Overview | Automatic aircraft selection, camera service, TAXI-button control and camera rate |
 | Camera views | Independent position, pitch, yaw and field of view for each camera |
-| Display | Manual exposure and automatic night adjustment |
+| Display | Manual exposure, automatic night adjustment and ground-speed colour |
 | PFD routing | Left/right display assignment, preview and target identification |
 | Diagnostics | Scene test, single-camera test and runtime counters |
 

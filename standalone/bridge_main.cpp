@@ -131,7 +131,9 @@ DWORD run_impl() {
       if (win::assign_targets(settings.left_id, settings.right_id))
         route_request = settings.route_request;
     }
-    const bool aircraft_matches = native_camera::aircraft_matches_profile();
+    const auto identity = native_camera::get_aircraft_identity();
+    const bool aircraft_matches =
+        native_camera::aircraft_matches_profile() && (!settings.auto_profile || identity.detected_profile == settings.profile);
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
@@ -174,12 +176,20 @@ DWORD run_impl() {
         failed = true;
         win::set_target_mask(0);
       }
-    } else if (!active && !test_scene && requested) {
+    } else if (!active && !test_scene && requested &&
+               !(connected && settings.enabled && aircraft_matches && !cutoff.inhibited && settings.follow_taxi && !buttons.valid)) {
       scene_runtime::manager().stop_source_tracking();
       native_camera::request_scene_stop(true);
       scene_runtime::reset_feed(key);
       requested = false;
     }
+    // Unknown button state hides the output after its existing grace period,
+    // but does not retire a valid scene pair. Fresh OFF and real profile/service
+    // changes still take the normal cleanup path above.
+    native_camera::suspend_scene_rendering(!active && !test_scene);
+    auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
+    composition.speed_color = settings.speed_color;
+    scene_runtime::set_composition(key, composition);
     const auto speed = native_camera::get_ground_speed();
     const auto light = native_camera::get_lighting();
     const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
@@ -205,6 +215,11 @@ DWORD run_impl() {
     const auto graphics = win::graphics_status();
     status = {};
     status.heartbeat = now;
+    status.active_profile = applied_profile;
+    status.detected_profile = identity.fresh ? identity.detected_profile : 0;
+    status.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
+    std::memcpy(status.aircraft_type, identity.type.data(), sizeof(status.aircraft_type));
+    std::memcpy(status.aircraft_path, identity.path.data(), sizeof(status.aircraft_path));
     status.graphics_ready = graphics.ready;
     status.hook_failures = graphics.hook_failures;
     status.scene_ready = scene.ready[0] && scene.ready[1];
@@ -225,12 +240,12 @@ DWORD run_impl() {
     for (UINT i = 0; i < status.candidate_count; ++i)
       status.candidates[i] = {inventory[i].id,     inventory[i].draws,  inventory[i].width,
                               inventory[i].height, inventory[i].levels, inventory[i].format};
-    const char* message = !connected          ? "Waiting for Windows companion heartbeat."
-                          : !settings.enabled ? "Camera service paused."
-                          : !aircraft_matches ? "Select the profile matching the loaded aircraft; waiting for aircraft telemetry."
-                          : cutoff.inhibited  ? "Above 60 knots: TAXI buttons commanded off."
-                          : failed            ? scene.message.c_str()
-                          : !buttons.valid    ? buttons.error
+    const char* message = !connected                     ? "Waiting for Windows companion heartbeat."
+                          : !settings.enabled            ? "Camera service paused."
+                          : !aircraft_matches            ? "Waiting for a supported aircraft identity or profile switch."
+                          : cutoff.inhibited             ? "Above 60 knots: TAXI buttons commanded off."
+                          : failed                       ? scene.message.c_str()
+                          : !buttons.valid               ? buttons.error
                           : (!targets[0] || !targets[1]) ? "Detecting display textures for the selected aircraft profile."
                           : !active                      ? "Ready. Use the aircraft's left or right TAXI button."
                           : !requested || failed         ? scene.message.c_str()
@@ -264,6 +279,13 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
                     scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
+      if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
+          std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
+        char identity_detail[640];
+        std::snprintf(identity_detail, sizeof(identity_detail), "Aircraft identity: type=%.255s | path=%.259s | detected=%u",
+                      status.aircraft_type, status.aircraft_path, status.detected_profile);
+        log_status(status, identity_detail);
+      }
       last_logged = status;
       last_connected = connected;
       last_requested = requested;
