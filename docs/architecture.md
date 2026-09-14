@@ -119,7 +119,7 @@ A capture is recorded when one of these paths provides enough information:
 | Render-target transition | At a known transition away from rendering into the camera texture |
 | End of queue submission | After submitted draws when tracking proves the texture remains a valid render target |
 
-Legacy barrier metadata is tracked in full for batches of up to 1,048,576 entries. This linear scan does not issue GPU work or dereference resource pointers. Larger or malformed batches invalidate source-state evidence. The separate 256-entry limit for inserting a copy before a barrier remains in place.
+Legacy barrier metadata is tracked in full for batches of up to 1,048,576 entries. This linear scan does not issue GPU work or dereference resource pointers. Larger or malformed batches invalidate source-state evidence. General camera-capture insertion is limited to 256 entries. Larger complete batches can deliver at most one PFD copy opportunity per selected display, using a linear scan of only those two target identities. Earlier transitions, aliases and uncertain batch metadata prevent insertion.
 
 The copy goes into a texture owned by Taxi Cam. This gives the compositor an image whose lifetime it controls while MSFS continues rendering into its own resources.
 
@@ -150,7 +150,7 @@ Reference-guide positions are saved separately for each aircraft profile. The **
 
 ## 6. Copy the result into the PFD
 
-The bridge tracks drawing into each selected PFD texture. At a verified transition out of render-target state, it copies the prepared patch into the exact profile rectangle, then restores the state required by the simulator's original transition. It requires positive resource-state evidence for the applicable barrier model. A target change or command-list closure alone does not authorize the copy.
+The bridge tracks drawing into each selected PFD texture. At a verified transition out of render-target state, it copies the prepared patch into the exact profile rectangle, then restores the state required by the simulator's original transition. It requires positive resource-state evidence for the applicable barrier model. A target change or command-list closure alone does not authorize the copy. The PFD draw and its verified exit may occur on different command lists; copying requires a current selected resource and verified typed-view information, alongside the same pass and recording checks.
 
 All camera-image shader drawing occurs on Taxi Cam's private command list. Simulator command lists receive bounded texture copies and resource transitions; Taxi Cam does not change their graphics pipeline, root arguments, viewport or clipping rectangle, and does not add samples to application occlusion queries. The copy excludes the navigation area, central gutter and lower trim display.
 

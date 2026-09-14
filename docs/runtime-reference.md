@@ -96,6 +96,12 @@ Ground speed is rounded to whole knots in the range 0–999. Invalid or stale da
 
 Source: [compositor and guides](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp).
 
+## PFD-copy diagnostics
+
+The bridge log reports `PFD copy admission` alongside the normal camera counters. `rt_metadata` counts selected-target RT exits seen in native barrier metadata; `rt_callbacks` counts those admitted by the recording/pass checks. `pending_matches` shows same-recording PFD evidence. `view_resolved` also includes verified selected targets whose earlier draw was recorded elsewhere. `attempts`, `rejected`, `state_skips` and `reason` distinguish missing/conflicting typed-view evidence from output or recording rejection. These are cumulative observations, not completed GPU-frame counts.
+
+Camera composition can succeed while PFD copies are refused. When images exist but no PFD copy has yet been recorded, the app reports that it is waiting for a verified copy opportunity.
+
 ## Exposure
 
 With valid ambient-light data, the exposure controller computes:

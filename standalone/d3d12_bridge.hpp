@@ -7,6 +7,9 @@ struct GraphicsStatus {
   bool ready{};
   std::uint64_t device{}, resources{}, lists{}, draws{}, hook_failures{}, clear_states{};
   const char* error = "not_started";
+  std::uint64_t selected_draws{}, selected_rt_metadata{}, selected_rt_callbacks{}, selected_pending_matches{};
+  std::uint64_t selected_view_resolved{}, selected_view_rejected{}, copy_attempts{}, copy_rejected{};
+  const char* copy_error = "not_attempted";
 };
 bool initialize_graphics() noexcept;
 // Isolated validation supplies a real hardware/WARP device. This never calls

@@ -302,9 +302,11 @@ void native_case(bool warp, bool a350) {
   };
   for (UINT side = 0; side < 2; ++side) {
     if (side) {
+      win::set_target_mask(0);  // The test changes this resource to the enhanced model before drawing.
       transition(list.get(), textures[3].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
       enhanced_transition(textures[3].get(), D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_COMMON,
                           D3D12_BARRIER_ACCESS_RENDER_TARGET);
+      win::set_target_mask(3);
     }
     generator.record(list.get(), rtvs[2 + side], display_width, 1024, false, 0, 0);
     if (a350) {
@@ -334,6 +336,20 @@ void native_case(bool warp, bool a350) {
   bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
   bd.SampleDesc.Count = 1;
   bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  // MSFS submits batches above seven thousand barriers. An unrelated RT and
+  // thousands of UAV barriers must not hide the selected PFD exit near the end.
+  Reference<ID3D12Resource> ordinary_target, ordinary_readback;
+  const auto ordinary_desc = texture_description(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM);
+  create_texture(device.get(), ordinary_desc, ordinary_target.put());
+  const D3D12_CPU_DESCRIPTOR_HANDLE ordinary_rtv{base.ptr + 6 * stride};
+  device->CreateRenderTargetView(ordinary_target.get(), nullptr, ordinary_rtv);
+  const float ordinary_color[]{.25f, .5f, .75f, 1};
+  list->ClearRenderTargetView(ordinary_rtv, ordinary_color, 0, nullptr);
+  auto ordinary_buffer = bd;
+  ordinary_buffer.Width = 256 * 64;
+  check(device->CreateCommittedResource(&bh, D3D12_HEAP_FLAG_NONE, &ordinary_buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(ordinary_readback.put())),
+        "Unselected RT readback");
   for (UINT i = 0; i < 2; ++i) {
     check(device->CreateCommittedResource(&bh, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                           IID_PPV_ARGS(readbacks[i].put())),
@@ -341,8 +357,27 @@ void native_case(bool warp, bool a350) {
     if (i)
       enhanced_transition(textures[3].get(), D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                           D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_ACCESS_COPY_SOURCE);
-    else
-      transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    else {
+      std::vector<D3D12_RESOURCE_BARRIER> barriers(7105);
+      for (auto& barrier : barriers)
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barriers[0].Transition = {ordinary_target.get(), 0, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
+      barriers.back().Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barriers.back().Transition = {textures[2].get(), 0, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
+      const auto before = runtime::snapshot(key).stamps;
+      list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+      std::printf("7105-barrier selected PFD copies: %llu -> %llu\n", before, runtime::snapshot(key).stamps);
+      require(runtime::snapshot(key).stamps == before + 1, "Selected PFD near end of7105barriers receives exactly one copy");
+      D3D12_TEXTURE_COPY_LOCATION ordinary_source{}, ordinary_destination{};
+      ordinary_source.pResource = ordinary_target.get();
+      ordinary_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      ordinary_destination.pResource = ordinary_readback.get();
+      ordinary_destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      ordinary_destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, 256};
+      list->CopyTextureRegion(&ordinary_destination, 0, 0, 0, &ordinary_source, nullptr);
+      transition(list.get(), ordinary_target.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
     D3D12_TEXTURE_COPY_LOCATION src{};
     src.pResource = textures[i + 2].get();
     src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -366,6 +401,16 @@ void native_case(bool warp, bool a350) {
   reset();
   std::uint64_t pixels = 0;
   std::vector<unsigned char> reference_patch;
+  void* ordinary_pixels{};
+  const D3D12_RANGE ordinary_range{0, 256 * 64}, ordinary_none{};
+  check(ordinary_readback->Map(0, &ordinary_range, &ordinary_pixels), "Map unselected RT pixels");
+  for (UINT i = 0; i < 64 * 64; ++i) {
+    const auto* pixel = static_cast<const unsigned char*>(ordinary_pixels) + i * 4;
+    require(pixel[0] >= 63 && pixel[0] <= 64 && pixel[1] >= 127 && pixel[1] <= 128 && pixel[2] >= 191 && pixel[2] <= 192 && pixel[3] == 255,
+            "Large-batch private patch leaves unrelated RT unchanged");
+    ++pixels;
+  }
+  ordinary_readback->Unmap(0, &ordinary_none);
   for (UINT side = 0; side < 2; ++side) {
     void* mapped{};
     const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
@@ -453,6 +498,112 @@ void native_case(bool warp, bool a350) {
             "Inset GS/guide pixel checks were not exercised");
     const D3D12_RANGE none{0, 0};
     readbacks[side]->Unmap(0, &none);
+  }
+  // A draw can be submitted in a different recording from its final RT exit.
+  // An empty transition-only recording remains unsafe; a later recording with
+  // independently observed outside-pass work supplies the required pass proof.
+  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+  submit();
+  reset();
+  const auto empty_before = runtime::snapshot(key).stamps;
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  require(runtime::snapshot(key).stamps == empty_before, "Empty RT-exit recording cannot admit a private copy");
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  submit();
+  reset();
+  generator.record(list.get(), ordinary_rtv, 64, 64, false, 0, 0);
+  const auto cross_before = win::graphics_status();
+  const auto cross_stamps = runtime::snapshot(key).stamps;
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  const auto cross_after = win::graphics_status();
+  std::printf("Cross-recording selected PFD copies: %llu -> %llu; pending matches: %llu -> %llu\n", cross_stamps,
+              runtime::snapshot(key).stamps, cross_before.selected_pending_matches, cross_after.selected_pending_matches);
+  require(runtime::snapshot(key).stamps == cross_stamps + 1 &&
+              cross_after.selected_pending_matches == cross_before.selected_pending_matches &&
+              cross_after.selected_view_resolved == cross_before.selected_view_resolved + 1,
+          "Safe cross-recording RT exit resolves unique observed typed view without pending draw");
+  D3D12_TEXTURE_COPY_LOCATION cross_source{}, cross_destination{};
+  cross_source.pResource = textures[2].get();
+  cross_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  cross_destination.pResource = readbacks[0].get();
+  cross_destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  cross_destination.PlacedFootprint = footprint;
+  list->CopyTextureRegion(&cross_destination, 0, 0, 0, &cross_source, nullptr);
+  transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  submit();
+  reset();
+  void* cross_pixels{};
+  const D3D12_RANGE cross_range{0, static_cast<SIZE_T>(bytes)}, cross_none{};
+  check(readbacks[0]->Map(0, &cross_range, &cross_pixels), "Cross-recording pixels");
+  for (UINT y = 0; y < 763; ++y)
+    for (UINT x = 0; x < (a350 ? 806u : 768u); ++x) {
+      const auto offset = SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
+      require(std::memcmp(static_cast<const unsigned char*>(cross_pixels) + offset, reference_patch.data() + offset, 4) == 0,
+              "Cross-recording selected rectangle matches independent verified patch");
+      ++pixels;
+    }
+  readbacks[0]->Unmap(0, &cross_none);
+  if (a350) {
+    Reference<ID3D12Resource> ambiguous;
+    auto desc = pd;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    create_texture(device.get(), desc, ambiguous.put());
+    std::uint64_t selected = 0;
+    for (const auto& candidate : win::pfd_inventory())
+      selected = std::max(selected, candidate.id);
+    require(selected && win::assign_targets(selected, second), "Select typeless target for typed-evidence lifecycle regression");
+    Reference<ID3D12DescriptorHeap> views;
+    auto view_heap = hd;
+    view_heap.NumDescriptors = 2;
+    check(device->CreateDescriptorHeap(&view_heap, IID_PPV_ARGS(views.put())), "Typed-evidence descriptor heap");
+    const auto view0 = views->GetCPUDescriptorHandleForHeapStart();
+    const D3D12_CPU_DESCRIPTOR_HANDLE view1{view0.ptr + stride};
+    D3D12_RENDER_TARGET_VIEW_DESC unorm{};
+    unorm.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    unorm.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    auto srgb = unorm;
+    srgb.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    const auto check_fallback = [&](bool copied, const char* reason, bool pending = false) {
+      generator.record(list.get(), pending ? view0 : ordinary_rtv, pending ? display_width : 64, pending ? 1024 : 64, false, 0, 0);
+      const auto before = win::graphics_status();
+      const auto copies = runtime::snapshot(key).stamps;
+      transition(list.get(), ambiguous.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      const auto after = win::graphics_status();
+      require(runtime::snapshot(key).stamps == copies + copied, "Typed-view lifecycle copy decision");
+      require(copied ? after.selected_view_resolved == before.selected_view_resolved + 1
+                     : after.selected_view_rejected == before.selected_view_rejected + 1,
+              "Typed-view lifecycle diagnostics identify admission or refusal");
+      require(std::strcmp(after.copy_error, reason) == 0, "Typed-view refusal reason is specific");
+      if (pending)
+        require(after.selected_pending_matches == before.selected_pending_matches + 1,
+                "Current validated view outranks conflicting other descriptor evidence");
+      transition(list.get(), ambiguous.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      submit();
+      reset();
+    };
+    check_fallback(false, "typed_rtv_missing");
+    device->CreateRenderTargetView(ambiguous.get(), &unorm, view0);
+    device->CreateRenderTargetView(ambiguous.get(), &srgb, view1);
+    check_fallback(false, "typed_rtv_conflict");
+    check_fallback(true, "copied", true);
+    device->CopyDescriptorsSimple(1, view1, ordinary_rtv, hd.Type);
+    check_fallback(true, "copied");
+    device->CreateRenderTargetView(ambiguous.get(), &srgb, view1);
+    check_fallback(false, "typed_rtv_conflict");
+    device->CopyDescriptors(1, &view1, nullptr, 1, &view0, nullptr, hd.Type);
+    check_fallback(true, "copied");
+    device->CreateRenderTargetView(ordinary_target.get(), nullptr, view0);
+    device->CreateRenderTargetView(ordinary_target.get(), nullptr, view1);
+    check_fallback(false, "typed_rtv_missing");
+    device->CreateRenderTargetView(ambiguous.get(), &unorm, view0);
+    ambiguous.get()->Release();
+    *ambiguous.put() = nullptr;
+    require(!win::assign_targets(selected, second), "Retired resource cannot reuse observed typed descriptor evidence");
+    device->CopyDescriptorsSimple(1, view1, view0, hd.Type);
+    for (const auto& candidate : win::pfd_inventory())
+      require(candidate.id != selected, "Descriptor copy cannot revive retired resource metadata");
+    require(win::assign_targets(first, second), "Restore targets after typed-evidence regression");
+    std::printf("Typed-view lifecycle: missing/conflict refuse; pending/simple/ranged replacement recover\n");
   }
   for (const auto format : {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
     if (!a350)

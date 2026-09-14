@@ -7,7 +7,7 @@
 
 namespace taxi_camera::engine_hook::render_boundary {
 // Linear metadata inspection, without allocations or resource dereferences.
-// Kept separate from the 256-barrier limit for inserting GPU commands.
+// Generic insertion is capped at 256; larger complete batches admit only the two explicitly selected PFD identities.
 inline constexpr UINT maximum_legacy_metadata_barriers = 1u << 20;
 enum ScopeFlags : std::uint32_t {
   ScopeEnabled = 1,
@@ -101,6 +101,18 @@ struct Callbacks {
                        const D3D12_RENDER_PASS_RENDER_TARGET_DESC*,
                        const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*) noexcept = nullptr;
   void (*pass_ended)(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept = nullptr;
+  // Optional comparison-only selection for complete legacy batches >256.
+  // Called once with capacity two, outside locks, under the reentry guard.
+  // Return zero, one, or two distinct nonnull pointers; no resource dereference,
+  // lifetime acquisition or GPU commands here. Actual before_legacy arguments
+  // still require caller-owned generation/lifetime/shape admission. At most one
+  // first eligible transition per selected resource is delivered before the
+  // unchanged original batch. All metadata and pass guards remain mandatory.
+  UINT (*selected_legacy_targets)(void*,
+                                  ID3D12GraphicsCommandList*,
+                                  std::uint64_t object_generation,
+                                  ID3D12Resource** targets,
+                                  UINT capacity) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;

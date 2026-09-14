@@ -243,6 +243,53 @@ void STDMETHODCALLTYPE copy_texture(ID3D12GraphicsCommandList* list,
     callbacks.after_copy_texture(callbacks.context, list, identity.generation, destination, x, y, z, source, box,
                                  same_safe(list, identity.generation));
 }
+// Only called after a complete bounded metadata scan excludes global uncertainty.
+// This adds O(2*N) comparisons and never uses the generic quadratic prefix scan.
+void selected_legacy(ID3D12GraphicsCommandList* list,
+                     std::uint64_t generation,
+                     UINT count,
+                     const D3D12_RESOURCE_BARRIER* barriers) noexcept {
+  if (!callbacks.selected_legacy_targets || !same_safe(list, generation)) {
+    ++batch_refusals;
+    return;
+  }
+  std::array<ID3D12Resource*, 2> targets{};
+  const UINT selected = callbacks.selected_legacy_targets(callbacks.context, list, generation, targets.data(), 2);
+  if (!selected || selected > targets.size() || !targets[0] || (selected == 2 && (!targets[1] || targets[0] == targets[1])) ||
+      !same_safe(list, generation)) {
+    ++batch_refusals;
+    return;
+  }
+  std::array<bool, 2> seen{};
+  UINT remaining = selected;
+  for (UINT n = 0; n < count && remaining; ++n) {
+    const auto& b = barriers[n];
+    // Preserve the generic prefix guard: even another resource's alias has
+    // unknown heap overlap. NULL aliases likewise refuse the remaining targets.
+    if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+      ++batch_refusals;
+      break;
+    }
+    if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
+      continue;
+    for (UINT target = 0; target < selected; ++target) {
+      if (seen[target] || b.Transition.pResource != targets[target])
+        continue;
+      seen[target] = true;
+      --remaining;
+      // Every first transition consumes this target, including splits or other
+      // states/subresources; a later RT exit cannot assume the pre-batch state.
+      if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE || b.Transition.StateBefore != D3D12_RESOURCE_STATE_RENDER_TARGET ||
+          b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ||
+          (b.Transition.Subresource != 0 && b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES))
+        continue;
+      if (!same_safe(list, generation))
+        return;
+      ++legacy_candidates;
+      callbacks.before_legacy(callbacks.context, list, generation, b.Transition);
+    }
+  }
+}
 void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const D3D12_RESOURCE_BARRIER* barriers) noexcept {
   const auto original = original_legacy.load(std::memory_order_acquire);
   if (inside) {
@@ -298,8 +345,10 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
   // leave a seemingly complete state from its last observed prefix element.
   notify_invalidation(list, identity.generation, uncertainty);
   if (allowed(identity)) {
-    if (!barriers || !count || count > 256)
+    if (!metadata_complete || global_uncertainty(uncertainty) || !barriers || !count)
       ++batch_refusals;
+    else if (count > 256)
+      selected_legacy(list, identity.generation, count, barriers);
     else
       for (UINT n = 0; n < count; ++n) {
         const auto& b = barriers[n];
@@ -509,7 +558,7 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
   }
   notify_invalidation(list, identity.generation, uncertainty);
   if (allowed(identity)) {
-    if (!texture_batches(count, groups))
+    if (!metadata_complete || global_uncertainty(uncertainty) || !texture_batches(count, groups))
       ++batch_refusals;
     else
       for (UINT group = 0; group < count; ++group) {
@@ -630,7 +679,8 @@ bool same_callbacks(const Callbacks& a, const Callbacks& b) noexcept {
   return a.context == b.context && a.before_legacy == b.before_legacy && a.before_enhanced == b.before_enhanced &&
          a.observe_legacy == b.observe_legacy && a.observe_enhanced == b.observe_enhanced &&
          a.after_copy_resource == b.after_copy_resource && a.after_copy_texture == b.after_copy_texture && a.after_draw == b.after_draw &&
-         a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended;
+         a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended &&
+         a.selected_legacy_targets == b.selected_legacy_targets;
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
   {

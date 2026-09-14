@@ -311,17 +311,18 @@ DWORD run_impl() {
     for (UINT i = 0; i < status.candidate_count; ++i)
       status.candidates[i] = {inventory[i].id,     inventory[i].draws,  inventory[i].width,
                               inventory[i].height, inventory[i].levels, inventory[i].format};
-    const char* message = !connected                     ? "Waiting for Windows companion heartbeat."
-                          : !settings.enabled            ? "Camera service paused."
-                          : !aircraft_matches            ? "Waiting for a supported aircraft identity or profile switch."
-                          : cutoff.inhibited             ? "Above 60 knots: TAXI buttons commanded off."
-                          : failed                       ? scene.message.c_str()
-                          : !buttons.valid               ? buttons.error
-                          : (!targets[0] || !targets[1]) ? "Detecting display textures for the selected aircraft profile."
-                          : !active                      ? "Ready. Use the aircraft's left or right TAXI button."
-                          : !requested || failed         ? scene.message.c_str()
-                          : progress.stalled()           ? "Capture paused: waiting for verified GPU state; camera views retained."
-                                                         : output.message;
+    const char* message = !connected                        ? "Waiting for Windows companion heartbeat."
+                          : !settings.enabled               ? "Camera service paused."
+                          : !aircraft_matches               ? "Waiting for a supported aircraft identity or profile switch."
+                          : cutoff.inhibited                ? "Above 60 knots: TAXI buttons commanded off."
+                          : failed                          ? scene.message.c_str()
+                          : !buttons.valid                  ? buttons.error
+                          : (!targets[0] || !targets[1])    ? "Detecting display textures for the selected aircraft profile."
+                          : !active                         ? "Ready. Use the aircraft's left or right TAXI button."
+                          : !requested || failed            ? scene.message.c_str()
+                          : progress.stalled()              ? "Capture paused: waiting for verified GPU state; camera views retained."
+                          : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD copy opportunity."
+                                                            : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     if (mailbox.lock()) {
       mailbox.data()->status = status;
@@ -366,6 +367,21 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.clear_states),
                     scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
+      char pfd_detail[640];
+      std::snprintf(pfd_detail, sizeof(pfd_detail),
+                    "PFD copy admission: selected_draws=%llu rt_metadata=%llu rt_callbacks=%llu pending_matches=%llu "
+                    "view_resolved=%llu view_rejected=%llu attempts=%llu rejected=%llu state_skips=%llu "
+                    "boundary_batches_refused=%llu boundary_passes_refused=%llu reason=%s",
+                    static_cast<unsigned long long>(graphics.selected_draws),
+                    static_cast<unsigned long long>(graphics.selected_rt_metadata),
+                    static_cast<unsigned long long>(graphics.selected_rt_callbacks),
+                    static_cast<unsigned long long>(graphics.selected_pending_matches),
+                    static_cast<unsigned long long>(graphics.selected_view_resolved),
+                    static_cast<unsigned long long>(graphics.selected_view_rejected),
+                    static_cast<unsigned long long>(graphics.copy_attempts), static_cast<unsigned long long>(graphics.copy_rejected),
+                    static_cast<unsigned long long>(output.state_skips), static_cast<unsigned long long>(boundaries.batch_refusals),
+                    static_cast<unsigned long long>(boundaries.pass_refusals), graphics.copy_error);
+      log_status(status, pfd_detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
         char identity_detail[640];
