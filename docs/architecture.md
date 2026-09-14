@@ -51,7 +51,7 @@ Source: [launcher](../standalone/launcher.hpp), [bridge startup and control loop
 
 ## 2. Read the TAXI buttons and select the displays
 
-The companion can select the aircraft profile automatically. SimConnect supplies the aircraft type and loaded aircraft path; catalog rules match the variant and add-on identity. Two distinct matching samples trigger a switch. The bridge retires the old camera pair before changing subscriptions, geometry or display routing, and the companion loads that aircraft's saved settings. Unknown aircraft remain inactive.
+The companion can select the aircraft profile automatically. SimConnect supplies the aircraft type and loaded aircraft path; catalog rules match the variant and add-on identity. Two distinct matching samples trigger a switch. The bridge suspends the camera pair before changing subscriptions, geometry or display routing, and the companion loads that aircraft's saved settings. The pair and its output allocations remain attached to the same verified native manager. Unknown aircraft remain inactive.
 
 Each aircraft profile supplies one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request.
 
@@ -74,7 +74,7 @@ Source: [aircraft profile](../profiles/catalog.hpp), [PFD detector](../src/pfd_t
 
 The bridge calls internal MSFS camera functions to create two scene views. These functions are outside the public camera SDK. Before any private call, the bridge verifies the loaded image structure, 29 required code fingerprints, activation data and manager update pointer. It uses the observed image size and section bounds. Simulator version, timestamp and section count are not allowlists.
 
-Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair. A transient inspection failure pauses new camera work. Removal requires a fresh, complete view inspection and a closed render gate observed across distinct manager updates. Pending or unreadable views retain their IDs; they cannot be erased or replaced until validation recovers. The engine handles deferred renderer release after an accepted removal. TAXI OFF, speed cutoff, service pause and companion disconnection close render gates and hide the PFD feed while retaining the pair. A subsequent ON reuses those same owned views. Aircraft/profile changes still require guarded cleanup before selecting the next adapter. Losing GPU capture-state evidence reports a stalled feed; it does not authorize camera removal or recreation. Capture resumes only when ordered GPU observations establish a valid source state again.
+Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair. A transient inspection failure pauses new camera work. Removal requires a fresh, complete view inspection and a closed render gate observed across distinct manager updates. Pending or unreadable views retain their IDs; they cannot be erased or replaced until validation recovers. The engine handles deferred renderer release after an accepted removal. TAXI OFF, speed cutoff, service pause and companion disconnection close render gates and hide the PFD feed while retaining the pair. A subsequent ON reuses those same owned views. Aircraft/profile changes close and revalidate the retained pair before selecting the next adapter; they do not request removal or replacement. Losing GPU capture-state evidence reports a stalled feed; it does not authorize camera removal or recreation. Capture resumes only when ordered GPU observations establish a valid source state again.
 
 Each bounded private-memory inspection caches memory-region metadata, never field contents. Metadata queries begin at the containing 64 KiB window when that region covers the requested field; protection or allocation splits fall back to the exact field address. Every field read and trace reread still runs, and each cached region must pass a fresh endpoint check before results are used. No cache survives an inspection stage. A scheduled closing pulse uses a separate inspection contract that validates ownership, the selected view and its render flags without reading camera or output objects. It can only close render gates; opening, pose changes, resizing and image publication still require the full inspection. The native close result and resulting flags are checked again before the closed state is accepted.
 
@@ -97,9 +97,9 @@ The aircraft transform is applied to each mount on camera updates. A camera ther
 | Nose | A380: 736 x 251; A350: 774 x 251 | Upper pane inside the black border |
 | Tail | A380: 736 x 496; A350: 774 x 496 | Lower camera pane inside the black border |
 
-MSFS renders each view at its pane size. The image does not need to be rendered at the main window's resolution and reduced afterward.
+The initial aircraft selects these render sizes. A pair retains its allocation sizes when the aircraft changes: for example, a pair created for the A380 keeps its 736-pixel width when used by the A350. The compositor scales it into the selected aircraft's display rectangle. This avoids replacing native camera output allocations during a flight change. Both views remain much smaller than the main window.
 
-Changing graphics settings can overwrite an established camera's size fields. The bridge closes both render gates and retains their entry IDs. When a fresh inspection proves both entries are mode2 and their existing output bitmaps still match the profile's pane sizes, it restores only the size fields and projection. It neither allocates replacement textures nor recreates the camera pair. Fresh captures are required before the PFD resumes. If the existing outputs or identities cannot be verified, the cameras stay closed and the app reports that MSFS must be restarted.
+Changing graphics settings can overwrite an established camera's size fields. The bridge closes both render gates and retains their entry IDs. When a fresh inspection proves both entries are mode2 and their existing output bitmaps still match the pair's original allocation sizes, it restores only the size fields and projection. It neither allocates replacement textures nor recreates the camera pair. Fresh captures are required before the PFD resumes. If the existing outputs or identities cannot be verified, the cameras stay closed and the app reports that MSFS must be restarted.
 
 The rate setting limits activation opportunities to **15–60 per camera per second**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images.
 
@@ -129,7 +129,7 @@ Source: [scene/resource matching](../src/scene_handoff.hpp), [capture manager](.
 
 ## 5. Combine the views and display information
 
-Source dimensions come from the aircraft profile. The compositor takes a completed nose image and a completed tail image from the current camera pair. It draws a **768 × 763** output containing:
+Source dimensions come from the aircraft profile selected when the pair is created and remain fixed for that pair. The compositor takes a completed nose image and a completed tail image from the current camera pair. It draws a **768 × 763** output containing:
 
 - nose view above and tail view below;
 - a 12-pixel black horizontal divider in the composed image;
@@ -188,6 +188,7 @@ The control loop checks companion heartbeat, aircraft telemetry, display identit
 | TAXI telemetry briefly disappears | Hold the last accepted button state for a bounded interval; continue checking camera-pose freshness separately |
 | Camera output changes identity | Discard the old image pairing and wait for current captures |
 | Capture stalls while source draws continue | Retain the camera pair and wait for fresh, ordered GPU-state evidence |
+| Aircraft/profile changes | Hide the feed, close and revalidate the same camera pair, reset routing and pose calibration, then require fresh captures |
 | Companion settings mutex is briefly busy | Retain the last validated settings within the existing heartbeat deadline |
 | Companion exits or its heartbeat expires | Suppress delivery and close render gates while retaining the pair |
 | Changed private code/layout or invalid GPU state | Refuse the affected operation and report the failed check |
@@ -196,7 +197,7 @@ Recovery is conditional. It does not infer a valid camera image from a non-null 
 
 ## Aircraft-specific parts
 
-The companion selects **FlyByWire A380X**, **iniBuilds A350-900 / ULR** or **iniBuilds A350-1000**. Each profile supplies aircraft identity, TAXI controls, camera mounts and dimensions, texture constraints, side ordering, display rectangles, composition marks and speed cutoff. Switching profiles retires owned cameras before resetting telemetry, routing and pose calibration. The A350 adapters require live simulator validation in addition to their GPU fixtures.
+The companion selects **FlyByWire A380X**, **iniBuilds A350-900 / ULR** or **iniBuilds A350-1000**. Each profile supplies aircraft identity, TAXI controls, camera mounts and dimensions, texture constraints, side ordering, display rectangles, composition marks and speed cutoff. Switching profiles closes and revalidates the retained cameras, then resets telemetry, routing and pose calibration. The new aircraft must provide fresh identity and body-pose data before the pair resumes; the PFD waits for new captures. The A350 adapters require live simulator validation in addition to their GPU fixtures.
 
 Windows startup, settings transport, private camera integration and GPU capture are shared components. Adding an aircraft requires its control, display and geometry integration; changing two variable names is not sufficient. See [Aircraft integration](aircraft-profiles.md).
 

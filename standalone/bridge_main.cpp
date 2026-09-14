@@ -100,6 +100,8 @@ DWORD run_impl() {
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
   unsigned rate{}, feeds{}, applied_profile{};
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
+  std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
+  unsigned pending_profile{};
   bool changing_profile = false;
   win::CompanionControl control;
   win::Status last_logged{};
@@ -115,43 +117,69 @@ DWORD run_impl() {
     const bool session_settings = settings.aircraft_session_epoch == session_epoch;
     if (connected && (changing_profile || settings.profile != applied_profile || settings.profile_request != applied_profile_request ||
                       session_epoch != applied_session_epoch)) {
-      if (!changing_profile) {
+      if (!changing_profile || settings.profile != pending_profile || settings.profile_request != pending_profile_request ||
+          session_epoch != pending_session_epoch) {
         win::set_target_mask(0);
         win::set_calibration(0, settings.calibration_budget);
+        native_camera::suspend_scene_rendering(true);
         scene_runtime::manager().stop_source_tracking();
-        if (native_camera::scene_snapshot().hook_installed)
-          native_camera::request_scene_stop(true);
+        scene_handoff().stop_scene();
         scene_runtime::reset_feed(key);
+        pending_profile = settings.profile;
+        pending_profile_request = settings.profile_request;
+        pending_session_epoch = session_epoch;
+        transition_token = 0;
         changing_profile = true;
         requested = failed = false;
-        // Old-flight tuples are excluded by their epoch. Leave new requests
-        // unconsumed, including assignments made while cleanup is pending.
         route_request = 0;
       }
-      const auto pair = native_camera::scene_snapshot().pair;
-      // Engine cleanup owns the IDs. Never switch adapters beneath live views.
-      if (pair.owned_ids[0] || pair.owned_ids[1] || pair.creation_pending) {
+      native_camera::suspend_scene_rendering(true);
+      if (!transition_token)
+        transition_token = native_camera::request_scene_profile_transition(pending_profile);
+      const auto transition = native_camera::scene_snapshot();
+      const bool ready = transition_token && transition.profile_transition_token == transition_token &&
+                         transition.profile_transition_id == pending_profile && transition.profile_transition_ready &&
+                         !transition.profile_transition_pending && !transition.profile_transition_failed;
+      if (!ready) {
+        const auto identity = native_camera::get_aircraft_identity();
         win::Status pending{};
         pending.heartbeat = now;
         pending.aircraft_session_epoch = session_epoch;
-        std::snprintf(pending.message, sizeof(pending.message), "Waiting for camera cleanup before switching aircraft profile.");
+        pending.active_profile = applied_profile;
+        pending.detected_profile = identity.fresh ? identity.detected_profile : 0;
+        pending.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
+        std::memcpy(pending.aircraft_type, identity.type.data(), sizeof(pending.aircraft_type));
+        std::memcpy(pending.aircraft_path, identity.path.data(), sizeof(pending.aircraft_path));
+        std::snprintf(pending.message, sizeof(pending.message), "%s",
+                      transition.profile_transition_failed ? transition.message.c_str()
+                                                           : "Closing and validating retained camera views for the aircraft profile.");
         if (mailbox.lock()) {
           mailbox.data()->status = pending;
           mailbox.unlock();
         }
         scene_runtime::service();
+        if (now >= next_telemetry) {
+          native_camera::initialize_body_pose_provider();
+          next_telemetry = now + 2000;
+        }
         Sleep(25);
         continue;
       }
-      if (!native_camera::request_scene_profile(settings.profile)) {
+      if (!native_camera::select_aircraft_profile(pending_profile)) {
         Sleep(25);
         continue;
       }
-      native_camera::select_aircraft_profile(settings.profile);
-      win::set_aircraft_profile(settings.profile);
-      applied_profile = settings.profile;
-      applied_profile_request = settings.profile_request;
-      applied_session_epoch = session_epoch;
+      win::set_aircraft_profile(pending_profile);
+      applied_profile = pending_profile;
+      applied_profile_request = pending_profile_request;
+      applied_session_epoch = pending_session_epoch;
+      char transition_detail[256]{};
+      std::snprintf(transition_detail, sizeof(transition_detail),
+                    "Aircraft transition: token=%llu session=%llu profile=%u retained_entries=%llu/%llu",
+                    static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(applied_session_epoch),
+                    applied_profile, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
+                    static_cast<unsigned long long>(transition.pair.owned_ids[1]));
+      log_status(status, transition_detail);
       applied_mounts = {};
       intent = {};
       progress = {};
@@ -178,11 +206,12 @@ DWORD run_impl() {
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
-    const unsigned mask = connected && settings.enabled && aircraft_matches && win::graphics_status().ready && !cutoff.inhibited
-                              ? (settings.follow_taxi ? desired.buttons
-                                 : session_settings   ? settings.manual_mask
-                                                      : 0)
-                              : 0;
+    const unsigned mask =
+        connected && session_settings && settings.enabled && aircraft_matches && win::graphics_status().ready && !cutoff.inhibited
+            ? (settings.follow_taxi ? desired.buttons
+               : session_settings   ? settings.manual_mask
+                                    : 0)
+            : 0;
     const bool test_scene =
         connected && session_settings && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
     const auto intent_observed_ms = GetTickCount64();

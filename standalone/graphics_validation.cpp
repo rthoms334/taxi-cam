@@ -160,6 +160,265 @@ void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   require(taxi_camera::drain_copy_queue(queue, device), "Interop capture completion");
 }
 
+void active_profile_switch_case(bool warp) {
+  using namespace taxi_camera;
+  Reference<ID3D12Debug> debug;
+  const bool debug_enabled = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debug.put())));
+  if (debug_enabled)
+    debug->EnableDebugLayer();
+  Reference<IDXGIFactory4> factory;
+  check(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())), "Profile switch factory");
+  Reference<IDXGIAdapter> adapter;
+  if (warp)
+    check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.put())), "Profile switch WARP");
+  Reference<ID3D12Device> device;
+  check(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(device.put())), "Profile switch device");
+  Reference<ID3D12InfoQueue> messages;
+  if (debug_enabled)
+    device->QueryInterface(IID_PPV_ARGS(messages.put()));
+  GradientGenerator generator(device.get());
+  require(win::initialize_graphics(device.get()), win::graphics_status().error);
+  const auto key = win::graphics_status().device;
+  win::set_aircraft_profile(profiles::A380.id);
+  require(runtime::prepare(key), "Prepare actual running compositor for profile switch");
+  runtime::manager().set_source_rate(60);
+  D3D12_COMMAND_QUEUE_DESC qd{};
+  Reference<ID3D12CommandQueue> queue;
+  Reference<ID3D12CommandAllocator> allocator;
+  Reference<ID3D12GraphicsCommandList> list;
+  check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(queue.put())), "Profile switch queue");
+  check(device->CreateCommandAllocator(qd.Type, IID_PPV_ARGS(allocator.put())), "Profile switch allocator");
+  check(device->CreateCommandList(0, qd.Type, allocator.get(), nullptr, IID_PPV_ARGS(list.put())), "Profile switch list");
+  std::array<Reference<ID3D12Resource>, 2> sources;
+  std::array<Reference<ID3D12Resource>, 4> displays, readbacks;
+  std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 4> footprints{};
+  std::array<UINT64, 4> byte_counts{};
+  Reference<ID3D12DescriptorHeap> heap;
+  const D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 6, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+  check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(heap.put())), "Profile switch RTVs");
+  const auto base = heap->GetCPUDescriptorHandleForHeapStart();
+  const auto stride = device->GetDescriptorHandleIncrementSize(hd.Type);
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 6> rtvs{};
+  for (UINT i = 0; i < rtvs.size(); ++i)
+    rtvs[i] = {base.ptr + SIZE_T{i} * stride};
+  for (UINT feed = 0; feed < 2; ++feed) {
+    const auto pane = profiles::A380.camera_panes[feed];
+    create_texture(device.get(), texture_description(pane[0], pane[1], DXGI_FORMAT_R8G8B8A8_UNORM), sources[feed].put());
+    device->CreateRenderTargetView(sources[feed].get(), nullptr, rtvs[feed]);
+  }
+  for (UINT i = 0; i < 4; ++i) {
+    const auto& profile = i < 2 ? profiles::A380 : profiles::A359;
+    auto d = texture_description(profile.width, 1024, DXGI_FORMAT_R8G8B8A8_UNORM);
+    d.MipLevels = profile.mips ? profile.mips : 1;
+    create_texture(device.get(), d, displays[i].put());
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = d.Format;
+    view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    device->CreateRenderTargetView(displays[i].get(), &view, rtvs[i + 2]);
+    device->GetCopyableFootprints(&d, 0, 1, 0, &footprints[i], nullptr, nullptr, &byte_counts[i]);
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = byte_counts[i];
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const auto props = heap_properties(D3D12_HEAP_TYPE_READBACK);
+    check(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(readbacks[i].put())),
+          "Profile switch readback");
+  }
+  const std::array<std::uint64_t, 2> handles{reinterpret_cast<std::uint64_t>(sources[0].get()),
+                                             reinterpret_cast<std::uint64_t>(sources[1].get())};
+  auto& handoff = scene_handoff();
+  const SceneManagerIdentity manager{501, 1};
+  const std::array<std::uint64_t, 2> entries{701, 702};
+  const auto submit = [&] {
+    check(list->Close(), "Profile switch Close");
+    ID3D12CommandList* batch[]{list.get()};
+    queue->ExecuteCommandLists(1, batch);
+    require(drain_copy_queue(queue.get(), device.get()), "Profile switch GPU completion");
+    check(allocator->Reset(), "Profile switch allocator Reset");
+    check(list->Reset(allocator.get(), nullptr), "Profile switch observed Reset");
+  };
+  const auto service_until = [&](auto predicate, const char* label) {
+    const auto deadline = GetTickCount64() + 5000;
+    while (!predicate() && GetTickCount64() < deadline) {
+      runtime::service();
+      Sleep(1);
+    }
+    const auto status = runtime::snapshot(key);
+    if (!predicate())
+      std::fprintf(stderr, "%s: output=%d frames=%llu completed=%llu tail=%s error=%s\n", label, status.output, status.frames,
+                   status.capture.completed, status.capture.tail_status, status.message);
+    require(predicate() && !status.failed, label);
+  };
+  const auto draw_source = [&](UINT feed, UINT frame) {
+    const auto pane = profiles::A380.camera_panes[feed];
+    generator.record(list.get(), rtvs[feed], pane[0], pane[1], false, frame, feed);
+    submit();
+  };
+  const auto render_displays = [&](UINT offset, unsigned mask) {
+    win::set_target_mask(mask);
+    const UINT width = offset ? 1644 : 768;
+    for (UINT side = 0; side < 2; ++side)
+      generator.record(list.get(), rtvs[offset + side + 2], width, 1024, false, 0, 0);
+    list->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+    // Both deferred stamps have completed. Disable further RT-exit copies so
+    // readback itself cannot create a second write to either display.
+    win::set_target_mask(0);
+    for (UINT side = 0; side < 2; ++side) {
+      const UINT index = offset + side;
+      transition(list.get(), displays[index].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+      src.pResource = displays[index].get();
+      src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      dst.pResource = readbacks[index].get();
+      dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      dst.PlacedFootprint = footprints[index];
+      list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      transition(list.get(), displays[index].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+    submit();
+    std::array<std::vector<unsigned char>, 2> pixels;
+    for (UINT side = 0; side < 2; ++side) {
+      const UINT index = offset + side;
+      void* mapped{};
+      const D3D12_RANGE range{0, static_cast<SIZE_T>(byte_counts[index])}, none{};
+      check(readbacks[index]->Map(0, &range, &mapped), "Profile switch image map");
+      const auto* bytes = static_cast<const unsigned char*>(mapped);
+      pixels[side].assign(bytes, bytes + byte_counts[index]);
+      readbacks[index]->Unmap(0, &none);
+    }
+    return pixels;
+  };
+  std::array<std::uint64_t, 2> old_routes{};
+  SceneCopyObservation initial_match{}, previous_match{};
+  UINT64 checked_pixels = 0;
+  for (UINT phase = 0; phase < 3; ++phase) {
+    const bool a350 = phase == 1;
+    const auto& profile = a350 ? profiles::A359 : profiles::A380;
+    const UINT offset = a350 ? 2 : 0;
+    const auto old_status = runtime::snapshot(key);
+    if (phase) {
+      require(old_status.output && old_status.frames > 0, "Profile changes while a real camera output is active");
+      win::set_target_mask(0);
+      runtime::manager().stop_source_tracking();
+      handoff.stop_scene();
+      runtime::reset_feed(key);
+    }
+    win::set_aircraft_profile(profile.id);
+    runtime::set_composition(key, profile.composition);
+    require(win::target_ids() == std::array<std::uint64_t, 2>{}, "Active profile change clears all previous PFD routes");
+    if (phase)
+      require(!win::assign_targets(old_routes[0], old_routes[1]), "Other-profile PFD routes cannot be reused");
+    const auto inventory = win::pfd_inventory();
+    require(inventory.size() == 2, "Only the current profile's live PFD sizes are eligible");
+    const std::array current_routes{std::min(inventory[0].id, inventory[1].id), std::max(inventory[0].id, inventory[1].id)};
+    require(win::assign_targets(current_routes[0], current_routes[1]), "Bind current-profile PFD identities explicitly");
+    handoff.begin_scene();
+    require(handoff.publish(handoff.begin_capture(), manager, entries, handles), "Retained sources get a fresh scene publication");
+    const auto match = handoff.observe_copy(key, handles[0], handles[1]);
+    require(match.source.matched && match.destination.matched, "Both retained camera sources match new publication");
+    if (!phase)
+      initial_match = match;
+    else {
+      require(!handoff.is_current(previous_match.source) && !handoff.is_current(previous_match.destination),
+              "Previous scene matches are stale");
+      require(match.source.scene_epoch != previous_match.source.scene_epoch, "Retained pair receives a new scene epoch");
+    }
+    for (const auto& pair : {std::pair{initial_match.source, match.source}, std::pair{initial_match.destination, match.destination}})
+      require(pair.first.resource == pair.second.resource && pair.first.entry_id == pair.second.entry_id &&
+                  pair.first.manager == pair.second.manager,
+              "Aircraft switch retains native resource generation, camera entry IDs and manager");
+    for (UINT feed = 0; feed < 2; ++feed) {
+      const auto d = sources[feed]->GetDesc();
+      const auto pane = profiles::A380.camera_panes[feed];
+      require(d.Width == static_cast<UINT>(pane[0]) && d.Height == static_cast<UINT>(pane[1]),
+              "Original A380 camera allocation dimensions are retained");
+    }
+    runtime::manager().begin_source_tracking();
+    runtime::reset_feed(key);
+    runtime::service();
+    require(!runtime::snapshot(key).output && runtime::snapshot(key).frames == old_status.frames,
+            "Old composed frame is unavailable before fresh sources");
+    const auto old_stamps = runtime::snapshot(key).stamps;
+    render_displays(offset, 3);
+    require(runtime::snapshot(key).stamps == old_stamps, "No stale profile image can stamp before either fresh feed");
+    const auto completed = runtime::snapshot(key).capture.completed;
+    draw_source(0, phase & 1);
+    service_until([&] { return runtime::snapshot(key).capture.completed > completed; }, "Fresh nose capture completes");
+    require(!runtime::snapshot(key).output && runtime::snapshot(key).frames == old_status.frames,
+            "One fresh feed cannot pair with the old profile tail");
+    render_displays(offset, 3);
+    require(runtime::snapshot(key).stamps == old_stamps, "No stale mixed-profile image can stamp after only one fresh feed");
+    Sleep(20);
+    draw_source(1, phase & 1);
+    service_until([&] { return runtime::snapshot(key).output && runtime::snapshot(key).frames > old_status.frames; },
+                  "Both fresh retained-source feeds compose under new profile");
+    const auto off = render_displays(offset, 0);
+    const auto before = runtime::snapshot(key).stamps;
+    const auto on = render_displays(offset, 3);
+    require(runtime::snapshot(key).stamps == before + 2, "Fresh camera images reach both current-profile PFDs");
+    UINT nose_pixels = 0, tail_pixels = 0;
+    for (UINT side = 0; side < 2; ++side) {
+      const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u;
+      const auto row_pitch = footprints[offset + side].Footprint.RowPitch;
+      for (UINT y = 0; y < 1024; ++y)
+        for (UINT x = 0; x < profile.width; ++x) {
+          const auto address = SIZE_T{y} * row_pitch + 4 * x;
+          const auto* pixel = on[side].data() + address;
+          const bool outer = x >= left && x < left + width && y < 763;
+          const bool inner = x >= left + 16 && x < left + width - 16 && y >= 12 && y < 763;
+          if (!outer)
+            require(std::memcmp(pixel, off[side].data() + address, 4) == 0,
+                    "Profile switch preserves every ND, gutter and lower-trim byte");
+          else if (!inner)
+            require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255, "Current-profile border stays opaque black");
+          else {
+            const auto wx = static_cast<UINT>((x - left - 16 + .5) * 768 / (width - 32));
+            const auto wy = static_cast<UINT>((y - 12 + .5) * 763 / 751);
+            if (wx >= 350 && wx < 400 && ((wy >= 100 && wy < 150) || (wy >= 400 && wy < 450))) {
+              const bool nose = wy < 200;
+              const UINT blue = phase & 1 ? (nose ? 153 : 102) : (nose ? 51 : 204);
+              require(pixel[2] >= blue - 2 && pixel[2] <= blue + 2, "Current-profile panes contain the fresh phase's GPU pixel pattern");
+              ++(nose ? nose_pixels : tail_pixels);
+            }
+            if (wy >= 251 && wy < 263)
+              require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Profile switch keeps the exact black divider");
+          }
+          ++checked_pixels;
+        }
+    }
+    require(nose_pixels > 1000 && tail_pixels > 1000, "Both fresh camera panes verified over broad regions");
+    std::printf("Profile phase%u id%u: retained736x251/496, fresh nose+tail, routes rebound, frames=%llu stamps=%llu checked=%llu\n", phase,
+                profile.id, runtime::snapshot(key).frames, runtime::snapshot(key).stamps, checked_pixels);
+    old_routes = current_routes;
+    previous_match = match;
+  }
+  win::set_target_mask(0);
+  runtime::manager().stop_source_tracking();
+  handoff.stop_scene();
+  runtime::reset_feed(key);
+  check(list->Close(), "Profile switch final Close");
+  require(win::graphics_status().hook_failures == 0, "Profile switch has no native hook failures");
+  UINT64 errors = 0;
+  if (messages.get())
+    for (UINT64 i = 0; i < messages->GetNumStoredMessages(); ++i) {
+      SIZE_T size{};
+      messages->GetMessage(i, nullptr, &size);
+      std::vector<unsigned char> bytes(size);
+      auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+      if (SUCCEEDED(messages->GetMessage(i, message, &size)) && message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+        ++errors;
+        std::fprintf(stderr, "D3D12 error%u: %s\n", message->ID, message->pDescription);
+      }
+    }
+  require(errors == 0, "Profile switch GPU debug validation");
+  std::printf(
+      "PASS active profile switch %s: A380->A350->A380, retained sources, fresh pair per phase, exact PFD/ND/trim pixels=%llu debug=%d "
+      "errors=%llu\n",
+      warp ? "WARP" : "hardware", checked_pixels, debug_enabled, errors);
+}
+
 void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy) {
   const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
   const UINT pane_width = profile.camera_panes[0][0], display_width = profile.width;
@@ -1557,7 +1816,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy) {
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   try {
-    bool warp = false, a350 = false, query_fallback = false, prefer_copy = false;
+    bool warp = false, a350 = false, query_fallback = false, prefer_copy = false, profile_switch = false;
     for (int i = 1; i < argc; ++i) {
       if (std::wcscmp(argv[i], L"--warp") == 0)
         warp = true;
@@ -1565,12 +1824,17 @@ int wmain(int argc, wchar_t** argv) {
         a350 = true;
       else if (std::wcscmp(argv[i], L"--query-fallback") == 0)
         query_fallback = true;
+      else if (std::wcscmp(argv[i], L"--profile-switch") == 0)
+        profile_switch = true;
       else if (std::wcscmp(argv[i], L"--prefer-copy") == 0)
         prefer_copy = true;
       else
         return 2;
     }
-    native_case(warp, a350, query_fallback, prefer_copy);
+    if (profile_switch)
+      active_profile_switch_case(warp);
+    else
+      native_case(warp, a350, query_fallback, prefer_copy);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL native graphics: %s\n", e.what());

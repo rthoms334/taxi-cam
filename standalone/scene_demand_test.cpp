@@ -73,7 +73,7 @@ void button_sequence(unsigned rate) {
     phase(true, 1000);   // Either or both PFDs use the same nose/tail pair.
   }
   require(starts == 1 && engine.creates == 2 && engine.erases == 0, "Display demand performed native reallocation");
-  pair.request_disable();  // Explicit aircraft/profile teardown remains separate.
+  pair.request_disable();  // Explicit terminal cleanup remains separate from display demand.
   pair.process_update(owner, callbacks);
   require(engine.erases == 2 && pair.snapshot().state == ec::State::disabled, "Explicit lifecycle cleanup was lost");
 }

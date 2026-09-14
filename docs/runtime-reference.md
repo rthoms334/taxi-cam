@@ -74,7 +74,7 @@ Source: [aircraft defaults](../profiles/catalog.hpp), [mount transforms](../nati
 
 ## Display geometry
 
-Pixel coordinates start at the top left. Row ranges below are inclusive. The table gives the A380 defaults and common working-canvas contract. The A350 uses 1644 x 1024 EFIS targets, 774 x 251 / 774 x 496 sources and a 774 x 751 content rectangle inside an 806 x 763 destination within the PFD area, preserving the central separator. See [Aircraft integration](aircraft-profiles.md).
+Pixel coordinates start at the top left. Row ranges below are inclusive. The table gives the A380 defaults and common working-canvas contract. The A350 uses 1644 x 1024 EFIS targets, initial 774 x 251 / 774 x 496 sources and a 774 x 751 content rectangle inside an 806 x 763 destination within the PFD area, preserving the central separator. See [Aircraft integration](aircraft-profiles.md).
 
 | Element | Geometry |
 | --- | --- |
@@ -216,4 +216,4 @@ Status includes `active_profile`, `detected_profile`, `identity_sample_ms`, `air
 
 The PFD assignment lists refresh when candidate allocation IDs change. Opening a list freezes its contents until it closes, preserving selection while drawing continues. Entries show dimensions, mips and format; their allocation IDs are session-only. Automatic assignment stays automatic unless a texture is explicitly chosen.
 
-After a TAXI telemetry gap exceeds the existing two-second intent grace, output is hidden and render gates are suspended. Existing owned views remain allocated through TAXI OFF, cutoff, service pause and companion disconnection. Aircraft/profile changes and native identity failures retain their separate cleanup guards. Fresh ON resumes that pair; this does not remove native memory/lifetime guards or establish the cause of a simulator crash.
+After a TAXI telemetry gap exceeds the existing two-second intent grace, output is hidden and render gates are suspended. Existing owned views remain allocated through TAXI OFF, cutoff, service pause and companion disconnection. Aircraft/profile changes suspend and revalidate that pair, clear the old feed and body calibration, and require fresh captures after the new profile is applied. Native identity failures retain their separate guards; a profile change does not authorize camera removal or replacement. Fresh ON resumes that pair; this does not remove native memory/lifetime guards or establish the cause of a simulator crash.

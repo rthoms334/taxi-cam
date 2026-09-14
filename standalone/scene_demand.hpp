@@ -2,7 +2,7 @@
 
 namespace taxi_camera::standalone {
 // Display demand is independent of native ownership. OFF parks the existing
-// pair; only an aircraft/profile lifecycle change may request its retirement.
+// pair; aircraft/profile changes use a separate retained-pair transition.
 struct SceneDemand {
   bool start;
   bool suspend;

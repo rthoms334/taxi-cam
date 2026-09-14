@@ -45,6 +45,11 @@ struct ProbeSnapshot {
   bool hook_installed = false;
   bool accepting_requests = false;
   bool pose_captured = false;
+  std::uint64_t profile_transition_token = 0;
+  std::uint32_t profile_transition_id = 0;
+  bool profile_transition_pending = false;
+  bool profile_transition_ready = false;
+  bool profile_transition_failed = false;
   MountPair mounts = default_mounts();
   std::array<MountedPose, 2> mounted_poses{};
   std::uint64_t updates = 0;
@@ -85,6 +90,9 @@ struct ProbeSnapshot {
 // the fixed main executable and pins this add-on until process exit. Engine
 // functions are never called here: requests are consumed by the update observer.
 void request_scene_test(bool reuse_calibration = false) noexcept;
+// Each request gets a unique completion token. Zero refuses the request.
+// Existing views are closed/revalidated by the observer and are never replaced.
+std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept;
 // Button mode retains public telemetry so another button press can restart.
 void request_scene_stop(bool keep_telemetry = false) noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;

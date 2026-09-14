@@ -54,7 +54,8 @@ inline bool retryable_scene_stop(SceneStopReason reason) noexcept {
 
 inline bool temporary_pose_unavailable(const char* reason) noexcept {
   return reason && (!std::strcmp(reason, "telemetry_busy") || !std::strcmp(reason, "aircraft_telemetry_stale") ||
-                    !std::strcmp(reason, "camera_telemetry_stale") || !std::strcmp(reason, "not_initialized"));
+                    !std::strcmp(reason, "camera_telemetry_stale") || !std::strcmp(reason, "not_initialized") ||
+                    !std::strcmp(reason, "aircraft_session_changed"));
 }
 
 // Observer policy, serialized by the probe mailbox mutex. No native calls.

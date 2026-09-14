@@ -137,6 +137,12 @@ if ($Validate) {
         }
     }
 
+    if (-not $WarpOnly) {
+        & $gpu --profile-switch
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware active-feed aircraft-switch validation failed.' }
+    }
+    & $gpu --warp --profile-switch
+    if ($LASTEXITCODE -ne 0) { throw 'WARP active-feed aircraft-switch validation failed.' }
     $smoke = Join-Path $out 'native-smoke-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'standalone/smoke_validation.cpp') '-ladvapi32' '-o' $smoke
     if ($LASTEXITCODE -ne 0) { throw 'Native smoke compilation failed.' }
@@ -213,8 +219,8 @@ if ($Validate) {
     [ordered]@{
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         dynamicGraphicsStateTests=@($dynamicStateResults)
-        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
-            'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
+        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
+            'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};

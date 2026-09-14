@@ -118,6 +118,25 @@ void mount_mailbox() {
   require(nc::request_scene_mounts(defaults), "Restoring default mounts failed");
 }
 
+void profile_transition_mailbox() {
+  require_wrong_host();
+  const auto first = nc::request_scene_profile_transition(1);
+  const auto first_status = nc::scene_snapshot();
+  require(first && first_status.profile_transition_token == first && first_status.profile_transition_id == 1 &&
+              first_status.profile_transition_ready && !first_status.profile_transition_pending,
+          "Initial empty-pair transition did not acknowledge its exact request");
+  require_inert(first_status);
+  const auto repeat = nc::request_scene_profile_transition(1);
+  require(repeat > first && nc::scene_snapshot().profile_transition_token == repeat,
+          "Same-profile reload reused the previous transition token");
+  const auto next = nc::request_scene_profile_transition(2);
+  const auto next_status = nc::scene_snapshot();
+  require(next > repeat && next_status.profile_transition_id == 2 && next_status.profile_transition_token == next,
+          "Superseding profile failed to publish its own acknowledgement");
+  require(nc::request_scene_profile_transition(9999) == 0 && nc::scene_snapshot().profile_transition_token == next,
+          "Invalid profile changed the accepted transition");
+  require_inert(next_status);
+}
 void wrong_host_public_flow() {
   require_wrong_host();
   const auto initial = nc::scene_snapshot();
@@ -195,6 +214,7 @@ void wrong_host_public_flow() {
 
 int main() {
   try {
+    profile_transition_mailbox();
     wrong_host_public_flow();
     std::printf("PASS: %u production runtime wrong-host checks; no hook, owned entries, pose calls or engine updates.\n", checks);
     return 0;
