@@ -192,8 +192,14 @@ void native_case(bool warp, bool a350) {
   }
   require(runtime::snapshot(key).frames > frames_before_interop, "Camera capture survives unrelated D3D11On12 Game Capture copy");
   win::set_target_mask(3);
-  generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
-  generator.record(list.get(), rtvs[3], display_width, 1024, false, 0, 0);
+  for (UINT side = 0; side < 2; ++side) {
+    generator.record(list.get(), rtvs[2 + side], display_width, 1024, false, 0, 0);
+    if (a350) {
+      const float grey[]{0.25f, 0.25f, 0.25f, 1};
+      const D3D12_RECT gutter{806, 0, 838, 763};
+      list->ClearRenderTargetView(rtvs[2 + side], grey, 1, &gutter);
+    }
+  }
   // Only change root constants and scissor. Original pipeline, signature,
   // topology and viewport must have survived the injected PFD draw.
   // Update one word only: previously set words must survive our root change.
@@ -242,8 +248,8 @@ void native_case(bool warp, bool a350) {
     for (UINT y = 0; y < 1024; ++y)
       for (UINT x = 0; x < display_width; ++x) {
         const auto* pixel = data + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
-        const UINT left = a350 && side ? 822u : 0u;
-        const UINT region_width = a350 ? 822u : 768u;
+        const UINT left = a350 && side ? 838u : 0u;
+        const UINT region_width = a350 ? 806u : 768u;
         const bool camera_region = x >= left && x < left + region_width;
         const auto local_x = static_cast<int>(x) - static_cast<int>(left);
         // Independent broad regions deliberately exclude reference marks and GS.
@@ -253,8 +259,13 @@ void native_case(bool warp, bool a350) {
           require(pixel[2] >= 202 && pixel[2] <= 206, "Tail frame on PFD");
         if (camera_region && y >= 255 && y < 259)
           require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Black divider");
-        if (a350 && !camera_region && y < 763)
-          require(pixel[2] >= 50 && pixel[2] <= 52, "A350 navigation half preserved");
+        if (a350 && !camera_region && y < 763) {
+          if (x >= 806 && x < 838)
+            require(pixel[0] >= 63 && pixel[0] <= 65 && pixel[1] >= 63 && pixel[1] <= 65 && pixel[2] >= 63 && pixel[2] <= 65,
+                    "A350 central grey separator and inner padding preserved on both sides");
+          else
+            require(pixel[2] >= 50 && pixel[2] <= 52, "A350 navigation area preserved");
+        }
         if (!a350 && local_x == 20 && y == 46)
           require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "A380 retains its full-height GS panel");
         if (!a350 && local_x == 20 && y == 50)

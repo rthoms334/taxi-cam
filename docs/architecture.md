@@ -195,6 +195,6 @@ Windows startup, settings transport, private camera integration and GPU capture 
 - Scene content and lighting depend on what MSFS renders for these views.
 - Build receipts report automated checks. Hardware rendering and live MSFS behaviour are separate validation scopes.
 
-The 768 x 763 GPU buffer is a common working canvas; final placement comes from each profile. A350 presentation covers the outer PFD half of each combined EFIS texture and preserves the neighbouring ND.
+The 768 x 763 GPU buffer is a common working canvas; final placement comes from each profile. A350 presentation covers the inner PFD area of each combined EFIS texture, preserving the central grey separator, its edge padding and the neighbouring ND.
 
 Exact settings, dimensions, timeouts and IPC fields are in the [runtime reference](runtime-reference.md). Build and publication behaviour is in [Releases](releases.md).

@@ -87,8 +87,13 @@ int main() {
       assert(profiles::camera_candidate(desired[0][0], desired[0][1]));
     }
   }
-  assert(profiles::display_rect(profiles::A359, 0).right == 822);
-  assert(profiles::display_rect(profiles::A359, 1).left == 822);
+  for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
+    const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1);
+    assert(left.left == 0 && left.right == 806 && right.left == 838 && right.right == 1644);
+    assert(right.left - left.right == 32);
+    for (const auto& pane : profile->camera_panes)
+      assert(pane[0] == 806);
+  }
   static PfdTargetDetector detector;
   detector.configure(profiles::A359);
   std::array<PfdTargetObservation, 4> observations{
