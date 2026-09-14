@@ -56,3 +56,15 @@ if ($doc.SelectNodes('//Launch.Addon').Count -ne 1 -or $doc.SelectSingleNode('//
 if ([IO.File]::ReadAllText((Join-Path $sim 'taxi-camera-native.addon64')) -ne 'legacy fixture') { throw 'Rollback did not restore the exact old file.' }
 if (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg'))) { throw 'Uninstall removed user calibration.' }
 Write-Output 'PASS native install/rollback: isolated process fixtures and paths, running-simulator refusal, exact binary receipts, startup preservation, calibration import, legacy retention and unrelated graphics files preserved.'
+
+. (Join-Path $PSScriptRoot 'validation_receipt.ps1')
+$requested = 'C:\Users\Pilot\AppData\Local\Taxi Cam\app\taxi-cam.exe'
+$redirected = '\\?\C:\Users\Pilot\AppData\Local\Packages\Example.Desktop_123\LocalCache\Local\Taxi Cam\app\taxi-cam.exe'
+if (-not (Test-TaxiRedirectedInstallPath $requested $redirected)) { throw 'Packaged LocalAppData redirection was accepted.' }
+if (-not (Test-TaxiRedirectedInstallPath $requested ($redirected -replace 'LocalCache\\Local','LocalCache\Roaming'))) { throw 'Packaged roaming redirection was accepted.' }
+if (Test-TaxiRedirectedInstallPath $requested ('\\?\' + $requested)) { throw 'Ordinary per-user installation was rejected.' }
+if (Test-TaxiRedirectedInstallPath 'C:\Users\Pilot\Apps\Taxi Cam\taxi-cam.exe' '\\?\D:\Apps\Taxi Cam\taxi-cam.exe') { throw 'A normal filesystem alias was rejected.' }
+if (Test-TaxiRedirectedInstallPath $redirected $redirected) { throw 'An explicitly selected physical path was rejected.' }
+$fixturePhysical = Get-TaxiPhysicalFilePath (Join-Path $sim 'dxgi.dll')
+if (-not $fixturePhysical.EndsWith('\sim\dxgi.dll', [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical file path lookup failed.' }
+Write-Output 'PASS installation visibility: ordinary paths, physical aliases, explicit cache paths, Local/Roaming redirection and real handle resolution.'
