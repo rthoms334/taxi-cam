@@ -9,7 +9,7 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 3;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 4;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
@@ -17,10 +17,22 @@ struct Settings {
   std::uint64_t route_request{}, left_id{}, right_id{};
   std::uint32_t auto_profile = 1;
   std::array<float, 3> speed_color = profiles::A380.composition.speed_color;
+  // Normalized left-side guide positions; the right side mirrors X. These are
+  // visual alignment settings, not calibrated ground-clearance measurements.
+  std::array<float, 2> nose_dot = profiles::A380.composition.nose_dot;
+  std::array<float, 2> tail_upper = profiles::A380.composition.tail_upper;
+  std::array<float, 2> tail_corner = profiles::A380.composition.tail_corner;
+  std::array<float, 2> tail_inner = profiles::A380.composition.tail_inner;
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
   std::array<std::array<double, 6>, 2> mounts = profiles::A380.mounts;
 };
+inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
+  settings.nose_dot = profile.composition.nose_dot;
+  settings.tail_upper = profile.composition.tail_upper;
+  settings.tail_corner = profile.composition.tail_corner;
+  settings.tail_inner = profile.composition.tail_inner;
+}
 struct Candidate {
   std::uint64_t id{}, draws{};
   std::uint32_t width{}, height{}, mips{}, format{};
@@ -44,6 +56,10 @@ struct Shared {
   Status status;
 };
 inline bool valid_settings(const Settings& s) noexcept {
+  for (const auto& position : {s.nose_dot, s.tail_upper, s.tail_corner, s.tail_inner})
+    if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || position[0] < 0 || position[0] > 0.5f || position[1] < 0 ||
+        position[1] > 1)
+      return false;
   for (const float c : s.speed_color)
     if (!std::isfinite(c) || c < 0 || c > 1)
       return false;

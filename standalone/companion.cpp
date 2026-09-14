@@ -89,7 +89,7 @@ HWND button(const wchar_t* label, int id, int x, int y, int w = 130, int h = 36)
 }
 void edit(double value, int id, int x, int y, int w = 110) {
   wchar_t buffer[64];
-  std::swprintf(buffer, 64, id == 201 || id == 202 ? L"%.4g" : L"%.10g", value);
+  std::swprintf(buffer, 64, id >= 360 && id <= 367 ? L"%.1f" : id == 201 || id == 202 ? L"%.4g" : L"%.10g", value);
   auto h = child(L"EDIT", buffer, id, x, y, w, 30, ES_AUTOHSCROLL | ES_LEFT | WS_BORDER);
   SendMessageW(h, EM_SETLIMITTEXT, 32, 0);
 }
@@ -165,6 +165,15 @@ bool read_fields(win::Settings& settings) {
   for (unsigned i = 0; i < 2; ++i)
     for (unsigned j = 0; j < 6; ++j)
       settings.mounts[i][j] = number(300 + static_cast<int>(i * 10 + j), settings.mounts[i][j], ok);
+  std::array<float, 2>* guides[]{&settings.nose_dot, &settings.tail_upper, &settings.tail_corner, &settings.tail_inner};
+  for (unsigned i = 0; i < 4; ++i)
+    for (unsigned axis = 0; axis < 2; ++axis) {
+      const auto value = number(360 + static_cast<int>(i * 2 + axis), (*guides[i])[axis] * 100., ok);
+      if (value < 0 || value > (axis ? 100 : 50))
+        ok = false;
+      else
+        (*guides[i])[axis] = static_cast<float>(value / 100.);
+    }
   if (page == 3) {
     for (unsigned i = 0; i < 2; ++i) {
       const LRESULT selected = SendDlgItemMessageW(window, 400 + i, CB_GETCURSEL, 0, 0);
@@ -191,7 +200,8 @@ void build_controls();
 bool apply(bool save = true) {
   auto settings = draft();
   if (!read_fields(settings)) {
-    notice = L"Check the values: rate 15–60, EV −16 to +4, lens 0.05–1.55.";
+    notice = page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
+                       : L"Check the values: rate 15–60, EV −16 to +4, lens 0.05–1.55.";
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
@@ -298,8 +308,8 @@ void build_controls() {
   controls.clear();
   navigation.clear();
   const auto s = draft();
-  const wchar_t* names[]{L"Overview", L"Camera views", L"Display", L"PFD routing", L"Diagnostics"};
-  for (int i = 0; i < 5; ++i)
+  const wchar_t* names[]{L"Overview", L"Camera views", L"Display", L"PFD routing", L"Diagnostics", L"Reference guides"};
+  for (int i = 0; i < 6; ++i)
     navigation.push_back(button(names[i], 100 + i, 20, 156 + i * 49, 166, 40));
   button(L"Menu", 602, 930, 37, 80, 34);
   button(L"Save changes", 500, 835, 686, 175, 42);
@@ -347,6 +357,15 @@ void build_controls() {
     edit(s.calibration_budget, 203, 840, 537, 120);
     button(L"Open log folder", 510, 260, 579, 210);
     button(L"Stop camera tests", 511, 500, 579, 210);
+  } else if (page == 5) {
+    const std::array<float, 2> guides[]{s.nose_dot, s.tail_upper, s.tail_corner, s.tail_inner};
+    for (unsigned i = 0; i < 4; ++i) {
+      const int y = i ? 338 + static_cast<int>(i - 1) * 64 : 204;
+      edit(guides[i][0] * 100., 360 + static_cast<int>(i * 2), 505, y, 113);
+      edit(guides[i][1] * 100., 361 + static_cast<int>(i * 2), 655, y, 113);
+    }
+    button(L"Apply live", 370, 260, 608, 185);
+    button(L"Reset guide positions", 371, 467, 608, 250);
   }
   refreshing = false;
   InvalidateRect(window, nullptr, TRUE);
@@ -430,11 +449,13 @@ void draw_page(HDC dc) {
   text(dc, L"Native camera service", 24, 84, 176, 22, small, Muted);
   text(dc, L"WINDOWS COMPANION", 24, 120, 182, 22, small, Muted);
   text(dc, L"v" TAXI_CAM_VERSION_WIDE, 24, 692, 155, 22, small, Muted);
-  const wchar_t* titles[]{L"Taxi camera", L"Camera views", L"Display", L"PFD routing", L"Diagnostics"};
+  const wchar_t* titles[]{L"Taxi camera", L"Camera views", L"Display", L"PFD routing", L"Diagnostics", L"Reference guides"};
   const wchar_t* subtitles[]{L"Your taxi cameras, controlled from the flight deck.",
                              L"Fine-tune each camera independently. Changes stay with this aircraft.",
-                             L"Balance visibility, colour and camera update rate.", L"Connect each TAXI button to the correct display.",
-                             L"Live status and the controls used during camera testing."};
+                             L"Balance visibility, colour and camera update rate.",
+                             L"Connect each TAXI button to the correct display.",
+                             L"Live status and the controls used during camera testing.",
+                             L"Move the guide points, preview them live, then save for this aircraft."};
   text(dc, titles[page], 244, 30, 740, 48, title_font);
   text(dc, subtitles[page], 247, 84, 758, 30, normal, Muted);
   win::Status sample;
@@ -524,6 +545,51 @@ void draw_page(HDC dc) {
     const auto line = sample.heartbeat ? widen(sample.message) : live;
     text(dc, L"Calibration batches per 50 ms (64–16384)", 260, 534, 550, 27, small, Muted);
     text(dc, line.c_str(), 260, 625, 730, 38, small, Muted, DT_LEFT | DT_WORDBREAK);
+  } else if (page == 5) {
+    panel(dc, 244, 138, 766, 118);
+    panel(dc, 244, 278, 766, 259);
+    text(dc, L"Nose-wheel view", 260, 150, 250, 30, heading);
+    text(dc, L"Nose dot", 260, 205, 225, 28, normal);
+    text(dc, L"Tail view", 260, 289, 250, 30, heading);
+    const wchar_t* labels[]{L"Upper endpoint", L"Outside corner", L"Inner endpoint"};
+    for (int i = 0; i < 3; ++i)
+      text(dc, labels[i], 260, 338 + i * 64, 233, 30, normal);
+    for (const int y : {176, 311}) {
+      text(dc, L"X from left (%)", 505, y, 139, 23, small, Muted);
+      text(dc, L"Y from top (%)", 655, y, 139, 23, small, Muted);
+    }
+    text(dc, L"X: 0–50%. Y: 0–100% of each camera view. The right guide mirrors the left.", 260, 551, 732, 26, small, Muted);
+    text(dc, L"Preview is temporary until saved. Reset changes guide positions only.", 260, 578, 732, 23, small, Muted);
+    auto preview = draft();
+    if (!read_fields(preview))
+      preview = draft();
+    const auto* profile = profiles::find(preview.profile);
+    const auto color = (profile ? profile : &profiles::A380)->composition.guide_color;
+    const auto brush = CreateSolidBrush(RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
+    const auto pen = CreatePen(PS_SOLID, scale(2), RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
+    const auto old_brush = SelectObject(dc, brush), old_pen = SelectObject(dc, pen);
+    const auto point = [&](const std::array<float, 2>& value, bool right, int y, int height) {
+      return POINT{scale(817 + static_cast<int>(std::lround((right ? 1 - value[0] : value[0]) * 172))),
+                   scale(y + static_cast<int>(std::lround(value[1] * height)))};
+    };
+    const auto dot = [&](POINT p, int radius) {
+      Ellipse(dc, p.x - scale(radius), p.y - scale(radius), p.x + scale(radius), p.y + scale(radius));
+    };
+    text(dc, L"Mirrored preview", 811, 155, 183, 23, small, Muted);
+    for (const bool right : {false, true}) {
+      dot(point(preview.nose_dot, right, 191, 45), 4);
+      const auto a = point(preview.tail_upper, right, 334, 158), b = point(preview.tail_corner, right, 334, 158),
+                 c = point(preview.tail_inner, right, 334, 158);
+      const POINT points[]{a, b, c};
+      Polyline(dc, points, 3);
+      dot(a, 3);
+      dot(b, 3);
+      dot(c, 3);
+    }
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(brush);
+    DeleteObject(pen);
   }
   text(dc, notice.c_str(), 248, 687, 382, 43, small, dirty ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
 }
@@ -790,8 +856,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (item->CtlType != ODT_BUTTON)
         break;
       const int id = static_cast<int>(item->CtlID);
-      const bool selected = (id >= 100 && id < 105 && id - 100 == page) || is_on(id, draft());
-      HBRUSH surround = CreateSolidBrush(id >= 100 && id < 105 ? Sidebar : Background);
+      const bool selected = (id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft());
+      HBRUSH surround = CreateSolidBrush(id >= 100 && id < 106 ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
       const bool primary = id == 500;
@@ -863,7 +929,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         dirty_notice();
         return 0;
       }
-      if (id >= 100 && id < 105) {
+      if (id >= 100 && id < 106) {
         auto s = draft();
         if (!read_fields(s)) {
           notice = L"Finish the current values before changing pages.";
@@ -995,6 +1061,24 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         publish(s);
         dirty_notice();
         build_controls();
+        return 0;
+      }
+      if (id == 370) {
+        if (apply(false)) {
+          dirty_notice();
+          notice = L"Preview applied. Save changes to keep these guide positions.";
+        }
+        return 0;
+      }
+      if (id == 371) {
+        auto s = draft();
+        if (const auto* profile = profiles::find(s.profile)) {
+          win::reset_guide_settings(s, *profile);
+          publish(s);
+          dirty_notice();
+          notice = L"Profile guide positions restored. Save changes to keep them.";
+          build_controls();
+        }
         return 0;
       }
       if (id == 402) {

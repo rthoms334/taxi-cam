@@ -213,6 +213,12 @@ DWORD run_impl() {
     // Close render gates on OFF, cutoff, service pause or a lost heartbeat.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
+    auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
+    composition.speed_color = settings.speed_color;
+    composition.nose_dot = settings.nose_dot;
+    composition.tail_upper = settings.tail_upper;
+    composition.tail_corner = settings.tail_corner;
+    composition.tail_inner = settings.tail_inner;
     if (demand.start) {
       ++startup.attempts;
       startup.prepare_begin_ms = GetTickCount64();
@@ -224,7 +230,7 @@ DWORD run_impl() {
       if (prepared) {
         startup.request_begin_ms = GetTickCount64();
         log_startup(status, startup, "request_begin");
-        scene_runtime::set_composition(key, profiles::find(applied_profile)->composition);
+        scene_runtime::set_composition(key, composition);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
@@ -241,8 +247,6 @@ DWORD run_impl() {
     }
     // Normal button changes never call request_scene_stop/reset_feed or release
     // source leases. The profile-change transaction above still owns teardown.
-    auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
-    composition.speed_color = settings.speed_color;
     scene_runtime::set_composition(key, composition);
     const auto speed = native_camera::get_ground_speed();
     const auto light = native_camera::get_lighting();

@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include "../native-camera/aircraft_identity.hpp"
 #include "settings_store.hpp"
 #include "../native-camera/view_resize.hpp"
@@ -25,6 +26,86 @@ std::array<double, 2> project_landmark(const profiles::AircraftProfile& profile,
   const double half_height = z * std::tan(mount[5] / 2);
   const double aspect = double(profile.camera_panes[feed][0]) / profile.camera_panes[feed][1];
   return {0.5 + x / (2 * half_height * aspect), 0.5 - y / (2 * half_height)};
+}
+using GuideMember = std::array<float, 2> standalone::Settings::*;
+constexpr std::array<GuideMember, 4> GuideMembers{&standalone::Settings::nose_dot, &standalone::Settings::tail_upper,
+                                                  &standalone::Settings::tail_corner, &standalone::Settings::tail_inner};
+bool same_guides(const standalone::Settings& a, const standalone::Settings& b) {
+  for (auto member : GuideMembers)
+    if (a.*member != b.*member)
+      return false;
+  return true;
+}
+void guide_settings_tests() {
+  using namespace standalone;
+  std::array<Settings, 3> saved{};
+  for (const auto* profile : profiles::Catalog) {
+    Settings defaults;
+    defaults.profile = profile->id;
+    defaults.mounts = profile->mounts;
+    defaults.speed_color = profile->composition.speed_color;
+    reset_guide_settings(defaults, *profile);
+    assert(defaults.nose_dot == profile->composition.nose_dot && defaults.tail_upper == profile->composition.tail_upper &&
+           defaults.tail_corner == profile->composition.tail_corner && defaults.tail_inner == profile->composition.tail_inner);
+    Settings edited = defaults;
+    edited.nose_dot = {profile->id * 0.03125f, 0.25f};
+    edited.tail_upper = {0.125f, 0.375f + profile->id * 0.03125f};
+    edited.tail_corner = {0.21875f, 0.6875f};
+    edited.tail_inner = {0.375f, 0.75f + profile->id * 0.03125f};
+    edited.mounts[0][1] += 0.125;
+    edited.speed_color = {0.25f, 0.5f, 0.75f};
+    edited.exposure = -7.5f;
+    assert(save_settings(edited));
+    Settings loaded;
+    assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, edited));
+    assert(loaded.mounts == edited.mounts && loaded.speed_color == edited.speed_color && loaded.exposure == edited.exposure);
+    for (auto member : GuideMembers) {
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        for (float value : {-0.001f, axis ? 1.001f : 0.501f, std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+          auto invalid = edited;
+          (invalid.*member)[axis] = value;
+          assert(!valid_settings(invalid) && !save_settings(invalid));
+        }
+        for (float value : {0.f, axis ? 1.f : 0.5f}) {
+          auto edge = edited;
+          (edge.*member)[axis] = value;
+          assert(valid_settings(edge));
+        }
+      }
+    }
+    assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, edited));
+    auto reset = edited;
+    reset_guide_settings(reset, *profile);
+    assert(same_guides(reset, defaults) && reset.mounts == edited.mounts && reset.speed_color == edited.speed_color &&
+           reset.exposure == edited.exposure && reset.profile == edited.profile);
+
+    const auto path = settings_path(edited);
+    assert(WritePrivateProfileStringW(L"guides", nullptr, nullptr, path.c_str()));
+    assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, defaults));
+    assert(loaded.mounts == edited.mounts && loaded.speed_color == edited.speed_color);
+    // Partial older configuration: missing coordinates retain this profile's
+    // defaults. Nonfinite/malformed INI text also uses the existing parser's
+    // per-key fallback; finite out-of-range data refuses the entire load.
+    assert(WritePrivateProfileStringW(L"guides", L"nose_dot_x", L"0.0625", path.c_str()));
+    assert(WritePrivateProfileStringW(L"guides", L"tail_upper_y", L"nan", path.c_str()));
+    assert(WritePrivateProfileStringW(L"guides", L"tail_inner_x", L"not-a-number", path.c_str()));
+    assert(load_settings(loaded, L"missing", profile->id));
+    auto partial = defaults;
+    partial.nose_dot[0] = 0.0625f;
+    assert(same_guides(loaded, partial));
+    assert(WritePrivateProfileStringW(L"guides", L"tail_corner_x", L"0.75", path.c_str()));
+    loaded = edited;
+    assert(!load_settings(loaded, L"missing", profile->id) && same_guides(loaded, edited) && loaded.mounts == edited.mounts);
+    assert(save_settings(edited));
+    saved[profile->id - 1] = edited;
+  }
+  for (const auto& expected : saved) {
+    Settings loaded;
+    assert(load_settings(loaded, L"missing", expected.profile) && same_guides(loaded, expected));
+    assert(loaded.mounts == expected.mounts && loaded.speed_color == expected.speed_color);
+  }
+  assert(settings_path(saved[0]) != settings_path(saved[1]) && settings_path(saved[1]) != settings_path(saved[2]));
 }
 }  // namespace
 int main() {
@@ -145,17 +226,13 @@ int main() {
     assert(std::abs(nose[0] - 0.5) < 1e-6 && nose[1] > 0.55 && nose[1] < 0.75);
     const auto gear = project_landmark(*profile, 1, {-20.200737 * 0.3048, -16.45 * 0.3048, -17.63 * 0.3048});
     assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > (longer ? 0.77 : 0.85) && gear[1] < (longer ? 0.84 : 0.90));
-    assert(profile->composition.tail_corner[0] < gear[0] && profile->composition.tail_inner[0] > gear[0]);
-    assert(profile->composition.tail_corner[1] > gear[1] && profile->composition.tail_upper[1] < gear[1]);
     const auto& tail_mount = profile->mounts[1];
     assert(tail_mount[0] == 0 && tail_mount[1] == 10 && tail_mount[2] == (longer ? -36.17 : -33));
     assert(tail_mount[3] == -15 && tail_mount[4] == 0 && tail_mount[5] == 0.62);
   }
-  // Earlier -900 live bounds projected into the accepted tail view. The lower
-  // legs clear the predicted bogie bounds; final guide alignment needs a live check.
-  const auto& a359_guides = profiles::A359.composition;
-  assert(a359_guides.tail_corner[0] < 0.280 && a359_guides.tail_corner[1] > 0.864);
-  assert(a359_guides.tail_inner[0] > 0.343 && a359_guides.tail_inner[1] > 0.864);
+  // Guide bounds and persistence are tested separately. Ground-contact point
+  // projections do not establish visible tyre alignment for these overlays.
+
   for (const auto* profile : profiles::Catalog) {
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);
     assert(profile->composition.nose_height == 255 && profile->composition.tail_top == 259);
@@ -178,7 +255,8 @@ int main() {
   assert(!detector.observe(observations.data(), observations.size(), 4000).valid);
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 0, 28));
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 1, 0));
+  guide_settings_tests();
   std::puts(
       "PASS aircraft profiles: isolated settings, variant identity, pane dimensions, mirrored display regions, "
-      "A350 gear framing and detector reset");
+      "mount geometry, guide roundtrip/bounds/defaults/isolation and detector reset");
 }

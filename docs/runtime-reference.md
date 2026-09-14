@@ -12,7 +12,7 @@ The companion saves settings to:
 
 The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900` and `ini-a350-1000`; each has its own calibration file.
 
-The INI contains `[service]`, `[display]`, `[nose]` and `[tail]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it uses that aircraft's defaults. Only the A380 profile imports `taxi-camera-mounts.cfg` beside the companion.
+The INI contains `[service]`, `[display]`, `[nose]`, `[tail]` and `[guides]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it uses that aircraft's defaults. Only the A380 profile imports `taxi-camera-mounts.cfg` beside the companion.
 
 Saves validate the complete settings object, flush a temporary UTF-16 file and replace the INI atomically.
 
@@ -86,7 +86,11 @@ Pixel coordinates start at the top left. Row ranges below are inclusive. The tab
 
 The logical gap between panes is four working-image rows. The visible divider covers four additional working rows of each pane. The whole 768 x 763 composition, including GS and guides, maps into the inner bordered area; working-image coordinates scale with it. Native source dimensions above match the resulting pane sizes to the nearest pixel.
 
-Nose reference dots are at 14% and 86% of image width, 48% of nose-pane height, with a 4.5-pixel radius. Each tail bracket consists of two segments mirrored across the image centre. The A380 uses normalized tail-pane points `(0.33, 0.625)`, `(0.305, 0.75)` and `(0.365, 0.758)`. The A350-900 uses `(0.29, 0.76)`, `(0.27, 0.93)` and `(0.36, 0.935)`; the -1000 uses `(0.31, 0.69)`, `(0.29, 0.85)` and `(0.37, 0.855)`. The A350 lower legs are positioned outside and below the projected main bogies; final alignment requires a live check. The stroke uses a two-pixel distance threshold. These fixed guide positions do not reproject when camera settings change.
+The **Reference guides** page edits `nose_dot`, `tail_upper`, `tail_corner` and `tail_inner`. Each point is stored in `[guides]` as `<point>_x` and `<point>_y`. Saved coordinates are normalized: X ranges from 0 to 0.5 and Y from 0 to 1; the UI displays these as 0-50% and 0-100%. X is measured from the left edge and Y from the top of the relevant camera pane. The right point mirrors X about the pane centre. Missing keys use that aircraft profile's shipped coordinates.
+
+**Apply live** publishes the current edit without saving. **Save changes** writes it to the active profile. **Reset guide positions** restores only that profile's shipped guide points; camera mounts and display settings are retained. Guide changes take effect on subsequent composed frames using the same scene resources. These positions remain relative to the image and do not automatically track wheels when camera mounts change.
+
+The nose dots have a 4.5-pixel radius; tail brackets use a two-pixel distance threshold in the working image. Their positions should be calibrated against the visible tyres at the chosen camera framing before being promoted to shipped defaults.
 
 Ground speed is rounded to whole knots in the range 0–999. Invalid or stale data displays `--`.
 
@@ -116,7 +120,7 @@ Mutex:   Local\380TaxiCamera.Control.<MSFS_PID>
 Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 ~~~
 
-The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `3` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
+The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `4` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
 
 The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 

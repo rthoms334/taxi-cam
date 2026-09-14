@@ -25,8 +25,7 @@ inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.guide_color = {1, 0.55f, 0};
   c.speed_color = {0, 0.94f, 0.28f};
-  // The -900 main-gear contact projects near (.299,.875). Put the
-  // mirrored lower legs outside and below it with the accepted tail mount.
+  // Initial image-space points; live alignment is saved per aircraft profile.
   c.tail_upper = {0.29f, 0.76f};
   c.tail_corner = {0.27f, 0.93f};
   c.tail_inner = {0.36f, 0.935f};
@@ -75,7 +74,7 @@ inline constexpr AircraftProfile A380{1,
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
 // The accepted -900 calibration transfers to the -1000 with its physical
 // longitudinal offsets, retaining the same height, pitch and lens. The -1000
-// and the resulting fixed guide placement still need a live check.
+// and its guide alignment still need a live check.
 // The compositor retains its bounded 768px working image.
 // Preserve a 32px central gap around the PFD/MFDDivider artwork on both sides.
 inline constexpr AircraftProfile A359{2,
@@ -126,8 +125,7 @@ inline constexpr DisplayRect display_content_rect(const AircraftProfile& p, unsi
     return {};
   const auto width = outer.right - outer.left, height = outer.bottom - outer.top;
   const auto padding = p.camera_padding;
-  if (padding.left >= width || padding.right >= width - padding.left || padding.top >= height ||
-      padding.bottom >= height - padding.top)
+  if (padding.left >= width || padding.right >= width - padding.left || padding.top >= height || padding.bottom >= height - padding.top)
     return {};
   return {outer.left + padding.left, outer.top + padding.top, outer.right - padding.right, outer.bottom - padding.bottom};
 }

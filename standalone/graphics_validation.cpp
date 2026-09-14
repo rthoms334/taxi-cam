@@ -428,7 +428,7 @@ void native_case(bool warp, bool a350) {
             require(pixel[0] > 250 && pixel[1] > 250 && pixel[2] > 250, "GS label scales with inset content in both axes");
             ++gs_label_pixels;
           }
-          // Independent A350 default lower corners sit below/outside the bogies.
+          // These pixels verify configured coordinates, not alignment to aircraft geometry.
           if (a350 && (working_x == 207 || working_x == 560) && working_y == 728) {
             require(pixel[0] > 250 && pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3,
                     "Configured A350 lower bracket corners render on both sides");
@@ -776,6 +776,139 @@ void native_case(bool warp, bool a350) {
   require(runtime::snapshot(key).stamps == stamps, "OFF state stops new PFD stamping");
   submit();
   reset();
+  // Apply all four guide pairs to an already-running compositor. Fresh source
+  // pixels distinguish live layout changes from merely replaying an old patch.
+  const auto source_handles =
+      std::array<std::uint64_t, 2>{reinterpret_cast<std::uint64_t>(textures[0].get()), reinterpret_cast<std::uint64_t>(textures[1].get())};
+  const auto source_before = handoff.observe_copy(key, source_handles[0], source_handles[1]);
+  const auto publications_before = handoff.diagnostics().publications;
+  require(source_before.source.matched && source_before.destination.matched && source_before.source.entry_id == 701 &&
+              source_before.destination.entry_id == 702,
+          "Live guide adjustment starts with the original camera identities");
+  auto adjusted = profile.composition;
+  adjusted.nose_dot = {.23f, .34f};
+  adjusted.tail_upper = {.18f, .30f};
+  adjusted.tail_corner = {.16f, .55f};
+  adjusted.tail_inner = {.26f, .56f};
+  runtime::set_composition(key, adjusted);
+  const auto frames_before_guides = runtime::snapshot(key).frames;
+  Sleep(20);  // Next permitted capture opportunity, without recreating either source.
+  generator.record(list.get(), rtvs[0], pane_width, nose_height, false, 1, 0);
+  generator.record(list.get(), rtvs[1], pane_width, tail_height, false, 1, 1);
+  // Earlier predicate tests deliberately invalidate tracked states. These
+  // actual source exits establish fresh, explicit RT-state evidence again.
+  for (unsigned feed = 0; feed < 2; ++feed) {
+    transition(list.get(), textures[feed].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    transition(list.get(), textures[feed].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  }
+  submit();
+  reset();
+  const auto guide_deadline = GetTickCount64() + 1000;
+  while (runtime::snapshot(key).frames == frames_before_guides && GetTickCount64() < guide_deadline) {
+    runtime::service();
+    Sleep(1);
+  }
+  if (runtime::snapshot(key).frames == frames_before_guides) {
+    const auto status = runtime::snapshot(key);
+    std::fprintf(stderr, "Live guide composition stalled: frames=%llu captures=%llu completed=%llu tail=%s message=%s\n", status.frames,
+                 status.capture.captures, status.capture.completed, status.capture.tail_status, status.message);
+  }
+  require(runtime::snapshot(key).output && runtime::snapshot(key).frames > frames_before_guides,
+          "Changed guide layout reaches a fresh running composition");
+  const auto source_after = handoff.observe_copy(key, source_handles[0], source_handles[1]);
+  for (const auto& pair :
+       {std::pair{source_before.source, source_after.source}, std::pair{source_before.destination, source_after.destination}})
+    require(pair.second.matched && pair.first.entry_id == pair.second.entry_id && pair.first.manager == pair.second.manager &&
+                pair.first.resource == pair.second.resource && pair.first.scene_epoch == pair.second.scene_epoch &&
+                handoff.is_current(pair.first),
+            "Guide adjustment retains camera IDs, owner, scene and source resource generations");
+  require(handoff.diagnostics().publications == publications_before, "Guide adjustment needs no new camera publication");
+  win::set_target_mask(3);
+  const auto stamps_before_guides = runtime::snapshot(key).stamps;
+  for (UINT side = 0; side < 2; ++side) {
+    generator.record(list.get(), rtvs[side + 2], display_width, 1024, false, 0, 0);
+    if (a350) {
+      const float grey[]{.25f, .25f, .25f, 1};
+      const D3D12_RECT gutter{806, 0, 838, 763};
+      list->ClearRenderTargetView(rtvs[side + 2], grey, 1, &gutter);
+    }
+  }
+  for (UINT side = 0; side < 2; ++side) {
+    transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+    source.pResource = textures[side + 2].get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    destination.pResource = readbacks[side].get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  }
+  submit();
+  require(runtime::snapshot(key).stamps == stamps_before_guides + 2, "Both PFDs receive the adjusted private patch");
+  // Independent working-pixel centres for the chosen normalized test inputs:
+  // nose pair, upper L endpoints, outside corners, and inner L endpoints.
+  constexpr std::array<std::array<double, 2>, 8> new_points{{{176.64, 86.70},
+                                                             {591.36, 86.70},
+                                                             {138.24, 410.20},
+                                                             {629.76, 410.20},
+                                                             {122.88, 536.20},
+                                                             {645.12, 536.20},
+                                                             {199.68, 541.24},
+                                                             {568.32, 541.24}}};
+  std::array<std::array<double, 2>, 8> old_points{};
+  const std::array old_normalized{profile.composition.nose_dot, profile.composition.tail_upper, profile.composition.tail_corner,
+                                  profile.composition.tail_inner};
+  for (UINT mark = 0; mark < old_normalized.size(); ++mark) {
+    const double x = old_normalized[mark][0] * 768, y = mark ? 259 + old_normalized[mark][1] * 504 : old_normalized[mark][1] * 255;
+    old_points[mark * 2] = {x, y};
+    old_points[mark * 2 + 1] = {768 - x, y};
+  }
+  for (UINT side = 0; side < 2; ++side) {
+    void* mapped{};
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)}, none{};
+    check(readbacks[side]->Map(0, &range, &mapped), "Map live guide adjustment pixels");
+    const auto* data = static_cast<const unsigned char*>(mapped);
+    const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u, inner_left = left + 16, inner_width = width - 32;
+    unsigned new_mask = 0, old_mask = 0;
+    for (UINT y = 0; y < 1024; ++y)
+      for (UINT x = 0; x < display_width; ++x) {
+        const auto* pixel = data + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
+        const bool outer = x >= left && x < left + width && y < 763;
+        const bool inner = x >= inner_left && x < inner_left + inner_width && y >= 12 && y < 763;
+        if (outer && !inner)
+          require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255, "Live guide edit preserves the black camera border");
+        if (!outer) {
+          if (a350 && y < 763 && x >= 806 && x < 838)
+            require(pixel[0] >= 63 && pixel[0] <= 65 && pixel[1] >= 63 && pixel[1] <= 65 && pixel[2] >= 63 && pixel[2] <= 65,
+                    "Live guide edit preserves the A350 grey gutter");
+          else
+            require(pixel[2] >= 50 && pixel[2] <= 52, "Live guide edit preserves navigation area and lower trim");
+        }
+        if (inner) {
+          const double wx = std::floor((x - inner_left + .5) * 768 / inner_width) + .5;
+          const double wy = std::floor((y - 12 + .5) * 763 / 751) + .5;
+          for (unsigned mark = 0; mark < new_points.size(); ++mark) {
+            if (std::abs(wx - new_points[mark][0]) < 1 && std::abs(wy - new_points[mark][1]) < 1) {
+              require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[1] < 3 && pixel[2] > 250),
+                      "Every adjusted nose dot and mirrored L endpoint appears at its new position");
+              new_mask |= 1u << mark;
+            }
+            if (std::abs(wx - old_points[mark][0]) < 1 && std::abs(wy - old_points[mark][1]) < 1) {
+              const unsigned blue = mark < 2 ? 153 : 102;
+              require(pixel[2] >= blue - 1 && pixel[2] <= blue + 1, "Old guide endpoints return to fresh camera imagery");
+              old_mask |= 1u << mark;
+            }
+          }
+        }
+        ++pixels;
+      }
+    require(new_mask == 255 && old_mask == 255, "Live adjustment checks every old and new mirrored endpoint on each PFD");
+    readbacks[side]->Unmap(0, &none);
+  }
+  runtime::set_composition(key, profile.composition);
+  win::set_target_mask(0);
+  reset();
   list->Close();
   runtime::manager().stop_source_tracking();
   handoff.stop_scene();
@@ -799,7 +932,7 @@ void native_case(bool warp, bool a350) {
       "PASS native %s: private patch copies, legacy/enhanced boundaries, replay, profile-admitted typed formats, query OFF==ON, exact "
       "black borders, "
       "inset "
-      "GS/guides, A350 gutter/ND, lower trim, descriptor copies, "
+      "GS/guides, live guide adjustment on retained sources, A350 gutter/ND, lower trim, descriptor copies, "
       "OFF, D3D11On12 capture coexistence, ClearState and active-render-pass state pixels, predicate guards; %llu pixels; debug=%d "
       "errors=%llu\n",
       warp ? "WARP" : "hardware", static_cast<unsigned long long>(pixels), debug_enabled, static_cast<unsigned long long>(errors));

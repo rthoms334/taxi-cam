@@ -138,13 +138,15 @@ Source dimensions come from the aircraft profile. The compositor takes a complet
 
 Ground speed is read from SimConnect and rendered by Taxi Cam. It is rounded to whole knots; unavailable data displays `--`. The original PFD's GS text is covered by this panel.
 
-The guides have aircraft-specific fixed positions in the image. Changing the camera mount or field of view does not reproject them onto the ground.
+The guides use adjustable positions within each camera image. Changing the camera mount or field of view does not move them with the wheels; use the Reference guides page to realign them after changing the framing.
 
 Exposure controls operate in the compositor. For the HDR `R11G11B10_FLOAT` camera format, the shader applies the selected exposure, tone mapping and colour encoding. Automatic exposure adjusts the requested EV from ambient-light data, with a gradual transition. It can brighten captured content but cannot supply lighting that MSFS omitted from the scene.
 
 The compositor result feeds private rendering of patches sized for each PFD rectangle and pixel format. Each patch includes the border, image, GS and guides. The finished patch is copied into a GPU buffer with a stable address for the simulator-side texture copy.
 
 Source: [compositor](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp), [exposure](../src/display_exposure.hpp).
+
+Reference-guide positions are saved separately for each aircraft profile. The **Reference guides** settings page provides X/Y controls for the nose dots and the tail brackets’ upper, outside-corner and inner endpoints. Coordinates are percentages of the relevant camera pane: X starts at its left edge and Y at its top. The configured left marker is mirrored to the right. **Apply live** previews edits on subsequent composed camera frames without changing the camera mounts or recreating views; **Save changes** persists them. **Reset guide positions** restores only the selected profile’s shipped marker coordinates.
 
 ## 6. Copy the result into the PFD
 

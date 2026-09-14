@@ -74,10 +74,11 @@ If the camera appears on the wrong display, open **PFD routing** to identify, as
 | Display | Manual exposure, automatic night adjustment and ground-speed colour |
 | PFD routing | Left/right display assignment, preview and target identification |
 | Diagnostics | Scene test, single-camera test and runtime counters |
+| Reference guides | Nose-dot and mirrored tail-bracket positions, live preview and profile reset |
 
-Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini`.
+Use **Apply live** on Reference guides to align the markers while the camera runs. Select **Save changes** to keep adjustments for that aircraft profile. Settings are stored in `%LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini`.
 
-The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Camera size is **768 × 255** for the nose and **768 × 504** for the tail.
+The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Each camera renders at the pane size specified by its aircraft profile.
 
 ## Uninstall
 
