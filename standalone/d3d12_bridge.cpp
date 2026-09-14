@@ -7,12 +7,14 @@
 #include <unordered_map>
 #include "../engine-hook/render_boundary_observer.hpp"
 #include "../src/calibration_d3d12.hpp"
+#include "../src/d3d12_command_list9.hpp"
 #include "../src/native_device_identity.hpp"
 #include "../src/taxi_button_routes.hpp"
 #include "../src/write_budget.hpp"
 #include "native_hooks.hpp"
 #include "root_layout.hpp"
 #include "query_scope.hpp"
+#include "pfd_copy_proof.hpp"
 
 namespace taxi_camera::standalone {
 namespace {
@@ -55,6 +57,7 @@ struct List : Metadata {
   std::array<View, 2> pending_pfds{};
   std::array<bool, 2> pending_rt{};
   QueryScope queries;
+  PfdCopyProof copy_proof;
   std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> raw_rtvs{};
   D3D12_CPU_DESCRIPTOR_HANDLE raw_dsv{};
   UINT raw_rtv_count{};
@@ -133,6 +136,10 @@ struct Registry {
   std::atomic<std::uint64_t> calibration_clears{};
   std::atomic<std::uint64_t> selected_exit_base{}, selected_exit_nonbase{}, selected_exit_split{};
   std::atomic<std::uint64_t> fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
+  std::atomic<std::uint64_t> preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
+  std::atomic<const char*> preferred_copy_reason{"not_attempted"};
+  std::atomic<std::uint64_t> dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{};
+  std::atomic<std::uint64_t> dynamic_depth_bias_restores{}, dynamic_strip_cut_restores{};
   WriteBudget calibration_budget;
 };
 Registry& registry() {
@@ -322,6 +329,32 @@ void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, 
   copy_pending_pfd(list, id, b.pResource, list);
   runtime::manager().record_render_target_before_enhanced_transition(list, b.pResource, true, id);
 }
+// The observations below are before native barrier forwarding. They only stage
+// evidence; after_draw promotes it after that barrier and the application draw
+// have both returned. No GPU command is admitted from a pending observation.
+void stage_copy_model(ID3D12GraphicsCommandList* native,
+                      std::uint64_t id,
+                      ID3D12Resource* target,
+                      PfdCopyProof::Mode model,
+                      const char* reason,
+                      std::uint32_t scope) noexcept {
+  const auto list = find_list(native);
+  if (!list || list->id != id)
+    return;
+  // One selection sample decides both paths; a concurrent routing update must
+  // not leave pre-existing proof intact while suppressing the new transition.
+  if (!maybe_selected(target)) {
+    list->copy_proof.forget_resource(reinterpret_cast<std::uint64_t>(target));
+    return;
+  }
+  if ((scope & (boundary::ScopeActivePass | boundary::ScopeSuspendedPass | boundary::ScopeInvalidRecording)) ||
+      !(scope & boundary::ScopeEnabled)) {
+    list->copy_proof.invalidate();
+    return;
+  }
+  if (const auto item = resource(target); item && item->alive)
+    list->copy_proof.observe_transition({reinterpret_cast<std::uint64_t>(target), item->id}, model, reason);
+}
 void observe_legacy(void*,
                     ID3D12GraphicsCommandList* list,
                     std::uint64_t id,
@@ -329,10 +362,11 @@ void observe_legacy(void*,
                     std::uint32_t scope) noexcept {
   const OwnedWork guard;
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
-    if (auto item = find_list(list); item && item->id == id)
+    if (auto item = find_list(list); item && item->id == id) {
       for (UINT i = 0; i < item->count; ++i)
         if (item->targets[i].resource && item->targets[i].resource->native == b.Transition.pResource)
           item->pfd_transition = true;
+    }
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET &&
       b.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET)
     selected_metadata(b.Transition.pResource, scope,
@@ -343,6 +377,17 @@ void observe_legacy(void*,
       for (unsigned side = 0; side < 2; ++side)
         if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.Transition.pResource)
           item->pending_rt[side] = false;
+  if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+    if (const auto item = find_list(list); item && item->id == id)
+      item->copy_proof.invalidate();
+  } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
+    const bool complete = b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE &&
+                          (b.Transition.Subresource == 0 || b.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
+    stage_copy_model(list, id, b.Transition.pResource,
+                     complete && b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ? PfdCopyProof::Mode::legacy_rt
+                                                                                               : PfdCopyProof::Mode::unknown,
+                     complete ? "not_rt_entry" : "split_or_partial_transition", scope);
+  }
   runtime::manager().observe_source_legacy(list, id, b);
 }
 void observe_enhanced(void*,
@@ -351,10 +396,11 @@ void observe_enhanced(void*,
                       const D3D12_TEXTURE_BARRIER& b,
                       std::uint32_t scope) noexcept {
   const OwnedWork guard;
-  if (auto item = find_list(list); item && item->id == id)
+  if (auto item = find_list(list); item && item->id == id) {
     for (UINT i = 0; i < item->count; ++i)
       if (item->targets[i].resource && item->targets[i].resource->native == b.pResource)
         item->pfd_transition = true;
+  }
   if (b.LayoutBefore == D3D12_BARRIER_LAYOUT_RENDER_TARGET && b.LayoutAfter != D3D12_BARRIER_LAYOUT_RENDER_TARGET)
     selected_metadata(b.pResource, scope,
                       !b.Subresources.NumMipLevels
@@ -367,6 +413,16 @@ void observe_enhanced(void*,
     for (unsigned side = 0; side < 2; ++side)
       if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.pResource)
         item->pending_rt[side] = false;
+  const auto& range = b.Subresources;
+  const bool whole = !range.NumMipLevels ? range.IndexOrFirstMipLevel == 0 || range.IndexOrFirstMipLevel == UINT_MAX
+                                         : range.IndexOrFirstMipLevel == 0 && range.NumMipLevels == 1 && range.FirstArraySlice == 0 &&
+                                               range.NumArraySlices == 1 && range.FirstPlane == 0 && range.NumPlanes == 1;
+  const bool complete = whole && b.Flags == D3D12_TEXTURE_BARRIER_FLAG_NONE && !((b.SyncBefore | b.SyncAfter) & D3D12_BARRIER_SYNC_SPLIT);
+  stage_copy_model(list, id, b.pResource,
+                   complete && b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET && b.AccessAfter == D3D12_BARRIER_ACCESS_RENDER_TARGET
+                       ? PfdCopyProof::Mode::enhanced_rt
+                       : PfdCopyProof::Mode::unknown,
+                   complete ? "not_rt_entry" : "split_or_partial_transition", scope);
   runtime::manager().observe_source_enhanced(list, id, b);
 }
 void copy_resource(void*,
@@ -396,6 +452,8 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
   auto list = find_list(native);
   if (!list || list->id != id)
     return;
+  if (reasons & ~boundary::InvalidationSplitBarrier)
+    list->copy_proof.invalidate();
   if (reasons == boundary::InvalidationPassBegin)
     flush_pfd(native, id);
   else
@@ -435,6 +493,10 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   for (UINT i = 0; i < list->count; ++i) {
     const auto& target = list->targets[i];
     if (target.resource && target.resource->alive && !target.mip) {
+      if (allowed)
+        list->copy_proof.after_draw({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id});
+      else
+        list->copy_proof.invalidate();
       ++target.resource->draws;
       const auto selected_mask = r.selected_mask.load(std::memory_order_relaxed);
       if (((selected_mask & 1) && target.resource->id == r.selected_ids[0].load(std::memory_order_relaxed)) ||
@@ -501,20 +563,11 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   if (!pending)
     return;
   auto& r = registry();
-  if (!list->queries.known_empty()) {
-    ++r.fallback_query_refused;
-    return;
-  }
-  if (!boundary::recording_allows_injection(native, id) || !list->raw_om_known || !list->graphics.complete()) {
+  if (!boundary::recording_allows_injection(native, id)) {
     ++r.fallback_state_refused;
     return;
   }
   const std::lock_guard lock(r.mutex);
-  const auto root = r.roots.find(list->graphics.root());
-  if (root == r.roots.end() || !root->second->alive || root->second->id != list->graphics.layout_generation()) {
-    ++r.fallback_state_refused;
-    return;
-  }
   for (unsigned side = 0; side < 2; ++side) {
     const auto view = list->pending_pfds[side];
     if (!list->pending_rt[side] || !view.resource || !view.resource->alive || !view.rtv || view.mip || !(r.active_mask & (1u << side)) ||
@@ -534,6 +587,36 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
                                  static_cast<LONG>(area.bottom)};
     const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
                            static_cast<LONG>(content.bottom)};
+    const PfdCopyProof::Key proof_key{reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id};
+    const auto model = list->copy_proof.mode(proof_key);
+    if (model != PfdCopyProof::Mode::unknown) {
+      ++r.preferred_copy_attempts;
+      // ensure_list's boundary registration has already proved identical QI7.
+      auto* enhanced = model == PfdCopyProof::Mode::enhanced_rt ? static_cast<ID3D12GraphicsCommandList7*>(native) : nullptr;
+      if (runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, view.format, destination, inner, enhanced)) {
+        ++r.preferred_copy_stamps;
+        r.preferred_copy_reason = model == PfdCopyProof::Mode::legacy_rt ? "copied_legacy" : "copied_enhanced";
+        list->pending_rt[side] = false;
+        list->pending_pfds[side] = {};
+        continue;
+      }
+      r.preferred_copy_reason = "private_copy_refused";
+    } else {
+      ++r.preferred_copy_no_proof;
+      r.preferred_copy_reason = list->copy_proof.reason(proof_key);
+    }
+    // The private copy neither changes graphics bindings nor contributes query
+    // samples. These original admission checks continue to guard shader draws.
+    if (!list->queries.known_empty()) {
+      ++r.fallback_query_refused;
+      continue;
+    }
+    const auto root = r.roots.find(list->graphics.root());
+    if (!list->raw_om_known || !list->graphics.complete() || root == r.roots.end() || !root->second->alive ||
+        root->second->id != list->graphics.layout_generation()) {
+      ++r.fallback_state_refused;
+      continue;
+    }
     const boundary::ScopedBypass bypass;
     const D3D12_CPU_DESCRIPTOR_HANDLE target{list->snapshot_rtvs->GetCPUDescriptorHandleForHeapStart().ptr +
                                              SIZE_T{8 + side} * r.rtv_stride};
@@ -546,6 +629,8 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     native->OMSetRenderTargets(list->raw_rtv_count, list->raw_rtvs.data(), FALSE, list->raw_has_dsv ? &list->raw_dsv : nullptr);
     if (stamped) {
       ++r.fallback_stamps;
+      r.dynamic_depth_bias_restores += list->graphics.has_depth_bias();
+      r.dynamic_strip_cut_restores += list->graphics.has_strip_cut();
       list->pending_rt[side] = false;
       list->pending_pfds[side] = {};
     }
@@ -691,6 +776,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     item->ready = observed;
     item->graphics.reset(item->recording, observed);
     item->queries.reset(observed);
+    item->copy_proof.reset(observed);
     item->raw_om_known = observed;
     r.lists[native] = item;
   }
@@ -995,6 +1081,7 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->depth_known = true;
     item->ready = hr == S_OK && item->recording < UINT64_MAX;
     item->queries.reset(item->ready);
+    item->copy_proof.reset(item->ready);
     item->raw_om_known = item->ready;
     if (item->ready) {
       item->graphics.reset(++item->recording, true);
@@ -1011,9 +1098,13 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
 struct Pipeline {
   static void apply(List& l, ID3D12PipelineState* p) { l.graphics.bind_pipeline(p); }
 };
+struct PipelineStateObject {
+  static void apply(List& l, ID3D12StateObject*) { l.graphics.invalidate("state_object_binding_not_restorable"); }
+};
 struct ClearState {
   static void apply(List& l, ID3D12PipelineState* p) {
     ++registry().clear_states;
+    l.copy_proof.clear_state();
     // ClearState unbinds the targets and graphics arguments immediately. A
     // deferred stamp must not reuse the pre-clear bindings at the next target
     // switch, nor restore the old pipeline over the caller's supplied PSO.
@@ -1193,6 +1284,18 @@ void pass_targets(void*,
   item->pending_rt = {};
   Targets::record(*item, count, handles.data(), FALSE, depth ? &depth->cpuDescriptor : nullptr, false);
 }
+struct DynamicDepthBias {
+  static void apply(List& l, FLOAT bias, FLOAT clamp, FLOAT slope) {
+    ++registry().dynamic_depth_bias_calls;
+    l.graphics.depth_bias(static_cast<d3d12_extended::CommandList9*>(l.native), bias, clamp, slope);
+  }
+};
+struct DynamicStripCut {
+  static void apply(List& l, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE value) {
+    ++registry().dynamic_strip_cut_calls;
+    l.graphics.strip_cut(static_cast<d3d12_extended::CommandList9*>(l.native), value);
+  }
+};
 struct QueryBegin {
   static void before(List& l, ID3D12QueryHeap* heap, D3D12_QUERY_TYPE type, UINT index) {
     l.queries.begin(reinterpret_cast<std::uint64_t>(heap), static_cast<std::uint32_t>(type), index);
@@ -1209,6 +1312,7 @@ struct QueryEnd {
 struct Unsupported {
   template <class... Args>
   static void apply(List& l, Args...) {
+    l.copy_proof.invalidate();
     l.graphics.invalidate("unsupported_native_work");
     boundary::invalidate_recording(l.native, l.id);
   }
@@ -1301,6 +1405,38 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   ok &= STATE(52, BeginQuery, QueryBegin)::install(list, active);
   ok &= STATE(53, EndQuery, QueryEnd)::install(list, active);
   ok &= STATE(51, DiscardResource, Unsupported)::install(list, active);
+  // Pass entry poisons queries and copy proof until actual Reset. No fallback
+  // can consume dynamic PSO state in that recording; keep the runtime's distinct
+  // active-pass implementations for these optional newer setters untouched.
+  if (active)
+    return ok;
+  ID3D12GraphicsCommandList4* state_object_list{};
+  const auto state_object_interface = list->QueryInterface(IID_PPV_ARGS(&state_object_list));
+  if (state_object_interface != E_NOINTERFACE) {
+    if (FAILED(state_object_interface) || !state_object_list || static_cast<ID3D12GraphicsCommandList*>(state_object_list) != list) {
+      ok = false;
+    } else {
+      ok &= StateHook<75, decltype(&ID3D12GraphicsCommandList4::SetPipelineState1), PipelineStateObject>::install(list, active);
+    }
+  }
+  if (state_object_list)
+    state_object_list->Release();
+  d3d12_extended::CommandList9* extended{};
+  const auto extension = list->QueryInterface(d3d12_extended::CommandList9Id, reinterpret_cast<void**>(&extended));
+  if (extension != E_NOINTERFACE) {
+    // Only inspect expanded slots after public QI proves this identical native
+    // interface. Older objects without List9 cannot expose these setters.
+    if (FAILED(extension) || !extended || static_cast<ID3D12GraphicsCommandList*>(extended) != list) {
+      ok = false;
+    } else {
+      ok &= StateHook<d3d12_extended::DepthBiasSlot, decltype(&d3d12_extended::CommandList9::RSSetDepthBias), DynamicDepthBias>::install(
+          list, active);
+      ok &= StateHook<d3d12_extended::StripCutSlot, decltype(&d3d12_extended::CommandList9::IASetIndexBufferStripCutValue),
+                      DynamicStripCut>::install(list, active);
+    }
+  }
+  if (extended)
+    extended->Release();
   return ok;
 }
 #undef STATE
@@ -1423,6 +1559,14 @@ GraphicsStatus graphics_status() noexcept {
   result.fallback_stamps = r.fallback_stamps.load();
   result.fallback_query_refused = r.fallback_query_refused.load();
   result.fallback_state_refused = r.fallback_state_refused.load();
+  result.preferred_copy_attempts = r.preferred_copy_attempts.load();
+  result.preferred_copy_stamps = r.preferred_copy_stamps.load();
+  result.preferred_copy_no_proof = r.preferred_copy_no_proof.load();
+  result.preferred_copy_reason = r.preferred_copy_reason.load();
+  result.dynamic_depth_bias_calls = r.dynamic_depth_bias_calls.load();
+  result.dynamic_strip_cut_calls = r.dynamic_strip_cut_calls.load();
+  result.dynamic_depth_bias_restores = r.dynamic_depth_bias_restores.load();
+  result.dynamic_strip_cut_restores = r.dynamic_strip_cut_restores.load();
   return result;
 }
 std::vector<PfdTargetObservation> pfd_inventory() {

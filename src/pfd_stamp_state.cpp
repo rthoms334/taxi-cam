@@ -15,6 +15,25 @@ void PfdGraphicsState::reset(std::uint64_t generation, bool native_observations)
   generation_ = generation;
   observed_ = native_observations;
 }
+void PfdGraphicsState::depth_bias(d3d12_extended::CommandList9* native, float bias, float clamp, float slope) noexcept {
+  if (!native || (dynamic_native_ && dynamic_native_ != native) || !std::isfinite(bias) || !std::isfinite(clamp) || !std::isfinite(slope)) {
+    invalidate("dynamic_depth_bias_invalid");
+    return;
+  }
+  dynamic_native_ = native;
+  depth_bias_ = {bias, clamp, slope};
+  depth_bias_known_ = true;
+}
+void PfdGraphicsState::strip_cut(d3d12_extended::CommandList9* native, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE value) noexcept {
+  if (!native || (dynamic_native_ && dynamic_native_ != native) || value < D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED ||
+      value > D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF) {
+    invalidate("dynamic_strip_cut_invalid");
+    return;
+  }
+  dynamic_native_ = native;
+  strip_cut_ = value;
+  strip_cut_known_ = true;
+}
 void PfdGraphicsState::bind_root(ID3D12RootSignature* root,
                                  std::uint64_t generation,
                                  const PfdRootLayout& layout,
@@ -245,7 +264,13 @@ UINT PfdGraphicsState::undefined_table_count() const noexcept {
   return count;
 }
 void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list) const noexcept {
+  if ((depth_bias_known_ || strip_cut_known_) && dynamic_native_ != list)
+    return;
   list->SetPipelineState(pipeline_);
+  if (depth_bias_known_)
+    dynamic_native_->RSSetDepthBias(depth_bias_[0], depth_bias_[1], depth_bias_[2]);
+  if (strip_cut_known_)
+    dynamic_native_->IASetIndexBufferStripCutValue(strip_cut_);
   list->SetGraphicsRootSignature(root_);
   if (observed_arguments_)
     for (UINT n = 0; n < observed_word_count_; ++n)

@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 #include <d3d12.h>
+#include "d3d12_command_list9.hpp"
 
 #include <array>
 #include <cstdint>
@@ -40,7 +41,21 @@ class PfdGraphicsState {
     if (!invalid_reason_)
       invalid_reason_ = reason;
   }
-  void bind_pipeline(ID3D12PipelineState* pipeline) noexcept { pipeline_ = pipeline; }
+  void bind_pipeline(ID3D12PipelineState* pipeline) noexcept {
+    pipeline_ = pipeline;
+    // Even assigning the SAME PSO resets these overrides to its defaults.
+    depth_bias_known_ = strip_cut_known_ = false;
+    dynamic_native_ = nullptr;
+  }
+  // Caller has verified this exact native pointer by QI for CommandList9 and
+  // observed the matching original setter on this recording.
+  void depth_bias(d3d12_extended::CommandList9* native, float bias, float clamp, float slope) noexcept;
+  void strip_cut(d3d12_extended::CommandList9* native, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE value) noexcept;
+  bool has_depth_bias() const noexcept { return depth_bias_known_; }
+  bool has_strip_cut() const noexcept { return strip_cut_known_; }
+  bool can_restore(ID3D12GraphicsCommandList* native) const noexcept {
+    return complete() && (!(depth_bias_known_ || strip_cut_known_) || dynamic_native_ == native);
+  }
   void bind_root(ID3D12RootSignature* root,
                  std::uint64_t layout_generation,
                  const PfdRootLayout& layout,
@@ -74,6 +89,10 @@ class PfdGraphicsState {
   bool observed_ = false;
   std::uint64_t generation_ = 0, layout_generation_ = 0;
   ID3D12PipelineState* pipeline_ = nullptr;
+  d3d12_extended::CommandList9* dynamic_native_ = nullptr;
+  bool depth_bias_known_ = false, strip_cut_known_ = false;
+  std::array<float, 3> depth_bias_{};
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut_ = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
   ID3D12RootSignature* root_ = nullptr;
   PfdRootLayout layout_{};
   std::array<PfdRootValue, 64> values_{};

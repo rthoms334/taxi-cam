@@ -190,10 +190,23 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                   const D3D12_RECT* destination,
                                   const D3D12_RECT* content) noexcept {
   const engine_hook::pfd_state::ScopedBypass bypass;
-  if (!state.complete() || !record_private_patch(list, buffer_device, address, width, height, destination, content))
+  if (!list || !state.can_restore(list))
     return false;
-  state.restore(list);
-  return true;
+  d3d12_extended::CommandList9* dynamic = nullptr;
+  if (state.has_depth_bias() || state.has_strip_cut()) {
+    const auto hr = list->QueryInterface(d3d12_extended::CommandList9Id, reinterpret_cast<void**>(&dynamic));
+    if (FAILED(hr) || dynamic != list) {
+      if (dynamic)
+        dynamic->Release();
+      return false;  // Refuse before changing any application graphics state.
+    }
+  }
+  const bool recorded = record_private_patch(list, buffer_device, address, width, height, destination, content);
+  if (recorded)
+    state.restore(list);
+  if (dynamic)
+    dynamic->Release();
+  return recorded;
 }
 bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
                                          ID3D12Device* buffer_device,

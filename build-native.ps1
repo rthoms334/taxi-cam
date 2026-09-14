@@ -100,6 +100,29 @@ if ($Validate) {
             if ($LASTEXITCODE -ne 0) { throw "Query-aware PFD regression failed: $queryAdapter / $queryProfile" }
         }
     }
+    foreach ($copyAdapter in @('hardware', 'warp')) {
+        if ($WarpOnly -and $copyAdapter -eq 'hardware') { continue }
+        foreach ($copyProfile in @('a380', 'a350')) {
+            $copyArgs = @('--prefer-copy')
+            if ($copyAdapter -eq 'warp') { $copyArgs += '--warp' }
+            if ($copyProfile -eq 'a350') { $copyArgs += '--a350' }
+            & $gpu @copyArgs
+            if ($LASTEXITCODE -ne 0) { throw "PFD boundary-copy regression failed: $copyAdapter / $copyProfile" }
+        }
+    }
+    $dynamicGpu = Join-Path $out 'dynamic-state-validation.exe'
+    & $compiler @common (Join-Path $taskRoot 'standalone/dynamic_state_validation.cpp') (Join-Path $out 'src_pfd_stamp_state.cpp.o') (Join-Path $out 'src_pfd_stamp_d3d12.cpp.o') (Join-Path $out 'engine-hook_pfd_state_observer.cpp.o') @libs '-o' $dynamicGpu
+    if ($LASTEXITCODE -ne 0) { throw 'Dynamic graphics-state validation compilation failed.' }
+    $dynamicStateResults = @()
+    foreach ($dynamicAdapter in @('hardware', 'warp')) {
+        if ($WarpOnly -and $dynamicAdapter -eq 'hardware') { continue }
+        $dynamicArgs = @()
+        if ($dynamicAdapter -eq 'warp') { $dynamicArgs += '--warp' }
+        & $dynamicGpu @dynamicArgs
+        $dynamicExit = $LASTEXITCODE
+        if ($dynamicExit -notin @(0, 77)) { throw "Dynamic graphics-state regression failed: $dynamicAdapter" }
+        $dynamicStateResults += [ordered]@{adapter=$dynamicAdapter; result=$(if ($dynamicExit -eq 77) { 'unsupported; skipped' } else { 'passed' })}
+    }
     $tailTest = Join-Path $out 'scene-queue-tail-test.exe'
     & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'src/scene_queue_tail_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $tailTest
     if ($LASTEXITCODE -ne 0) { throw 'Live capture regression compilation failed.' }
@@ -128,7 +151,9 @@ if ($Validate) {
         @{Name='native-slots'; Sources=@('standalone/native_slots_test.cpp')},
         @{Name='crash-evidence'; Sources=@('standalone/crash_evidence_test.cpp')},
         @{Name='native-root-state'; Sources=@('standalone/root_state_test.cpp','src/pfd_stamp_state.cpp')},
+        @{Name='dynamic-state-abi'; Sources=@('standalone/dynamic_state_abi_test.cpp')},
         @{Name='native-query-scope'; Sources=@('standalone/query_scope_test.cpp')},
+        @{Name='pfd-copy-proof'; Sources=@('standalone/pfd_copy_proof_test.cpp')},
         @{Name='taxi-routes'; Sources=@('tests/taxi_button_routes_test.cpp')},
         @{Name='target-assignment'; Sources=@('standalone/target_assignment_test.cpp')},
         @{Name='pfd-detector'; Sources=@('tests/pfd_target_detector_test.cpp')},
@@ -186,7 +211,8 @@ if ($Validate) {
     if (-not $WarpOnly) { $gpuTests = @('hardware GPU') + $gpuTests }
     [ordered]@{
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
-        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
+        dynamicGraphicsStateTests=@($dynamicStateResults)
+        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));

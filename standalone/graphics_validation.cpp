@@ -160,7 +160,7 @@ void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   require(taxi_camera::drain_copy_queue(queue, device), "Interop capture completion");
 }
 
-void native_case(bool warp, bool a350, bool query_fallback) {
+void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy) {
   const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
   const UINT pane_width = profile.camera_panes[0][0], display_width = profile.width;
   const UINT nose_height = profile.camera_panes[0][1], tail_height = profile.camera_panes[1][1];
@@ -291,6 +291,183 @@ void native_case(bool warp, bool a350, bool query_fallback) {
     Sleep(1);
   }
   require(runtime::snapshot(key).frames > frames_before_interop, "Camera capture survives unrelated D3D11On12 Game Capture copy");
+  if (prefer_copy) {
+    Reference<ID3D12Resource> other;
+    create_texture(device.get(), texture_description(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM), other.put());
+    const D3D12_CPU_DESCRIPTOR_HANDLE other_rtv{base.ptr + 6 * stride};
+    device->CreateRenderTargetView(other.get(), nullptr, other_rtv);
+    Reference<ID3D12QueryHeap> occlusion, statistics;
+    const D3D12_QUERY_HEAP_DESC oh{D3D12_QUERY_HEAP_TYPE_OCCLUSION, 2, 0}, sh{D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, 2, 0};
+    check(device->CreateQueryHeap(&oh, IID_PPV_ARGS(occlusion.put())), "Preferred-copy occlusion queries");
+    check(device->CreateQueryHeap(&sh, IID_PPV_ARGS(statistics.put())), "Preferred-copy pipeline queries");
+    const auto read_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+    auto buffer = texture_description(1, 1, DXGI_FORMAT_UNKNOWN);
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = 512;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    buffer.Flags = D3D12_RESOURCE_FLAG_NONE;
+    Reference<ID3D12Resource> query_results, pixels, other_pixels;
+    check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(query_results.put())),
+          "Preferred-copy query readback");
+    const auto desc = textures[2]->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 bytes{};
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    buffer.Width = bytes;
+    check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(pixels.put())),
+          "Preferred-copy PFD readback");
+    buffer.Width = 256 * 64;
+    check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(other_pixels.put())),
+          "Preferred-copy state readback");
+    // Put both targets in COMMON in a separate completed recording. Only the
+    // explicit entry in the tested recording may prove a preferred copy.
+    for (UINT side = 0; side < 2; ++side)
+      transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+    submit();
+    reset();
+    std::uint64_t checked{};
+    for (bool proof : {true, false}) {
+      for (bool at_close : {false, true}) {
+        const UINT side = at_close ? 1 : 0;
+        auto* target = textures[side + 2].get();
+        std::vector<unsigned char> off_image, off_other;
+        for (UINT on = 0; on < 2; ++on) {
+          if (!proof) {
+            // Exact same real RT state, but established on an earlier recording:
+            // this must retain the working Draw fallback, never borrow proof.
+            transition(list.get(), target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            submit();
+            reset();
+          }
+          win::set_target_mask(on ? 1u << side : 0);
+          const auto before = win::graphics_status();
+          const auto stamps_before = runtime::snapshot(key).stamps;
+          list->BeginQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on);
+          list->BeginQuery(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on);
+          if (proof)
+            transition(list.get(), target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+          generator.record(list.get(), rtvs[side + 2], display_width, 1024, false, 0, 0);
+          if (!at_close) {
+            list->OMSetRenderTargets(1, &other_rtv, FALSE, nullptr);
+            require(runtime::snapshot(key).stamps == stamps_before + (proof ? on : 0),
+                    "OM uses proven copy inside paired queries; missing proof defers Draw");
+            list->DrawInstanced(3, 1, 0, 0);  // Native state must survive the preferred copy without any app rebind.
+          }
+          list->EndQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on);
+          require(runtime::snapshot(key).stamps == stamps_before + (!at_close && proof ? on : 0),
+                  "Open pipeline query still excludes the Draw fallback");
+          list->EndQuery(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on);
+          if (at_close)
+            require(runtime::snapshot(key).stamps == stamps_before, "Current dirty PFD is not delivered per query-end");
+          else
+            list->DrawInstanced(3, 1, 0, 0);  // Also verify state restored after the no-proof final-End fallback.
+          list->ResolveQueryData(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on, 1, query_results.get(), on * sizeof(UINT64));
+          list->ResolveQueryData(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on, 1, query_results.get(),
+                                 64 + on * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+          submit();  // Close is the second tested existing delivery boundary.
+          const auto after = win::graphics_status();
+          require(runtime::snapshot(key).stamps == stamps_before + on, "Exactly one preferred or fallback image per selected boundary");
+          require(after.preferred_copy_stamps == before.preferred_copy_stamps + (proof ? on : 0),
+                  "Per-recording explicit RT entry chooses the private-copy route");
+          require(after.fallback_stamps == before.fallback_stamps + (proof ? 0 : on),
+                  "Missing per-recording proof retains working Draw fallback only");
+          std::printf("Boundary delivery %s proof=%u enabled=%u: copies+%llu fallback+%llu\n", at_close ? "Close" : "OM", proof, on,
+                      after.preferred_copy_stamps - before.preferred_copy_stamps, after.fallback_stamps - before.fallback_stamps);
+          win::set_target_mask(0);
+          reset();
+          transition(list.get(), target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+          D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+          src.pResource = target;
+          src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          dst.pResource = pixels.get();
+          dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+          dst.PlacedFootprint = footprint;
+          list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+          transition(list.get(), target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+          if (!at_close) {
+            transition(list.get(), other.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            src.pResource = other.get();
+            dst.pResource = other_pixels.get();
+            dst.PlacedFootprint = {0, {DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, 256}};
+            list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            transition(list.get(), other.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+          }
+          submit();
+          reset();
+          void* data{};
+          D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)}, none{};
+          check(pixels->Map(0, &range, &data), "Preferred-copy PFD pixels");
+          const auto* image = static_cast<unsigned char*>(data);
+          if (!on)
+            off_image.assign(image, image + bytes);
+          else {
+            const UINT left = a350 && side ? 838 : 0, width = a350 ? 806 : 768;
+            for (UINT y = 0; y < 1024; ++y)
+              for (UINT x = 0; x < display_width; ++x) {
+                const auto* pixel = image + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
+                if (x >= left && x < left + width && y < 763) {
+                  if (x < left + 16 || x >= left + width - 16 || y < 12)
+                    require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0, "Preferred-copy exact black border");
+                } else
+                  require(std::memcmp(pixel, off_image.data() + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x, 4) == 0,
+                          "Preferred-copy preserves exact OFF bytes in ND, opposite atlas half, gutter and trim");
+                ++checked;
+              }
+            const auto* nose = image + SIZE_T{150} * footprint.Footprint.RowPitch + 4 * (left + width / 2);
+            const auto* tail = image + SIZE_T{650} * footprint.Footprint.RowPitch + 4 * (left + width / 2);
+            require(nose[2] >= 49 && nose[2] <= 53 && tail[2] >= 202 && tail[2] <= 206,
+                    "Preferred-copy and no-proof fallback both contain real composed nose and tail images");
+          }
+          pixels->Unmap(0, &none);
+          if (!at_close) {
+            range = {0, 256 * 64};
+            check(other_pixels->Map(0, &range, &data), "Preferred-copy native next-draw pixels");
+            const auto* image = static_cast<unsigned char*>(data);
+            if (!on)
+              off_other.assign(image, image + 256 * 64);
+            else
+              require(std::memcmp(image, off_other.data(), off_other.size()) == 0,
+                      "Native draws after delivery preserve exact OFF graphics-state pixels without rebinding");
+            other_pixels->Unmap(0, &none);
+          }
+        }
+        void* data{};
+        const D3D12_RANGE range{0, 512}, none{};
+        check(query_results->Map(0, &range, &data), "Preferred-copy query equality");
+        std::array<UINT64, 2> samples{};
+        std::memcpy(samples.data(), data, sizeof(samples));
+        require(samples[0] == UINT64{display_width} * 1024 + (at_close ? 0 : 4096) && samples[1] == samples[0],
+                "Preferred-copy and fallback preserve native occlusion results OFF versus ON");
+        D3D12_QUERY_DATA_PIPELINE_STATISTICS off{}, on{};
+        std::memcpy(&off, static_cast<unsigned char*>(data) + 64, sizeof(off));
+        std::memcpy(&on, static_cast<unsigned char*>(data) + 64 + sizeof(off), sizeof(on));
+        require(std::memcmp(&off, &on, sizeof(off)) == 0 && off.IAVertices == (at_close ? 3u : 6u),
+                "Preferred-copy and fallback preserve every native pipeline-statistics field");
+        query_results->Unmap(0, &none);
+      }
+    }
+    list->Close();
+    require(win::graphics_status().hook_failures == 0, "Preferred-copy native hook failures");
+    if (messages.get())
+      for (UINT64 i = 0; i < messages->GetNumStoredMessages(); ++i) {
+        SIZE_T size{};
+        messages->GetMessage(i, nullptr, &size);
+        std::vector<unsigned char> memory(size);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(memory.data());
+        if (SUCCEEDED(messages->GetMessage(i, message, &size)) && message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+          std::fprintf(stderr, "D3D12 preferred-copy error %u: %s\n", static_cast<unsigned>(message->ID), message->pDescription);
+          require(false, "Preferred-copy D3D12 validation error");
+        }
+      }
+    std::printf(
+        "PASS preferred copy %s %s: explicit legacy entry, OM/Close, missing-proof fallback, exact OFF pixels, paired-query equality; %llu "
+        "pixels\n",
+        a350 ? "A350" : "A380", warp ? "WARP" : "hardware", checked);
+    return;
+  }
   if (query_fallback) {
     Reference<ID3D12Resource> other_a, other_b, depth_a, depth_b;
     Reference<ID3D12DescriptorHeap> raw_rtvs, raw_dsvs;
@@ -1368,7 +1545,7 @@ void native_case(bool warp, bool a350, bool query_fallback) {
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   try {
-    bool warp = false, a350 = false, query_fallback = false;
+    bool warp = false, a350 = false, query_fallback = false, prefer_copy = false;
     for (int i = 1; i < argc; ++i) {
       if (std::wcscmp(argv[i], L"--warp") == 0)
         warp = true;
@@ -1376,10 +1553,12 @@ int wmain(int argc, wchar_t** argv) {
         a350 = true;
       else if (std::wcscmp(argv[i], L"--query-fallback") == 0)
         query_fallback = true;
+      else if (std::wcscmp(argv[i], L"--prefer-copy") == 0)
+        prefer_copy = true;
       else
         return 2;
     }
-    native_case(warp, a350, query_fallback);
+    native_case(warp, a350, query_fallback, prefer_copy);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL native graphics: %s\n", e.what());

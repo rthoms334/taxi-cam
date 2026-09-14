@@ -24,6 +24,7 @@ SLOT(ID3D12GraphicsCommandList7, Close, 9);
 SLOT(ID3D12GraphicsCommandList7, Reset, 10);
 SLOT(ID3D12GraphicsCommandList7, ClearState, 11);
 SLOT(ID3D12GraphicsCommandList7, SetPipelineState, 25);
+SLOT(ID3D12GraphicsCommandList4, SetPipelineState1, 75);
 SLOT(ID3D12GraphicsCommandList7, SetDescriptorHeaps, 28);
 SLOT(ID3D12GraphicsCommandList7, SetGraphicsRootSignature, 30);
 SLOT(ID3D12GraphicsCommandList7, SetGraphicsRootDescriptorTable, 32);
@@ -46,5 +47,5 @@ SLOT(ID3D12GraphicsCommandList7, BeginRenderPass, 68);
 SLOT(ID3D12GraphicsCommandList7, EndRenderPass, 69);
 SLOT(ID3D12GraphicsCommandList7, Barrier, 80);
 int main() {
-  std::puts("PASS native ABI: 42 vtable slots checked against pinned public Windows COM declarations.");
+  std::puts("PASS native ABI: 43 vtable slots checked against pinned public Windows COM declarations.");
 }

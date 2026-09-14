@@ -419,6 +419,18 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.fallback_query_refused),
                     static_cast<unsigned long long>(graphics.fallback_state_refused));
       log_status(status, draw_detail);
+      char copy_detail[512];
+      std::snprintf(copy_detail, sizeof(copy_detail),
+                    "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s | "
+                    "dynamic_bias_calls=%llu restores=%llu dynamic_strip_calls=%llu restores=%llu",
+                    static_cast<unsigned long long>(graphics.preferred_copy_attempts),
+                    static_cast<unsigned long long>(graphics.preferred_copy_stamps),
+                    static_cast<unsigned long long>(graphics.preferred_copy_no_proof), graphics.preferred_copy_reason,
+                    static_cast<unsigned long long>(graphics.dynamic_depth_bias_calls),
+                    static_cast<unsigned long long>(graphics.dynamic_depth_bias_restores),
+                    static_cast<unsigned long long>(graphics.dynamic_strip_cut_calls),
+                    static_cast<unsigned long long>(graphics.dynamic_strip_cut_restores));
+      log_status(status, copy_detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
         char identity_detail[640];

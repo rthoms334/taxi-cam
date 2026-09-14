@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 #include "../src/pfd_stamp_state.hpp"
@@ -9,7 +10,20 @@ struct Call {
   UINT64 value;
 };
 std::vector<Call> calls;
-void STDMETHODCALLTYPE pipeline(void*, ID3D12PipelineState*) {}
+std::vector<unsigned> dynamic_calls;
+std::array<float, 3> replayed_bias{};
+D3D12_INDEX_BUFFER_STRIP_CUT_VALUE replayed_cut{};
+void STDMETHODCALLTYPE pipeline(void*, ID3D12PipelineState*) {
+  dynamic_calls.push_back(25);
+}
+void STDMETHODCALLTYPE bias(void*, float a, float b, float c) {
+  dynamic_calls.push_back(82);
+  replayed_bias = {a, b, c};
+}
+void STDMETHODCALLTYPE cut(void*, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE v) {
+  dynamic_calls.push_back(83);
+  replayed_cut = v;
+}
 void STDMETHODCALLTYPE root(void*, ID3D12RootSignature*) {}
 void STDMETHODCALLTYPE constant(void*, UINT index, UINT value, UINT offset) {
   calls.push_back({34, index, offset, value});
@@ -48,7 +62,9 @@ PfdGraphicsState state(bool observed = true) {
 }  // namespace
 int main() {
   try {
-    std::array<void*, 43> vtable{};
+    std::array<void*, 84> vtable{};
+    vtable[82] = reinterpret_cast<void*>(&bias);
+    vtable[83] = reinterpret_cast<void*>(&cut);
     vtable[25] = reinterpret_cast<void*>(&pipeline);
     vtable[30] = reinterpret_cast<void*>(&root);
     vtable[34] = reinterpret_cast<void*>(&constant);
@@ -107,6 +123,34 @@ int main() {
     invalid.invalidate();
     invalid.bind_observed_root(reinterpret_cast<ID3D12RootSignature*>(4), 3);
     check(!invalid.complete(), "Signature change must not clear unsupported-work invalidation");
+    auto dynamic_state = state();
+    auto* native9 = reinterpret_cast<d3d12_extended::CommandList9*>(list);
+    dynamic_state.depth_bias(native9, -4.f, .5f, 2.f);
+    dynamic_state.strip_cut(native9, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF);
+    check(dynamic_state.has_depth_bias() && dynamic_state.has_strip_cut() && dynamic_state.can_restore(list), "Dynamic snapshot ready");
+    dynamic_calls.clear();
+    dynamic_state.restore(list);
+    check((dynamic_calls == std::vector<unsigned>{25, 82, 83}), "Dynamic overrides replay after PSO reset");
+    check((replayed_bias == std::array<float, 3>{-4.f, .5f, 2.f}) && replayed_cut == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF,
+          "Exact dynamic arguments");
+    check(!dynamic_state.can_restore(reinterpret_cast<ID3D12GraphicsCommandList*>(UINT_PTR{8})), "Wrong native list refused before stamp");
+    dynamic_state.bind_pipeline(reinterpret_cast<ID3D12PipelineState*>(1));
+    check(!dynamic_state.has_depth_bias() && !dynamic_state.has_strip_cut(), "Same app PSO assignment clears dynamic overrides");
+    dynamic_calls.clear();
+    dynamic_state.restore(list);
+    check((dynamic_calls == std::vector<unsigned>{25}), "No fabricated default override");
+    dynamic_state.depth_bias(native9, std::numeric_limits<float>::quiet_NaN(), 0, 0);
+    check(!dynamic_state.complete(), "Nonfinite depth bias refuses restoration");
+    dynamic_state = state();
+    dynamic_state.strip_cut(native9, static_cast<D3D12_INDEX_BUFFER_STRIP_CUT_VALUE>(3));
+    check(!dynamic_state.complete(), "Invalid strip cut refuses restoration");
+    dynamic_state = state();
+    dynamic_state.depth_bias(native9, -4, 0, 0);
+    dynamic_state.strip_cut(reinterpret_cast<d3d12_extended::CommandList9*>(UINT_PTR{8}), D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED);
+    check(!dynamic_state.complete(), "Mixed native identity refuses restoration");
+    dynamic_state.reset(2, true);
+    check(!dynamic_state.has_depth_bias() && !dynamic_state.has_strip_cut(), "Actual Reset clears dynamic overrides");
+    std::puts("PASS dynamic PSO replay: exact bias/cut after PSO, same-PSO reset, native identity and invalid input guards.");
     std::puts(
         "PASS native root replay: pre-existing layouts, sparse partial constants, all descriptor kinds, redundant bindings, heap changes, "
         "Reset requirement and bounds.");

@@ -27,7 +27,7 @@ Saves validate the complete settings object, flush a temporary UTF-16 file and r
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
 | `exposure` | −8.8 | Manual EV, −16 to +4 |
-| `speed_red`, `speed_green`, `speed_blue` | Profile colour | Normalized RGB, 0�1, edited with the colour picker |
+| `speed_red`, `speed_green`, `speed_blue` | Profile colour | Normalized RGB, 0�1, edited with the colour picker |
 | `night_boost` | 4 | Maximum automatic boost, 0–8 EV |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
 
@@ -106,6 +106,8 @@ The bridge log reports `PFD copy admission` alongside the normal camera counters
 
 The `PFD scope` line records selected RT-exit scope flags (enabled=1, active pass=2, suspended pass=4, invalid recording=8, prior work=16), base/nonbase subresource counts and split barriers. It also reports completed calibration-clear recordings and the automatic/manual/calibration control masks.
 
+The `PFD boundary copy` line counts attempts and completed copy recordings at target changes or command-list closure. `no_proof` and `reason` identify cases that retain the guarded drawing path because that recording has no usable render-target transition evidence. `dynamic_bias_calls` and `dynamic_strip_calls` count observed application overrides; the following `restores` counters count successful camera draws that replayed those overrides. These counters distinguish the active delivery path and actual application API use; they do not by themselves prove or disprove a visible brightness flash.
+
 Camera composition can succeed while PFD writes are refused. The `PFD guarded draw` line counts deferred draw attempts, successful stamps and query/state refusals separately from texture copies. When images exist but no PFD write has yet been recorded, the app reports that it is waiting for a verified write opportunity.
 
 ## Exposure
@@ -183,7 +185,7 @@ Use the counters in pipeline order:
 | `scene_ready` | Both engine camera-ready flags are set |
 | `captures` | Snapshot copy operations recorded |
 | `composed` | Paired compositions submitted |
-| `stamps` | Camera draws recorded into PFD command lists |
+| `stamps` | Camera copies or draws recorded into PFD command lists |
 
 Private-code mismatch diagnostics include the failed RVA and byte count. Code that moves also fails the current fixed-address profile; the runtime does not guess a new address or call an unverified match.
 
