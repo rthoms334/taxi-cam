@@ -188,7 +188,8 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                   UINT width,
                                   UINT height,
                                   const D3D12_RECT* destination,
-                                  const D3D12_RECT* content) noexcept {
+                                  const D3D12_RECT* content,
+                                  bool draw) noexcept {
   const engine_hook::pfd_state::ScopedBypass bypass;
   if (!list || !state.can_restore(list))
     return false;
@@ -201,9 +202,27 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
       return false;  // Refuse before changing any application graphics state.
     }
   }
-  const bool recorded = record_private_patch(list, buffer_device, address, width, height, destination, content);
+  ID3D12GraphicsCommandList1* samples = nullptr;
+  if (state.has_sample_positions()) {
+    const auto hr = list->QueryInterface(IID_PPV_ARGS(&samples));
+    if (FAILED(hr) || samples != list) {
+      if (samples)
+        samples->Release();
+      if (dynamic)
+        dynamic->Release();
+      return false;
+    }
+    // The application can prepare a multisample pattern before its next target
+    // bind. Our intervening draw has a single-sample PSO and needs defaults.
+    samples->SetSamplePositions(0, 0, nullptr);
+  }
+  const bool recorded = record_private_patch(list, buffer_device, address, width, height, destination, content, draw);
   if (recorded)
     state.restore(list);
+  else if (samples)
+    state.restore_sample_positions(list);
+  if (samples)
+    samples->Release();
   if (dynamic)
     dynamic->Release();
   return recorded;
@@ -214,7 +233,8 @@ bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
                                          UINT width,
                                          UINT height,
                                          const D3D12_RECT* destination,
-                                         const D3D12_RECT* content) noexcept {
+                                         const D3D12_RECT* content,
+                                         bool draw) noexcept {
   if (!list || !pipeline_ || !address || address % 4 || buffer_device != device_ || width < 1 || height < 2 || width > 16384 ||
       height > 16384 || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return false;
@@ -252,7 +272,8 @@ bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   list->RSSetViewports(1, &viewport);
   list->RSSetScissorRects(1, &scissor);
-  list->DrawInstanced(3, 1, 0, 0);
+  if (draw)
+    list->DrawInstanced(3, 1, 0, 0);
   return true;
 }
 void PfdStampD3D12::release() noexcept {

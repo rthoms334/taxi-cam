@@ -126,6 +126,7 @@ struct Registry {
   PfdTargetDetector detector;
   const profiles::AircraftProfile* profile = &profiles::A380;
   unsigned active_mask{}, calibration_mask{};
+  bool graphics_state_test = false;
   std::array<std::shared_ptr<Resource>, 2> selected_resources{};
   std::array<std::atomic<ID3D12Resource*>, 2> selected_native{};
   std::array<std::atomic<std::uint64_t>, 2> selected_ids{};
@@ -141,6 +142,7 @@ struct Registry {
   std::atomic<const char*> preferred_copy_reason{"not_attempted"};
   std::atomic<std::uint64_t> dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{};
   std::atomic<std::uint64_t> dynamic_depth_bias_restores{}, dynamic_strip_cut_restores{};
+  std::atomic<std::uint64_t> sample_position_calls{}, sample_position_restores{}, state_test_roundtrips{};
   WriteBudget calibration_budget;
 };
 Registry& registry() {
@@ -616,7 +618,7 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
                            static_cast<LONG>(content.bottom)};
     const PfdCopyProof::Key proof_key{reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id};
     const auto model = list->copy_proof.mode(proof_key);
-    if (model != PfdCopyProof::Mode::unknown) {
+    if (!r.graphics_state_test && model != PfdCopyProof::Mode::unknown) {
       ++r.preferred_copy_attempts;
       // ensure_list's boundary registration has already proved identical QI7.
       auto* enhanced = model == PfdCopyProof::Mode::enhanced_rt ? static_cast<ID3D12GraphicsCommandList7*>(native) : nullptr;
@@ -628,6 +630,8 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
         continue;
       }
       r.preferred_copy_reason = "private_copy_refused";
+    } else if (r.graphics_state_test) {
+      r.preferred_copy_reason = "diagnostic_no_draw";
     } else {
       ++r.preferred_copy_no_proof;
       r.preferred_copy_reason = list->copy_proof.reason(proof_key);
@@ -650,12 +654,16 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     native->OMSetRenderTargets(1, &target, FALSE, nullptr);
     ++r.fallback_attempts;
     const bool stamped = runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
-                                        view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner);
+                                        view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test);
     // Restore the CURRENT raw OM bindings, including valid descriptors that
     // predate tracking. Never replay the bindings from when the PFD was queued.
     native->OMSetRenderTargets(list->raw_rtv_count, list->raw_rtvs.data(), FALSE, list->raw_has_dsv ? &list->raw_dsv : nullptr);
     if (stamped) {
-      ++r.fallback_stamps;
+      if (r.graphics_state_test)
+        ++r.state_test_roundtrips;
+      else
+        ++r.fallback_stamps;
+      r.sample_position_restores += list->graphics.has_sample_positions();
       r.dynamic_depth_bias_restores += list->graphics.has_depth_bias();
       r.dynamic_strip_cut_restores += list->graphics.has_strip_cut();
       list->pending_rt[side] = false;
@@ -712,6 +720,8 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
   {
     const std::lock_guard lock(r.mutex);
     refresh_selected(r);
+    if (r.graphics_state_test)
+      return;
     std::shared_ptr<Resource> item;
     unsigned side = 0;
     for (unsigned i = 0; i < 2; ++i)
@@ -1311,6 +1321,12 @@ void pass_targets(void*,
   item->pending_rt = {};
   Targets::record(*item, count, handles.data(), FALSE, depth ? &depth->cpuDescriptor : nullptr, false);
 }
+struct SamplePositions {
+  static void apply(List& l, UINT samples, UINT pixels, D3D12_SAMPLE_POSITION* positions) {
+    ++registry().sample_position_calls;
+    l.graphics.sample_positions(static_cast<ID3D12GraphicsCommandList1*>(l.native), samples, pixels, positions);
+  }
+};
 struct DynamicDepthBias {
   static void apply(List& l, FLOAT bias, FLOAT clamp, FLOAT slope) {
     ++registry().dynamic_depth_bias_calls;
@@ -1437,6 +1453,16 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   // active-pass implementations for these optional newer setters untouched.
   if (active)
     return ok;
+  ID3D12GraphicsCommandList1* sample_list{};
+  const auto sample_interface = list->QueryInterface(IID_PPV_ARGS(&sample_list));
+  if (sample_interface != E_NOINTERFACE) {
+    if (FAILED(sample_interface) || !sample_list || static_cast<ID3D12GraphicsCommandList*>(sample_list) != list)
+      ok = false;
+    else
+      ok &= StateHook<63, decltype(&ID3D12GraphicsCommandList1::SetSamplePositions), SamplePositions>::install(list);
+  }
+  if (sample_list)
+    sample_list->Release();
   ID3D12GraphicsCommandList4* state_object_list{};
   const auto state_object_interface = list->QueryInterface(IID_PPV_ARGS(&state_object_list));
   if (state_object_interface != E_NOINTERFACE) {
@@ -1590,6 +1616,9 @@ GraphicsStatus graphics_status() noexcept {
   result.preferred_copy_stamps = r.preferred_copy_stamps.load();
   result.preferred_copy_no_proof = r.preferred_copy_no_proof.load();
   result.preferred_copy_reason = r.preferred_copy_reason.load();
+  result.sample_position_calls = r.sample_position_calls.load();
+  result.sample_position_restores = r.sample_position_restores.load();
+  result.state_test_roundtrips = r.state_test_roundtrips.load();
   result.dynamic_depth_bias_calls = r.dynamic_depth_bias_calls.load();
   result.dynamic_strip_cut_calls = r.dynamic_strip_cut_calls.load();
   result.dynamic_depth_bias_restores = r.dynamic_depth_bias_restores.load();
@@ -1635,6 +1664,11 @@ void set_calibration(unsigned mask, unsigned budget) noexcept {
   refresh_selected(r);
   r.calibration_budget.set_limit(budget);
 }
+void set_graphics_state_test(bool enabled) noexcept {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  r.graphics_state_test = enabled;
+}
 void set_target_mask(unsigned mask) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
@@ -1654,6 +1688,7 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   {
     const std::lock_guard lock(r.mutex);
     r.active_mask = r.calibration_mask = 0;
+    r.graphics_state_test = false;
     // This entry point starts an explicit aircraft/profile session, including a
     // reload of the same adapter. Ordinary texture replacement uses forget().
     r.routes.reset();

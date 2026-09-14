@@ -48,6 +48,8 @@ int main() {
     CompanionControl control;
     require(!control.connected(1000) && !control.settings().enabled, "No enable before first message");
     Settings settings;
+    require(settings.graphics_state_test == 0 && valid_settings(settings), "Graphics state test defaults off");
+    settings.graphics_state_test = 1;
     settings.camera_rate = 60;
     settings.exposure = -7.3f;
     settings.follow_taxi = 0;
@@ -63,10 +65,18 @@ int main() {
     publish(owner, 10000, settings);
     control.refresh(reader);
     require(control.connected(10000), "Fresh companion accepted");
-    require(ProtocolVersion == 5 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 6 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
-            "Protocol5 guide coordinates roundtrip");
+            "Protocol6 guide coordinates roundtrip");
+    require(control.settings().graphics_state_test == 1, "Diagnostic flag roundtrips through IPC");
+    {
+      auto invalid = settings;
+      invalid.graphics_state_test = 2;
+      publish(owner, 10000, invalid);
+      control.refresh(reader);
+      require(!control.connected(10000) && !control.settings().enabled, "Malformed diagnostic flag refuses IPC");
+    }
     for (auto member : {&Settings::nose_dot, &Settings::tail_upper, &Settings::tail_corner, &Settings::tail_inner}) {
       for (unsigned axis = 0; axis < 2; ++axis) {
         for (float value :
@@ -94,7 +104,7 @@ int main() {
         require(held.manual_mask == 3 && held.camera_rate == 60 && held.exposure == settings.exposure && held.mounts == settings.mounts &&
                     held.route_request == 12 && held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
                     held.tail_upper == settings.tail_upper && held.tail_corner == settings.tail_corner &&
-                    held.tail_inner == settings.tail_inner,
+                    held.tail_inner == settings.tail_inner && held.graphics_state_test == 1,
                 "Preserve exact settings during contention");
       }
       require(!control.connected(15001), "Contention cannot extend heartbeat deadline");
@@ -129,10 +139,10 @@ int main() {
     control.refresh(reader);
     require(control.connected(17000), "Valid message restores connection");
     require(owner.lock(1000), "Protocol mutation lock");
-    owner.data()->version = 3;
+    owner.data()->version = 5;
     owner.unlock();
     control.refresh(reader);
-    require(!control.connected(17000), "Old protocol3 invalidates the larger protocol4 guide layout");
+    require(!control.connected(17000), "Old protocol5 invalidates the protocol6 diagnostic layout");
     require(owner.lock(1000), "Restore protocol lock");
     owner.data()->version = ProtocolVersion;
     owner.unlock();

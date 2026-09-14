@@ -134,7 +134,7 @@ Mutex:   Local\380TaxiCamera.Control.<MSFS_PID>
 Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 ~~~
 
-The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `5` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
+The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `6` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
 
 The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 
@@ -162,6 +162,10 @@ The above-60-knots cutoff remains inhibited while an OFF acknowledgement is pend
 Source: [IPC](../standalone/protocol.hpp), [control loop](../standalone/bridge_main.cpp), [recovery policy](../native-camera/scene_recovery.hpp), [speed cutoff](../native-camera/taxi_speed_cutoff.hpp).
 
 ## Diagnostics
+
+**Graphics state test** is a temporary diagnostic on this page. With a TAXI request or manual camera preview active, it keeps camera capture and composition running and performs the overlay's graphics-state changes and restoration, but omits camera pixel drawing and PFD copies. Turn it off to return to normal camera delivery. Existing command recordings can persist until MSFS redraws the display. The test is off by default, is not saved to configuration, and clears on Stop camera tests or an aircraft-session/profile change.
+
+The `PFD state diagnostic` log reports the switch and successful `roundtrips` separately from camera stamps. `sample_position_calls` counts native programmable sample-pattern setters, and `restores` counts overlays that restored an observed pattern. These counters establish whether the application uses the state; they do not establish the cause of a visible flash.
 
 The bridge writes a status snapshot to the companion and appends metadata to:
 

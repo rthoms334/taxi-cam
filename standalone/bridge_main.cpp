@@ -256,6 +256,7 @@ DWORD run_impl() {
     // Close render gates on OFF, cutoff, service pause or a lost heartbeat.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
+    win::set_graphics_state_test(connected && settings.enabled && settings.graphics_state_test);
     auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
     composition.speed_color = settings.speed_color;
     composition.nose_dot = settings.nose_dot;
@@ -379,8 +380,10 @@ DWORD run_impl() {
                           : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
                           : !requested || failed                 ? scene.message.c_str()
                           : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
-                          : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
-                                                                 : output.message;
+                          : settings.graphics_state_test && output.output
+                              ? "Graphics state test: camera pixels omitted; native state replay active."
+                          : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD write opportunity."
+                                                            : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     if (mailbox.lock()) {
       mailbox.data()->status = status;
@@ -477,6 +480,13 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.fallback_query_refused),
                     static_cast<unsigned long long>(graphics.fallback_state_refused));
       log_status(status, draw_detail);
+      char diagnostic_detail[256];
+      std::snprintf(diagnostic_detail, sizeof(diagnostic_detail),
+                    "PFD state diagnostic: enabled=%u roundtrips=%llu sample_position_calls=%llu restores=%llu",
+                    settings.graphics_state_test, static_cast<unsigned long long>(graphics.state_test_roundtrips),
+                    static_cast<unsigned long long>(graphics.sample_position_calls),
+                    static_cast<unsigned long long>(graphics.sample_position_restores));
+      log_status(status, diagnostic_detail);
       char copy_detail[512];
       std::snprintf(copy_detail, sizeof(copy_detail),
                     "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s | "

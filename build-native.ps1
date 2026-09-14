@@ -136,6 +136,19 @@ if ($Validate) {
         if ($dynamicExit -notin @(0, 77)) { throw "Dynamic graphics-state regression failed: $dynamicAdapter" }
         $dynamicStateResults += [ordered]@{adapter=$dynamicAdapter; result=$(if ($dynamicExit -eq 77) { 'unsupported; skipped' } else { 'passed' })}
     }
+    $sampleGpu = Join-Path $out 'sample-positions-validation.exe'
+    & $compiler @common (Join-Path $taskRoot 'standalone/sample_positions_validation.cpp') (Join-Path $out 'src_pfd_stamp_state.cpp.o') (Join-Path $out 'src_pfd_stamp_d3d12.cpp.o') (Join-Path $out 'engine-hook_pfd_state_observer.cpp.o') @libs '-o' $sampleGpu
+    if ($LASTEXITCODE -ne 0) { throw 'Sample-position validation compilation failed.' }
+    $sampleResults = @()
+    foreach ($sampleAdapter in @('hardware', 'warp')) {
+        if ($WarpOnly -and $sampleAdapter -eq 'hardware') { continue }
+        $sampleArgs = @()
+        if ($sampleAdapter -eq 'warp') { $sampleArgs += '--warp' }
+        & $sampleGpu @sampleArgs
+        $sampleExit = $LASTEXITCODE
+        if ($sampleExit -notin @(0, 77)) { throw "Sample-position graphics regression failed: $sampleAdapter" }
+        $sampleResults += [ordered]@{adapter=$sampleAdapter; result=$(if ($sampleExit -eq 77) { 'unsupported; skipped' } else { 'passed' })}
+    }
     $tailTest = Join-Path $out 'scene-queue-tail-test.exe'
     & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'src/scene_queue_tail_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $tailTest
     if ($LASTEXITCODE -ne 0) { throw 'Live capture regression compilation failed.' }
@@ -172,6 +185,7 @@ if ($Validate) {
         @{Name='crash-evidence'; Sources=@('standalone/crash_evidence_test.cpp')},
         @{Name='native-root-state'; Sources=@('standalone/root_state_test.cpp','src/pfd_stamp_state.cpp')},
         @{Name='dynamic-state-abi'; Sources=@('standalone/dynamic_state_abi_test.cpp')},
+        @{Name='sample-positions-abi'; Sources=@('standalone/sample_positions_abi_test.cpp')},
         @{Name='native-query-scope'; Sources=@('standalone/query_scope_test.cpp')},
         @{Name='pfd-copy-proof'; Sources=@('standalone/pfd_copy_proof_test.cpp')},
         @{Name='metadata-batch-cache'; Sources=@('standalone/metadata_batch_cache_test.cpp')},
@@ -190,6 +204,11 @@ if ($Validate) {
         & $exe
         if ($LASTEXITCODE -ne 0) { throw "Native test failed: $($entry.Name)" }
     }
+    $diagnosticsTest = Join-Path $out 'companion-diagnostics-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'standalone/companion_diagnostics_test.cpp') (Join-Path $taskRoot 'standalone/updater.cpp') '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-o' $diagnosticsTest
+    if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls compilation failed.' }
+    & $diagnosticsTest
+    if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls validation failed.' }
     & (Join-Path $taskRoot 'standalone/exe_xml_test.ps1')
     $updaterTest = Join-Path $out 'updater-test.exe'
     & $compiler @common (Join-Path $taskRoot 'standalone/updater_test.cpp') (Join-Path $taskRoot 'standalone/updater.cpp') '-lbcrypt' '-lshell32' '-o' $updaterTest
@@ -233,7 +252,8 @@ if ($Validate) {
     [ordered]@{
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         dynamicGraphicsStateTests=@($dynamicStateResults)
-        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','textured gray alpha and mip preservation under forced shader fallback','scoped barrier metadata lookup caching','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
+        samplePositionTests=@($sampleResults)
+        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','textured gray alpha and mip preservation under forced shader fallback','scoped barrier metadata lookup caching','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','temporary graphics state diagnostic pixel preservation and controls','camera border and inset composition','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));

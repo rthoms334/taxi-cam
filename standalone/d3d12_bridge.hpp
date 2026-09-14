@@ -17,6 +17,7 @@ struct GraphicsStatus {
   std::uint64_t preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
   const char* preferred_copy_reason = "not_attempted";
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, dynamic_depth_bias_restores{}, dynamic_strip_cut_restores{};
+  std::uint64_t sample_position_calls{}, sample_position_restores{}, state_test_roundtrips{};
 };
 bool initialize_graphics() noexcept;
 // Isolated validation supplies a real hardware/WARP device. This never calls
@@ -27,6 +28,8 @@ std::vector<PfdTargetObservation> pfd_inventory();
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
+// Temporary diagnostic: retain normal camera work and state replay, omit PFD pixels.
+void set_graphics_state_test(bool enabled) noexcept;
 std::array<std::uint64_t, 2> target_ids() noexcept;
 void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;

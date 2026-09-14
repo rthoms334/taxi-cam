@@ -9,7 +9,7 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 5;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 6;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
@@ -27,6 +27,8 @@ struct Settings {
   std::array<float, 2> tail_inner = profiles::A380.composition.tail_inner;
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
+  // Session-only diagnostic. Never persisted in aircraft settings.
+  std::uint32_t graphics_state_test = 0;
   std::array<std::array<double, 6>, 2> mounts = profiles::A380.mounts;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
@@ -66,7 +68,8 @@ inline bool valid_settings(const Settings& s) noexcept {
     if (!std::isfinite(c) || c < 0 || c > 1)
       return false;
   if (s.auto_profile > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
-      s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 || s.calibration_budget > 16384)
+      s.scene_test > 1 || s.graphics_state_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 ||
+      s.calibration_budget > 16384)
     return false;
   for (const auto& m : s.mounts) {
     for (const double v : m)

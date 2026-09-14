@@ -34,6 +34,41 @@ void PfdGraphicsState::strip_cut(d3d12_extended::CommandList9* native, D3D12_IND
   strip_cut_ = value;
   strip_cut_known_ = true;
 }
+void PfdGraphicsState::sample_positions(ID3D12GraphicsCommandList1* native,
+                                        UINT samples,
+                                        UINT pixels,
+                                        const D3D12_SAMPLE_POSITION* positions) noexcept {
+  if (!native || (sample_native_ && sample_native_ != native)) {
+    invalidate("sample_position_interface_mismatch");
+    return;
+  }
+  if (!samples && !pixels && !positions) {
+    sample_native_ = nullptr;
+    sample_count_ = sample_pixels_ = 0;
+    sample_positions_ = {};
+    return;
+  }
+  if ((samples != 1 && samples != 2 && samples != 4 && samples != 8 && samples != 16) || (pixels != 1 && pixels != 4) ||
+      samples > 16 / pixels || !positions) {
+    invalidate("sample_position_arguments_invalid");
+    return;
+  }
+  for (UINT n = 0; n < samples * pixels; ++n)
+    if (positions[n].X < -8 || positions[n].X > 7 || positions[n].Y < -8 || positions[n].Y > 7) {
+      invalidate("sample_position_coordinates_invalid");
+      return;
+    }
+  sample_native_ = native;
+  sample_count_ = samples;
+  sample_pixels_ = pixels;
+  std::copy_n(positions, samples * pixels, sample_positions_.begin());
+}
+void PfdGraphicsState::restore_sample_positions(ID3D12GraphicsCommandList* native) const noexcept {
+  if (!has_sample_positions() || sample_native_ != native)
+    return;
+  auto positions = sample_positions_;
+  sample_native_->SetSamplePositions(sample_count_, sample_pixels_, positions.data());
+}
 void PfdGraphicsState::bind_root(ID3D12RootSignature* root,
                                  std::uint64_t generation,
                                  const PfdRootLayout& layout,
@@ -264,7 +299,7 @@ UINT PfdGraphicsState::undefined_table_count() const noexcept {
   return count;
 }
 void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list) const noexcept {
-  if ((depth_bias_known_ || strip_cut_known_) && dynamic_native_ != list)
+  if (((depth_bias_known_ || strip_cut_known_) && dynamic_native_ != list) || (has_sample_positions() && sample_native_ != list))
     return;
   list->SetPipelineState(pipeline_);
   if (depth_bias_known_)
@@ -301,6 +336,7 @@ void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list) const noexcept {
         break;
     }
   }
+  restore_sample_positions(list);
   list->IASetPrimitiveTopology(topology_);
   list->RSSetViewports(viewport_count_, viewports_.data());
   list->RSSetScissorRects(scissor_count_, scissors_.data());

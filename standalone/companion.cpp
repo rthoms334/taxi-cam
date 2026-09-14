@@ -287,16 +287,18 @@ void sync_aircraft_session() {
       sample.aircraft_session_epoch == s.aircraft_session_epoch)
     return;
   win::reset_aircraft_session(s, sample.aircraft_session_epoch);
+  s.graphics_state_test = 0;
   publish(s);
   profile_selection = {};
   // Do not rebuild numeric edits when a flight changes in the background.
   for (unsigned side = 0; side < 2; ++side)
     SendDlgItemMessageW(window, 400 + side, CB_SETCURSEL, 0, 0);
-  for (const auto& label : std::array<std::pair<int, const wchar_t*>, 5>{{{224, L"Left preview: Off"},
+  for (const auto& label : std::array<std::pair<int, const wchar_t*>, 6>{{{224, L"Left preview: Off"},
                                                                           {225, L"Right preview: Off"},
                                                                           {226, L"Calibrate left: Off"},
                                                                           {227, L"Calibrate right: Off"},
-                                                                          {229, L"Scene test: Off"}}})
+                                                                          {229, L"Scene test: Off"},
+                                                                          {232, L"Graphics state test: Off"}}})
     SetDlgItemTextW(window, label.first, label.second);
 }
 void auto_profile() {
@@ -381,10 +383,11 @@ void build_controls() {
     toggle(L"Calibrate right", 227, (s.calibration_mask & 2) != 0, 505, 540, 200);
   } else if (page == 4) {
     toggle(L"Scene test", 229, s.scene_test, 260, 449, 200);
+    toggle(L"Graphics state test", 232, s.graphics_state_test, 476, 449, 250);
     toggle(L"First camera only", 228, s.single_camera, 737, 449, 235);
-    edit(s.calibration_budget, 203, 840, 537, 120);
-    button(L"Open log folder", 510, 260, 579, 210);
-    button(L"Stop camera tests", 511, 500, 579, 210);
+    edit(s.calibration_budget, 203, 840, 548, 120);
+    button(L"Open log folder", 510, 260, 591, 210);
+    button(L"Stop camera tests", 511, 500, 591, 210);
   } else if (page == 5) {
     const std::array<float, 2> guides[]{s.nose_dot, s.tail_upper, s.tail_corner, s.tail_inner};
     for (unsigned i = 0; i < 4; ++i) {
@@ -568,11 +571,14 @@ void draw_page(HDC dc) {
                   sample.probe_cpu_ms, sample.probe_max_ms, sample.stage_ms[0], sample.stage_ms[1], sample.stage_ms[2], sample.stage_ms[3],
                   sample.stage_ms[4], sample.stage_ms[5], sample.stage_ms[6], sample.stage_ms[7], sample.stage_ms[8], sample.stage_ms[9]);
     text(dc, data, 637, 156, 350, 236, small, Muted, DT_LEFT | DT_WORDBREAK);
-    panel(dc, 244, 436, 766, 86);
-    text(dc, L"The scene test runs independently of PFD assignment. PFD delivery needs both views.", 260, 488, 700, 24, small, Muted);
+    panel(dc, 244, 436, 766, 102);
+    text(dc,
+         L"Scene test renders without PFD delivery. Graphics state test needs preview/TAXI active.\n"
+         L"It changes/restores overlay state without drawing camera pixels. Temporary; not saved.",
+         260, 488, 730, 42, small, Muted, DT_LEFT | DT_WORDBREAK);
     const auto line = sample.heartbeat ? widen(sample.message) : live;
-    text(dc, L"Calibration batches per 50 ms (64–16384)", 260, 534, 550, 27, small, Muted);
-    text(dc, line.c_str(), 260, 625, 730, 38, small, Muted, DT_LEFT | DT_WORDBREAK);
+    text(dc, L"Calibration batches per 50 ms (64–16384)", 260, 546, 550, 27, small, Muted);
+    text(dc, line.c_str(), 260, 635, 730, 38, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 5) {
     panel(dc, 244, 138, 766, 118);
     panel(dc, 244, 278, 766, 259);
@@ -806,6 +812,8 @@ bool is_on(int id, const win::Settings& s) {
       return s.single_camera;
     case 229:
       return s.scene_test;
+    case 232:
+      return s.graphics_state_test;
     default:
       return false;
   }
@@ -1038,6 +1046,19 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         ShowWindow(hwnd, SW_HIDE);
         return 0;
       }
+      if (id == 232) {
+        const bool had_unsaved_changes = dirty;
+        if (!apply(false))
+          return 0;
+        auto s = draft();
+        s.graphics_state_test = !s.graphics_state_test;
+        publish(s);
+        dirty = had_unsaved_changes;
+        notice = s.graphics_state_test ? L"Temporary graphics state test on; camera pixels will not be drawn."
+                                       : L"Graphics state test off; normal camera drawing restored.";
+        build_controls();
+        return 0;
+      }
       if (id >= 220 && id <= 229) {
         if (!apply(false))
           return 0;
@@ -1148,7 +1169,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (id == 511) {
         auto s = draft();
         s.follow_taxi = 0;
-        s.manual_mask = s.calibration_mask = s.scene_test = 0;
+        s.manual_mask = s.calibration_mask = s.scene_test = s.graphics_state_test = 0;
         publish(s);
         dirty_notice();
         build_controls();

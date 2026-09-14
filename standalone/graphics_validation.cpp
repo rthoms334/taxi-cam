@@ -540,7 +540,7 @@ void textured_gray_fallback(ID3D12Device* device,
     check(list->Reset(allocator, nullptr), "Fresh ordinary gray recording");
   };
   submit();  // Source preparation cannot supply tested PFD RT-entry evidence.
-  std::uint64_t checked = 0, fallback_count = 0;
+  std::uint64_t checked = 0, fallback_count = 0, roundtrip_count = 0;
   std::array<double, 16> means{};
   unsigned case_index = 0;
   for (UINT output_format = 0; output_format < 2; ++output_format) {
@@ -548,8 +548,10 @@ void textured_gray_fallback(ID3D12Device* device,
     for (UINT input_format = 0; input_format < 2; ++input_format) {
       for (UINT mip = 0; mip < 4; ++mip) {
         std::vector<unsigned char> baseline;
-        for (UINT on = 0; on < 2; ++on) {
-          win::set_target_mask(on);
+        for (UINT on = 0; on < 3; ++on) {
+          const bool draw = on == 1, diagnostic = on == 2;
+          win::set_graphics_state_test(diagnostic);
+          win::set_target_mask(on ? 1 : 0);
           const auto before = win::graphics_status();
           const float background[]{.15f, .15f, .15f, 1};
           list->ClearRenderTargetView(rtv(output_format), background, 0, nullptr);
@@ -576,13 +578,15 @@ void textured_gray_fallback(ID3D12Device* device,
           list->DrawInstanced(3, 1, 0, 0);
           list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);  // Actual guarded fallback, no RT-entry proof.
           const auto delivered = win::graphics_status();
-          require(
-              delivered.fallback_stamps == before.fallback_stamps + on && delivered.preferred_copy_stamps == before.preferred_copy_stamps,
-              "Gray test must exercise one real shader fallback, never a private copy");
+          require(delivered.fallback_stamps == before.fallback_stamps + draw &&
+                      delivered.state_test_roundtrips == before.state_test_roundtrips + diagnostic &&
+                      delivered.preferred_copy_stamps == before.preferred_copy_stamps,
+                  "Gray test must exercise one real shader fallback, never a private copy");
           list->DrawInstanced(3, 1, 0, 0);  // No application state rebind at all.
           win::set_target_mask(0);
           submit();
-          fallback_count += on;
+          fallback_count += draw;
+          roundtrip_count += diagnostic;
           for (UINT level = 0; level < 4; ++level) {
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -613,7 +617,7 @@ void textured_gray_fallback(ID3D12Device* device,
               for (UINT x = 0; x < fp.Footprint.Width; ++x) {
                 const SIZE_T offset = fp.Offset + SIZE_T{y} * fp.Footprint.RowPitch + 4 * x;
                 const bool inside = !level && x < 806 && y < 763;
-                if (on && !inside) {
+                if (on && (!inside || diagnostic)) {
                   require(std::memcmp(actual + offset, baseline.data() + offset, 4) == 0,
                           "Native textured gray/alpha pixels, gutter, trim or lower mip changed after shader fallback");
                   ++checked;
@@ -624,13 +628,15 @@ void textured_gray_fallback(ID3D12Device* device,
                   sum += actual[offset];
               }
           }
-          if (on)
+          if (draw)
             require(changed_patch > 1000, "The tested shader fallback must visibly write the camera patch");
+          else if (diagnostic)
+            require(!changed_patch, "State-only roundtrip must not write any camera pixels");
           else
             means[case_index] = sum / 4096.;
           readback->Unmap(0, &none);
           std::printf("Gray case RTV=%s SRV=%s mip=%u enabled=%u mean=%.6f fallback+%u\n", output_format ? "sRGB" : "UNORM",
-                      input_format ? "sRGB" : "UNORM", mip, on, sum / 4096., on);
+                      input_format ? "sRGB" : "UNORM", mip, on, sum / 4096., static_cast<unsigned>(draw));
         }
         ++case_index;
       }
@@ -642,6 +648,7 @@ void textured_gray_fallback(ID3D12Device* device,
       require(means[output * 8 + input * 4 + 3] > means[output * 8 + input * 4] + 15, "Mip control must measurably change sampled gray");
   }
   require(means[8] > means[0] + 15, "sRGB RTV control must measurably change encoded gray");
+  win::set_graphics_state_test(false);
   check(device->GetDeviceRemovedReason(), "Gray fixture device health");
   Reference<ID3D12InfoQueue> messages;
   const bool debug_messages = SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(messages.put())));
@@ -663,8 +670,8 @@ void textured_gray_fallback(ID3D12Device* device,
   runtime::manager().stop_source_tracking();
   scene_handoff().stop_scene();
   runtime::reset_feed(key);
-  std::printf("PASS textured gray %s: 16 UNORM/sRGB/mip/alpha cases; fallback=%llu preferredcopy=0; outside/mip pixels=%llu\n",
-              warp ? "WARP" : "hardware", fallback_count, checked);
+  std::printf("PASS textured gray %s: 16 UNORM/sRGB/mip/alpha cases; fallback=%llu roundtrip=%llu preferredcopy=0; preserved pixels=%llu\n",
+              warp ? "WARP" : "hardware", fallback_count, roundtrip_count, checked);
 }
 void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bool textured_gray = false) {
   const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
