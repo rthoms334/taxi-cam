@@ -80,6 +80,18 @@ int main() {
             "Left calibration replaces manual preview routing");
     command(227);
     require(current.calibration_mask == 3, "Both calibration targets remain independently selectable");
+    command(226);
+    require(current.calibration_mask == 2 && !current.follow_taxi, "Remaining right calibration keeps automatic control paused");
+    command(227);
+    require(!current.calibration_mask && !current.manual_mask && current.follow_taxi,
+            "Switching off the last right calibration target restores TAXI buttons");
+    command(226);
+    command(227);
+    command(227);
+    require(current.calibration_mask == 1 && !current.follow_taxi, "Remaining left calibration keeps automatic control paused");
+    command(226);
+    require(!current.calibration_mask && current.follow_taxi, "Switching off the last left calibration target restores TAXI buttons");
+    command(226);
     command(224);
     require(current.manual_mask == 1 && !current.calibration_mask, "Preview control exits calibration");
     command(104);

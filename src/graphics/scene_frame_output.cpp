@@ -199,6 +199,12 @@ bool SceneFrameOutput::idle() const noexcept {
   const auto completed = fence_->GetCompletedValue();
   return completed != UINT64_MAX && completed >= submitted_;
 }
+std::uint64_t SceneFrameOutput::completed_submissions() const noexcept {
+  if (failed_ || !fence_)
+    return 0;
+  const auto completed = fence_->GetCompletedValue();
+  return completed <= submitted_ ? completed : 0;  // Device removal returns UINT64_MAX.
+}
 
 bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
   if (!idle() || prepared_)

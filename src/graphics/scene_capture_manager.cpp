@@ -689,6 +689,7 @@ bool SceneCaptureManager::capture_source(List& item,
     packet.match = match;
     packet.token = ++next_token_;
     packet.submitted = 0;
+    packet.order = {};
     packet.producer = nullptr;
     packet.in_flight = 0;
     packet.assigned = true;
@@ -821,6 +822,7 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending) noexcept {
       }
       ++packet.in_flight;
       pending.packets |= private_recording.packets;
+      pending.packet_positions[&packet - packets_.data()] = ++pending.last_position;
       // Explicitly attach this owned submission to the OUTER receipt. The
       // native queue wrapper bypasses nested observation from its after phase.
       ID3D12CommandList* executable = packet.tail_list;
@@ -941,6 +943,18 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     return 0;
   const auto result = begin_transaction(*owner, queue, mask, false);
   if (result.receipt) {
+    // ExecuteCommandLists order can differ from recording/allocation order.
+    // Replayed lists use their last occurrence in this exact batch. Private
+    // queue-tail captures follow every application list in the same receipt.
+    transaction_.last_position = count;
+    for (UINT index = 0; mask && index < count; ++index) {
+      const auto* item = list(static_cast<ID3D12GraphicsCommandList*>(native_lists[index]));
+      if (!item || item->awaiting_native_reset || !item->packets)
+        continue;
+      for (std::size_t slot = 0; slot < packets_.size(); ++slot)
+        if (item->packets & (1u << slot))
+          transaction_.packet_positions[slot] = index + 1;
+    }
     transaction_.source_work = source_work;
     owner->source_states.begin_batch();
     if (unknown_lists)
@@ -993,6 +1007,7 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
         --packet.in_flight;
         if (success && !refused) {
           packet.producer = pending.queue;
+          packet.order = {pending.value, pending.packet_positions[index]};
           ++packet.submitted;
         } else {
           quarantine(packet);
@@ -1104,7 +1119,7 @@ std::size_t SceneCaptureManager::poll_completed_frames(Frame* frames, std::size_
     if (count == capacity)
       break;
     packet.leased = true;
-    frames[count++] = {packet.token, packet.device_key, packet.match, packet.gpu.ready_resource()};
+    frames[count++] = {packet.token, packet.device_key, packet.match, packet.gpu.ready_resource(), packet.order};
     ++stats_.completed;
   }
   return count;

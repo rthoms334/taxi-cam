@@ -220,7 +220,7 @@ DWORD run_impl() {
     const bool test_scene =
         connected && session_settings && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
     const auto intent_observed_ms = GetTickCount64();
-    if (!mask && !test_scene && prewarm.phase() != win::ScenePrewarm::Phase::warming)
+    if (!mask && !test_scene && !prewarm.active())
       failed = false;
     const auto targets = win::target_ids();
     const unsigned assigned = (targets[0] ? 1u : 0u) | (targets[1] ? 2u : 0u);
@@ -249,21 +249,26 @@ DWORD run_impl() {
           velocity.knots};
     };
     bool background_warmup = false;
-    if (prewarm.phase() == win::ScenePrewarm::Phase::waiting || prewarm.phase() == win::ScenePrewarm::Phase::warming) {
+    if (prewarm.pending()) {
       const auto warm_scene = native_camera::scene_snapshot();
       const auto warm_output = scene_runtime::snapshot(key);
       const auto previous_warm_phase = prewarm.phase();
-      background_warmup = prewarm.observe(now, warm_readiness().eligible(), mask || test_scene,
-                                          requested && warm_scene.ready[0] && warm_scene.ready[1] && warm_output.output,
-                                          failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
-                                              warm_scene.pair.state == engine_camera::State::blocked);
+      background_warmup = prewarm.observe(
+          now, warm_readiness().eligible(), mask || test_scene,
+          {requested && warm_scene.ready[0] && warm_scene.ready[1], warm_output.output, warm_output.frames, warm_output.completed_frames},
+          failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
+              warm_scene.pair.state == engine_camera::State::blocked);
       if (prewarm.phase() != previous_warm_phase) {
         char detail[384]{};
         std::snprintf(
-            detail, sizeof(detail), "Prewarm phase=%s elapsed_ms=%llu entries=%llu/%llu created_total=%llu output=%u", prewarm.name(),
+            detail, sizeof(detail),
+            "Prewarm phase=%s elapsed_ms=%llu entries=%llu/%llu created_total=%llu output=%u completed_pairs=%llu/%llu", prewarm.name(),
             static_cast<unsigned long long>(prewarm.started_ms() && now >= prewarm.started_ms() ? now - prewarm.started_ms() : 0),
             static_cast<unsigned long long>(warm_scene.pair.owned_ids[0]), static_cast<unsigned long long>(warm_scene.pair.owned_ids[1]),
-            static_cast<unsigned long long>(warm_scene.created_total), warm_output.output);
+            static_cast<unsigned long long>(warm_scene.created_total), warm_output.output,
+            static_cast<unsigned long long>(
+                warm_output.completed_frames >= prewarm.baseline_pairs() ? warm_output.completed_frames - prewarm.baseline_pairs() : 0),
+            static_cast<unsigned long long>(win::ScenePrewarm::RequiredPairs));
         log_status(status, detail);
       }
     }
@@ -301,8 +306,8 @@ DWORD run_impl() {
       startup.target_ms = GetTickCount64();
       log_startup(status, startup, "targets_ready");
     }
-    // Background warmup has zero display demand and closes after one complete
-    // pair or its bounded budget. Otherwise OFF, cutoff, pause and heartbeat
+    // Background warmup has zero display demand and closes after three GPU-completed
+    // pairs or its bounded budget. Otherwise OFF, cutoff, pause and heartbeat
     // loss close the render gates immediately.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
@@ -330,7 +335,9 @@ DWORD run_impl() {
         // Preparation may compile shaders. Re-read the companion and public
         // session/ground evidence before queuing any native camera creation.
         control.refresh(mailbox);
-        warm_start_allowed = prewarm.observe(GetTickCount64(), warm_readiness().eligible(), false, false, !prepared);
+        const auto warm_output = scene_runtime::snapshot(key);
+        warm_start_allowed = prewarm.observe(GetTickCount64(), warm_readiness().eligible(), false,
+                                             {false, false, warm_output.frames, warm_output.completed_frames}, !prepared);
         if (!warm_start_allowed)
           log_status(status, "Prewarm preparation ended without a native request; eligibility or budget was lost.");
       }
@@ -430,11 +437,13 @@ DWORD run_impl() {
       std::snprintf(aircraft_message, sizeof(aircraft_message), "%s Aircraft type: %.96s.",
                     identity.fresh ? "The loaded aircraft is not supported by the selected profile." : "Waiting for aircraft identity.",
                     identity.type[0] ? identity.type.data() : "unavailable");
-    const char* message = !connected                             ? "Waiting for Windows companion heartbeat."
-                          : !settings.enabled                    ? "Camera service paused."
-                          : !aircraft_matches                    ? aircraft_message
-                          : cutoff.inhibited                     ? "Above 60 knots: TAXI buttons commanded off."
-                          : failed                               ? scene.message.c_str()
+    const char* message = !connected          ? "Waiting for Windows companion heartbeat."
+                          : !settings.enabled ? "Camera service paused."
+                          : !aircraft_matches ? aircraft_message
+                          : cutoff.inhibited  ? "Above 60 knots: TAXI buttons commanded off."
+                          : failed            ? scene.message.c_str()
+                          : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed
+                              ? scene.message.c_str()
                           : !buttons.valid                       ? buttons.error
                           : (!targets[0] || !targets[1])         ? "Detecting display textures for the selected aircraft profile."
                           : !active && settings.calibration_mask ? "Calibration requested on the selected display."
@@ -443,8 +452,8 @@ DWORD run_impl() {
                           : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
                           : !requested || failed                 ? scene.message.c_str()
                           : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
-                          : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD write opportunity."
-                                                            : output.message;
+                          : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
+                                                                 : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     if (mailbox.lock()) {
       mailbox.data()->status = status;

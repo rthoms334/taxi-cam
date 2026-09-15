@@ -8,7 +8,7 @@ $outputDirectory = Join-Path $repoRoot 'build/tests/camera'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $common = @('-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-DNOMINMAX', '-D_WIN32_WINNT=0x0A00',
             '-mno-avx', '-mno-avx2', '-mno-avx512f', '-static')
-foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activation_mask', 'view_resize')) {
+foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activation_mask', 'view_resize', 'view_aa')) {
     $output = Join-Path $outputDirectory ($component + '-test.exe')
     $testSource = $component + '_test.cpp'
     & $compiler @common (Join-Path $repoRoot ('src/camera/' + $component + '.cpp')) `
@@ -58,6 +58,11 @@ $mountTest = Join-Path $outputDirectory 'aircraft-mounts-test.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Aircraft mount test compilation failed.' }
 & $mountTest
 if ($LASTEXITCODE -ne 0) { throw 'Aircraft mount test failed.' }
+$scenePoseTest = Join-Path $outputDirectory 'aircraft-scene-pose-test.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'aircraft_scene_pose_test.cpp') '-o' $scenePoseTest
+if ($LASTEXITCODE -ne 0) { throw 'Aircraft scene pose test compilation failed.' }
+& $scenePoseTest
+if ($LASTEXITCODE -ne 0) { throw 'Aircraft scene pose test failed.' }
 $mountConfigTest = Join-Path $outputDirectory 'mount-config-test.exe'
 & $compiler @common '-fno-exceptions' '-fno-rtti' (Join-Path $repoRoot 'src/camera/mount_config.cpp') `
     (Join-Path $repoRoot 'tests/camera/mount_config_test.cpp') '-o' $mountConfigTest
@@ -84,6 +89,7 @@ $runtimeSources = @(
     'src/camera/activation_mask.cpp',
     'src/camera/verified_profile.cpp',
     'src/camera/view_resize.cpp',
+    'src/camera/view_aa.cpp',
     'src/camera/aircraft_inventory.cpp',
     'src/graphics/scene_handoff.cpp',
     'src/camera/entry_pair.cpp',

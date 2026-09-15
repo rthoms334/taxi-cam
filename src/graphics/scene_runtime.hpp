@@ -25,8 +25,10 @@ struct Snapshot {
   bool output = false;
   bool failed = false;
   std::uint64_t frames = 0;
+  std::uint64_t completed_frames = 0;
   std::uint64_t stamps = 0;
   std::uint64_t state_skips = 0;
+  std::uint64_t stale_frames = 0;
   std::uint32_t patch_requests = 0;
   std::uint64_t patch_draws = 0;
   float display_exposure_ev = -8.8f;

@@ -46,7 +46,7 @@ $graphics = @(
 )
 $engine = @(
  'src/camera/probe.cpp','src/camera/local_memory.cpp','src/camera/code_contract.cpp','src/camera/activation_mask.cpp',
- 'src/camera/view_resize.cpp','src/camera/source_view.cpp','src/camera/body_pose_provider.cpp','src/camera/mount_config.cpp',
+ 'src/camera/view_resize.cpp','src/camera/view_aa.cpp','src/camera/source_view.cpp','src/camera/body_pose_provider.cpp','src/camera/mount_config.cpp',
  'src/camera/verified_profile.cpp','src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp',
  'src/camera/owned_entry_inventory.cpp','src/camera/owned_view.cpp','src/camera/view_pool.cpp',
  'src/hooks/observer_hook.cpp','src/hooks/observer_thunk.S'
@@ -80,6 +80,15 @@ if ($Validate) {
     $gpu = Join-Path $out 'native-graphics-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'tests/graphics/graphics_validation.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $gpu
     if ($LASTEXITCODE -ne 0) { throw 'Native validation compilation failed.' }
+    $frameOrder = Join-Path $out 'native-frame-order-validation.exe'
+    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/graphics/frame_order_validation.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $frameOrder
+    if ($LASTEXITCODE -ne 0) { throw 'Frame-order validation compilation failed.' }
+    & $frameOrder --warp
+    if ($LASTEXITCODE -ne 0) { throw 'WARP frame-order validation failed.' }
+    if (-not $WarpOnly) {
+        & $frameOrder
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware frame-order validation failed.' }
+    }
     & $gpu --patch-demand
     if ($LASTEXITCODE -ne 0) { throw 'Lazy patch demand admission failed.' }
     if (-not $WarpOnly) {

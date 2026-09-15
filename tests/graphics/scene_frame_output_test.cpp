@@ -196,6 +196,7 @@ void run(bool warp) {
     require(!output->patch(patch_format, patch_replay.width, patch_replay.height, patch_replay.content).buffer,
             "New typed patch is not published by prepare, even after earlier output submissions");
     require(output->discard_prepared(), "Discard closed never-submitted composition");
+    require(output->completed_submissions() == frame, "Unsubmitted/discarded work counted as GPU-completed warmup");
     require(!output->submit(), "Discarded composition was submitted");
     require(!output->patch(patch_format, patch_replay.width, patch_replay.height, patch_replay.content).buffer,
             "Discard cannot expose an unwritten patch buffer");
@@ -212,6 +213,8 @@ void run(bool warp) {
     require(output->submit(), output->error());
     require(manager->end_private_submission(transaction.receipt), "Private timeline signal");
     require(!output->idle(), "Output fence did not cover blocked work");
+    require(output->submissions() == frame + 1 && output->completed_submissions() == frame,
+            "A blocked GPU submission incorrectly counted as completed warmup");
     require(!output->discard_prepared(), "Submitted work could be discarded");
     patch_replay.patch = output->patch(patch_format, patch_replay.width, patch_replay.height, patch_replay.content);
     require(patch_replay.patch.buffer, "Submitted demanded patch becomes available under the shared timeline");
@@ -238,6 +241,7 @@ void run(bool warp) {
     check(blocked->Signal(frame + 1), "Release output queue");
     wait([&] { return completed->GetCompletedValue() >= frame * 2 + 2; });
     require(output->idle() && output->submissions() == frame + 1, "Output submission did not retire");
+    require(output->completed_submissions() == frame + 1, "Retired GPU work was not available to the prewarm completion check");
     require(output->address() == stable_address && output->buffer() == stable_buffer, "Stable output address changed");
     void* mapped = nullptr;
     D3D12_RANGE range{0, static_cast<SIZE_T>(Output::BufferBytes)};

@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include "../../src/app/launcher.hpp"
+#include "../../src/app/launcher_log.hpp"
 
 namespace {
 void require(bool value, const char* label) {
@@ -15,10 +16,78 @@ struct Files {
         DeleteFileW(path->c_str());
   }
 };
+struct ModuleFixture {
+  unsigned snapshots = 0, closed = 0, pauses = 0, fail_snapshots = 0;
+  DWORD failure = ERROR_BAD_LENGTH, last_error = 0;
+  bool fail_after_entry = false;
+  HANDLE snapshot(DWORD) {
+    ++snapshots;
+    if (snapshots <= fail_snapshots) {
+      last_error = failure;
+      return INVALID_HANDLE_VALUE;
+    }
+    return reinterpret_cast<HANDLE>(std::uintptr_t(123));
+  }
+  bool first(HANDLE, MODULEENTRY32W& entry) {
+    require(entry.dwSize == sizeof(entry), "Module entry size initialized");
+    std::wcscpy(entry.szModule, snapshots == 1 && fail_after_entry ? L"partial.dll" : L"complete.dll");
+    std::wcscpy(entry.szExePath, L"C:\\fixture\\module.dll");
+    entry.modBaseAddr = reinterpret_cast<BYTE*>(std::uintptr_t(0x10000));
+    entry.modBaseSize = 4096;
+    return true;
+  }
+  bool next(HANDLE, MODULEENTRY32W&) {
+    last_error = fail_after_entry && snapshots == 1 ? failure : ERROR_NO_MORE_FILES;
+    return false;
+  }
+  DWORD error() { return last_error; }
+  void close(HANDLE) { ++closed; }
+  void pause() { ++pauses; }
+};
+void module_checks() {
+  using taxi_camera::standalone::module_inventory;
+  ModuleFixture racing;
+  racing.fail_snapshots = 2;
+  auto result = module_inventory(1, racing);
+  require(!result.error && result.entries.size() == 1 && result.attempts == 3 && racing.closed == 1 && racing.pauses == 2,
+          "Transient loader races retry the snapshot and keep the successful inventory");
+  ModuleFixture partial;
+  partial.fail_after_entry = true;
+  result = module_inventory(1, partial);
+  require(!result.error && result.attempts == 2 && result.entries.size() == 1 && result.entries[0].name == L"complete.dll" &&
+              partial.closed == 2,
+          "Partial inventories are discarded before a whole-snapshot retry");
+  ModuleFixture perpetual;
+  perpetual.fail_snapshots = 100;
+  result = module_inventory(1, perpetual);
+  require(result.error == ERROR_BAD_LENGTH && result.entries.empty() && result.attempts == 32 && perpetual.pauses == 31,
+          "Changing loader inventory cannot cause an unbounded startup wait");
+  ModuleFixture denied;
+  denied.fail_snapshots = 1;
+  denied.failure = ERROR_ACCESS_DENIED;
+  result = module_inventory(1, denied);
+  require(result.error == ERROR_ACCESS_DENIED && result.entries.empty() && result.attempts == 1 && denied.pauses == 0,
+          "Access failure remains an error, not a missing bridge or retry");
+  partial = {};
+  partial.fail_after_entry = true;
+  partial.failure = ERROR_PARTIAL_COPY;
+  result = module_inventory(1, partial);
+  require(result.error == ERROR_PARTIAL_COPY && result.entries.empty() && result.attempts == 1 && partial.closed == 1,
+          "A failed enumeration must never publish an incomplete module list");
+  partial.failure = 0;
+  partial.snapshots = partial.closed = 0;
+  result = module_inventory(1, partial);
+  require(result.error == ERROR_GEN_FAILURE && result.entries.empty(), "Failed API without an error still refuses partial contents");
+  DWORD error = 1;
+  unsigned attempts = 0;
+  const auto current = taxi_camera::standalone::modules(GetCurrentProcessId(), &error, &attempts);
+  require(!error && !current.empty() && attempts > 0, "Real Windows module enumeration remains usable");
+}
 }  // namespace
 
 int main() {
   try {
+    module_checks();
     using taxi_camera::standalone::same_path;
     wchar_t temporary[MAX_PATH]{}, original[MAX_PATH]{};
     require(GetTempPathW(MAX_PATH, temporary) != 0, "Temporary directory");

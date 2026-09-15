@@ -43,9 +43,9 @@ The installer adds an `exe.xml` entry that starts the companion in background mo
 
 The companion checks the simulator's executable path, Windows user/session and AMD64 executable structure. Different paths are accepted only when Windows identifies them as the same file, allowing the Xbox installation path and its WindowsApps alias to match. It then loads the bridge using Windows `LoadLibraryW` in the simulator process and calls the DLL's `TaxiCameraStart` export. The bridge starts its control worker after the loader has finished.
 
-The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. With the service enabled and fresh data confirming a supported aircraft is on the ground at no more than 0.5 knots, it can prepare the camera pair before the first TAXI press. Warmup renders until the first combined nose/tail frame is available, then closes the render gates and keeps the pair ready. It writes neither PFD images nor TAXI-button state. Display discovery proceeds independently.
+The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. With the service enabled and fresh data confirming a supported aircraft is on the ground at no more than 0.5 knots, it can prepare the camera pair before the first TAXI press. Warmup renders three combined nose/tail frames and waits for their GPU completion, then closes the render gates and keeps the pair ready. It writes neither PFD images nor TAXI-button state. Display discovery proceeds independently.
 
-Background warmup gets one attempt per aircraft session and a five-second budget. Invalid or stale readiness data, diagnostics, a failure or the budget ending parks the attempt without an automatic retry. An explicit TAXI or scene-test request takes over immediately; it does not wait for background warmup. Only confirmed, assigned display textures receive the image. The explicit scene test prepares cameras without writing a PFD.
+Background warmup gets one attempt per aircraft session. Its five-second rendering budget begins when both native views are ready; preparation and aircraft-loading waits have a separate two-minute overall ceiling. Invalid or stale readiness data and diagnostics immediately park background work. Fresh eligible data can resume that same attempt without recreating the pair or resetting either deadline. A failure or deadline ends the attempt. An explicit TAXI or scene-test request takes over immediately; it does not wait for background warmup. Only confirmed, assigned display textures receive the image. The explicit scene test prepares cameras without writing a PFD.
 
 Closing the settings window hides it. Exiting the companion clears camera delivery. The bridge and its installed hooks stay loaded until MSFS exits because recorded GPU commands may still refer to their resources.
 
@@ -74,7 +74,7 @@ Source: [aircraft profile](../src/profiles/catalog.hpp), [PFD detector](../src/g
 
 ## 3. Position and render the two cameras
 
-The bridge calls internal MSFS camera functions to create two scene views. These functions are outside the public camera SDK. Before any private call, the bridge verifies the loaded image structure, 29 required code fingerprints, activation data and manager update pointer. It uses the observed image size and section bounds. Simulator version, timestamp and section count are not allowlists.
+The bridge calls internal MSFS camera functions to create two scene views. These functions are outside the public camera SDK. Before any private call, the bridge verifies the loaded image structure, 31 required code fingerprints, activation data and manager update pointer. It uses the observed image size and section bounds. Simulator version, timestamp and section count are not allowlists.
 
 Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair. A transient inspection failure pauses new camera work. Removal requires a fresh, complete view inspection and a closed render gate observed across distinct manager updates. Pending or unreadable views retain their IDs; they cannot be erased or replaced until validation recovers. The engine handles deferred renderer release after an accepted removal. TAXI OFF, speed cutoff, service pause and companion disconnection close render gates and hide the PFD feed while retaining the pair. A subsequent ON reuses those same owned views. Aircraft/profile changes close and revalidate the retained pair before selecting the next adapter; they do not request removal or replacement. Losing GPU capture-state evidence reports a stalled feed; it does not authorize camera removal or recreation. Capture resumes only when ordered GPU observations establish a valid source state again.
 
@@ -84,7 +84,9 @@ A scheduled closing pulse uses a separate inspection contract that validates own
 
 ### Following the aircraft
 
-SimConnect supplies latitude, longitude, altitude, pitch, bank and true heading. Taxi Cam converts these into an aircraft position and orientation in the scene's world coordinate system. Public camera data and the internal view establish the coordinate calibration.
+Camera mounts use the active aircraft model's scene transform, read in the verified camera-update observer. The current simulator profile identifies the user/controller's generation-checked model node, requires its second node reference to agree, checks the attached model identity, and rereads every observed field before accepting a pose. Native matrix rows map to aircraft right, up and forward with the first row negated.
+
+SimConnect still supplies aircraft identity, speed and a separate position/orientation plausibility check. Public camera data and the internal view establish the coordinate calibration used by that check. The asynchronous telemetry pose is never blended into the scene pose used for the mounts. A missing, changing or mismatched model pose closes the camera render gates while retaining the existing views.
 
 Each camera has a mount expressed relative to the aircraft datum:
 
@@ -92,7 +94,9 @@ Each camera has a mount expressed relative to the aircraft datum:
 - **Pitch and yaw** specify where it looks.
 - **Lens** sets its field of view.
 
-The aircraft transform is applied to each mount on camera updates. A camera therefore moves and turns with the aircraft while retaining its configured viewpoint. The nose and tail mounts are independently adjustable.
+The scene transform is applied to each mount before its render gate opens. The nose and tail mounts remain independently adjustable. This follows the model by setting the owned cameras' world transforms; it does not change native scene parenting. The scene-body change stopped the large A350 back-and-forth movement with AA Off. With the subsequent per-view AA change installed, the user reports the issue completely fixed in TAA. DLSS still produces slight back-and-forth aircraft movement in the lower view while taxiing. A brief fixed-fin intrusion remains a nonblocking follow-up. These observations do not establish A380 behaviour or identify the remaining DLSS mechanism.
+
+The AA change clears only bit31 of each owned view's first flag word, matching the observed `ToggleVpEffectAA` command. It does this with the render gate closed at creation and checks it before each later activation, so a graphics-setting change cannot silently restore it. Both flag words and the global override values are checked around the operation; all other bits remain intact. A changed or globally forced setting leaves the pair closed. A successful write requires fresh owned-view identity and resource checks. The main view and simulator AA setting are unchanged. TAA stability is confirmed by the user's A350 test; the lower-view DLSS residual remains open. The user also reports significantly higher FPS in TAA, without a matched numerical benchmark.
 
 ### Rendering at display size
 
@@ -104,6 +108,8 @@ The aircraft transform is applied to each mount on camera updates. A camera ther
 The initial aircraft selects these render sizes. A pair retains its allocation sizes when the aircraft changes: for example, a pair created for the A380 keeps its 736-pixel width when used by the A350. The compositor scales it into the selected aircraft's display rectangle. This avoids replacing native camera output allocations during a flight change. Both views remain much smaller than the main window.
 
 Changing graphics settings can overwrite an established camera's size fields. The bridge closes both render gates and retains their entry IDs. When a fresh inspection proves both entries are mode2 and their existing output bitmaps still match the pair's original allocation sizes, it restores only the size fields and projection. It neither allocates replacement textures nor recreates the camera pair. Fresh captures are required before the PFD resumes. If the existing outputs or identities cannot be verified, the cameras stay closed and the app reports that MSFS must be restarted.
+
+A live DLSS-to-TAA switch exposed a recovery refusal: the inherited primary render size was 1695×901 while the two display-size pairs were 2542×1351. The A350 camera bitmaps remained 774×251 and 774×496. Recovery now accepts independently bounded inherited pairs when the existing output still proves the exact original pane size. A regression reproduces the old refusal and checks successful restoration without allocation or changes outside the size fields; the corrected recovery still needs a simulator check.
 
 The rate setting limits activation opportunities to **15–60 per camera per second**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images.
 

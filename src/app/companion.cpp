@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include "launcher.hpp"
+#include "launcher_log.hpp"
 #include "../shared/protocol.hpp"
 #include "settings_store.hpp"
 #include "bug_report.hpp"
@@ -746,12 +747,17 @@ DWORD WINAPI connection_worker(void*) {
           mailbox.data()->settings = settings;
           mailbox.unlock();
         }
-        const auto loaded = win::load_bridge(attached, expected_simulator, installation + L"\\taxi-camera-bridge.dll", &running);
+        win::LaunchDiagnostics launch_diagnostics;
+        const auto loaded =
+            win::load_bridge(attached, expected_simulator, installation + L"\\taxi-camera-bridge.dll", &running, &launch_diagnostics);
+        win::log_launch(win::settings_directory(), attached, loaded, launch_diagnostics);
         const bool retrying = startup_retry.schedule(loaded, GetTickCount64());
         attempted = !retrying;
         {
           const std::lock_guard lock(app_mutex);
           connection = loaded.message;
+          if (!loaded.ok)
+            connection += L" (Windows " + std::to_wstring(loaded.error) + L")";
           if (retrying)
             connection += L" Retrying startup preflight.";
           else if (loaded.retry_before_load && !loaded.ok)
@@ -1148,9 +1154,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           s.manual_mask ^= id == 224 ? 1u : 2u;
         }
         if (id == 226 || id == 227) {
-          s.follow_taxi = 0;
           s.manual_mask = 0;
           s.calibration_mask ^= id == 226 ? 1u : 2u;
+          s.follow_taxi = s.calibration_mask == 0;
         }
         if (id == 228)
           s.single_camera = !s.single_camera;

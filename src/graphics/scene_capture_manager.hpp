@@ -23,11 +23,22 @@ class SceneCaptureManager {
   static constexpr std::size_t MaximumLists = 4096;
   static constexpr std::size_t MaximumPackets = 16;
   static constexpr std::uint64_t MaximumBytes = 256ull * 1024 * 1024;
+  struct FrameOrder {
+    // Actual serialized device timeline and list position within that submit.
+    // Allocation tokens and CPU retirement times do not order rendered images.
+    std::uint64_t submission = 0;
+    std::uint32_t position = 0;
+    bool newer_than(const FrameOrder& previous) const noexcept {
+      return submission && position &&
+             (submission > previous.submission || (submission == previous.submission && position > previous.position));
+    }
+  };
   struct Frame {
     std::uint64_t token = 0;
     std::uint64_t device_key = 0;
     SceneCopyMatch match;
     ID3D12Resource* resource = nullptr;  // Borrowed owned snapshot, COPY_DEST.
+    FrameOrder order;
   };
   struct Submission {
     std::uint64_t receipt = 0;
@@ -168,6 +179,8 @@ class SceneCaptureManager {
   // Each returned frame is leased exactly once, after successful native Reset
   // or destruction retires its application recording, all receipts return, and
   // its producer fence completes. Caller supplies fixed bounded storage.
+  // Buffer-slot order is unspecified. Consumers must retain the newest order
+  // per device/feed, including across polls, to reject delayed older captures.
   std::size_t poll_completed_frames(Frame* frames, std::size_t capacity) noexcept;
   bool finish_consumption(std::uint64_t token, ID3D12Fence*, std::uint64_t value) noexcept;
   // Only for a leased frame on which NO private work was recorded/submitted.
@@ -204,6 +217,7 @@ class SceneCaptureManager {
     D3D12_RESOURCE_DESC description{};
     SceneCopyMatch match;
     std::uint64_t token = 0, device_key = 0, submitted = 0;
+    FrameOrder order;
     ID3D12CommandQueue* producer = nullptr;  // Registered queue retained by hook.
     unsigned in_flight = 0;
     bool assigned = false, retired = false, quarantined = false, leased = false;
@@ -222,6 +236,8 @@ class SceneCaptureManager {
     bool source_work = false;
     std::array<SourceLease, source_state::Tracker::capacity> source_leases{};
     std::size_t source_lease_count = 0;
+    std::array<std::uint32_t, MaximumPackets> packet_positions{};
+    std::uint32_t last_position = 0;
   };
   struct SourceCandidate {
     ID3D12Resource* native = nullptr;  // Registry identity only; never a GPU lease.

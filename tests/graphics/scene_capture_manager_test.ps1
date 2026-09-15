@@ -34,7 +34,8 @@ foreach ($tailAdapter in @('hardware', 'warp')) {
     $tailOutput = & $tailExecutable @tailArguments
     if ($LASTEXITCODE -ne 0) { throw "Queue tail validation failed: $tailAdapter/$tailModel." }
     $tailResult = $tailOutput | ConvertFrom-Json
-    if ($tailResult.passed -ne $true -or $tailResult.checked_pixels -ne 1748736 -or $tailResult.tail_captures -ne 6 -or
+    # Three complete pairs at the fixture's current 736 x (251 + 496) dimensions.
+    if ($tailResult.passed -ne $true -or $tailResult.checked_pixels -ne (3 * 736 * (251 + 496)) -or $tailResult.tail_captures -ne 6 -or
         $tailResult.reset_receipt_lease -ne $true -or $tailResult.stop_releases_sources -ne $true -or $tailResult.tail_device_reuse -ne $true) {
       throw 'Invalid queue tail receipt.'
     }

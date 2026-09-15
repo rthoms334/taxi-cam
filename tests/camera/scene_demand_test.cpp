@@ -150,10 +150,12 @@ void prewarm_sequence(unsigned rate) {
   bool requested = false;
   unsigned starts = 0;
   for (std::uint64_t now = 0; now < 20000; now += 10) {
-    const bool eligible = now >= 1000;  // Simulate arrival of telemetry, not a load timer.
+    const bool eligible = now >= 1000;
     const bool foreground = now >= 10000 && (now / 1000) % 2;
-    const bool complete_pair = now >= 2000;
-    const bool warm = warmup.observe(now, eligible, foreground, complete_pair, false);
+    // The first image is available before the GPU has completed all three pairs.
+    const std::uint64_t completed = now < 2000 ? 0 : now < 2200 ? 1 : now < 2400 ? 2 : 3;
+    const win::ScenePrewarmProgress progress{now >= 1500, now >= 1800, now >= 1800 ? 3u : 0u, completed};
+    const bool warm = warmup.observe(now, eligible, foreground, progress, false);
     const auto demand = win::scene_demand(foreground ? 3u : 0u, false, 3, requested, false, warm);
     require(demand.stamp_mask == (foreground ? 3u : 0u), "Prewarm wrote an unrequested PFD");
     if (demand.start) {
@@ -165,33 +167,77 @@ void prewarm_sequence(unsigned rate) {
     if (!taxi_camera::native_camera::park_initial_scene(demand.suspend, before.owned_ids[0] || before.owned_ids[1]))
       pair.process_update(owner, callbacks);
     const auto gates = schedule.tick(now, demand.suspend);
-    if ((!warm && !foreground) || now < 1000)
+    if (!warm && !foreground)
       require(!gates[0] && !gates[1], "Completed/idle warmup left native rendering active");
     if (now < 1000)
       require(engine.creates == 0, "Missing startup telemetry created cameras");
-    if (now >= 2000 && now < 10000)
-      require(warmup.phase() == win::ScenePrewarm::Phase::ready, "Completed pair was not retained parked");
+    if (now >= 1800 && now < 2400)
+      require(warm, "Submitted or first-pair output ended warmup before three GPU completions");
+    if (now >= 2400 && now < 10000)
+      require(warmup.phase() == win::ScenePrewarm::Phase::ready, "Three completed pairs were not retained parked");
   }
   require(starts == 1 && engine.creates == 2 && engine.erases == 0, "Prewarm and button toggles allocated extra native cameras");
 }
-void prewarm_cancellation() {
+void prewarm_loading_and_completion() {
   namespace win = taxi_camera::standalone;
+  using Phase = win::ScenePrewarm::Phase;
+  win::ScenePrewarm warm;
+  require(warm.observe(1000, true, false, {}, false), "Ready session did not begin preparation");
+  require(warm.observe(11000, true, false, {}, false) && warm.phase() == Phase::preparing,
+          "Ten-second shader preparation consumed the rendering budget");
+  require(!warm.observe(11100, false, false, {}, false) && warm.phase() == Phase::paused,
+          "Lost heartbeat/telemetry did not park the warmup");
+  require(warm.observe(70000, true, false, {}, false) && warm.phase() == Phase::preparing,
+          "Stable loaded aircraft could not resume the original preparation");
+  require(warm.started_ms() == 1000, "Resuming preparation reset the overall work budget");
+  require(warm.observe(71000, true, false, {true, true, 3, 0}, false), "Native readiness did not start rendering");
+  for (unsigned completed = 0; completed < 3; ++completed)
+    require(warm.observe(71100 + completed * 100, true, false, {true, true, 3, completed}, false),
+            "CPU submissions or fewer than three GPU completions ended warmup");
+  require(!warm.observe(71500, true, false, {true, true, 3, 3}, false) && warm.phase() == Phase::ready,
+          "GPU completion did not park the prepared cameras");
+  require(!warm.observe(72000, true, false, {true, true, 3, 3}, false), "Ready cameras rendered indefinitely while TAXI was off");
+
+  win::ScenePrewarm retained;
+  require(retained.observe(1000, true, false, {true, true, 50, 49}, false), "Retained views skipped fresh warmup");
+  require(retained.observe(1100, true, false, {true, true, 50, 50}, false), "Old in-flight pair counted as new-session warmup");
+  require(retained.observe(1200, true, false, {true, true, 53, 52}, false), "Only two new pairs completed");
+  require(retained.observe(1250, true, false, {false, false, 53, 53}, false), "Obsolete scene output marked warmup ready");
+  require(!retained.observe(1300, true, false, {true, true, 53, 53}, false) && retained.phase() == Phase::ready,
+          "New-session pairs did not complete the retained warmup");
+}
+void prewarm_limits_and_takeover() {
+  namespace win = taxi_camera::standalone;
+  using Phase = win::ScenePrewarm::Phase;
   for (unsigned cause = 0; cause < 4; ++cause) {
     win::ScenePrewarm warmup;
-    require(warmup.observe(1000, true, false, false, false), "Ready session did not begin warmup");
-    const auto now = cause == 0 ? 6000u : cause == 3 ? 999u : 1100u;
-    require(!warmup.observe(now, cause != 1, false, false, cause == 2), "Cancelled/failed/budgeted warmup kept rendering");
+    require(warmup.observe(1000, true, false, {}, false), "Ready session did not begin warmup");
+    const bool render_timeout = cause == 1;
+    if (render_timeout)
+      require(warmup.observe(1100, true, false, {true, false, 0, 0}, false), "Ready views did not begin render budget");
+    const auto now = cause == 0 ? 1000 + win::ScenePrewarm::MaximumStartupMs : render_timeout ? 6100 : cause == 3 ? 999 : 1200;
+    require(!warmup.observe(now, true, false, {}, cause == 2), "Failure/deadline left warmup rendering");
+    require(warmup.phase() == (cause == 2 ? Phase::failed : Phase::timed_out), "Incorrect terminal warmup state");
     for (unsigned retry = 0; retry < 100; ++retry)
-      require(!warmup.observe(10000 + retry, true, false, false, false), "Background warmup retried automatically");
-    const auto explicit_demand = win::scene_demand(1, false, 1, true, false, false);
-    require(!explicit_demand.start && !explicit_demand.suspend && explicit_demand.stamp_mask == 1,
-            "A background cancellation prevented explicit retained resume");
-    warmup = {};  // The bridge resets only for a new aircraft session.
-    require(warmup.observe(20000, true, false, false, false), "A new session could not warm the retained pair");
+      require(!warmup.observe(now + 1 + retry, true, false, {}, false), "Terminal warmup restarted in the background");
+    warmup = {};
+    require(warmup.observe(200000, true, false, {}, false), "A new aircraft session could not warm the retained pair");
   }
-  win::ScenePrewarm foreground;
-  require(!foreground.observe(1000, true, true, false, false), "Foreground created a second warmup demand");
-  require(!foreground.observe(2000, true, false, false, false), "Foreground OFF began a new background attempt");
+  win::ScenePrewarm paused;
+  require(paused.observe(1000, true, false, {}, false), "Pause fixture start");
+  require(!paused.observe(2000, false, false, {}, false), "Pause did not close gates");
+  require(!paused.observe(121000, false, false, {}, false) && paused.phase() == Phase::timed_out,
+          "Indefinite ineligibility escaped the overall deadline");
+  for (unsigned phase = 0; phase < 4; ++phase) {
+    win::ScenePrewarm foreground;
+    if (phase) {
+      require(foreground.observe(1000, true, false, {}, false), "Takeover fixture start");
+      foreground.observe(1100, phase != 3, false, {phase == 2, false, 0, 0}, false);
+    }
+    require(!foreground.observe(1200, true, true, {}, false) && foreground.phase() == Phase::foreground,
+            "Foreground request waited for background preparation/completion");
+    require(!foreground.observe(2000, true, false, {}, false), "Foreground OFF restarted background rendering");
+  }
   Engine engine;
   ec::PairController pair;
   const ec::EngineCallbacks callbacks{&engine, Engine::initialize, Engine::create, Engine::erase};
@@ -202,9 +248,8 @@ void prewarm_cancellation() {
       pair.process_update({11, 1}, callbacks);
   }
   require(engine.creates == 0 && pair.snapshot().request_pending, "Suspended pending creation was consumed");
-  require(!taxi_camera::native_camera::park_initial_scene(false, false), "Explicit startup remained parked");
   pair.process_update({11, 1}, callbacks);
-  require(engine.creates == 2 && engine.erases == 0, "Explicit resume did not use the one queued pair");
+  require(engine.creates == 2 && engine.erases == 0, "Resume did not use the one queued pair");
   require(!taxi_camera::native_camera::park_initial_scene(true, true), "Owned pair gate closure/cleanup was skipped");
 }
 void prewarm_unqueued_failure_then_taxi() {
@@ -214,44 +259,30 @@ void prewarm_unqueued_failure_then_taxi() {
     Engine engine;
     ec::PairController pair;
     const ec::EngineCallbacks callbacks{&engine, Engine::initialize, Engine::create, Engine::erase};
-    bool requested = false;
-    bool failed = false;
-    const bool background = warmup.observe(1000, true, false, false, false);
-    const auto initial = win::scene_demand(0, false, 3, requested, failed, background);
-    require(initial.start && !initial.stamp_mask, "Background preparation was not admitted without PFD writes");
-    // Mirror the bridge's post-prepare eligibility/budget check. Cause 3
-    // remains eligible but the native request itself then refuses acceptance.
-    const auto after_prepare = cause == 1 ? 6000u : 1100u;
-    const bool allowed = warmup.observe(after_prepare, cause != 0, false, false, cause == 2);
-    require(allowed == (cause == 3), "The wrong pre-native stage admitted the cancelled start");
+    bool requested = false, failed = false;
+    const bool background = warmup.observe(1000, true, false, {}, false);
+    require(win::scene_demand(0, false, 3, requested, failed, background).start, "Background preparation not admitted");
+    const auto after_prepare = cause == 1 ? 121000u : 1100u;
+    const bool allowed = warmup.observe(after_prepare, cause != 0, false, {}, cause == 2);
+    require(allowed == (cause == 3), "The wrong pre-native stage admitted the start");
     failed = win::finish_scene_start(warmup, background, requested);
     require(!failed && !requested && engine.creates == 0 && !pair.snapshot().request_pending,
-            "An unqueued background failure latched foreground failure or queued native creation");
-    require(warmup.phase() == (cause == 0 ? win::ScenePrewarm::Phase::cancelled
-                              : cause == 1 ? win::ScenePrewarm::Phase::timed_out
-                                           : win::ScenePrewarm::Phase::failed),
-            "A refused background request remained eligible to retry");
-    // First TAXI ON occurs immediately: there is deliberately no intervening
-    // OFF iteration to clear the shared failure latch.
-    const bool foreground_background = warmup.observe(after_prepare + 1, true, true, false, failed);
+            "Unqueued background failure latched foreground failure or queued native creation");
+    const bool foreground_background = warmup.observe(after_prepare + 1, true, true, {}, failed);
     const auto taxi = win::scene_demand(1, false, 1, requested, failed, foreground_background);
-    require(taxi.start && !taxi.suspend && taxi.stamp_mask == 1,
-            "First TAXI after unqueued background cancellation required a button retoggle");
+    require(taxi.start && !taxi.suspend && taxi.stamp_mask == 1, "First TAXI needed a retoggle after interrupted preparation");
     pair.request_independent_pose();
     pair.process_update({11, 1}, callbacks);
     requested = pair.snapshot().state == ec::State::active;
     failed = win::finish_scene_start(warmup, false, requested);
-    require(requested && !failed && engine.creates == 2 && engine.erases == 0,
-            "The immediate foreground start did not create exactly one pair");
+    require(requested && !failed && engine.creates == 2 && engine.erases == 0, "Foreground did not create exactly one pair");
     for (unsigned retry = 0; retry < 100; ++retry)
-      require(!warmup.observe(after_prepare + 2 + retry, true, false, false, false),
-              "A failed prewarm later retried in the background");
+      require(!warmup.observe(after_prepare + 2 + retry, true, false, {}, false), "Warmup restarted after foreground takeover");
   }
   win::ScenePrewarm explicit_failure;
   const bool failed = win::finish_scene_start(explicit_failure, false, false);
   const auto latched = win::scene_demand(1, false, 1, false, failed);
-  require(failed && !latched.start && latched.suspend && !latched.stamp_mask,
-          "Foreground failure lost its existing no-retry latch");
+  require(failed && !latched.start && latched.suspend && !latched.stamp_mask, "Foreground failure lost its no-retry latch");
 }
 }  // namespace
 int main() {
@@ -262,7 +293,8 @@ int main() {
     prewarm_readiness();
     prewarm_sequence(15);
     prewarm_sequence(60);
-    prewarm_cancellation();
+    prewarm_loading_and_completion();
+    prewarm_limits_and_takeover();
     prewarm_unqueued_failure_then_taxi();
     const auto failed = taxi_camera::standalone::scene_demand(3, false, 3, false, true);
     require(!failed.start && failed.suspend && !failed.stamp_mask, "A failed start retried or stamped without permission");
@@ -272,7 +304,8 @@ int main() {
     require(!unknown.start && unknown.suspend && !unknown.stamp_mask, "Unknown demand bits created or stamped views");
     std::puts(
         "PASS scene demand: prepare once before discovery, matched-target-only writes, scene-only test, left/OFF/right, retained "
-        "pair, one bounded grounded prewarm, cancellation/timeout and closed idle gates at 15/60 fps. Mock engine only.");
+        "pair, three completed background pairs, loading pause/resume, setup/render budgets and closed idle gates at 15/60 fps. Mock "
+        "engine only.");
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL scene demand: %s\n", e.what());

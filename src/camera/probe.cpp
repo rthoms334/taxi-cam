@@ -6,6 +6,7 @@
 #include "../hooks/observer_hook.hpp"
 #include "../graphics/scene_handoff.hpp"
 #include "activation_mask.hpp"
+#include "aircraft_scene_pose.hpp"
 #include "body_pose_provider.hpp"
 #include "local_memory.hpp"
 #include "probe_inspection_gate.hpp"
@@ -13,6 +14,7 @@
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
 #include "source_view.hpp"
+#include "view_aa.hpp"
 #include "view_readiness_wait.hpp"
 #include "view_resize.hpp"
 #include "view_resize_recovery.hpp"
@@ -249,9 +251,33 @@ bool capture_pose(Runtime& runtime) {
     }
     body = sample_body_pose(GetTickCount64());
   }
-  if (!body.valid || !make_mounted_pair(body.pose, runtime.mounts, runtime.mounted_poses)) {
+  if (!body.valid) {
     runtime.pose_busy = temporary_pose_unavailable(body.error);
     runtime.message = std::string("Aircraft body pose unavailable: ") + body.error;
+    return false;
+  }
+  // The visible aircraft and its camera offsets must use the same scene pose.
+  // SimConnect is asynchronous; a fresh packet is still not the rendered model
+  // transform during a taxi turn. Retain its session/freshness/plausibility
+  // guards, but never use it as the mount transform or interpolate toward it.
+  LocalMemoryReader objects;
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
+  std::uint64_t user = 0;
+  const auto aircraft = inspected(runtime, [&] {
+    return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base, 133538936, true, true, false, nullptr, &user);
+  });
+  if (!aircraft.valid || !aircraft.available || !user) {
+    runtime.pose_busy = true;
+    runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
+    return false;
+  }
+  objects.reset_budget();
+  const auto scene = inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base); });
+  if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose) ||
+      !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses)) {
+    runtime.pose_busy = true;
+    runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") +
+                      (scene.complete ? "public_pose_mismatch" : scene.error);
     return false;
   }
   runtime.pose_captured = true;
@@ -455,6 +481,29 @@ bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair,
   }
   return true;
 }
+bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapshot& view) {
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
+  const auto result = disable_owned_view_aa(view, image);
+  if (!result.complete) {
+    runtime.stage_error = result.error;
+    return false;
+  }
+  if (result.write_attempted) {
+    const auto confirmed = inspect_entry(runtime, id);
+    auto expected_flags = view.flags;
+    expected_flags[0] &= ~kViewAaFlag;
+    if (!confirmed.complete || !confirmed.ready || confirmed.mode != 2 || confirmed.view_address != view.view_address ||
+        confirmed.node_address != view.node_address || confirmed.camera_address != view.camera_address ||
+        confirmed.resource_address != view.resource_address || confirmed.dimensions != view.dimensions ||
+        confirmed.output_dimensions != view.output_dimensions || confirmed.flags != expected_flags) {
+      runtime.stage_error = "Owned camera identity changed while disabling its AA; render gate stays closed.";
+      return false;
+    }
+    view = confirmed;
+  }
+  return true;
+}
+
 void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose) noexcept {
   using SetVector = void (*)(void*, const double*);
   function<SetVector>(runtime, 66324928)(reinterpret_cast<void*>(view.node_address), pose.position.data());
@@ -629,6 +678,10 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     runtime.creation_valid = view.complete && view.ready && (view.flags[0] & 1u);
     if (!runtime.creation_valid) {
       runtime.stage_error = "The new owned view could not be validated with its render gate closed.";
+      return id;
+    }
+    if (!prepare_owned_view_aa(runtime, id, view)) {
+      runtime.creation_valid = false;
       return id;
     }
     apply_pose(runtime, view, runtime.mounted_poses[runtime.creations - 1]);
@@ -1064,7 +1117,17 @@ void observer(void* manager) noexcept {
           desired = next_schedule.tick(GetTickCount64(), runtime.suspended.load());
           const bool needs_pose = desired[0] || desired[1];
           const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
-          if (pose_ready) {
+          bool aa_ready = true;
+          if (pose_ready && needs_pose) {
+            for (unsigned i = 0; i < desired.size(); ++i) {
+              if (desired[i] && !prepare_owned_view_aa(runtime, pair.owned_ids[i], views[i])) {
+                aa_ready = false;
+                break;
+              }
+              report.flags[i] = views[i].flags;
+            }
+          }
+          if (pose_ready && aa_ready) {
             // Position changes happen only inside the validated observer phase,
             // before the original manager update can consume a newly opened gate.
             if (needs_pose)
@@ -1076,6 +1139,12 @@ void observer(void* manager) noexcept {
             timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, desired, report, new_pair); });
             runtime.scheduled_ids = pair.owned_ids;
             runtime.schedule = next_schedule;
+          } else if (!aa_ready) {
+            timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, {}, report, true); });
+            runtime.scheduled_ids = pair.owned_ids;
+            runtime.schedule = next_schedule;
+            report.view_waiting = true;
+            runtime.message = std::string("Camera AA configuration unavailable; retaining the closed camera pair: ") + runtime.stage_error;
           } else {
             body_pose_failed = true;
             timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, {}, report, true); });

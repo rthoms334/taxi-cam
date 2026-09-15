@@ -200,15 +200,18 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
                                             bool inspect_selected_object,
                                             bool inspect_component,
                                             bool inspect_camera_keys,
-                                            std::uint64_t* verified_source) {
+                                            std::uint64_t* verified_source,
+                                            std::uint64_t* verified_user) {
   if (verified_source != nullptr)
     *verified_source = 0;
+  if (verified_user != nullptr)
+    *verified_user = 0;
   AircraftInventory result;
   std::uint64_t aircraft_for_output = 0;
   if ((expected_facade_vtable != 0 && expected_facade_vtable != kAircraftExpectedFacadeVtableRva) ||
       (inspect_selected_object && expected_facade_vtable != kAircraftExpectedFacadeVtableRva) ||
       (inspect_component && !inspect_selected_object) || (inspect_camera_keys && !inspect_component) ||
-      (verified_source != nullptr && !inspect_component)) {
+      ((verified_source != nullptr || verified_user != nullptr) && !inspect_component)) {
     result.stage = "accessor_profile";
     result.error = "The accessor extension permits only the fixed captured facade vtable identity.";
     return result;
@@ -645,6 +648,8 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
   result.stage = "complete";
   if (verified_source != nullptr)
     *verified_source = aircraft_for_output;
+  if (verified_user != nullptr)
+    *verified_user = user;
   return result;
 }
 

@@ -53,7 +53,7 @@ Side masks are **0 off, 1 left, 2 right, 3 both**. Using manual preview disables
 
 PFD routing selections apply immediately. Each side may use an explicit current texture ID or **Automatic assignment**. Automatic detection preserves an explicitly selected side and identifies the other from the same confirmed pair. Selecting the same nonzero ID for both sides shows an error and preserves the accepted assignment. Changing aircraft profile starts fresh target discovery; ordinary loss of both resource identities still requires an explicit assignment before side order can be trusted.
 
-Calibration identifies the destination texture using an animated pattern. Its write allowance renews every 50 ms in the native adapter. Reaching the limit skips additional pattern writes for that window without disabling calibration.
+Calibration identifies the destination texture using an animated pattern. Switching either calibration target on disables automatic TAXI control; switching the last target off restores **TAXI buttons** automatically. Its write allowance renews every 50 ms in the native adapter. Reaching the limit skips additional pattern writes for that window without disabling calibration.
 
 Source: [settings schema](../src/shared/protocol.hpp), [persistence](../src/app/settings_store.hpp), [write budget](../src/graphics/write_budget.hpp).
 
@@ -76,7 +76,11 @@ The A350-900 mounts use the accepted calibration. The -1000 retains the same hei
 
 Position components are bounded to ±500 m, pitch to ±89°, yaw to ±180° and lens to 0.05–1.55 radians. Both mounts are saved in the profile.
 
-Source: [aircraft defaults](../src/profiles/catalog.hpp), [mount transforms](../src/camera/aircraft_mounts.hpp).
+The mount transform comes from the active aircraft model's scene node. Fresh telemetry provides a separate plausibility guard (within 25 m and 15° after coordinate calibration), without smoothing or driving the mount. A failed model identity, stale generation, changed snapshot or pose disagreement keeps the camera gates closed. Camera controls and saved mount values are unchanged. The scene-body change stopped the large A350 movement with AA Off. Following the per-view AA change, the user reports the issue completely fixed in TAA; slight lower-view movement while taxiing with DLSS remains open. The brief fixed-fin intrusion is a nonblocking follow-up.
+
+The AA change disables the simulator's per-view AA effect on the two owned taxi views while preserving the main-view AA setting. A required global override, stale owned view or failed flag verification retains the closed camera pair. The user confirms stable TAA and significantly better FPS than DLSS on their setup. DLSS stability remains incomplete; these observations are not a general performance benchmark.
+
+Source: [aircraft defaults](../src/profiles/catalog.hpp), [mount transforms](../src/camera/aircraft_mounts.hpp), [scene pose reader](../src/camera/aircraft_scene_pose.hpp).
 
 ## Display geometry
 
@@ -110,9 +114,9 @@ Source: [compositor and guides](../src/graphics/camera_compositor_d3d12.hpp), [o
 
 Warmup requires an enabled, connected service, the current supported aircraft session, valid TAXI and body-pose data, and fresh `SIM ON GROUND` and ground-speed samples confirming on-ground operation at 0–0.5 knots. The on-ground subscription is optional and separate from the body-pose packet: missing data prevents background warmup, without disabling ordinary TAXI requests.
 
-Each session gets one background attempt lasting up to five seconds. The first combined frame ends warmup and parks the pair. Foreground activation takes over; stale data, a failure or the time limit ends background work without retrying it. No display or TAXI state is written by warmup.
+Each session gets one background attempt. Shader preparation and native camera/calibration readiness may take up to a two-minute overall ceiling. Once both views are ready, a separate five-second rendering budget begins. Three new combined frames must complete on the GPU before warmup parks the pair; queued work and output from an earlier session do not count. Foreground activation takes over immediately. Stale or ineligible data parks the attempt until fresh eligible data resumes it, retaining both deadlines and any queued creation request. Failure or timeout ends background work for that session. No display or TAXI state is written by warmup.
 
-`Prewarm phase` reports the outcome, elapsed time, retained entry IDs, cumulative native creation count and output availability. Ordinary OFF/ON cycles should reuse the same IDs. The recurring `Camera retention` line also reports `created_total`, owned `snapshot_bytes`, quarantined packet count and the warmup phase. These counters help detect unwanted recreation and growth in our snapshot pool; they do not measure all simulator heap or VRAM use.
+`Prewarm phase` reports preparation, rendering, a parked pause or the final outcome, with elapsed time, retained entry IDs, cumulative native creation count, output availability and GPU-completed warmup pairs. Ordinary OFF/ON cycles should reuse the same IDs. The recurring `Camera retention` line also reports `created_total`, owned `snapshot_bytes`, quarantined packet count and the warmup phase. These counters help detect unwanted recreation and growth in our snapshot pool; they do not measure all simulator heap or VRAM use.
 
 ## PFD-copy diagnostics
 
@@ -200,7 +204,7 @@ The bridge writes a status snapshot to the companion and appends metadata to:
 Control-transition logs include companion connectivity, cached-read contention count, requested scene state, TAXI validity/grace expiry, scene stop reason and recovery attempts. Output changes and readiness-wait episodes are also logged immediately when observed by the control loop. Camera entry IDs, per-view readiness, draw counts, unknown command lists and invalid recording counts distinguish a control disconnect, temporary pending view and GPU capture-state loss.
 When an established camera entry is pending or its inspection changes during a read, the observer retains the pair and waits for fresh validation. It closes only independently validated ready views and makes no pose, resize or activation calls against unavailable views. A timeout does not authorize removing an unavailable camera. Completed images remain subject to resource-generation checks.
 
-A primary-resolution change also retains the pair. Recovery requires the same owned IDs, both render gates observed closed across distinct manager updates, mode2 entries, and existing bitmap dimensions equal to the configured panes. Only the 24 camera-size bytes and projection are restored; no output allocator or entry deletion is called. A refused or partial restoration remains paused, with a restart message instead of repeated recreation.
+A primary-resolution or AA-mode change also retains the pair. Recovery requires the same owned IDs, both render gates observed closed across distinct manager updates, mode2 entries, and existing bitmap dimensions equal to the configured panes. Upscaling can leave different primary render and display sizes in the three camera-size pairs; recovery bounds all six values independently before restoring them to the original pane dimensions. Only the 24 camera-size bytes and projection are restored; no output allocator or entry deletion is called. A refused or partial restoration remains paused, with a restart message instead of repeated recreation. The mixed-size DLSS-to-TAA case has a local regression test; recovery in the simulator still needs confirmation on the corrected build.
 
 OBS Game Capture's [D3D11On12 capture path](https://github.com/obsproject/obs-studio/blob/master/plugins/win-capture/graphics-hook/d3d12-capture.cpp) copies a wrapped backbuffer on an application queue. A null-buffer [SetPredication call](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-setpredication) disables conditional execution and does not invalidate capture evidence. A non-null predicate still invalidates injection for the entire recording, including after a later null call, until a successful native Reset. Hardware and WARP validation exercise the D3D11On12 copy sequence followed by fresh camera capture and both PFD pixel checks; this is separate from live OBS/MSFS validation.
 

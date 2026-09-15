@@ -61,6 +61,7 @@ class SceneFrameOutput {
   ID3D12Resource* buffer() const noexcept { return buffer_; }
   D3D12_GPU_VIRTUAL_ADDRESS address() const noexcept { return address_; }
   std::uint64_t submissions() const noexcept { return submitted_; }
+  std::uint64_t completed_submissions() const noexcept;
   ID3D12Fence* completion_fence() const noexcept { return fence_; }
   const char* error() const noexcept { return error_; }
 

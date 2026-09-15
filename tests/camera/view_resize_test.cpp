@@ -217,6 +217,45 @@ void stale_fields_and_boundary() {
 }
 
 void retained_dimension_restore() {
+  // Live DLSS -> TAA transition: primary render size differs from display
+  // size, but each owned Bitmap retains its original A350 pane allocation.
+  for (unsigned feed = 0; feed < 2; ++feed) {
+    Fixture f(0, feed);
+    const taxi_camera::profiles::CameraPanes panes{{{774, 251}, {774, 496}}};
+    f.desired.fill(panes[feed]);
+    f.view.mode = 2;
+    f.view.resource_present = true;
+    f.view.output_dimensions = panes[feed];
+    f.view.dimensions = {{{1695, 901}, {2542, 1351}, {2542, 1351}}};
+    std::memcpy(f.memory + 16, &f.view.dimensions, 24);
+    auto callbacks = f.callbacks();
+    callbacks.ensure_output = nullptr;
+    const auto result = nc::restore_owned_view_dimensions(f.view, feed, f.desired, callbacks, panes);
+    require(result.complete && result.write_attempted && result.status == nc::ViewResizeStatus::dimensions_restored,
+            "DLSS/TAA mixed primary sizes prevented retained camera recovery");
+    require(f.refreshed == 1 && f.allocated == 0, "AA recovery must refresh without allocating a texture");
+    for (unsigned i = 0; i < f.before.size(); ++i)
+      if (i < 16 || i >= 40)
+        require(f.memory[i] == f.before[i], "AA recovery changed flags or bytes outside the dimensions");
+  }
+  for (unsigned pair = 0; pair < 3; ++pair) {
+    for (unsigned axis = 0; axis < 2; ++axis) {
+      for (const auto invalid : {0, 31, 16385, std::numeric_limits<std::int32_t>::max()}) {
+        Fixture f;
+        f.view.mode = 2;
+        f.view.resource_present = true;
+        f.view.output_dimensions = f.desired[0];
+        f.view.dimensions = {{{1695, 901}, {2542, 1351}, {2542, 1351}}};
+        f.view.dimensions[pair][axis] = invalid;
+        std::memcpy(f.memory + 16, &f.view.dimensions, 24);
+        std::memcpy(f.before.data(), f.memory, f.before.size());
+        const auto result = nc::restore_owned_view_dimensions(f.view, 0, f.desired, f.callbacks());
+        require(!result.complete && !result.write_attempted && result.status == nc::ViewResizeStatus::invalid_dimensions,
+                "AA recovery admitted an out-of-bounds inherited dimension");
+        f.unchanged_bytes();
+      }
+    }
+  }
   for (unsigned feed = 0; feed < 2; ++feed) {
     Fixture f(0, feed);
     f.view.mode = 2;

@@ -279,9 +279,10 @@ struct Fixture {
                         bool selected_object = false,
                         bool component = false,
                         bool camera_keys = false,
-                        std::uint64_t* verified_source = nullptr) {
-    const auto result =
-        inspect_aircraft_metadata(image, objects, info, base, expected, selected_object, component, camera_keys, verified_source);
+                        std::uint64_t* verified_source = nullptr,
+                        std::uint64_t* verified_user = nullptr) {
+    const auto result = inspect_aircraft_metadata(image, objects, info, base, expected, selected_object, component, camera_keys,
+                                                  verified_source, verified_user);
     require(result.image_bytes == image.memory.attempted && result.image_bytes <= (selected_object ? 56u
                                                                                    : expected == 0 ? 24u
                                                                                                    : 32u),
@@ -1103,6 +1104,32 @@ void borrowed_aircraft_output() {
   }
 }
 
+void borrowed_user_output() {
+  Fixture baseline;
+  baseline.add_components();
+  const auto before = baseline.run(Base, kAircraftExpectedFacadeVtableRva, true, true);
+  Fixture fixture;
+  fixture.add_components();
+  std::uint64_t source = 0, user = 0;
+  const auto result = fixture.run(Base, kAircraftExpectedFacadeVtableRva, true, true, false, &source, &user);
+  require(result.valid && result.available && source == Aircraft && user == User, "full graph publishes active user and source");
+  require(result.object_bytes == before.object_bytes && result.image_bytes == before.image_bytes, "user output adds no target reads");
+  for (unsigned scenario = 0; scenario < 5; ++scenario) {
+    Fixture failed;
+    failed.add_components();
+    if (scenario == 0)
+      failed.objects.memory.change_on_repeat = UserArray;
+    if (scenario == 1)
+      failed.objects.memory.change_on_repeat = UserControl;
+    if (scenario == 2)
+      failed.objects.memory.fail_on_repeat = FirstComponent;
+    if (scenario == 3)
+      failed.objects.memory.integer(ComponentCollection + 36, 0, 4);
+    std::uint64_t output = 0xdeadbeef;
+    const auto state = failed.run(Base, kAircraftExpectedFacadeVtableRva, true, scenario != 4, false, nullptr, &output);
+    require((!state.valid || !state.available) && output == 0, "unavailable/changed/incomplete graph clears active user output");
+  }
+}
 }  // namespace
 
 int main() {
@@ -1117,6 +1144,7 @@ int main() {
   component_extension();
   camera_key_extension();
   borrowed_aircraft_output();
+  borrowed_user_output();
   std::printf("PASS: %u bounded aircraft-facade metadata checks. Synthetic readers only.\n", checks);
   return 0;
 }

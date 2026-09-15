@@ -113,6 +113,9 @@ struct AircraftInventory {
 // validation. Only full success publishes the borrowed aircraft payload address
 // already resolved by handle+368; no extra field is read. The caller owns its
 // manager/aircraft lifetime and approved update phase; no lifetime is extended.
+// verified_user likewise publishes the selected world's first user only after
+// the entire graph and trace succeed. Requires inspect_component; adds no reads.
+// This establishes graph membership, not the user's scene-node layout or pose.
 AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
                                             AircraftObjectReader& objects,
                                             const Inventory& image,
@@ -121,6 +124,7 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
                                             bool inspect_selected_object = false,
                                             bool inspect_component = false,
                                             bool inspect_camera_keys = false,
-                                            std::uint64_t* verified_source = nullptr);
+                                            std::uint64_t* verified_source = nullptr,
+                                            std::uint64_t* verified_user = nullptr);
 
 }  // namespace taxi_camera::discovery

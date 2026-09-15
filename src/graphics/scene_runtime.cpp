@@ -22,6 +22,7 @@ struct Device {
   std::array<bool, Formats.size() * DepthFormats.size()> stamp_ready{};
   std::array<SceneCaptureManager::Frame, 2> pending;
   std::array<SceneCopyMatch, 2> committed;
+  std::array<SceneCaptureManager::FrameOrder, 2> newest;
   Snapshot status;
   std::uint32_t patch_profile = 1;
 };
@@ -285,10 +286,19 @@ void service() {
   for (std::size_t i = 0; i < count; ++i) {
     auto& frame = incoming[i];
     auto* item = find(frame.device_key);
-    if (!item || !item->status.initialized || item->status.failed || frame.match.feed >= 2) {
+    if (!item || !item->status.initialized || item->status.failed || frame.match.feed >= 2 || !scene_handoff().is_current(frame.match)) {
       manager().discard_frame(frame.token);
       continue;
     }
+    auto& newest = item->newest[frame.match.feed];
+    if (!frame.order.newer_than(newest)) {
+      manager().discard_frame(frame.token);
+      ++item->status.stale_frames;
+      continue;
+    }
+    // Keep this high-water mark after composition/reset. Device timeline values
+    // never restart, and an older recording may retire in a later service call.
+    newest = frame.order;
     auto& previous = item->pending[frame.match.feed];
     if (previous.token)
       manager().discard_frame(previous.token);
@@ -352,6 +362,7 @@ Snapshot snapshot(std::uint64_t key) {
   Snapshot result;
   if (const auto* item = find(key)) {
     result = item->status;
+    result.completed_frames = item->output.completed_submissions();
     result.patch_requests = item->output.patch_requests();
     result.patch_draws = item->output.patch_draws();
     if (result.output && !current_output(*item)) {
