@@ -47,7 +47,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     constexpr std::array<float, 18> speeds{0, 1,  2,  3,  4,  5,      6,     7,   8,
                                            9, 11, 42, 60, 99, 99.49f, 99.5f, 100, std::numeric_limits<float>::quiet_NaN()};
-    constexpr unsigned Width = 144, Height = 56, Pitch = 768, Profiles = 3, Cases = speeds.size(), Frames = Cases * Profiles;
+    constexpr unsigned Width = 144, Height = 56, Pitch = 768, Profiles = taxi_camera::profiles::Catalog.size(), Cases = speeds.size(),
+                       Frames = Cases * Profiles;
     constexpr UINT64 FrameBytes = Pitch * Height;
     D3D12_RESOURCE_DESC bd{};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -171,7 +172,7 @@ int wmain(int argc, wchar_t** argv) {
     const D3D12_RANGE none{0, 0};
     readback->Unmap(0, &none);
     std::printf(
-        "PASS GS font %s: %u cases, 10 distinct digits, %llu two-space gap pixels, %llu antialiased pixels; three profiles and overflow "
+        "PASS GS font %s: %u cases, 10 distinct digits, %llu two-space gap pixels, %llu antialiased pixels; all profiles and overflow "
         "'--'.\n",
         warp ? "WARP" : "hardware", Frames, gap_pixels, antialiased);
     return 0;

@@ -1,6 +1,6 @@
 # Taxi Cam
 
-Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Press the aircraft's **TAXI** button to see both views on the upper part of its Primary Flight Display (PFD).
+Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraft's **TAXI** button or a keyboard shortcut to see both views on the upper part of its Primary Flight Display (PFD).
 
 ## Important notice
 
@@ -15,6 +15,7 @@ If you find this mod useful, please consider a donation.
 - **FlyByWire A380X**
 - **iniBuilds A350-900**, including **ULR**
 - **iniBuilds A350-1000**
+- **iniBuilds A380** — experimental; use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
 
 ## Installation
 
@@ -30,9 +31,11 @@ Taxi Cam starts with MSFS after installation. You can also launch it from the Wi
 
 1. Load a supported aircraft. Leave **Auto aircraft** enabled in **Overview** to select the matching settings automatically.
 2. Allow a few seconds for the cameras to become ready.
-3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. Press it again to turn them off.
+3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380, use **Ctrl + Shift + F11** to turn both displays on. Repeat the control to turn them off.
 
 The cameras switch off above **60 knots**. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
+
+Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + F9** toggles the left display, **Ctrl + Shift + F10** the right and **Ctrl + Shift + F11** both. In **Settings → Overview → Flight-deck control**, select **Keyboard shortcuts…** to configure or disable them. Using a shortcut selects manual camera control. See [Keyboard controls](docs/keyboard-shortcuts.md) for details.
 
 ## Adjusting the views
 
@@ -57,6 +60,7 @@ On **Display**, adjust brightness, automatic night exposure and ground-speed tex
 ## Known issues and limitations
 
 - **Night lighting:** Runway and taxiway lights can look very faint or be difficult to see. Improving their visibility is on the roadmap.
+- **iniBuilds A380:** Camera views and reference markers have been calibrated in the simulator. Automatic PFD selection uses an experimental rule; if it cannot identify both displays, select them manually in **PFD routing**.
 - **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. Try a lower camera frame rate if needed.
 
 Please report unexpected behaviour using **Report a bug**.

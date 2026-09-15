@@ -21,13 +21,14 @@ enum class PfdTargetConfidence { none, stabilizing, confirmed };
 
 struct PfdTargetDetection {
   bool valid = false;
+  bool invalidates_targets = false;
   std::array<std::uint64_t, 2> targets{};  // Left, right.
   unsigned stable_windows = 0;
   PfdTargetConfidence confidence = PfdTargetConfidence::none;
   const char* status = "warming_up";
 };
 
-// Empirically validated A380 heuristic, not material-name or aircraft identity
+// Empirical profile-specific heuristics, not material-name or aircraft identity
 // proof. IDs must identify resource incarnations and must not be reused. Supply
 // the complete current inventory on each call; reset on device/session changes.
 // The caller serializes access. This class never reads GPU resources or allocates.
@@ -51,10 +52,18 @@ class PfdTargetDetector {
     clear("warming_up");
   }
 
-  const PfdTargetDetection& observe(const PfdTargetObservation* observations, std::size_t count, std::uint64_t now_ms) noexcept {
+  const PfdTargetDetection& observe(const PfdTargetObservation* observations,
+                                    std::size_t count,
+                                    std::uint64_t now_ms,
+                                    bool inventory_complete = true) noexcept {
     if (count > capacity || (count != 0 && observations == nullptr)) {
       reset();
-      clear(count > capacity ? "capacity_exceeded" : "invalid_input");
+      clear(count > capacity ? "capacity_exceeded" : "invalid_input", true);
+      return detection_;
+    }
+    if (profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group && !inventory_complete) {
+      reset();
+      clear("incomplete_inventory", true);
       return detection_;
     }
     std::size_t current_count = 0;
@@ -64,19 +73,21 @@ class PfdTargetDetector {
         continue;
       if (value.id == 0) {
         reset();
-        clear("invalid_input");
+        clear("invalid_input", true);
         return detection_;
       }
-      current_[current_count++] = {value.id, value.draws};
+      current_[current_count++] = {value.id, value.draws, value.format};
     }
     std::sort(current_.begin(), current_.begin() + current_count, [](const Counter& a, const Counter& b) { return a.id < b.id; });
     for (std::size_t i = 1; i < current_count; ++i) {
       if (current_[i - 1].id == current_[i].id) {
         reset();
-        clear("duplicate_id");
+        clear("duplicate_id", true);
         return detection_;
       }
     }
+    if (profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group)
+      return observe_allocation_group(current_count, now_ms);
     if (current_count < 2) {
       clear(current_count == 0 ? "no_candidates" : "insufficient_candidates");
       seed(current_count, now_ms);
@@ -131,6 +142,18 @@ class PfdTargetDetector {
     std::array<std::uint64_t, 2> pair{std::max(busiest[0].id, busiest[1].id), std::min(busiest[0].id, busiest[1].id)};
     if (!profile_->higher_id_left)
       std::swap(pair[0], pair[1]);
+    return confirm(pair);
+  }
+
+ private:
+  const profiles::AircraftProfile* profile_ = &profiles::A380;
+  struct Counter {
+    std::uint64_t id = 0;
+    std::uint64_t draws = 0;
+    std::uint32_t format = 0;
+  };
+
+  const PfdTargetDetection& confirm(const std::array<std::uint64_t, 2>& pair) noexcept {
     if (pair != pending_) {
       clear("stabilizing");
       pending_ = pair;
@@ -143,12 +166,49 @@ class PfdTargetDetector {
     return detection_;
   }
 
- private:
-  const profiles::AircraftProfile* profile_ = &profiles::A380;
-  struct Counter {
-    std::uint64_t id = 0;
-    std::uint64_t draws = 0;
-  };
+  const PfdTargetDetection& observe_allocation_group(std::size_t count, std::uint64_t now_ms) noexcept {
+    // Two live ini A380 sessions exposed eight active, one-mip RGBA8 typeless
+    // displays. In the complete allocation-ordered group the last is LEFT and
+    // third-last is RIGHT. IDs are incarnation IDs shared with other objects,
+    // so gaps are valid. Never generalize this to a partial list or to another
+    // format/profile, even when two textures happen to dominate activity.
+    constexpr std::size_t group_size = 8;
+    const auto reject = [&](const char* status, bool invalidates = true) -> const PfdTargetDetection& {
+      clear(status, invalidates);
+      seed(count, now_ms);
+      return detection_;
+    };
+    if (count != group_size)
+      return reject(count < group_size ? "ini_group_incomplete" : "ini_group_ambiguous");
+    for (std::size_t i = 0; i < count; ++i) {
+      if (current_[i].format != 27)
+        return reject("ini_group_format");
+      if (current_[i].draws == UINT64_MAX)
+        return reject("counter_saturated");
+    }
+    if (!baseline_valid_)
+      return reject("warming_up", false);
+    if (previous_count_ != count)
+      return reject("ini_group_changed");
+    bool active = true;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (previous_[i].id != current_[i].id || previous_[i].format != current_[i].format)
+        return reject("ini_group_changed");
+      if (current_[i].draws < previous_[i].draws)
+        return reject("counter_reset");
+      active &= current_[i].draws > previous_[i].draws;
+    }
+    if (now_ms < baseline_ms_ || now_ms - baseline_ms_ > maximum_window_ms)
+      return reject(now_ms < baseline_ms_ ? "clock_reset" : "stale_window", false);
+    if (now_ms - baseline_ms_ < window_ms)
+      return detection_;
+    seed(count, now_ms);
+    if (!active) {
+      clear("ini_group_inactive");
+      return detection_;
+    }
+    return confirm({current_[count - 1].id, current_[count - 3].id});
+  }
 
   bool contains(std::size_t count, std::uint64_t id) const noexcept {
     const auto found = std::lower_bound(current_.begin(), current_.begin() + count, id,
@@ -156,8 +216,9 @@ class PfdTargetDetector {
     return found != current_.begin() + count && found->id == id;
   }
 
-  void clear(const char* status) noexcept {
+  void clear(const char* status, bool invalidates = false) noexcept {
     detection_ = {};
+    detection_.invalidates_targets = invalidates;
     detection_.status = status;
     pending_ = {};
   }

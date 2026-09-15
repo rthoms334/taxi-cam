@@ -125,6 +125,9 @@ struct Registry {
   std::unordered_map<SIZE_T, DXGI_FORMAT> dsvs;
   TaxiButtonRoutes routes;
   PfdTargetDetector detector;
+  // A dropped resource can make a truncated allocation group look complete.
+  // Keep this false for the device lifetime once observation loses coverage.
+  std::atomic<bool> pfd_inventory_complete{true};
   const profiles::AircraftProfile* profile = &profiles::A380;
   unsigned active_mask{}, calibration_mask{};
   std::array<std::shared_ptr<Resource>, 2> selected_resources{};
@@ -300,13 +303,17 @@ void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         item->desc = desc;
         item->id = ++r.next_id;
         r.resources[native] = item;
-      }
+      } else
+        r.pfd_inventory_complete = false;
     }
     if (item && scene_handoff().register_resource(r.key, reinterpret_cast<std::uint64_t>(native), item->id)) {
       runtime::manager().register_source_candidate(r.key, native, item->id, desc, initial);
-      if (!attach(native, item))
+      if (!attach(native, item)) {
+        r.pfd_inventory_complete = false;
         error("resource_lifetime_notification_failed");
+      }
     } else if (item) {
+      r.pfd_inventory_complete = false;
       item->retire();
       error("resource_registry_full");
     }
@@ -1629,6 +1636,7 @@ GraphicsStatus graphics_status() noexcept {
                         r.copy_attempts,
                         r.copy_rejected,
                         r.copy_error};
+  result.target_detection = r.detector.snapshot().status;
   for (unsigned i = 0; i < result.selected_exit_scopes.size(); ++i)
     result.selected_exit_scopes[i] = r.selected_exit_scopes[i].load(std::memory_order_relaxed);
   result.calibration_clears = r.calibration_clears.load(std::memory_order_relaxed);
@@ -1721,7 +1729,6 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
 }
 void discover_pfds(std::uint64_t now) noexcept {
   observe_safely([&] {
-    auto inventory = pfd_inventory();
     auto& r = registry();
     const std::lock_guard lock(r.mutex);
     for (auto i = r.resources.begin(); i != r.resources.end();) {
@@ -1740,10 +1747,16 @@ void discover_pfds(std::uint64_t now) noexcept {
       } else
         ++i;
     }
-    if (now && (!r.routes.targets[0] || !r.routes.targets[1])) {
-      const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now);
+    const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
+    if (now && (ranked_group || !r.routes.targets[0] || !r.routes.targets[1])) {
+      // Take the full inventory after retirement cleanup, under the same
+      // registry lock used for detector configuration and target assignment.
+      auto inventory = pfd_inventory();
+      const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now, r.pfd_inventory_complete.load());
       if (detection.valid)
         r.routes.adopt_detected(detection.targets);
+      else if (ranked_group && detection.invalidates_targets)
+        r.routes.forget_detected();
     }
     refresh_selected(r);
   });

@@ -96,11 +96,15 @@ if ($Validate) {
         if ($LASTEXITCODE -ne 0) { throw 'Hardware native graphics validation failed.' }
         & $gpu --a350
         if ($LASTEXITCODE -ne 0) { throw 'Hardware A350 graphics validation failed.' }
+        & $gpu --ini-a380
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware ini A380 graphics validation failed.' }
     } else { Write-Output 'Hardware GPU validation not run: explicit WARP-only CI mode.' }
     & $gpu --warp
     if ($LASTEXITCODE -ne 0) { throw 'WARP native graphics validation failed.' }
     & $gpu --warp --a350
     if ($LASTEXITCODE -ne 0) { throw 'WARP A350 graphics validation failed.' }
+    & $gpu --warp --ini-a380
+    if ($LASTEXITCODE -ne 0) { throw 'WARP ini A380 graphics validation failed.' }
     foreach ($queryAdapter in @('hardware', 'warp')) {
         if ($WarpOnly -and $queryAdapter -eq 'hardware') { continue }
         foreach ($queryProfile in @('a380', 'a350')) {
@@ -254,6 +258,11 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls compilation failed.' }
     & $diagnosticsTest
     if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls validation failed.' }
+    $hotkeysTest = Join-Path $out 'camera-hotkeys-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-o' $hotkeysTest
+    if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls compilation failed.' }
+    & $hotkeysTest
+    if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls validation failed.' }
     & (Join-Path $taskRoot 'tests/installer/exe_xml_test.ps1')
     $updaterTest = Join-Path $out 'updater-test.exe'
     & $compiler @common (Join-Path $taskRoot 'tests/app/updater_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lbcrypt' '-lshell32' '-o' $updaterTest
@@ -299,7 +308,7 @@ if ($Validate) {
         dynamicGraphicsStateTests=@($dynamicStateResults)
         samplePositionTests=@($sampleResults)
         tests=@($gpuTests + @('pre-existing graphics objects','terminal command-list PFD drawing without application root replay','textured gray alpha and mip preservation with terminal PFD draws and repeated submissions','scoped barrier metadata lookup caching','descriptor heap filtering and retained device identity','unrelated submission bypass and discovery lock ordering','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','isolated graphics-state regression coverage','lazy typed patch demand, discard and cross-profile replay','fractional ground-speed truncation and raw-speed cutoff','camera border and inset composition','antialiased GS glyphs and two-character spacing','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','shared read-only inspection transaction with fresh endpoint validation','early camera preparation and activation timings','bounded grounded prewarm and retained foreground takeover','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
-            'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
+            'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','configurable global camera shortcuts, native conflict recovery, hidden-window dispatch, preview isolation and manual-only controls','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
             'compositor formats and exposure','scene handoff and resource state','camera ownership','bug report URL encoding, bounds and diagnostic privacy','queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};

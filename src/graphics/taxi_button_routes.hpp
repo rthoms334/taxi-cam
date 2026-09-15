@@ -62,6 +62,7 @@ class TaxiButtonRoutes {
     if (selection[0] && selection[0] == selection[1])
       return false;
     targets = selection;
+    detected_targets_ = {};
     assigned_ = selection[0] != 0 || selection[1] != 0;
     return true;
   }
@@ -69,6 +70,7 @@ class TaxiButtonRoutes {
     if (side >= targets.size() || id == 0 || targets[1 - side] == id)
       return false;
     targets[side] = id;
+    detected_targets_[side] = 0;
     assigned_ = true;
     return true;
   }
@@ -81,6 +83,7 @@ class TaxiButtonRoutes {
       return false;
     if (exact_names || (!assigned_ && !targets[0] && !targets[1])) {
       targets = detected;
+      detected_targets_ = exact_names ? std::array<std::uint64_t, 2>{} : detected;
       assigned_ = true;
       return true;
     }
@@ -92,15 +95,28 @@ class TaxiButtonRoutes {
     if (targets[survivor] != detected[0] && targets[survivor] != detected[1])
       return false;
     targets[1 - survivor] = detected[0] == targets[survivor] ? detected[1] : detected[0];
+    detected_targets_[1 - survivor] = targets[1 - survivor];
     assigned_ = true;
     return true;
   }
 
   void forget(std::uint64_t id) noexcept {
     assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0;
-    for (auto& target : targets)
-      if (target == id)
-        target = 0;
+    for (unsigned side = 0; side < targets.size(); ++side)
+      if (targets[side] == id) {
+        targets[side] = 0;
+        detected_targets_[side] = 0;
+      }
+  }
+
+  // An allocation-rank policy must be withdrawn when its complete-group
+  // evidence changes. Explicit sides and semantic-name assignments survive;
+  // the existing both-lost guard still requires an explicit session retry.
+  void forget_detected() noexcept {
+    const auto previous = detected_targets_;
+    for (auto id : previous)
+      if (id)
+        forget(id);
   }
 
   unsigned active_mask(bool valid, bool left, bool right) const noexcept {
@@ -115,6 +131,7 @@ class TaxiButtonRoutes {
 
  private:
   bool assigned_ = false;
+  std::array<std::uint64_t, 2> detected_targets_{};
 };
 
 }  // namespace taxi_camera

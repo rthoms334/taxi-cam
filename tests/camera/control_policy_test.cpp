@@ -1,6 +1,6 @@
+#include "../../src/camera/taxi_speed_cutoff.hpp"
 #include "../../src/graphics/capture_progress.hpp"
 #include "../../src/graphics/scene_source_state.hpp"
-#include "../../src/camera/taxi_speed_cutoff.hpp"
 #include "view_readiness_wait_test.hpp"
 
 #include <cassert>
@@ -48,6 +48,14 @@ int main() {
   assert(crossing.update(2, true, 59, true, 1, 2) == 1 && crossing.inhibited());
   crossing.sent(0, true);
   assert(crossing.update(3, true, 59, true, 0, 3) == 0 && !crossing.inhibited());
+
+  TaxiSpeedCutoff manual;
+  assert(!manual.update(100, true, 60, false, 0, 0, 60, false) && !manual.inhibited());
+  assert(!manual.update(101, true, 60.01, false, 0, 0, 60, false) && manual.inhibited() && !manual.pending());
+  assert(!manual.update(102, false, 0, false, 0, 0, 60, false) && manual.inhibited());
+  assert(!manual.update(103, true, 10, false, 0, 0, 60, false) && !manual.inhibited() && !manual.pending());
+  // Even stray ON telemetry cannot produce aircraft commands in manual mode.
+  assert(!manual.update(104, true, 70, true, 3, 104, 60, false) && manual.inhibited() && !manual.pending());
 
   taxi_camera::CaptureProgress progress;
   assert(!progress.observe(1, false, 4024, 800000, true));

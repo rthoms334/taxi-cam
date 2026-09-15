@@ -22,7 +22,8 @@ struct Composition {
   // Float 0/1 is passed directly in the compositor's GPU constants.
   float square_nose_markers = 1;
 };
-enum class TaxiControl { push_event, lvar_off };
+enum class TaxiControl { push_event, lvar_off, manual_only };
+enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group };
 inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.square_nose_markers = 0;
@@ -61,6 +62,8 @@ struct AircraftProfile {
   std::array<std::string_view, 3> package_markers{"flybywire-aircraft-a380-842", "flybywire_a380_842"};
   // Target pixels: the outer display region is black around this camera inset.
   DisplayInsets camera_padding{16, 12, 16, 0};
+  PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
+  float exposure = -8.8f;
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -116,7 +119,34 @@ inline constexpr AircraftProfile A35K{3,
                                       AmberEtacsA35K,
                                       {28, 29, 87, 91, 27, 90},
                                       {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
-inline constexpr std::array<const AircraftProfile*, 3> Catalog{&A380, &A359, &A35K};
+// iniBuilds A380 display layout started from FBW. Mounts and guide defaults
+// reflect the user's accepted live calibration from 2026-09-15.
+// The streamed aircraft reports Airbus with this exact AircraftLoaded path
+// component. Its INOP TAXI buttons produced no observed latch changes.
+inline constexpr AircraftProfile IniA380 = [] {
+  auto p = A380;
+  p.id = 4;
+  p.key = "ini-a380";
+  p.name = L"iniBuilds A380 (experimental)";
+  p.taxi_lvars = {"", ""};
+  p.taxi_events = {"", ""};
+  p.pfd_labels = {"", ""};
+  p.taxi_control = TaxiControl::manual_only;
+  p.aircraft_types = {"Airbus", "A388"};
+  p.package_markers = {"simobjects/airplanes/inibuilds-a380", "fs24-inibuilds-aircraft-a380"};
+  p.mounts = {{{0, 2.2, 16, -17.5, 0, 1}, {0, 18, -34, -32, 0, 1}}};
+  p.composition.tail_upper = {0.34f, 0.52f};
+  p.composition.tail_corner = {0.305f, 0.65f};
+  p.composition.tail_inner = {0.355f, 0.65f};
+  p.exposure = -11.5f;
+  // Live-selected PFDs use one mip. Exclude the observed five-mip static
+  // resources; other active displays still require target identity checks.
+  p.mips = 1;
+  p.formats = {28, 29, 87, 91, 27, 90};
+  p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
+  return p;
+}();
+inline constexpr std::array<const AircraftProfile*, 4> Catalog{&A380, &A359, &A35K, &IniA380};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < 2 ? side : 0];
 }
@@ -190,6 +220,9 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
   if (path_contains(path, "flybywire-aircraft-a380-842") || path_contains(path, "simobjects/airplanes/flybywire_a380x") ||
       path_contains(path, "simobjects/airplanes/flybywire_a380_842"))
     return A380.id;
+  for (const auto marker : IniA380.package_markers)
+    if (!marker.empty() && path_contains(path, marker))
+      return matches_aircraft(IniA380, type) ? IniA380.id : 0;
   std::uint32_t match = 0;
   for (const auto* p : Catalog) {
     if (!matches_aircraft(*p, type))

@@ -16,23 +16,23 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900` and `ini-a350-1000`; each has its own calibration file.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000` and `ini-a380`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 
-The INI contains `[service]`, `[display]`, `[nose]`, `[tail]` and `[guides]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it uses that aircraft's defaults. Only the A380 profile imports `taxi-camera-mounts.cfg` beside the companion.
+The INI contains `[service]`, `[display]`, `[nose]`, `[tail]` and `[guides]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it uses that aircraft's defaults. Only the FBW A380 profile imports `taxi-camera-mounts.cfg` beside the companion.
 
 Saves validate the complete settings object, flush a temporary UTF-16 file and replace the INI atomically.
 
 | Saved field | Default | Range or purpose |
 | --- | --- | --- |
 | `enabled` | 1 | Enable the camera service |
-| `follow_taxi` | 1 | Read aircraft TAXI controls; 0 uses manual preview |
-| `auto_detect` | 1 | Detect the PFD pair from draw activity |
+| `follow_taxi` | 1; iniBuilds A380: 0 | Read aircraft TAXI controls; 0 uses manual control |
+| `auto_detect` | 1 | Detect the PFD pair using the profile's policy |
 | `camera_rate` | 15 | Integer 15–60, activation limit per camera |
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
-| `exposure` | −8.8 | Manual EV, −16 to +4 |
+| `exposure` | −8.8; iniBuilds A380: −11.5 | Daytime EV, −16 to +4 |
 | `speed_red`, `speed_green`, `speed_blue` | Profile colour | Normalized RGB, 0�1, edited with the colour picker |
 | `night_boost` | 4 | Maximum automatic boost, 0–8 EV |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
@@ -49,11 +49,11 @@ The following controls are session-only and start cleared:
 | `left_id`, `right_id` | Assign current display texture IDs |
 | `route_request` | Identify a new explicit assignment request |
 
-Side masks are **0 off, 1 left, 2 right, 3 both**. Using manual preview disables automatic TAXI control in the UI; re-enable **TAXI buttons** on Overview to return to aircraft control.
+Side masks are **0 off, 1 left, 2 right, 3 both**. Using manual preview or a [keyboard shortcut](keyboard-shortcuts.md) disables automatic TAXI control in the UI; re-enable **TAXI buttons** on Overview to return to aircraft control. The iniBuilds A380 uses manual control because its cockpit TAXI buttons are INOP.
 
 PFD routing selections apply immediately. Each side may use an explicit current texture ID or **Automatic assignment**. Automatic detection preserves an explicitly selected side and identifies the other from the same confirmed pair. Selecting the same nonzero ID for both sides shows an error and preserves the accepted assignment. Changing aircraft profile starts fresh target discovery; ordinary loss of both resource identities still requires an explicit assignment before side order can be trusted.
 
-Calibration identifies the destination texture using an animated pattern. Switching either calibration target on disables automatic TAXI control; switching the last target off restores **TAXI buttons** automatically. Its write allowance renews every 50 ms in the native adapter. Reaching the limit skips additional pattern writes for that window without disabling calibration.
+Calibration identifies the destination texture using an animated pattern. Switching either calibration target on disables automatic TAXI control; switching the last target off restores **TAXI buttons** automatically on aircraft with working buttons. The iniBuilds A380 remains in manual control. Its write allowance renews every 50 ms in the native adapter. Reaching the limit skips additional pattern writes for that window without disabling calibration.
 
 Source: [settings schema](../src/shared/protocol.hpp), [persistence](../src/app/settings_store.hpp), [write budget](../src/graphics/write_budget.hpp).
 
@@ -63,8 +63,10 @@ Each mount stores six values: **right, up, forward, pitch, yaw, lens**.
 
 | Aircraft / view | Right m | Up m | Forward m | Pitch ° | Yaw ° | Lens rad |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| A380 nose | 0 | −1.75 | 26.950668984 | −17.5 | 0 | 1.24 |
-| A380 tail | 0 | 18 | −25 | −32 | 0 | 1.02 |
+| FBW A380 nose | 0 | −1.75 | 26.950668984 | −17.5 | 0 | 1.24 |
+| FBW A380 tail | 0 | 18 | −25 | −32 | 0 | 1.02 |
+| iniBuilds A380 nose | 0 | 2.2 | 16 | −17.5 | 0 | 1 |
+| iniBuilds A380 tail | 0 | 18 | −34 | −32 | 0 | 1 |
 | A350-900 nose | 0 | -2 | 16 | -15 | 0 | 0.55 |
 | A350-900 tail | 0 | 10 | -33 | -15 | 0 | 0.62 |
 | A350-1000 nose | 0 | -2 | 19.81 | -15 | 0 | 0.55 |

@@ -11,6 +11,7 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 | FlyByWire A380X | `fbw-a380x` | 768 x 1024, RGBA8, five mips | 736 x 251 / 736 x 496 |
 | iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
 | iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
+| iniBuilds A380 (experimental) | `ini-a380` | 768 x 1024, one mip; supported RGBA/BGRA views | 736 x 251 / 736 x 496 |
 
 A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The A350 adapters are undergoing live simulator validation; a passing GPU fixture does not establish aircraft framing or automatic target ordering.
 
@@ -18,10 +19,11 @@ A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6.
 
 | Aircraft | Left / right state | Automatic OFF |
 | --- | --- | --- |
-| A380 | `L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON`, `L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON` | Corresponding `A32NX.FCU_EFIS_L_TAXI_PUSH` / `R_TAXI_PUSH` event |
+| FBW A380 | `L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON`, `L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON` | Corresponding `A32NX.FCU_EFIS_L_TAXI_PUSH` / `R_TAXI_PUSH` event |
 | A350 | `L:INI_TAXI_LEFT`, `L:INI_TAXI_RIGHT` | Write zero to the selected latch through public SimConnect |
+| iniBuilds A380 | Manual previews or configurable camera hotkeys; cockpit buttons marked INOP | Suppress camera output above the speed limit; no aircraft-variable writes |
 
-The installed iniBuilds behavior XML uses each TAXI latch for its button state and lamp. Its input-event setter toggles that latch. An idempotent zero write makes cutoff independent of toggle timing. The other side is not written. Both adapters wait for a fresh OFF acknowledgement. The catalog supplies the speed limit, currently 60 knots for all profiles.
+The installed iniBuilds A350 behavior XML uses each TAXI latch for its button state and lamp. Its input-event setter toggles that latch. An idempotent zero write makes cutoff independent of toggle timing. The other side is not written. The FBW A380 and A350 adapters wait for a fresh OFF acknowledgement. The manual-only iniBuilds A380 suppresses output without waiting for a cockpit-button acknowledgement. The catalog supplies the speed limit, currently 60 knots for all profiles.
 
 ## Display placement
 
@@ -29,7 +31,7 @@ Each side has an explicit destination rectangle. The A380 covers rows 0 through 
 
 Inside each outer region, both aircraft draw a black border 16 target pixels wide on the left and right and 12 pixels high at the top. The complete camera image fits within that border, including its GS panel and reference marks. Content is 736 x 751 pixels on A380 and 774 x 751 on A350. This is distinct from the preserved central grey separator.
 
-The profile defines accepted texture dimensions, mip policy and formats. Resource IDs identify an allocation lifetime, not an aircraft material. The detector ranks activity across three one-second windows and requires a clear pair above other candidates. The side-order rule is profile data; it must be verified in the simulator. `$EFIS_LEFT` / `$EFIS_RIGHT` and A380 material hints are reference labels, not proof of GPU identity. **PFD routing** supports explicit assignment and correction when the heuristic is ambiguous.
+The profile defines accepted texture dimensions, mip policy and formats. Resource IDs identify an allocation lifetime, not an aircraft material. FBW A380 and A350 detection ranks activity across three one-second windows and requires a clear pair above other candidates. The experimental iniBuilds A380 rule instead checks the complete display group described below. The side-order rule is profile data; it must be verified in the simulator. `$EFIS_LEFT` / `$EFIS_RIGHT` and A380 material hints are reference labels, not proof of GPU identity. **PFD routing** supports explicit assignment and correction when the heuristic is ambiguous.
 
 ## Shared rendering contract
 
@@ -45,13 +47,29 @@ The A350-900 defaults are nose **right/up/forward 0 / -2 / 16 m, pitch/yaw -15 /
 
 The A350-1000 retains the same height, pitch, yaw and lens for each camera, with nose forward position **19.81 m** and tail **-36.17 m** for its longer fuselage. Its amber tail guide points are `(0.31, 0.69)`, `(0.29, 0.85)` and `(0.37, 0.855)`. The FBW A380 uses magenta tail guide points `(0.33, 0.64)`, `(0.305, 0.75)` and `(0.365, 0.758)`.
 
-These per-aircraft defaults were promoted from the user's saved local configurations on 2026-09-15. Camera mounts, nose markers and exposure settings already matched those configurations. Existing saved settings still take precedence, and new profiles start with TAXI-button control enabled. Guide points are fixed image references; changing camera settings can move the gear relative to them. The geometry check projects the installed iniBuilds 1.2.6 `flight_model.cfg` gear contact points; it does not replace a cockpit comparison or establish metric clearance.
+These per-aircraft defaults were promoted from the user's saved local configurations on 2026-09-15. Camera mounts, nose markers and exposure settings already matched those configurations. Existing saved settings still take precedence. FBW A380 and A350 profiles start with TAXI-button control enabled; iniBuilds A380 starts in manual control with both displays off. Guide points are fixed image references; changing camera settings can move the gear relative to them. The geometry check projects the installed iniBuilds A350 1.2.6 `flight_model.cfg` gear contact points; it does not replace a cockpit comparison or establish metric clearance.
 
 Changing profiles hides output and closes the owned views through the engine update callback. After validating the same manager, entry IDs and output resources, it retains that pair while changing the control subscription and camera mounts. Render dimensions stay fixed at the pair's original allocation sizes; the compositor scales into the selected profile's PFD rectangle. The bridge clears texture routes, button intent, pose calibration and capture history. A new profile cannot inherit another aircraft's saved mounts or stale ON state. The application stores the selected profile separately from each profile's INI file.
 
 Flight/aircraft load notifications and changes in simulation running state also trigger this suspended transition, including reloads of the same aircraft. Confirming the current profile again in the dropdown explicitly retries its connection and display discovery. Manual texture IDs and preview/calibration requests belong to one flight and are cleared at the transition; saved mounts, guides and exposure remain intact. Native identity and GPU lifetime checks still apply. If the retained manager, IDs or output allocations cannot be verified, the cameras remain unavailable; a flight-load notification does not authorize abandoning or replacing those objects.
 
 ## Adding an aircraft
+
+### iniBuilds A380 configuration
+
+The streamed aircraft was observed on 2026-09-15 reporting `ATC TYPE=Airbus` and an `AircraftLoaded` path under `SimObjects/Airplanes/inibuilds-a380/presets/inibuilds/a380-800_rr_basic/config/aircraft.CFG`. Matching requires its exact product path component; a generic Airbus type or iniBuilds vendor folder alone cannot select this profile. The FBW A380 keeps its separate identity and settings.
+
+Both INOP TAXI buttons showed no visible response when clicked. The A350-name candidate Lvars stayed at zero during the two-minute read-only capture; this does not establish that those variables exist on the A380. The profile therefore neither reads nor writes guessed TAXI variables. Use the companion's left/right preview controls or camera hotkeys. Manual control still obeys aircraft identity, session, service, GPU and speed guards.
+
+A corrected public input inventory returned 1,000 descriptors. A two-minute subscription test detected the captain's PFD brightness adjustment (`AIRLINER_MIP_SIDE_PFD_LEFT`, 100 down to 65 and back), but no input-value notification correlated with the user's clicks on either PFD. The clickable cursor has therefore not established a usable public camera toggle. The earlier diagnostic had ignored inventory response ID 34 and rejected the client's unused trailing descriptor slot; those parser issues are corrected. This result does not rule out a private aircraft interaction.
+
+The display rectangle and initial guide layout started from FBW A380. A parked live capture showed the copied nose mount below ground, producing a large black area inside the raw nose image. Raising that mount revealed the ground; the user then corrected both views and reference markers. The compositor's pane placement and divider were correct in the captured images.
+
+The accepted iniBuilds A380 calibration was promoted to defaults on 2026-09-15: nose **right/up/forward 0 / 2.2 / 16 m, pitch/yaw -17.5 / 0 degrees, lens 1 rad**; tail **0 / 18 / -34 m, -32 / 0 degrees, 1 rad**. The left tail guide points are `(0.34, 0.52)`, `(0.305, 0.65)` and `(0.355, 0.65)`, mirrored on the right. Nose markers remain `(0.14, 0.48)`. Daytime exposure defaults to **-11.5 EV**, with automatic night adjustment enabled. Settings remain independent in `ini-a380.ini`, and saved user calibration takes precedence over defaults. These are accepted visual alignments, not a metric clearance calibration.
+
+Texture admission requires 768 x 1024, exactly one mip and supported RGBA/BGRA views. Two live sessions exposed eight active RGBA8 typeless resources (format 27); the user identified the last allocation as left and the third-last as right in both sessions. The experimental automatic rule requires that complete eight-resource group, unchanged membership and activity on every member across three one-second windows. It permits gaps in resource IDs and does not use fixed IDs. Missing, extra, changed or incompletely tracked resources prevent automatic selection. Structural changes withdraw automatically assigned sides while preserving explicit selections; loss of both identities requires reselecting the aircraft profile or assigning the PFDs manually. Pauses alone do not remove existing identities. The original activity-ranking rule remains in use for FBW A380 and A350. Local detector tests cover both observed inventories, but the new automatic rule still requires a live simulator check. Own-device GPU fixtures check display regions and preserved lower rows; hotkeys, AA, turns, cutoff and reload also need live verification.
+
+### Integration requirements
 
 Define an `AircraftProfile` in [the catalog](../src/profiles/catalog.hpp): accepted aircraft types and add-on path markers, control strategy and variables, texture constraints, side-order rule, destination rectangles and border insets, camera dimensions, mounts, composition and speed limit. Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
 

@@ -3,8 +3,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
-#include "../../src/camera/aircraft_identity.hpp"
 #include "../../src/app/settings_store.hpp"
+#include "../../src/camera/aircraft_identity.hpp"
 #include "../../src/camera/view_resize.hpp"
 #include "../../src/graphics/pfd_target_detector.hpp"
 using namespace taxi_camera;
@@ -118,7 +118,7 @@ void aircraft_swap_tests() {
 }
 void guide_settings_tests() {
   using namespace standalone;
-  std::array<Settings, 3> saved{};
+  std::array<Settings, profiles::Catalog.size()> saved{};
   for (const auto* profile : profiles::Catalog) {
     Settings defaults;
     defaults.profile = profile->id;
@@ -227,6 +227,38 @@ int main() {
   assert(!profiles::detect_aircraft("A359", "D:/Community/other-a350/aircraft.cfg"));
   assert(!profiles::detect_aircraft("A359", "D:/Community/not-inibuilds-aircraft-a350/aircraft.cfg"));
   assert(!profiles::detect_aircraft("A359", "D:/Community/inibuilds-aircraft-a350-copy/aircraft.cfg"));
+  constexpr auto ini_a380_path = "SimObjects/Airplanes/inibuilds-a380/presets/inibuilds/a380-800_rr_basic/config/aircraft.CFG";
+  assert(profiles::detect_aircraft("Airbus", ini_a380_path) == profiles::IniA380.id);
+  assert(profiles::detect_aircraft("AIRBUS", "SimObjects\\Airplanes\\INIBUILDS-A380\\presets\\iniBuilds\\other\\aircraft.cfg") ==
+         profiles::IniA380.id);
+  assert(!profiles::detect_aircraft("Airbus", "SimObjects/Airplanes/inibuilds-a380-copy/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("Airbus", "SimObjects/Airplanes/Other_A380/presets/inibuilds/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("A359", ini_a380_path));
+  assert(profiles::IniA380.taxi_control == profiles::TaxiControl::manual_only);
+  assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
+  assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
+  assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 87));
+  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 5, 28));
+  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 12, 87));
+  assert(profiles::matches_display(profiles::A380, 768, 1024, 5, 28));
+  assert(!profiles::matches_display(profiles::A380, 768, 1024, 1, 28));
+  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 0, 28));
+  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 13, 28));
+  assert(!profiles::matches_display(profiles::IniA380, 1644, 1024, 1, 28));
+  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 1, 10));
+  Settings ini_a380;
+  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id));
+  assert(ini_a380.profile == profiles::IniA380.id && !ini_a380.follow_taxi && !ini_a380.manual_mask && !ini_a380.calibration_mask);
+  assert(ini_a380.mounts == profiles::IniA380.mounts && ini_a380.mounts != a380.mounts);
+  assert(settings_path(ini_a380) != settings_path(a380));
+  assert(ini_a380.exposure == -11.5f);
+  // A partial saved profile inherits its own exposure; explicit calibration
+  // continues to override the shipped default.
+  const auto ini_path_settings = settings_path(ini_a380);
+  assert(WritePrivateProfileStringW(L"service", L"enabled", L"1", ini_path_settings.c_str()));
+  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -11.5f);
+  assert(WritePrivateProfileStringW(L"display", L"exposure", L"-10.25", ini_path_settings.c_str()));
+  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -10.25f);
   native_camera::AircraftIdentityCache identity;
   std::array<unsigned char, 296> packet{};
   std::array<std::uint32_t, 10> h{296, 0, 8, 5, 0, 5, 0, 0, 1, 1};
@@ -271,7 +303,7 @@ int main() {
       assert(content.left < content.right && content.top < content.bottom && content.left >= rect.left && content.top >= rect.top &&
              content.right <= rect.right && content.bottom <= rect.bottom);
       assert(content.bottom - content.top == 751);
-      const int expected_width = profile->id == 1 ? 736 : 774;
+      const int expected_width = profile->width == 768 ? 736 : 774;
       assert(content.right - content.left == static_cast<unsigned>(expected_width));
       assert(profile->camera_panes[side][0] == expected_width && profile->camera_panes[side][1] == (side == 0 ? 251 : 496));
       native_camera::ViewDimensions desired, original{{{3413, 913}, {3413, 913}, {3413, 913}}};

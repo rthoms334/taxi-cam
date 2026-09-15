@@ -4,13 +4,14 @@ Taxi Cam creates two additional camera views inside MSFS and draws their images 
 
 A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD using another texture. Taxi Cam connects them by combining the camera images and copying or drawing the result into the PFD texture.
 
-The left and right PFDs share **one nose camera and one tail camera**. Each EFIS TAXI button controls whether its own PFD receives the combined image.
+The left and right PFDs share **one nose camera and one tail camera**. Each EFIS TAXI button or manual camera request controls whether its PFD receives the combined image.
 
 ## The complete path
 
 ~~~mermaid
 flowchart TD
     Button["EFIS TAXI button state"] --> Control["Bridge selects the left or right PFD"]
+    Manual["Keyboard shortcuts or manual previews"] --> Control
     Control --> Cameras["MSFS renders nose and tail views"]
     Cameras --> Capture["Bridge captures the GPU images"]
     Capture --> Combine["GPU combines views, guides and ground speed"]
@@ -55,11 +56,11 @@ Source: [launcher](../src/app/launcher.hpp), [bridge startup and control loop](.
 
 The companion can select the aircraft profile automatically. SimConnect supplies the aircraft type and loaded aircraft path; catalog rules match the variant and add-on identity. Two distinct matching samples trigger a switch. The bridge suspends the camera pair before changing subscriptions, geometry or display routing, and the companion loads that aircraft's saved settings. The pair and its output allocations remain attached to the same verified native manager. Unknown aircraft remain inactive.
 
-Each aircraft profile supplies one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request.
+FBW A380 and A350 profiles supply one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request. The iniBuilds A380 has INOP TAXI buttons and uses manual camera requests from configurable keyboard shortcuts or the companion's previews. All requests retain the aircraft, session, service and speed guards.
 
 The bridge also needs to know which GPU texture represents each PFD. A cockpit screen is rendered into an off-screen texture before the cockpit model displays it. Many simulator textures have similar dimensions, so Taxi Cam observes their draw activity.
 
-For the A380, detection selects candidates with:
+For the FBW A380, detection selects candidates with:
 
 - **768 × 1024** pixels;
 - **five mip levels** — the texture's smaller-resolution copies;
@@ -67,6 +68,8 @@ For the A380, detection selects candidates with:
 - a consistently dominant pair of draw rates across three one-second windows.
 
 Initial assignment uses the profile's resource-ID ordering rule. This is a heuristic, so **PFD routing** provides identification, explicit assignment and swap controls. The material-name hints in the aircraft profile do not provide guaranteed GPU labels.
+
+The experimental iniBuilds A380 rule requires exactly eight active 768 × 1024, one-mip RGBA8 typeless displays with stable membership across three one-second windows. It selects the last allocation for the left PFD and third-last for the right, matching two manually identified sessions. Extra, missing or changed members invalidate the automatic selection. See [Aircraft profiles](aircraft-profiles.md#inibuilds-a380-configuration) for its validation limits and manual recovery.
 
 Each resource gets an ID for its current lifetime. If one PFD is replaced, routing keeps the surviving side's identity. If both assigned textures disappear, manual reassignment can be required. Texture IDs are never saved between simulator sessions.
 
@@ -219,7 +222,7 @@ Recovery is conditional. It does not infer a valid camera image from a non-null 
 
 ## Aircraft-specific parts
 
-The companion selects **FlyByWire A380X**, **iniBuilds A350-900 / ULR** or **iniBuilds A350-1000**. Each profile supplies aircraft identity, TAXI controls, camera mounts and dimensions, texture constraints, side ordering, display rectangles, composition marks and speed cutoff. Switching profiles closes and revalidates the retained cameras, then resets telemetry, routing and pose calibration. The new aircraft must provide fresh identity and body-pose data before the pair resumes; the PFD waits for new captures. The A350 adapters require live simulator validation in addition to their GPU fixtures.
+The companion selects **FlyByWire A380X**, **iniBuilds A350-900 / ULR**, **iniBuilds A350-1000** or **iniBuilds A380 (experimental)**. Each profile supplies aircraft identity, control strategy, camera mounts and dimensions, texture constraints, detection policy, display rectangles, composition marks, exposure and speed cutoff. Switching profiles closes and revalidates the retained cameras, then resets telemetry, routing and pose calibration. The new aircraft must provide fresh identity and body-pose data before the pair resumes; the PFD waits for new captures. GPU fixtures do not establish live aircraft behaviour.
 
 Windows startup, settings transport, private camera integration and GPU capture are shared components. Adding an aircraft requires its control, display and geometry integration; changing two variable names is not sufficient. See [Aircraft integration](aircraft-profiles.md).
 

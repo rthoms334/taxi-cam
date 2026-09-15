@@ -47,7 +47,9 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
     profile = &profiles::A380;
   Settings value;
   value.profile = profile->id;
+  value.follow_taxi = profile->taxi_control == profiles::TaxiControl::manual_only ? 0u : 1u;
   value.mounts = profile->mounts;
+  value.exposure = profile->exposure;
   value.speed_color = profile->composition.speed_color;
   reset_guide_settings(value, *profile);
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, (settings_directory() + L"\\settings.ini").c_str());
@@ -100,7 +102,7 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
     return value >= 0 && value <= 16384 && std::floor(value) == value ? static_cast<UINT>(value) : fallback;
   };
   value.enabled = integer(L"service", L"enabled", 1);
-  value.follow_taxi = integer(L"service", L"follow_taxi", 1);
+  value.follow_taxi = profile->taxi_control == profiles::TaxiControl::manual_only ? 0u : integer(L"service", L"follow_taxi", 1);
   value.auto_detect = integer(L"service", L"auto_detect", 1);
   value.camera_rate = integer(L"display", L"camera_rate", 15);
   value.single_camera = integer(L"display", L"single_camera", 0);
@@ -117,7 +119,7 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   guide(value.tail_upper, L"tail_upper_x", L"tail_upper_y");
   guide(value.tail_corner, L"tail_corner_x", L"tail_corner_y");
   guide(value.tail_inner, L"tail_inner_x", L"tail_inner_y");
-  value.exposure = static_cast<float>(read(L"display", L"exposure", -8.8));
+  value.exposure = static_cast<float>(read(L"display", L"exposure", profile->exposure));
   value.night_boost = static_cast<float>(read(L"display", L"night_boost", 4));
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
   for (unsigned i = 0; i < 2; ++i)

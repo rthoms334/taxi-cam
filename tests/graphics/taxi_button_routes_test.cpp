@@ -179,6 +179,39 @@ int main() {
   assert(selections.targets[0] == 902 && selections.targets[1] == 903);
   assert(selections.select_explicit({903, 902}));  // Explicit swap replaces both atomically.
   assert(selections.matches(903, 1) && selections.matches(902, 2));
+  // Losing the complete ini allocation group withdraws only heuristic sides.
+  // It does not weaken manual anchors or the existing both-lost refusal.
+  taxi_camera::TaxiButtonRoutes ranked;
+  assert(ranked.adopt_detected({211, 209}));
+  ranked.forget_detected();
+  assert((ranked.targets == std::array<std::uint64_t, 2>{0, 0}));
+  assert(!ranked.adopt_detected({311, 309}));
+  assert(ranked.select_explicit({0, 0}));
+  assert(ranked.adopt_detected({311, 309}));
+  assert(ranked.assign(0, 311));  // Making one side explicit preserves it.
+  ranked.forget_detected();
+  assert((ranked.targets == std::array<std::uint64_t, 2>{311, 0}));
+  assert(ranked.adopt_detected({411, 311}));
+  assert((ranked.targets == std::array<std::uint64_t, 2>{311, 411}));
+  ranked.forget_detected();
+  assert((ranked.targets == std::array<std::uint64_t, 2>{311, 0}));
+  assert(ranked.select_explicit({0, 509}));
+  assert(ranked.adopt_detected({511, 509}));
+  ranked.forget_detected();
+  assert((ranked.targets == std::array<std::uint64_t, 2>{0, 509}));
+  assert(ranked.select_explicit({511, 509}));
+  ranked.forget_detected();
+  assert((ranked.targets == std::array<std::uint64_t, 2>{511, 509}));
+  ranked.reset();
+  assert(ranked.adopt_detected({611, 609}, true));  // Semantic names are not rank evidence.
+  ranked.forget_detected();
+  assert((ranked.targets == std::array<std::uint64_t, 2>{611, 609}));
+  ranked.reset();
+  assert(ranked.adopt_detected({711, 709}));
+  assert(!ranked.select_explicit({711, 711}));
+  ranked.forget_detected();
+  assert((ranked.targets == std::array<std::uint64_t, 2>{0, 0}));
+  std::puts("Ranked auto selection invalidation: PASS; explicit and semantic sides preserved, both-lost still refused");
   std::puts("Explicit manual/Auto routing: PASS; partial anchors preserved, duplicate pair unchanged");
   std::puts("Taxi button routes: PASS");
 }

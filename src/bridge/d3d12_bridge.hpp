@@ -18,6 +18,7 @@ struct GraphicsStatus {
   const char* preferred_copy_reason = "not_attempted";
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
+  const char* target_detection = "warming_up";
 };
 bool initialize_graphics() noexcept;
 // Isolated validation supplies a real hardware/WARP device. This never calls

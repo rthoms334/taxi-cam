@@ -1,19 +1,19 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
-#include "../hooks/render_boundary_observer.hpp"
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
-#include "d3d12_bridge.hpp"
+#include "../hooks/render_boundary_observer.hpp"
 #include "../shared/companion_control.hpp"
-#include "crash_evidence.hpp"
-#include "../shared/scene_demand.hpp"
-#include "native_hooks.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/scene_demand.hpp"
+#include "crash_evidence.hpp"
+#include "d3d12_bridge.hpp"
+#include "native_hooks.hpp"
 
 namespace {
 using namespace taxi_camera;
@@ -208,14 +208,16 @@ DWORD run_impl() {
     const auto identity = native_camera::get_aircraft_identity();
     const bool aircraft_matches =
         native_camera::aircraft_matches_profile() && (!settings.auto_profile || identity.detected_profile == settings.profile);
+    const auto* profile = profiles::find(settings.profile);
+    const bool manual_only = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
     const unsigned mask =
         connected && session_settings && settings.enabled && aircraft_matches && win::graphics_status().ready && !cutoff.inhibited
-            ? (settings.follow_taxi ? desired.buttons
-               : session_settings   ? settings.manual_mask
-                                    : 0)
+            ? (settings.follow_taxi && !manual_only ? desired.buttons
+               : session_settings                   ? settings.manual_mask
+                                                    : 0)
             : 0;
     const bool test_scene =
         connected && session_settings && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
@@ -240,7 +242,7 @@ DWORD run_impl() {
           native_camera::aircraft_matches_profile() && aircraft.fresh && aircraft.detected_profile == settings.profile,
           win::graphics_status().ready,
           native_camera::get_taxi_cutoff().inhibited,
-          native_camera::get_taxi_buttons().valid,
+          manual_only || native_camera::get_taxi_buttons().valid,
           pose.valid || pose.calibration_required,
           ground.valid,
           ground.on_ground,
@@ -437,23 +439,37 @@ DWORD run_impl() {
       std::snprintf(aircraft_message, sizeof(aircraft_message), "%s Aircraft type: %.96s.",
                     identity.fresh ? "The loaded aircraft is not supported by the selected profile." : "Waiting for aircraft identity.",
                     identity.type[0] ? identity.type.data() : "unavailable");
-    const char* message = !connected          ? "Waiting for Windows companion heartbeat."
-                          : !settings.enabled ? "Camera service paused."
-                          : !aircraft_matches ? aircraft_message
-                          : cutoff.inhibited  ? "Above 60 knots: TAXI buttons commanded off."
-                          : failed            ? scene.message.c_str()
-                          : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed
-                              ? scene.message.c_str()
-                          : !buttons.valid                       ? buttons.error
-                          : (!targets[0] || !targets[1])         ? "Detecting display textures for the selected aircraft profile."
-                          : !active && settings.calibration_mask ? "Calibration requested on the selected display."
-                          : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."
-                          : !active && !settings.follow_taxi     ? "Manual control selected. Enable a preview or TAXI buttons on Overview."
-                          : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
-                          : !requested || failed                 ? scene.message.c_str()
-                          : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
-                          : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
-                                                                 : output.message;
+    const char* target_message = "Detecting display textures for the selected aircraft profile.";
+    if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
+      const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
+      target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."
+                       : is("incomplete_inventory") ? "Display tracking was incomplete. Select the left and right PFDs manually."
+                       : is("ini_group_incomplete") ? "Waiting for all eight iniBuilds A380 display textures."
+                       : is("ini_group_ambiguous")
+                           ? "Extra iniBuilds A380 display textures make automatic selection ambiguous. Select PFDs manually."
+                       : is("ini_group_format")   ? "This iniBuilds A380 display format needs manual PFD selection."
+                       : is("ini_group_inactive") ? "Waiting for all eight iniBuilds A380 displays to update."
+                       : is("detected")           ? "PFD identities changed. Re-select the aircraft profile or choose the PFDs manually."
+                                                  : "Checking the iniBuilds A380 display group across three active samples.";
+    }
+    const char* message =
+        !connected          ? "Waiting for Windows companion heartbeat."
+        : !settings.enabled ? "Camera service paused."
+        : !aircraft_matches ? aircraft_message
+        : cutoff.inhibited  ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
+        : failed            ? scene.message.c_str()
+        : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
+        : !manual_only && !buttons.valid                                                                ? buttons.error
+        : (!targets[0] || !targets[1])                                                                  ? target_message
+        : !active && settings.calibration_mask ? "Calibration requested on the selected display."
+        : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."
+        : !active && manual_only               ? "Ready. Use camera hotkeys or the left/right preview controls."
+        : !active && !settings.follow_taxi     ? "Manual control selected. Enable a preview or TAXI buttons on Overview."
+        : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
+        : !requested || failed                 ? scene.message.c_str()
+        : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
+        : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
+                                               : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     if (mailbox.lock()) {
       mailbox.data()->status = status;

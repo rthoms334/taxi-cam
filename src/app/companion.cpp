@@ -14,7 +14,9 @@
 #include "launcher_log.hpp"
 #include "../shared/protocol.hpp"
 #include "settings_store.hpp"
+#include "camera_hotkeys.hpp"
 #include "bug_report.hpp"
+#include "../shared/manual_camera_intent.hpp"
 #include "../shared/profile_selection.hpp"
 #include "../graphics/target_assignment.hpp"
 #include "updater.hpp"
@@ -24,10 +26,11 @@ using namespace taxi_camera;
 namespace win = standalone;
 constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2;
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
+constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
 constexpr COLORREF Background = RGB(17, 21, 28), Sidebar = RGB(12, 16, 22), Card = RGB(26, 32, 41), Border = RGB(44, 54, 67),
                    Text = RGB(232, 238, 246), Muted = RGB(154, 170, 188), Accent = RGB(66, 219, 184);
 HINSTANCE instance{};
-HWND window{}, report_tooltip{};
+HWND window{}, sidebar_tooltip{}, shortcut_window{};
 HFONT normal{}, small{}, title_font{}, heading{};
 HBRUSH background_brush{}, card_brush{};
 HICON icon{};
@@ -47,6 +50,9 @@ std::atomic<bool> running{true};
 std::atomic<DWORD> simulator_pid{};
 HANDLE worker{}, show_event{}, singleton{};
 bool dirty = false, refreshing = false, background_start = false, preview_ui = false;
+win::CameraHotkeys hotkey_draft = win::DefaultCameraHotkeys, hotkey_saved = win::DefaultCameraHotkeys;
+win::CameraHotkeyRegistration hotkey_registration;
+bool hotkey_editor_focused{}, hotkeys_closing{};
 win::Updater updater;
 ULONGLONG next_update_check{};
 bool update_prompt{};
@@ -157,6 +163,12 @@ void publish(const win::Settings& value) {
   const std::lock_guard lock(app_mutex);
   current = value;
 }
+void donate() {
+  const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", DonationUrl, nullptr, nullptr, SW_SHOWNORMAL));
+  if (result <= 32)
+    MessageBoxW(window, L"Could not open your browser. You can also find the PayPal donation link in the Taxi Cam README.",
+                L"Donate to Taxi Cam", MB_OK | MB_ICONWARNING);
+}
 void report_bug() {
   win::BugReportContext context;
   {
@@ -250,6 +262,151 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
   return ok && win::valid_settings(settings);
 }
 void build_controls();
+void refresh_shortcut_status() {
+  if (!shortcut_window)
+    return;
+  for (unsigned i = 0; i < 3; ++i) {
+    const auto state = hotkey_draft[i] != hotkey_saved[i] ? std::wstring(L"Unsaved — select Save changes to apply")
+                       : hotkey_editor_focused            ? std::wstring(L"Editing — shortcuts paused until you leave the field")
+                                                          : hotkey_registration.status(i);
+    SetDlgItemTextW(shortcut_window, 650 + i, state.c_str());
+  }
+}
+void register_camera_hotkeys() {
+  if (hotkey_editor_focused || hotkeys_closing)
+    hotkey_registration.clear();
+  else
+    hotkey_registration.configure(window, hotkey_saved, preview_ui);
+}
+LRESULT CALLBACK shortcut_editor(HWND control, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
+  if (message == WM_SETFOCUS) {
+    // RegisterHotKey consumes its chord before the native editor sees it. Release
+    // our bindings while editing so existing shortcuts can be captured as well.
+    hotkey_editor_focused = true;
+    hotkey_registration.clear();
+    refresh_shortcut_status();
+  } else if (message == WM_KILLFOCUS) {
+    const auto next = reinterpret_cast<HWND>(w);
+    const int next_id = next && GetParent(next) == shortcut_window ? GetDlgCtrlID(next) : 0;
+    hotkey_editor_focused = next_id >= 620 && next_id <= 622;
+    register_camera_hotkeys();
+    refresh_shortcut_status();
+  } else if (message == WM_NCDESTROY) {
+    RemoveWindowSubclass(control, shortcut_editor, id);
+  }
+  return DefSubclassProc(control, message, w, l);
+}
+struct ShortcutDialogTemplate {
+  DLGTEMPLATE dialog{WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, WS_EX_DLGMODALFRAME, 0, 0, 0, 450, 260};
+  WORD menu{}, window_class{}, title{};
+};
+INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
+  if (message == WM_INITDIALOG) {
+    shortcut_window = hwnd;
+    hotkey_draft = hotkey_saved;
+    SetWindowTextW(hwnd, L"Taxi Cam — Flight-deck keyboard shortcuts");
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+    RECT bounds{0, 0, scale(680), scale(460)}, owner{};
+    AdjustWindowRectExForDpi(&bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, FALSE, WS_EX_DLGMODALFRAME, dpi);
+    GetWindowRect(window, &owner);
+    const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
+    SetWindowPos(hwnd, nullptr, owner.left + (owner.right - owner.left - width) / 2, owner.top + (owner.bottom - owner.top - height) / 2,
+                 width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    const auto make = [&](const wchar_t* type, const wchar_t* label, int id, int x, int y, int width, int height, DWORD style = 0,
+                          HFONT font = nullptr) {
+      HWND control = CreateWindowExW(0, type, label, WS_CHILD | WS_VISIBLE | style, scale(x), scale(y), scale(width), scale(height), hwnd,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+      SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font ? font : normal), TRUE);
+      SetWindowTheme(control, L"DarkMode_Explorer", nullptr);
+      return control;
+    };
+    make(L"STATIC", L"Flight-deck keyboard shortcuts", -1, 20, 17, 640, 28, 0, heading);
+    make(L"STATIC", L"Use Ctrl or Alt with a letter, number or function key. Clear disables a shortcut.", -1, 20, 51, 640, 27, 0, small);
+    for (unsigned i = 0; i < 3; ++i) {
+      const int y = 90 + static_cast<int>(i) * 90;
+      make(L"STATIC", win::CameraHotkeyNames[i], -1, 20, y + 5, 190, 26);
+      auto field = make(HOTKEY_CLASSW, L"", 620 + i, 220, y, 330, 32, WS_TABSTOP | WS_BORDER);
+      SendMessageW(field, HKM_SETHOTKEY, win::hotkey_control_value(hotkey_draft[i]), 0);
+      SetWindowSubclass(field, shortcut_editor, 1, 0);
+      make(L"BUTTON", L"Clear", 630 + i, 568, y, 92, 32, WS_TABSTOP | BS_PUSHBUTTON);
+      make(L"STATIC", L"", 650 + i, 20, y + 40, 640, 25, 0, small);
+    }
+    make(L"STATIC",
+         L"Both turns both displays on; press again to turn both off.\nShortcuts apply to all aircraft and work while Taxi Cam is hidden.",
+         660, 20, 350, 640, 45, 0, small);
+    make(L"BUTTON", L"Reset shortcuts", 640, 20, 407, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"BUTTON", L"Save changes", IDOK, 400, 407, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", L"Close", IDCANCEL, 562, 407, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    refresh_shortcut_status();
+    return TRUE;
+  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT) {
+    const auto dc = reinterpret_cast<HDC>(w);
+    SetTextColor(dc, Text);
+    SetBkColor(dc, Card);
+    return reinterpret_cast<INT_PTR>(card_brush);
+  }
+  if (message == WM_COMMAND) {
+    const int id = LOWORD(w);
+    if (id >= 620 && id <= 622 && HIWORD(w) == EN_CHANGE) {
+      hotkey_draft[id - 620] = win::hotkey_from_control(static_cast<WORD>(SendDlgItemMessageW(hwnd, id, HKM_GETHOTKEY, 0, 0)));
+      refresh_shortcut_status();
+      return TRUE;
+    }
+    if ((id >= 630 && id <= 632) || id == 640) {
+      if (id == 640)
+        hotkey_draft = win::DefaultCameraHotkeys;
+      else
+        hotkey_draft[id - 630] = {};
+      for (unsigned i = 0; i < 3; ++i)
+        SendDlgItemMessageW(hwnd, 620 + i, HKM_SETHOTKEY, win::hotkey_control_value(hotkey_draft[i]), 0);
+      refresh_shortcut_status();
+      return TRUE;
+    }
+    if (id == IDOK) {
+      std::wstring error;
+      if (!win::valid_camera_hotkeys(hotkey_draft, &error)) {
+        SetDlgItemTextW(hwnd, 660, error.c_str());
+        return TRUE;
+      }
+      if (!win::save_camera_hotkeys(hotkey_draft, win::settings_directory())) {
+        SetDlgItemTextW(hwnd, 660, L"Could not save shortcuts. Check access to the local settings folder.");
+        return TRUE;
+      }
+      hotkey_saved = hotkey_draft;
+      register_camera_hotkeys();
+      refresh_shortcut_status();
+      SetDlgItemTextW(hwnd, 660,
+                      hotkey_registration.conflicts()
+                          ? L"Saved. Unavailable shortcuts need a different combination. The other shortcuts remain active."
+                          : L"Shortcuts saved for all aircraft. Camera settings and unfinished edits are unchanged.");
+      return TRUE;
+    }
+    if (id == IDCANCEL) {
+      EndDialog(hwnd, IDCANCEL);
+      return TRUE;
+    }
+  }
+  if (message == WM_CLOSE) {
+    EndDialog(hwnd, IDCANCEL);
+    return TRUE;
+  }
+  if (message == WM_DESTROY) {
+    shortcut_window = nullptr;
+    hotkey_editor_focused = false;
+    hotkey_draft = hotkey_saved;
+    register_camera_hotkeys();
+  }
+  return FALSE;
+}
+void edit_camera_hotkeys() {
+  const ShortcutDialogTemplate layout;
+  if (DialogBoxIndirectParamW(instance, &layout.dialog, window, shortcut_dialog, 0) == -1) {
+    notice = L"Could not open the keyboard shortcut editor.";
+    InvalidateRect(window, nullptr, FALSE);
+  }
+}
 bool apply(bool save = true) {
   auto settings = draft();
   const wchar_t* field_error{};
@@ -268,6 +425,8 @@ bool apply(bool save = true) {
   publish(settings);
   dirty = false;
   notice = save ? L"Saved. Adjustments apply while the cameras are running." : L"Settings updated.";
+  if (save && hotkey_registration.conflicts())
+    notice = L"Saved. Some shortcuts are unavailable; check Overview > Flight-deck control.";
   InvalidateRect(window, nullptr, FALSE);
   return true;
 }
@@ -349,6 +508,35 @@ void sync_aircraft_session() {
                                                                           {229, L"Scene test: Off"}}})
     SetDlgItemTextW(window, label.first, label.second);
 }
+void toggle_camera_from_hotkey(unsigned action) {
+  // Keep unfinished numeric edits in their controls. A global shortcut must not
+  // run Apply or rebuild the page, even when the companion is hidden.
+  sync_aircraft_session();
+  auto s = draft();
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto now = GetTickCount64();
+  const bool fresh = sample.heartbeat && now >= sample.heartbeat && now - sample.heartbeat <= 3000 &&
+                     sample.aircraft_session_epoch == s.aircraft_session_epoch && sample.active_profile == s.profile;
+  win::toggle_manual_camera(s, action, fresh ? sample.taxi_mask : 0);
+  publish(s);
+  dirty_notice();
+  notice = L"Manual camera request: left " + std::wstring(s.manual_mask & 1 ? L"on" : L"off") + L", right " +
+           (s.manual_mask & 2 ? L"on" : L"off") + L". TAXI-button control is off.";
+  if (!s.enabled)
+    notice = L"Camera request updated. The camera service is off.";
+  for (unsigned side = 0; side < 2; ++side) {
+    const auto label = std::wstring(side ? L"Right preview: " : L"Left preview: ") + (s.manual_mask & (1u << side) ? L"On" : L"Off");
+    SetDlgItemTextW(window, 224 + side, label.c_str());
+    SetDlgItemTextW(window, 226 + side, side ? L"Calibrate right: Off" : L"Calibrate left: Off");
+  }
+  SetDlgItemTextW(window, 221, L"TAXI buttons: Off");
+  SetDlgItemTextW(window, 229, L"Scene test: Off");
+  InvalidateRect(window, nullptr, FALSE);
+}
 void auto_profile() {
   const auto s = draft();
   if (!s.auto_profile) {
@@ -381,9 +569,9 @@ void auto_profile() {
 }
 void build_controls() {
   refreshing = true;
-  if (report_tooltip) {
-    DestroyWindow(report_tooltip);
-    report_tooltip = nullptr;
+  if (sidebar_tooltip) {
+    DestroyWindow(sidebar_tooltip);
+    sidebar_tooltip = nullptr;
   }
   for (HWND h : controls)
     DestroyWindow(h);
@@ -393,17 +581,21 @@ void build_controls() {
   const wchar_t* names[]{L"Overview", L"Camera views", L"Display", L"PFD routing", L"Diagnostics", L"Reference guides"};
   for (int i = 0; i < 6; ++i)
     navigation.push_back(button(names[i], 100 + i, 20, 156 + i * 49, 166, 40));
+  const auto donate_button = button(L"Donate", 513, 24, 590, 110, 40);
   const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
-  report_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
-                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
-  if (report_tooltip) {
+  sidebar_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
+                                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
+  if (sidebar_tooltip) {
     TOOLINFOW tip{};
     tip.cbSize = sizeof(tip);
     tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     tip.hwnd = window;
     tip.uId = reinterpret_cast<UINT_PTR>(report_button);
     tip.lpszText = const_cast<wchar_t*>(L"Report a bug");
-    SendMessageW(report_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    tip.uId = reinterpret_cast<UINT_PTR>(donate_button);
+    tip.lpszText = const_cast<wchar_t*>(L"Donate via PayPal");
+    SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
   }
   button(L"Menu", 602, 930, 37, 80, 34);
   button(L"Save changes", 500, 835, 686, 175, 42);
@@ -417,7 +609,11 @@ void build_controls() {
         SendMessageW(combo, CB_SETCURSEL, i, 0);
     toggle(L"Auto aircraft", 230, s.auto_profile, 707, 304, 140);
     toggle(L"Service", 220, s.enabled, 860, 304, 135);
-    toggle(L"TAXI buttons", 221, s.follow_taxi, 800, 412, 180);
+    const auto* profile = profiles::find(s.profile);
+    const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
+    toggle(L"TAXI buttons", 221, s.follow_taxi && !manual, 800, 412, 180);
+    EnableWindow(GetDlgItem(window, 221), !manual);
+    button(L"Keyboard shortcuts…", 645, 580, 412, 205);
     edit(s.camera_rate, 200, 855, 528, 100);
   } else if (page == 1) {
     for (int i = 0; i < 2; ++i) {
@@ -568,8 +764,13 @@ void draw_page(HDC dc) {
     panel(dc, 244, 281, 766, 93);
     text(dc, L"Aircraft profile", 260, 284, 350, 26, small, Muted);
     panel(dc, 244, 395, 766, 96);
-    text(dc, L"Flight-deck control", 264, 406, 450, 30, heading);
-    text(dc, L"Left and right EFIS TAXI buttons activate their own PFD.", 264, 446, 530, 24, small, Muted);
+    text(dc, L"Flight-deck control", 264, 406, 300, 30, heading);
+    const auto* profile = profiles::find(draft().profile);
+    const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
+    text(dc,
+         manual ? L"Use Keyboard shortcuts or PFD routing previews for this aircraft."
+                : L"Left and right EFIS TAXI buttons activate their own PFD.",
+         264, 446, 530, 30, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
     text(dc, L"15–60 fps per camera. Lower rates leave more time for the sim.", 264, 564, 540, 24, small, Muted);
@@ -616,7 +817,12 @@ void draw_page(HDC dc) {
     panel(dc, 244, 500, 766, 112);
     text(dc, L"Target calibration", 260, 507, 705, 29, heading);
     text(dc, L"Animated bars identify each screen before enabling a live feed.", 260, 581, 705, 23, small, Muted);
-    text(dc, L"Enable flight-deck control on Overview to return to normal use.", 250, 630, 745, 24, small, Muted);
+    const auto* profile = profiles::find(draft().profile);
+    text(dc,
+         profile && profile->taxi_control == profiles::TaxiControl::manual_only
+             ? L"Use shortcuts in Overview > Flight-deck control, or manual previews."
+             : L"Enable flight-deck control on Overview to return to normal use.",
+         250, 630, 745, 24, small, Muted);
   } else if (page == 4) {
     panel(dc, 244, 138, 766, 277);
     wchar_t data[1024];
@@ -910,6 +1116,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
       SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
       taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+      register_camera_hotkeys();
+      if (hotkey_registration.conflicts())
+        notice = L"Some shortcuts are unavailable. Check Overview > Flight-deck control.";
       build_controls();
       tray(true);
       SetTimer(hwnd, 1, 250, nullptr);
@@ -920,6 +1129,14 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         show();
       poll_updates();
       return 0;
+    case WM_HOTKEY: {
+      const int action = hotkey_registration.action(w, l);
+      const auto focus = GetFocus();
+      const auto focused_id = focus && GetParent(focus) == hwnd ? GetDlgCtrlID(focus) : 0;
+      if (action >= 0 && !preview_ui && !(focused_id >= 620 && focused_id <= 622))
+        toggle_camera_from_hotkey(static_cast<unsigned>(action));
+      return 0;
+    }
     case WM_GETMINMAXINFO: {
       auto* info = reinterpret_cast<MINMAXINFO*>(l);
       info->ptMinTrackSize = {scale(1055), scale(795)};
@@ -965,7 +1182,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         break;
       const int id = static_cast<int>(item->CtlID);
       const bool selected = (id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft());
-      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || id == 512 ? Sidebar : Background);
+      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || id == 512 || id == 513 ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
       const bool primary = id == 500;
@@ -1043,6 +1260,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const int id = LOWORD(w);
       if (refreshing)
         return 0;
+      if (id == 645) {
+        edit_camera_hotkeys();
+        return 0;
+      }
       if (HIWORD(w) == CBN_SELCHANGE && (id == 400 || id == 401)) {
         if (apply(false))
           dirty_notice();
@@ -1071,6 +1292,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 512) {
         report_bug();
+        return 0;
+      }
+      if (id == 513) {
+        donate();
         return 0;
       }
       if (id == 210 && HIWORD(w) == CBN_SELENDOK) {
@@ -1138,6 +1363,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (id == 220)
           s.enabled = !s.enabled;
         if (id == 221) {
+          const auto* profile = profiles::find(s.profile);
+          if (profile && profile->taxi_control == profiles::TaxiControl::manual_only)
+            return 0;
           s.follow_taxi = !s.follow_taxi;
           if (s.follow_taxi) {
             s.manual_mask = 0;
@@ -1149,14 +1377,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (id == 223)
           s.auto_detect = !s.auto_detect;
         if (id == 224 || id == 225) {
-          s.follow_taxi = 0;
-          s.calibration_mask = 0;
-          s.manual_mask ^= id == 224 ? 1u : 2u;
+          win::toggle_manual_camera(s, id == 224 ? 0u : 1u);
         }
         if (id == 226 || id == 227) {
           s.manual_mask = 0;
           s.calibration_mask ^= id == 226 ? 1u : 2u;
-          s.follow_taxi = s.calibration_mask == 0;
+          const auto* profile = profiles::find(s.profile);
+          s.follow_taxi = s.calibration_mask == 0 && profile && profile->taxi_control != profiles::TaxiControl::manual_only;
         }
         if (id == 228)
           s.single_camera = !s.single_camera;
@@ -1257,9 +1484,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         ShowWindow(hwnd, SW_HIDE);
       return 0;
     case WM_DESTROY:
-      if (report_tooltip) {
-        DestroyWindow(report_tooltip);
-        report_tooltip = nullptr;
+      hotkeys_closing = true;
+      hotkey_registration.clear();
+      if (sidebar_tooltip) {
+        DestroyWindow(sidebar_tooltip);
+        sidebar_tooltip = nullptr;
       }
       stop_service();
       tray(false);
@@ -1310,7 +1539,10 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
     win::settings_override = installation + L"\\preview-settings";
   if (!win::load_settings(current, installation))
     notice = L"Saved settings were invalid; profile defaults loaded.";
-  INITCOMMONCONTROLSEX common{sizeof(common), ICC_STANDARD_CLASSES};
+  if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
+    notice = L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.";
+  hotkey_draft = hotkey_saved;
+  INITCOMMONCONTROLSEX common{sizeof(common), ICC_STANDARD_CLASSES | ICC_HOTKEY_CLASS};
   InitCommonControlsEx(&common);
   WNDCLASSEXW type{};
   type.cbSize = sizeof(type);

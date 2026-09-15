@@ -40,6 +40,9 @@ void patch_demand_case() {
   require(output.set_patch_profile(3), "Select A350-1000");
   request(taxi_camera::profiles::A35K, DXGI_FORMAT_R8G8B8A8_UNORM);
   require(output.patch_requests() == 5, "Matching profile geometry reuses its exact typed slot");
+  require(output.set_patch_profile(taxi_camera::profiles::IniA380.id), "Select experimental ini A380");
+  request(taxi_camera::profiles::IniA380, DXGI_FORMAT_R8G8B8A8_UNORM);
+  require(output.patch_requests() == 5, "ini A380 starting geometry reuses the existing A380 slot");
   require(!output.set_patch_profile(99) && output.set_patch_profile(1), "Invalid profile refuses without losing prior slots");
   request(taxi_camera::profiles::A380, DXGI_FORMAT_R8G8B8A8_UNORM);
   require(output.patch_requests() == 5 && !output.patch_draws(), "Profile roundtrip retains bounded demand without GPU work");
@@ -879,8 +882,10 @@ void textured_gray_fallback(ID3D12Device* device,
   std::printf("PASS textured gray %s: 16 UNORM/sRGB/mip/alpha cases; fallback=%llu preferredcopy=0; preserved pixels=%llu\n",
               warp ? "WARP" : "hardware", fallback_count, checked);
 }
-void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bool textured_gray = false) {
-  const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
+void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bool textured_gray = false, bool ini_a380 = false) {
+  const auto& profile = ini_a380 ? taxi_camera::profiles::IniA380 : a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
+  if (ini_a380)
+    std::puts("Validating iniBuilds A380 display geometry: own GPU fixtures only; does not validate live routing or framing.");
   const UINT pane_width = profile.camera_panes[0][0], display_width = profile.width;
   const UINT nose_height = profile.camera_panes[0][1], tail_height = profile.camera_panes[1][1];
   Reference<ID3D12Debug> debug;
@@ -928,7 +933,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
                                           : 1024,
                                  DXGI_FORMAT_R8G8B8A8_UNORM);
     if (i > 1)
-      d.MipLevels = a350 ? 1 : 5;
+      d.MipLevels = profile.mips ? profile.mips : 1;
     create_texture(device.get(), d, textures[i].put());
   }
   D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -2356,12 +2361,15 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   try {
-    bool warp = false, a350 = false, query_fallback = false, prefer_copy = false, profile_switch = false, textured_gray = false;
+    bool warp = false, a350 = false, query_fallback = false, prefer_copy = false, profile_switch = false, textured_gray = false,
+         ini_a380 = false;
     for (int i = 1; i < argc; ++i) {
       if (std::wcscmp(argv[i], L"--warp") == 0)
         warp = true;
       else if (std::wcscmp(argv[i], L"--a350") == 0)
         a350 = true;
+      else if (std::wcscmp(argv[i], L"--ini-a380") == 0)
+        ini_a380 = true;
       else if (std::wcscmp(argv[i], L"--query-fallback") == 0)
         query_fallback = true;
       else if (std::wcscmp(argv[i], L"--textured-gray") == 0)
@@ -2375,13 +2383,15 @@ int wmain(int argc, wchar_t** argv) {
       else
         return 2;
     }
+    if (ini_a380 && (a350 || profile_switch))
+      return 2;
     patch_demand_case();
     if (argc == 2 && std::wcscmp(argv[1], L"--patch-demand") == 0)
       return 0;
     if (profile_switch)
       active_profile_switch_case(warp);
     else
-      native_case(warp, a350, query_fallback, prefer_copy, textured_gray);
+      native_case(warp, a350, query_fallback, prefer_copy, textured_gray, ini_a380);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL native graphics: %s\n", e.what());

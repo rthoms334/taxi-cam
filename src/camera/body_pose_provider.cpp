@@ -367,7 +367,8 @@ DWORD WINAPI worker(void*) noexcept {
     if (last_packet && SUCCEEDED(last_packet(session, &id)) && id)
       taxi_packets[taxi_packet_cursor++ % taxi_packets.size()] = id;
   };
-  bool taxi_defined = last_packet != nullptr;
+  const bool manual_only = profile.taxi_control == profiles::TaxiControl::manual_only;
+  bool taxi_defined = !manual_only && last_packet != nullptr;
   for (const auto name : profile.taxi_lvars) {
     if (!taxi_defined)
       break;
@@ -375,7 +376,7 @@ DWORD WINAPI worker(void*) noexcept {
     remember_taxi_packet();
   }
   if (!taxi_defined)
-    taxi_failure("taxi_definition_unavailable");
+    taxi_failure(manual_only ? "taxi_buttons_unavailable_use_manual_control" : "taxi_definition_unavailable");
   std::array<bool, 2> taxi_events{};
   // Isolated telemetry readers never control the aircraft. Production sends
   // the aircraft's real input event; its own controller updates the light.
@@ -592,7 +593,7 @@ DWORD WINAPI worker(void*) noexcept {
     AcquireSRWLockExclusive(&state.lock);
     const auto commands = state.speed_cutoff.update(GetTickCount64(), speed.valid, speed.knots, buttons.valid,
                                                     (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms,
-                                                    profile.speed_cutoff_knots);
+                                                    profile.speed_cutoff_knots, !manual_only);
     state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
                           : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
                                                            : "below_speed_limit";
