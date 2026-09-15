@@ -75,6 +75,7 @@ struct List : Metadata {
   DXGI_FORMAT depth = DXGI_FORMAT_UNKNOWN;
   bool depth_known = true;
   bool ready = false;
+  bool closing = false;
   bool pfd_dirty = false, pfd_transition = false;
   void retire() noexcept override {
     alive.store(false, std::memory_order_release);
@@ -138,6 +139,8 @@ struct Registry {
   std::atomic<std::uint64_t> calibration_clears{};
   std::atomic<std::uint64_t> selected_exit_base{}, selected_exit_nonbase{}, selected_exit_split{};
   std::atomic<std::uint64_t> fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
+  std::atomic<std::uint64_t> recording_end_draws{}, shader_deferred{}, close_forward_refused{};
+  bool close_forward_verified = false;
   std::atomic<std::uint64_t> preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
   std::atomic<const char*> preferred_copy_reason{"not_attempted"};
   std::atomic<std::uint64_t> dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{};
@@ -583,7 +586,7 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
       }
     }
 }
-void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
+void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool recording_end = false) noexcept {
   auto list = find_list(native);
   if (!registry().ready || !list || list->id != id || !list->ready)
     return;
@@ -637,6 +640,16 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
       ++r.preferred_copy_no_proof;
       r.preferred_copy_reason = list->copy_proof.reason(proof_key);
     }
+    // Shader delivery is terminal work on a DIRECT recording. Intermediate
+    // boundaries retain the typed target, without replaying application roots.
+    if (!r.graphics_state_test && !recording_end) {
+      ++r.shader_deferred;
+      continue;
+    }
+    if (!r.graphics_state_test && !r.close_forward_verified) {
+      ++r.close_forward_refused;
+      continue;
+    }
     // The private copy neither changes graphics bindings nor contributes query
     // samples. These original admission checks continue to guard shader draws.
     if (!list->queries.known_empty()) {
@@ -671,12 +684,17 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     if (!shader_only)
       native->OMSetRenderTargets(1, &target, FALSE, nullptr);
     ++r.fallback_attempts;
-    const bool stamped = targets_only || runtime::stamp(native, list->graphics, r.key, view.format,
-                                                        static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
-                                                        DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test, group);
+    const bool terminal_draw = recording_end && !r.graphics_state_test;
+    const bool stamped =
+        targets_only ||
+        (terminal_draw
+             ? runtime::stamp_at_recording_end(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
+                                               view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner)
+             : runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
+                              view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test, group));
     // Restore the CURRENT raw OM bindings, including valid descriptors that
     // predate tracking. Never replay the bindings from when the PFD was queued.
-    if (!shader_only)
+    if (!shader_only && !terminal_draw)
       native->OMSetRenderTargets(list->raw_rtv_count, list->raw_rtvs.data(), FALSE, list->raw_has_dsv ? &list->raw_dsv : nullptr);
     if (stamped) {
       if (r.graphics_state_test) {
@@ -685,9 +703,12 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
           ++r.state_test_target_roundtrips;
         if (!targets_only)
           ++r.state_test_shader_roundtrips;
-      } else
+      } else {
         ++r.fallback_stamps;
-      if (!targets_only) {
+        if (terminal_draw)
+          ++r.recording_end_draws;
+      }
+      if (!targets_only && !terminal_draw) {
         if (group == PfdStateGroup::all || group == PfdStateGroup::raster)
           r.sample_position_restores += list->graphics.has_sample_positions();
         if (group == PfdStateGroup::all || group == PfdStateGroup::pipeline) {
@@ -1114,13 +1135,34 @@ HRESULT STDMETHODCALLTYPE list_create1(ID3D12Device4* device,
   return hr;
 }
 NativeSlot list_reset, list_close;
+// The captured forward must be a native runtime endpoint: no downstream
+// add-on may append instrument draws after we deliberately leave our state set.
+bool native_close_endpoint(const void* address) noexcept {
+  HMODULE owner{};
+  if (!image_region(address, true) ||
+      !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(address), &owner))
+    return false;
+  return owner == GetModuleHandleW(L"D3D12Core.dll") || owner == GetModuleHandleW(L"d3d12.dll") ||
+         owner == GetModuleHandleW(L"D3D12SDKLayers.dll");
+}
 HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
   if (!owned_depth && registry().ready) {
     const OwnedWork guard;
     observe_safely([&] {
-      if (auto item = find_list(native))
-        flush_pfd(native, item->id);
+      if (auto item = find_list(native); item && item->ready && !item->closing) {
+        item->closing = true;
+        stage_pfd(native, item->id);
+        drain_pfds(native, item->id, true);
+        // Success or failure, no second Close may append another stamp. The
+        // capture manager retains submission/reexecution leases independently.
+        item->pfd_dirty = false;
+        item->pending_pfds = {};
+        item->pending_rt = {};
+        item->ready = false;
+        item->graphics.invalidate("native_recording_closed");
+      }
     });
   }
   return list_close.forward<F>()(native);
@@ -1150,6 +1192,7 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->copy_proof.reset(item->ready);
     item->raw_om_known = item->ready;
     if (item->ready) {
+      item->closing = false;
       item->graphics.reset(++item->recording, true);
       item->graphics.bind_pipeline(pso);
       boundary::successful_reset(native, item->id);
@@ -1562,6 +1605,7 @@ bool initialize_graphics(ID3D12Device* device) noexcept {
   }
   // Bootstrap objects, modules and the device remain pinned. No runtime unload.
   bool ok = hook_state(list);
+  r.close_forward_verified = native_close_endpoint(list_close.original.load(std::memory_order_acquire));
   const auto base = boundary::register_list(list, ++r.next_id, Boundaries);
   ok &= base.ready && base.protection_restored;
   // Discover the runtime's real active-pass table on this owned, empty list,
@@ -1650,6 +1694,9 @@ GraphicsStatus graphics_status() noexcept {
   result.state_test_roundtrips = r.state_test_roundtrips.load();
   result.state_test_target_roundtrips = r.state_test_target_roundtrips.load();
   result.state_test_shader_roundtrips = r.state_test_shader_roundtrips.load();
+  result.recording_end_draws = r.recording_end_draws.load();
+  result.shader_deferred = r.shader_deferred.load();
+  result.close_forward_refused = r.close_forward_refused.load();
   result.dynamic_depth_bias_calls = r.dynamic_depth_bias_calls.load();
   result.dynamic_strip_cut_calls = r.dynamic_strip_cut_calls.load();
   result.dynamic_depth_bias_restores = r.dynamic_depth_bias_restores.load();

@@ -284,6 +284,50 @@ bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
     list->DrawInstanced(3, 1, 0, 0);
   return true;
 }
+bool PfdStampD3D12::record_final_buffer(ID3D12GraphicsCommandList* list,
+                                        const PfdGraphicsState& state,
+                                        ID3D12Device* buffer_device,
+                                        D3D12_GPU_VIRTUAL_ADDRESS address,
+                                        UINT width,
+                                        UINT height,
+                                        const D3D12_RECT* destination,
+                                        const D3D12_RECT* content) noexcept {
+  const engine_hook::pfd_state::ScopedBypass bypass;
+  if (!list || !state.can_restore(list) || !pipeline_ || !address || address % 4 || buffer_device != device_ || width < 1 || height < 2 ||
+      width > 16384 || height > 16384 || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+    return false;
+  // Preflight the same rectangles as record_private_patch before temporarily
+  // normalizing sample positions. Invalid requests change no graphics state.
+  const UINT upper = static_cast<UINT>((static_cast<UINT64>(height) * 763) / 1024);
+  if (!upper)
+    return false;
+  const D3D12_RECT rect = destination ? *destination : D3D12_RECT{0, 0, static_cast<LONG>(width), static_cast<LONG>(upper)};
+  if (rect.left < 0 || rect.top < 0 || rect.right <= rect.left || rect.bottom <= rect.top || rect.right > static_cast<LONG>(width) ||
+      rect.bottom > static_cast<LONG>(height))
+    return false;
+  const D3D12_RECT inner = content ? *content : rect;
+  if (inner.left < rect.left || inner.top < rect.top || inner.right > rect.right || inner.bottom > rect.bottom ||
+      inner.right <= inner.left || inner.bottom <= inner.top)
+    return false;
+  ID3D12GraphicsCommandList1* samples = nullptr;
+  if (state.has_sample_positions()) {
+    const auto hr = list->QueryInterface(IID_PPV_ARGS(&samples));
+    if (FAILED(hr) || samples != list) {
+      if (samples)
+        samples->Release();
+      return false;
+    }
+    samples->SetSamplePositions(0, 0, nullptr);
+  }
+  // Our PSO resets any dynamic depth-bias/strip-cut overrides. The only draw
+  // follows all application work; there is no application state restoration.
+  const bool recorded = record_private_patch(list, buffer_device, address, width, height, &rect, &inner);
+  if (!recorded && samples)
+    state.restore_sample_positions(list);
+  if (samples)
+    samples->Release();
+  return recorded;
+}
 void PfdStampD3D12::release() noexcept {
   release_pointer(pipeline_);
   release_pointer(root_);

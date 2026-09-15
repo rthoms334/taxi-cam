@@ -19,6 +19,7 @@ struct GraphicsStatus {
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, dynamic_depth_bias_restores{}, dynamic_strip_cut_restores{};
   std::uint64_t sample_position_calls{}, sample_position_restores{}, state_test_roundtrips{};
   std::uint64_t state_test_target_roundtrips{}, state_test_shader_roundtrips{};
+  std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
 };
 bool initialize_graphics() noexcept;
 // Isolated validation supplies a real hardware/WARP device. This never calls

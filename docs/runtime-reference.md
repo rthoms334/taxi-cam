@@ -114,9 +114,19 @@ The bridge log reports `PFD copy admission` alongside the normal camera counters
 
 The `PFD scope` line records selected RT-exit scope flags (enabled=1, active pass=2, suspended pass=4, invalid recording=8, prior work=16), base/nonbase subresource counts and split barriers. It also reports completed calibration-clear recordings and the automatic/manual/calibration control masks.
 
-The `PFD boundary copy` line counts attempts and completed copy recordings at target changes or command-list closure. `no_proof` and `reason` identify cases that retain the guarded drawing path because that recording has no usable render-target transition evidence. `dynamic_bias_calls` and `dynamic_strip_calls` count observed application overrides; the following `restores` counters count successful camera draws that replayed those overrides. These counters distinguish the active delivery path and actual application API use; they do not by themselves prove or disprove a visible brightness flash.
+The `PFD boundary copy` line counts attempts and completed copy recordings at target changes or command-list closure. `no_proof` and `reason` identify recordings without usable render-target transition evidence; their drawing fallback waits for native DIRECT command-list closure. `dynamic_bias_calls` and `dynamic_strip_calls` count observed application overrides. Their `restores` counters apply to optional graphics-state diagnostics; normal recording-end drawing does not replay application state.
 
-Camera composition can succeed while PFD writes are refused. The `PFD guarded draw` line counts deferred draw attempts, successful stamps and query/state refusals separately from texture copies. When images exist but no PFD write has yet been recorded, the app reports that it is waiting for a verified write opportunity.
+The `PFD guarded draw` line reports attempts, successful stamps and query/state refusals separately from texture copies. Its additional fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `recording_end` | Successful camera draws appended immediately before native DIRECT `Close` |
+| `deferred` | Intermediate delivery opportunities held until closure because no safe copy was available |
+| `close_forward_refused` | Drawing opportunities rejected because the captured `Close` forward was not a verified D3D12 runtime endpoint |
+
+A drawing attempt requires a verified target, current image, complete state evidence and no open paired query or render pass. `Close` must forward to `D3D12Core.dll`, `d3d12.dll`, or the official `D3D12SDKLayers.dll` debug layer. The bridge binds its own camera pipeline and target without replaying application state afterward. A recording gets at most one closure attempt; only a successful native `Reset` permits another. Independently proved texture copies retain their own admission and resource-state restoration.
+
+Camera composition can succeed while PFD writes are refused. When images exist but no PFD write has yet been recorded, the app reports that it is waiting for a verified write opportunity. These are recorded-operation counters, not proof that a frame was presented or that display flashing is resolved.
 
 ## Exposure
 
@@ -175,7 +185,9 @@ Source: [IPC](../standalone/protocol.hpp), [control loop](../standalone/bridge_m
 
 **Graphics state test** cycles through **Off**, **All**, **Targets only**, **Shader state only**, **Pipeline only**, **Root bindings only**, and **Raster state only**. With a TAXI request or manual camera preview active, the test modes keep camera capture and composition running but omit camera pixel drawing and PFD copies. All repeats both render-target binding and shader-state restoration; Targets only changes and restores RTV/DSV bindings; Shader state only changes and restores the overlay pipeline, root arguments, topology, viewports and scissors without changing RTV/DSV bindings. The three narrower modes isolate the pipeline (including observed dynamic depth bias and strip cut), root signature and arguments, or topology/viewports/scissors and observed sample positions. Each narrower mode restores only the state it changes. Cycle back to Off to return to normal camera delivery. Existing command recordings can persist until MSFS redraws the display. The test is off by default, is not saved to configuration, and clears on Stop camera tests or an aircraft-session/profile change.
 
-The `PFD state diagnostic` log reports `mode` (0-6), its `name`, successful `roundtrips`, and separate `targets` and `shaders` operation counts, independently of camera stamps. `sample_position_calls` counts native programmable sample-pattern setters, and `restores` counts overlays that restored an observed pattern. These counters establish whether the application uses the state; they do not establish the cause of a visible flash.
+These tests exercise application-state changes and restoration at display boundaries. Normal camera delivery instead uses a proved texture copy or a final draw at native command-list closure, without replaying application bindings.
+
+The `PFD state diagnostic` log reports `mode` (0-6), its `name`, successful `roundtrips`, and separate `targets` and `shaders` operation counts, independently of camera stamps. `sample_position_calls` counts native programmable sample-pattern setters, and `restores` counts diagnostic recordings that restored an observed pattern. These counters establish whether the application uses the state; they do not establish the cause of a visible flash.
 
 The bridge writes a status snapshot to the companion and appends metadata to:
 
@@ -216,7 +228,7 @@ The frame-rate setting limits activation opportunities for each camera. Each ope
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |
 | Captures increase, no compositions | Both feeds, current scene identity and GPU completion |
-| Compositions increase, no PFD draws | Assigned targets, active side and restorable graphics state |
+| Compositions increase, no PFD draws | Assigned targets, active side, recording-end/query/state admission and `close_forward_refused` |
 | PFD draws increase, wrong display | Target identification, left/right assignment and display layer |
 | Camera inhibited below 60 knots | Pending TAXI OFF acknowledgement |
 

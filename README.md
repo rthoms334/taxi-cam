@@ -37,7 +37,7 @@ Taxi Cam asks MSFS to render two additional views of the aircraft and its surrou
 1. **MSFS starts the tray app.** An `exe.xml` entry launches `taxi-cam.exe`, which loads `taxi-camera-bridge.dll` into the simulator.
 2. **The bridge reads the aircraft.** SimConnect supplies TAXI-button state, aircraft position and orientation, ground speed and ambient lighting.
 3. **MSFS renders the cameras.** The bridge calls the simulator's internal camera functions to position independent nose and tail views relative to the aircraft.
-4. **The GPU combines the images.** The bridge copies the rendered views, adds the divider, reference marks and ground speed, then draws the result into the enabled PFD texture.
+4. **The GPU combines the images.** The bridge copies the rendered views and adds the divider, reference marks and ground speed. It updates the enabled PFD through a verified texture copy or a camera draw at the end of the aircraft's graphics command recording.
 
 Left TAXI enables the left PFD; right TAXI enables the right PFD. Both displays share the same pair of cameras. While a supported aircraft is stationary on the ground, Taxi Cam prepares that pair in the background and then parks it for the first button press. Switching TAXI off retains the pair with rendering stopped. Images remain on the GPU throughout capture and display.
 

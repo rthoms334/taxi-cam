@@ -2,7 +2,7 @@
 
 Taxi Cam creates two additional camera views inside MSFS and draws their images into the aircraft's Primary Flight Display (PFD) screen texture. MSFS supplies the scene rendering: aircraft geometry, airport surfaces and lighting. Taxi Cam controls where the cameras look and how their images are presented.
 
-A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD using another texture. Taxi Cam connects them by combining the camera images and copying the result into the PFD texture.
+A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD using another texture. Taxi Cam connects them by combining the camera images and copying or drawing the result into the PFD texture.
 
 The left and right PFDs share **one nose camera and one tail camera**. Each EFIS TAXI button controls whether its own PFD receives the combined image.
 
@@ -14,7 +14,7 @@ flowchart TD
     Control --> Cameras["MSFS renders nose and tail views"]
     Cameras --> Capture["Bridge captures the GPU images"]
     Capture --> Combine["GPU combines views, guides and ground speed"]
-    Combine --> Display["Bridge copies into the enabled PFD texture"]
+    Combine --> Display["Bridge updates the enabled PFD texture"]
 ~~~
 
 There are three interfaces in this path:
@@ -155,7 +155,9 @@ Reference-guide positions are saved separately for each aircraft profile. The **
 The bridge tracks drawing into each selected PFD texture and supports two delivery paths:
 
 - **Texture copy:** copy the prepared patch into the exact profile rectangle, restoring the target's original resource state afterward. The bridge prefers this path at a target change or command-list closure when an explicit render-target transition and a later completed native draw in that recording prove the applicable barrier model. It also supports verified transitions out of render-target state. Copies leave graphics bindings and drawing-query results untouched. Missing or invalidated state evidence prevents this path; a target change or closure alone is insufficient.
-- **Guarded draw:** use a verified PFD render target after native drawing has established its contents, while it has no intervening transition and the recording is outside a render pass and all paired GPU queries. Pending PFD updates can be delivered after the final query ends or at command-list closure. The bridge binds the selected PFD for this draw and restores the simulator's exact render-target/depth bindings, graphics pipeline, root arguments, viewport and clipping rectangle. Any observed dynamic depth-bias and index-strip-cut overrides are restored after rebinding the original pipeline; rebinding a pipeline resets these values even when the pipeline object is unchanged. An observed programmable sample pattern is temporarily reset for the single-sample camera draw, then restored exactly before application rendering resumes. An unsupported interface, invalid pattern or incomplete state refuses the draw before changing application bindings.
+- **Draw at command-list closure:** when a copy cannot be proved safe, retain the verified PFD target until MSFS closes that DIRECT command list. At render-target changes and query endings, the bridge records pending display work without inserting a camera draw. Immediately before forwarding native `Close`, it binds the PFD and records the camera draw as final work in that recording. It leaves its own graphics and render-target bindings in place; no application root arguments or other drawing state are replayed afterward. An observed sample pattern is reset to the default required by the single-sample camera pipeline.
+
+The final draw requires a current target identity, valid typed view and dimensions, no intervening target transition, complete tracked graphics state, and a recording outside render passes and all paired GPU queries. It is admitted only when the captured `Close` implementation belongs to `D3D12Core.dll`, `d3d12.dll`, or the official `D3D12SDKLayers.dll` debug layer. An unverified forward blocks this drawing path; independently proved texture copies remain available. Each recording gets one closure attempt, even if native `Close` fails. A successful native `Reset` is required before new drawing can be appended.
 
 Query tracking starts from an observed recording creation or successful native Reset. Unknown, mismatched or overflowing query scopes block camera drawing until a successful Reset. Timestamp queries do not open a paired scope. This prevents camera drawing from adding samples to the simulator's visibility and pipeline-statistics queries.
 
@@ -178,7 +180,7 @@ MSFS can record a GPU command list once and execute it again later. Taxi Cam the
 
 A shared per-device fence timeline orders output writes and PFD reads, including work submitted on different queues. The output cannot be overwritten while an earlier tracked PFD read still needs it. Resources remain alive while recorded commands can reference them.
 
-Turning off one TAXI side stops recording further camera copies to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side, the scene test nor the bounded startup warmup requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
+Turning off one TAXI side stops recording further camera copies or draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side, the scene test nor the bounded startup warmup requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
 
 The retained pair is shared by both displays; toggling TAXI does not allocate another pair. Owned capture storage has a maximum of 16 snapshot packets and a 256 MiB aggregate budget. Up to eight private PFD patch slots reuse matching allocations. Output buffers, pipelines and resources that recorded GPU work may still reference remain allocated until safe release or simulator exit. These bounds cover Taxi Cam storage, not all memory allocated internally by the simulator or driver.
 

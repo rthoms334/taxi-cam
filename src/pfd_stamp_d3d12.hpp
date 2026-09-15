@@ -91,6 +91,19 @@ class PfdStampD3D12 {
                      const D3D12_RECT* content = nullptr,
                      bool draw = true,
                      PfdStateGroup group = PfdStateGroup::all) noexcept;
+  // Terminal DIRECT-list recording only, immediately before forwarding Close.
+  // Caller guarantees no later application commands in this recording, binds
+  // the retained matching RTV/no DSV, and preserves pass/query/resource guards.
+  // Same owned-buffer/fence contract as record_buffer. Successful recording
+  // leaves our graphics state bound; application state is never replayed.
+  bool record_final_buffer(ID3D12GraphicsCommandList*,
+                           const PfdGraphicsState&,
+                           ID3D12Device* buffer_device,
+                           D3D12_GPU_VIRTUAL_ADDRESS address,
+                           UINT width,
+                           UINT height,
+                           const D3D12_RECT* destination = nullptr,
+                           const D3D12_RECT* content = nullptr) noexcept;
   DXGI_FORMAT format() const noexcept { return format_; }
   DXGI_FORMAT depth_format() const noexcept { return depth_format_; }
   void release() noexcept;

@@ -391,4 +391,36 @@ bool stamp(ID3D12GraphicsCommandList* list,
   ++item->status.state_skips;
   return false;
 }
+bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
+                            const PfdGraphicsState& state,
+                            std::uint64_t key,
+                            DXGI_FORMAT format,
+                            UINT width,
+                            UINT height,
+                            DXGI_FORMAT depth_format,
+                            const D3D12_RECT* destination,
+                            const D3D12_RECT* content) {
+  const std::lock_guard lock(runtime().mutex);
+  auto* item = find(key);
+  if (!item || !current_output(*item) || item->status.failed)
+    return false;
+  for (std::size_t i = 0; i < Formats.size(); ++i) {
+    if (Formats[i] != format)
+      continue;
+    for (std::size_t d = 0; d < DepthFormats.size(); ++d) {
+      if (DepthFormats[d] != depth_format)
+        continue;
+      const auto slot = i * DepthFormats.size() + d;
+      if (list && item->stamp_ready[slot] && state.can_restore(list) && manager().register_consumer_recording(list) &&
+          item->stamps[slot].record_final_buffer(list, state, item->native, item->output.address(), width, height, destination, content)) {
+        ++item->status.stamps;
+        return true;
+      }
+      ++item->status.state_skips;
+      return false;
+    }
+  }
+  ++item->status.state_skips;
+  return false;
+}
 }  // namespace taxi_camera::scene_runtime

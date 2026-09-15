@@ -106,14 +106,42 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
 // this rejects redundant changes to any state outside the chosen diagnostic.
 namespace setup_trace {
 std::vector<unsigned> calls;
+ID3D12RootSignature* last_root{};
+bool sample_query_allowed = true, samples_normalized = false;
+unsigned sample_queries{}, sample_releases{};
+HRESULT STDMETHODCALLTYPE query(void* self, REFIID iid, void** output) {
+  *output = nullptr;
+  ++sample_queries;
+  if (!sample_query_allowed || iid != __uuidof(ID3D12GraphicsCommandList1))
+    return E_NOINTERFACE;
+  *output = self;
+  return S_OK;
+}
+ULONG STDMETHODCALLTYPE release(void*) {
+  ++sample_releases;
+  return 1;
+}
 D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE type(void*) {
   return D3D12_COMMAND_LIST_TYPE_DIRECT;
 }
 void STDMETHODCALLTYPE pipeline(void*, ID3D12PipelineState*) {
   calls.push_back(25);
 }
-void STDMETHODCALLTYPE root(void*, ID3D12RootSignature*) {
+void STDMETHODCALLTYPE root(void*, ID3D12RootSignature* value) {
+  last_root = value;
   calls.push_back(30);
+}
+void STDMETHODCALLTYPE table(void*, UINT, D3D12_GPU_DESCRIPTOR_HANDLE) {
+  calls.push_back(32);
+}
+void STDMETHODCALLTYPE constant(void*, UINT, UINT, UINT) {
+  calls.push_back(34);
+}
+void STDMETHODCALLTYPE cbv(void*, UINT, UINT64) {
+  calls.push_back(38);
+}
+void STDMETHODCALLTYPE uav(void*, UINT, UINT64) {
+  calls.push_back(42);
 }
 void STDMETHODCALLTYPE srv(void*, UINT, UINT64) {
   calls.push_back(40);
@@ -133,21 +161,40 @@ void STDMETHODCALLTYPE scissor(void*, UINT, const D3D12_RECT*) {
 void STDMETHODCALLTYPE draw(void*, UINT, UINT, UINT, UINT) {
   calls.push_back(12);
 }
+void STDMETHODCALLTYPE samples(void*, UINT count, UINT pixels, D3D12_SAMPLE_POSITION* positions) {
+  calls.push_back(63);
+  samples_normalized = !count && !pixels && !positions;
+}
+void STDMETHODCALLTYPE bias(void*, FLOAT, FLOAT, FLOAT) {
+  calls.push_back(82);
+}
+void STDMETHODCALLTYPE cut(void*, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE) {
+  calls.push_back(83);
+}
 void verify(ID3D12Device* device, D3D12_GPU_VIRTUAL_ADDRESS address) {
   using namespace taxi_camera;
   const win::OwnedWork owned;
   PfdStampD3D12 stamp;
   check(stamp.initialize(device, DXGI_FORMAT_R8G8B8A8_UNORM), "Initialize diagnostic setup trace");
-  std::array<void*, 43> slots{};
+  std::array<void*, 84> slots{};
+  slots[0] = reinterpret_cast<void*>(&query);
+  slots[2] = reinterpret_cast<void*>(&release);
   slots[8] = reinterpret_cast<void*>(&type);
   slots[12] = reinterpret_cast<void*>(&draw);
   slots[25] = reinterpret_cast<void*>(&pipeline);
   slots[30] = reinterpret_cast<void*>(&root);
+  slots[32] = reinterpret_cast<void*>(&table);
+  slots[34] = reinterpret_cast<void*>(&constant);
+  slots[38] = reinterpret_cast<void*>(&cbv);
   slots[40] = reinterpret_cast<void*>(&srv);
+  slots[42] = reinterpret_cast<void*>(&uav);
   slots[36] = reinterpret_cast<void*>(&constants);
   slots[20] = reinterpret_cast<void*>(&topology);
   slots[21] = reinterpret_cast<void*>(&viewport);
   slots[22] = reinterpret_cast<void*>(&scissor);
+  slots[63] = reinterpret_cast<void*>(&samples);
+  slots[82] = reinterpret_cast<void*>(&bias);
+  slots[83] = reinterpret_cast<void*>(&cut);
   auto* pointer = slots.data();
   auto* list = reinterpret_cast<ID3D12GraphicsCommandList*>(&pointer);
   const std::array<std::vector<unsigned>, 4> expected{{{25, 30, 40, 36, 20, 21, 22}, {25}, {30, 40, 36}, {20, 21, 22}}};
@@ -168,6 +215,46 @@ void verify(ID3D12Device* device, D3D12_GPU_VIRTUAL_ADDRESS address) {
               calls.empty(),
           "Invalid group refuses before mutation");
   std::puts("PASS diagnostic setup: exact all/pipeline/root/raster setters, no draw; partial draws and invalid group refused.");
+  PfdGraphicsState state;
+  state.reset(1, true);
+  state.bind_pipeline(reinterpret_cast<ID3D12PipelineState*>(UINT_PTR{1}));
+  state.bind_observed_root(reinterpret_cast<ID3D12RootSignature*>(UINT_PTR{2}), 2);
+  const UINT application_value = 17;
+  state.constants(0, 3, 1, &application_value);
+  state.table(1, 0x1000);
+  state.descriptor(2, PfdRootKind::cbv, 0x2000);
+  state.topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  const D3D12_VIEWPORT application_viewport{64, 64, 64, 64, 0, 1};
+  const D3D12_RECT application_scissor{64, 64, 128, 128};
+  state.viewports(0, 1, &application_viewport);
+  state.scissors(0, 1, &application_scissor);
+  auto* native9 = reinterpret_cast<d3d12_extended::CommandList9*>(list);
+  state.depth_bias(native9, -4, 0, 0);
+  state.strip_cut(native9, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF);
+  require(state.can_restore(list), "Final stamp fixture has complete distinct application state");
+  calls.clear();
+  require(stamp.record_final_buffer(list, state, device, address, 768, 1024), "Record production final-buffer draw");
+  require(calls == std::vector<unsigned>{25, 30, 40, 36, 20, 21, 22, 12} && last_root != state.root(),
+          "Final-buffer path records camera setup and draw with no application root, pipeline or raster restoration");
+  const D3D12_SAMPLE_POSITION positions[]{{-3, 2}, {4, -1}};
+  state.sample_positions(reinterpret_cast<ID3D12GraphicsCommandList1*>(list), 2, 1, positions);
+  calls.clear();
+  require(stamp.record_final_buffer(list, state, device, address, 768, 1024), "Record final draw with an application sample pattern");
+  require(calls == std::vector<unsigned>{63, 25, 30, 40, 36, 20, 21, 22, 12} && samples_normalized && sample_queries == 1 &&
+              sample_releases == 1 && last_root != state.root(),
+          "Final draw normalizes samples once and never restores any application state afterward");
+  calls.clear();
+  const D3D12_RECT invalid_rectangle{0, 0, 769, 1024};
+  require(!stamp.record_final_buffer(list, state, device, address, 768, 1024, &invalid_rectangle) && calls.empty() && sample_queries == 1,
+          "Invalid final rectangle refuses before sample or graphics mutation");
+  require(!stamp.record_final_buffer(list, state, device, address + 1, 768, 1024) && calls.empty() && sample_queries == 1,
+          "Invalid final buffer address refuses before sample or graphics mutation");
+  sample_query_allowed = false;
+  require(
+      !stamp.record_final_buffer(list, state, device, address, 768, 1024) && calls.empty() && sample_queries == 2 && sample_releases == 1,
+      "Unavailable sample-position interface refuses the final draw without mutation");
+  sample_query_allowed = true;
+  std::puts("PASS final-buffer setup: one camera draw, no application replay, exact sample reset and pre-mutation refusals.");
 }
 }  // namespace setup_trace
 
@@ -338,12 +425,15 @@ void active_profile_switch_case(bool warp) {
   };
   const auto render_displays = [&](UINT offset, unsigned mask) {
     win::set_target_mask(mask);
+    const auto before_close = runtime::snapshot(key).stamps;
     const UINT width = offset ? 1644 : 768;
     for (UINT side = 0; side < 2; ++side)
       generator.record(list.get(), rtvs[offset + side + 2], width, 1024, false, 0, 0);
     list->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
-    // Both deferred stamps have completed. Disable further RT-exit copies so
-    // readback itself cannot create a second write to either display.
+    require(runtime::snapshot(key).stamps == before_close, "Profile-switch PFD drawings remain deferred until Close");
+    submit();
+    // Close completes both deferred stamps. Disable further RT-exit copies and
+    // use a separate recording so readback cannot cause a second display write.
     win::set_target_mask(0);
     for (UINT side = 0; side < 2; ++side) {
       const UINT index = offset + side;
@@ -499,8 +589,8 @@ void active_profile_switch_case(bool warp) {
       warp ? "WARP" : "hardware", checked_pixels, debug_enabled, errors);
 }
 
-// Exercise actual Draw fallback on a fresh ordinary recording, then a native
-// alpha-blended gray texture draw with every binding left untouched. Both typed
+// Exercise final-Draw fallback on a fresh ordinary recording after two native
+// alpha-blended gray texture draws with every binding left untouched. Both typed
 // views of a typeless SRV/RTV and all mip levels carry non-endpoint values.
 void textured_gray_fallback(ID3D12Device* device,
                             ID3D12CommandQueue* queue,
@@ -601,11 +691,19 @@ void textured_gray_fallback(ID3D12Device* device,
   check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                         IID_PPV_ARGS(readback.put())),
         "Gray pixels readback");
-  const auto submit = [&] {
+  const auto submit = [&](bool replay = false) {
     check(list->Close(), "Close gray recording");
     ID3D12CommandList* lists[]{list};
     queue->ExecuteCommandLists(1, lists);
     require(drain_copy_queue(queue, device), "Gray GPU completion");
+    if (replay) {
+      const auto recorded_stamps = runtime::snapshot(key).stamps;
+      const auto submissions = runtime::snapshot(key).capture.submissions;
+      queue->ExecuteCommandLists(1, lists);
+      require(drain_copy_queue(queue, device), "Closed final-Draw recording reexecutes with its output buffer alive");
+      require(runtime::snapshot(key).stamps == recorded_stamps && runtime::snapshot(key).capture.submissions > submissions,
+              "Reexecution retains consumer synchronization without recording another camera draw");
+    }
     check(allocator->Reset(), "Reset gray allocator");
     check(list->Reset(allocator, nullptr), "Fresh ordinary gray recording");
   };
@@ -639,7 +737,8 @@ void textured_gray_fallback(ID3D12Device* device,
           list->SetGraphicsRoot32BitConstants(0, 4, parameters, 0);
           list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
           // Native trim quad is outside the camera patch, with alpha accumulating
-          // twice. The second native draw must use the unchanged pre-stamp state.
+          // twice. Production must defer its camera draw until both are recorded;
+          // diagnostics must preserve the state needed by the second native draw.
           const D3D12_VIEWPORT viewport{812, 800, 64, 64, 0, 1};
           const D3D12_RECT scissor{812, 800, 876, 864};
           list->RSSetViewports(1, &viewport);
@@ -647,17 +746,27 @@ void textured_gray_fallback(ID3D12Device* device,
           const auto target_rtv = rtv(output_format);
           list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);
           list->DrawInstanced(3, 1, 0, 0);
-          list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);  // Actual guarded fallback, no RT-entry proof.
+          list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);  // Stage production; diagnostics still replay here.
           const auto delivered = win::graphics_status();
-          require(delivered.fallback_stamps == before.fallback_stamps + draw &&
+          require(delivered.fallback_stamps == before.fallback_stamps && delivered.recording_end_draws == before.recording_end_draws &&
                       delivered.state_test_roundtrips == before.state_test_roundtrips + diagnostic &&
                       delivered.state_test_target_roundtrips == before.state_test_target_roundtrips + (mode == 1 || mode == 2) &&
                       delivered.state_test_shader_roundtrips == before.state_test_shader_roundtrips + (mode == 1 || mode >= 3) &&
                       delivered.preferred_copy_stamps == before.preferred_copy_stamps,
-                  "Gray test must exercise the exact selected draw/state/target operations, never a private copy");
+                  "OM stages production without drawing; diagnostics exercise only selected state and never a private copy");
           list->DrawInstanced(3, 1, 0, 0);  // No application state rebind at all.
+          require(win::graphics_status().fallback_stamps == before.fallback_stamps,
+                  "Production camera draw cannot precede the final unrebound native gray draw");
+          win::set_target_mask(draw ? 1 : 0);
+          submit(draw);
+          const auto closed = win::graphics_status();
+          require(closed.fallback_stamps == before.fallback_stamps + draw &&
+                      closed.recording_end_draws == before.recording_end_draws + draw &&
+                      closed.state_test_roundtrips == delivered.state_test_roundtrips &&
+                      closed.preferred_copy_stamps == before.preferred_copy_stamps &&
+                      closed.close_forward_refused == before.close_forward_refused,
+                  "Close records exactly one production camera draw; diagnostic and copy counts stay unchanged");
           win::set_target_mask(0);
-          submit();
           fallback_count += draw;
           roundtrip_count += diagnostic;
           for (UINT level = 0; level < 4; ++level) {
@@ -702,7 +811,7 @@ void textured_gray_fallback(ID3D12Device* device,
               }
           }
           if (draw)
-            require(changed_patch > 1000, "The tested shader fallback must visibly write the camera patch");
+            require(changed_patch > 1000, "The final camera draw must survive closed-list reexecution and visibly write the patch");
           else if (diagnostic)
             require(!changed_patch, "State-only roundtrip must not write any camera pixels");
           else
@@ -962,10 +1071,10 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
           require(runtime::snapshot(key).stamps == stamps_before + (!at_close && proof ? on : 0),
                   "Open pipeline query still excludes the Draw fallback");
           list->EndQuery(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on);
-          if (at_close)
-            require(runtime::snapshot(key).stamps == stamps_before, "Current dirty PFD is not delivered per query-end");
-          else
-            list->DrawInstanced(3, 1, 0, 0);  // Also verify state restored after the no-proof final-End fallback.
+          require(runtime::snapshot(key).stamps == stamps_before + (!at_close && proof ? on : 0),
+                  "Final EndQuery never issues a production Draw fallback before the application's last draw");
+          if (!at_close)
+            list->DrawInstanced(3, 1, 0, 0);  // No-proof production leaves native bindings untouched until Close.
           list->ResolveQueryData(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on, 1, query_results.get(), on * sizeof(UINT64));
           list->ResolveQueryData(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on, 1, query_results.get(),
                                  64 + on * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
@@ -975,7 +1084,9 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
           require(after.preferred_copy_stamps == before.preferred_copy_stamps + (proof ? on : 0),
                   "Per-recording explicit RT entry chooses the private-copy route");
           require(after.fallback_stamps == before.fallback_stamps + (proof ? 0 : on),
-                  "Missing per-recording proof retains working Draw fallback only");
+                  "Missing per-recording proof delivers only the final Close Draw fallback");
+          require(after.recording_end_draws == before.recording_end_draws + (proof ? 0 : on),
+                  "Every no-proof production camera draw occurs at Close");
           std::printf("Boundary delivery %s proof=%u enabled=%u: copies+%llu fallback+%llu\n", at_close ? "Close" : "OM", proof, on,
                       after.preferred_copy_stamps - before.preferred_copy_stamps, after.fallback_stamps - before.fallback_stamps);
           win::set_target_mask(0);
@@ -1141,6 +1252,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
       list->ClearDepthStencilView({raw_dsv.ptr + device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV)},
                                   D3D12_CLEAR_FLAG_DEPTH, 0, 0, 0, nullptr);
       const auto before = runtime::snapshot(key).stamps;
+      const auto before_end_draws = win::graphics_status().recording_end_draws;
       list->BeginQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2);
       list->BeginQuery(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2 + 1);
       list->BeginQuery(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on);
@@ -1155,8 +1267,8 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
       list->RSSetViewports(1, &vp);
       list->RSSetScissorRects(1, &scissor);
       list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-      // Legal immediate descriptor reuse. Native OM captured A; our later
-      // restoration must not bind newly written B through these old handles.
+      // Legal immediate descriptor reuse. Native OM captured A; staging the
+      // camera must not bind newly written B through these old handles.
       {
         const win::OwnedWork unobserved;
         device->CreateRenderTargetView(other_b.get(), nullptr, raw_rtv);
@@ -1174,12 +1286,15 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
       require(runtime::snapshot(key).stamps == before, "Occlusion End cannot drain active pipeline-statistics query");
       list->EndQuery(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on);
       std::printf("Query-aware PFD delivery enabled=%u: %llu -> %llu\n", on, before, runtime::snapshot(key).stamps);
-      require(runtime::snapshot(key).stamps == before + on, "Final EndQuery delivers exactly one deferred PFD image");
+      require(runtime::snapshot(key).stamps == before, "Final EndQuery retains the PFD image until native work finishes at Close");
       list->ResolveQueryData(occlusion.get(), D3D12_QUERY_TYPE_OCCLUSION, on * 2, 2, query_results.get(), on * 16);
       list->ResolveQueryData(statistics.get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, on, 1, query_results.get(),
                              64 + on * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
       list->DrawInstanced(3, 1, 0, 0);  // No OM/PSO/root/viewport rebind; A and its DSV must survive.
       submit();
+      require(runtime::snapshot(key).stamps == before + on, "Close delivers exactly one deferred PFD image after native query work");
+      require(win::graphics_status().recording_end_draws == before_end_draws + on,
+              "Deferred-query camera delivery uses only the final no-restore draw");
       reset();
       // Separate transition-only recording reproduces the live rejected copy route.
       const auto before_exit = runtime::snapshot(key).stamps;
@@ -1211,7 +1326,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
         for (UINT n = 0; n < 64 * 64; ++n) {
           const auto* pixel = static_cast<unsigned char*>(data) + i * 256 * 64 + n * 4;
           require(pixel[0] == (i ? 255 : 0) && pixel[1] == (i ? 0 : 255) && pixel[2] == 0 && pixel[3] == 255,
-                  "Current untracked RTV+DSV contents restored despite handle reuse");
+                  "Current untracked RTV+DSV contents preserved through native work despite handle reuse");
           ++checked;
         }
       other_pixels->Unmap(0, &none);
@@ -1254,7 +1369,8 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
     require(std::memcmp(&off, &on, sizeof(off)) == 0 && off.IAVertices == 3, "Pipeline statistics unchanged OFF versus ON");
     query_results->Unmap(0, &none);
     std::printf(
-        "PASS query fallback %s: overlap blocked, final End delivered, independent exit refused, raw RTV+DSV descriptor reuse restored; "
+        "PASS query fallback %s: overlap blocked, final End staged, Close delivered, independent exit refused, raw RTV+DSV reuse "
+        "preserved; "
         "query OFF=ON=%llu; %llu pixels\n",
         warp ? "WARP" : "hardware", samples[0], checked);
     win::set_target_mask(0);

@@ -544,10 +544,14 @@ DWORD run_impl() {
                     settings.calibration_mask);
       log_status(status, scope_detail);
       char draw_detail[384];
-      std::snprintf(draw_detail, sizeof(draw_detail), "PFD guarded draw: attempts=%llu stamps=%llu query_refused=%llu state_refused=%llu",
-                    static_cast<unsigned long long>(graphics.fallback_attempts), static_cast<unsigned long long>(graphics.fallback_stamps),
-                    static_cast<unsigned long long>(graphics.fallback_query_refused),
-                    static_cast<unsigned long long>(graphics.fallback_state_refused));
+      std::snprintf(
+          draw_detail, sizeof(draw_detail),
+          "PFD guarded draw: attempts=%llu stamps=%llu query_refused=%llu state_refused=%llu "
+          "recording_end=%llu deferred=%llu close_forward_refused=%llu",
+          static_cast<unsigned long long>(graphics.fallback_attempts), static_cast<unsigned long long>(graphics.fallback_stamps),
+          static_cast<unsigned long long>(graphics.fallback_query_refused),
+          static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
+          static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
       char diagnostic_detail[256];
       std::snprintf(

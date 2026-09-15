@@ -58,4 +58,16 @@ bool stamp(ID3D12GraphicsCommandList*,
            const D3D12_RECT* content = nullptr,
            bool draw = true,
            PfdStateGroup group = PfdStateGroup::all);
+// Terminal DIRECT-list entry only: immediately before native Close, after all
+// application commands. Caller supplies the guarded retained RTV; successful
+// recording intentionally leaves our state bound and never replays app roots.
+bool stamp_at_recording_end(ID3D12GraphicsCommandList*,
+                            const PfdGraphicsState&,
+                            std::uint64_t key,
+                            DXGI_FORMAT format,
+                            UINT width,
+                            UINT height,
+                            DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
+                            const D3D12_RECT* destination = nullptr,
+                            const D3D12_RECT* content = nullptr);
 }  // namespace taxi_camera::scene_runtime
