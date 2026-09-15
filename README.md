@@ -34,7 +34,7 @@ Release files contain no loose PowerShell scripts, documentation folders or lice
 
 Nose-wheel and tail cameras for Microsoft Flight Simulator 2024, controlled by the aircraft's EFIS **TAXI** buttons.
 
-The camera image occupies the upper part of the Primary Flight Display (PFD): nose-wheel view above, tail view below, with ground speed, magenta reference marks and a black divider. The lower trim display remains visible.
+The camera image occupies the upper part of the Primary Flight Display (PFD): nose-wheel view above, tail view below, with ground speed, aircraft-specific reference marks and a black divider. The lower trim display remains visible. A380 nose markers are 14-by-14-pixel magenta squares; A350 nose markers are 12-pixel-diameter amber circles.
 
 - **Aircraft:** FlyByWire A380X; iniBuilds A350-900 / ULR and A350-1000 adapters under live validation
 - **Platform:** Windows x64, MSFS 2024

@@ -60,7 +60,7 @@ if ([IO.File]::ReadAllText((Join-Path $sim 'taxi-camera-native.addon64')) -ne 'l
 if (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg'))) { throw 'Uninstall removed user calibration.' }
 Write-Output 'PASS native install/rollback: isolated process fixtures and paths, running-simulator refusal, exact binary receipts, startup preservation, calibration import, legacy retention and unrelated graphics files preserved.'
 
-. (Join-Path $PSScriptRoot 'validation_receipt.ps1')
+. (Join-Path $repoRoot 'installer/validation_receipt.ps1')
 $requested = 'C:\Users\Pilot\AppData\Local\Taxi Cam\app\taxi-cam.exe'
 $redirected = '\\?\C:\Users\Pilot\AppData\Local\Packages\Example.Desktop_123\LocalCache\Local\Taxi Cam\app\taxi-cam.exe'
 if (-not (Test-TaxiRedirectedInstallPath $requested $redirected)) { throw 'Packaged LocalAppData redirection was accepted.' }
