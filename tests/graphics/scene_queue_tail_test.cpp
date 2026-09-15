@@ -487,10 +487,35 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     }
   }
   require(manager->statistics().tail_captures == 6, "Unexpected persistent/replay tail captures");
-  // An immediate replay is rate-limited; no extra GPU snapshot is appended.
-  producer.queue->ExecuteCommandLists(1, &original);
+  // GPU completion and the pixel walk above may take longer than one interval
+  // on a hosted runner. Validate capture timestamps rather than assuming this
+  // replay is still immediate. A burst checks any additional captures per feed.
+  for (unsigned replay = 0; replay < 8; ++replay) {
+    if (replay == 4)
+      Sleep(70);  // Also exercise a replay legitimately due after one interval.
+    const auto previous = manager->last_tail_us_;
+    const auto before = manager->statistics().tail_captures;
+    producer.queue->ExecuteCommandLists(1, &original);
+    unsigned changed = 0;
+    for (unsigned feed = 0; feed < 2; ++feed) {
+      const auto captured = manager->last_tail_us_[feed];
+      if (captured != previous[feed]) {
+        ++changed;
+        require(captured > previous[feed] && captured - previous[feed] >= 66667, "Tail capture exceeded the configured 15 Hz interval");
+      }
+    }
+    require(manager->statistics().tail_captures == before + changed, "Tail capture counts disagree with per-feed timestamps");
+  }
   drain(producer.queue.p);
-  require(manager->statistics().tail_captures == 6, "Tail capture exceeded the configured frame rate");
+  const auto rate_checked_captures = manager->statistics().tail_captures;
+  require(rate_checked_captures > 6, "Delayed replay did not exercise an additional capture interval");
+  // Legitimate delayed captures own GPU packets too. Retire these unused
+  // frames before asserting that shutdown releases all source references.
+  std::array<Manager::Frame, Manager::MaximumPackets> unused{};
+  const auto unused_count = manager->poll_completed_frames(unused.data(), unused.size());
+  for (std::size_t i = 0; i < unused_count; ++i)
+    require(manager->discard_frame(unused[i].token), "Discard unused rate-check frame");
+  require(manager->poll_completed_frames(unused.data(), unused.size()) == 0, "Rate-check frame remained unretired");
   // Unknown actual recordings must destroy global model proof, even if empty.
   check(unknown.list->Close(), "Close unknown list");
   ID3D12CommandList* unregistered = unknown.list.p;
@@ -498,11 +523,12 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   Sleep(70);
   producer.queue->ExecuteCommandLists(1, &original);
   drain(producer.queue.p);
-  require(manager->statistics().tail_captures == 6, "Unregistered submission left stale state proof usable");
+  require(manager->statistics().tail_captures == rate_checked_captures, "Unregistered submission left stale state proof usable");
   require(Boundary::remove().protection_restored, "Remove boundary observation");
   producer.queue->ExecuteCommandLists(1, &original);
   drain(producer.queue.p);
-  require(manager->statistics().tail_captures == 6 && std::strcmp(manager->statistics().tail_status, "observer_disabled") == 0,
+  require(manager->statistics().tail_captures == rate_checked_captures &&
+              std::strcmp(manager->statistics().tail_status, "observer_disabled") == 0,
           "Disabled observer left prior immutable recording eligible");
   manager->stop_source_tracking();
   require(queue_context->source_deaths.load() == 0, "A source died while the application still owned it");
@@ -512,11 +538,13 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   }
   require(queue_context->source_deaths.load() == 2, "Stop left candidate-registry or recording source references pinned");
   require(SUCCEEDED(device->GetDeviceRemovedReason()), "Tail GPU work removed device");
-  std::printf("{\"passed\":true,\"warp\":%s,\"enhanced\":%s,\"born_render_target\":%s,\"checked_pixels\":%llu,\"tail_captures\":6,\"replayed\":true,"
-              "\"two_producer_queues\":true,\"persistent_rt\":true,\"reset_receipt_lease\":true,\"stop_releases_sources\":true,"
-              "\"tail_device_reuse\":true,\"scoped_target_invalidation\":true,\"checks\":%u}\n",
-              warp_requested ? "true" : "false", enhanced ? "true" : "false", born_render_target ? "true" : "false",
-              static_cast<unsigned long long>(checked_pixels), checks);
+  std::printf(
+      "{\"passed\":true,\"warp\":%s,\"enhanced\":%s,\"born_render_target\":%s,\"checked_pixels\":%llu,\"tail_captures\":%llu,\"replayed\":"
+      "true,"
+      "\"two_producer_queues\":true,\"persistent_rt\":true,\"reset_receipt_lease\":true,\"stop_releases_sources\":true,"
+      "\"tail_device_reuse\":true,\"scoped_target_invalidation\":true,\"checks\":%u}\n",
+      warp_requested ? "true" : "false", enhanced ? "true" : "false", born_render_target ? "true" : "false",
+      static_cast<unsigned long long>(checked_pixels), static_cast<unsigned long long>(rate_checked_captures), checks);
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -527,10 +555,14 @@ int main(int argc, char** argv) {
     }
     bool warp = false, enhanced = false, born_render_target = false;
     for (int n = 1; n < argc; ++n) {
-      if (std::strcmp(argv[n], "--warp") == 0 && !warp) warp = true;
-      else if (std::strcmp(argv[n], "--enhanced") == 0 && !enhanced) enhanced = true;
-      else if (std::strcmp(argv[n], "--born-render-target") == 0 && !born_render_target) born_render_target = true;
-      else require(false, "Usage: scene-queue-tail-test [--warp] [--enhanced] [--born-render-target]");
+      if (std::strcmp(argv[n], "--warp") == 0 && !warp)
+        warp = true;
+      else if (std::strcmp(argv[n], "--enhanced") == 0 && !enhanced)
+        enhanced = true;
+      else if (std::strcmp(argv[n], "--born-render-target") == 0 && !born_render_target)
+        born_render_target = true;
+      else
+        require(false, "Usage: scene-queue-tail-test [--warp] [--enhanced] [--born-render-target]");
     }
     tail_run(warp, enhanced, born_render_target);
     return 0;
