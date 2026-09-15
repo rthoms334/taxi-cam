@@ -3,6 +3,24 @@ name: Windows release
 on:
   push:
     branches: [main]
+    # Release only when code or inputs to the shipped build change.
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'tools/**'
+      - 'installer/**'
+      - 'ci/**'
+      - 'bootstrap.ps1'
+      - 'build.ps1'
+      - 'smoke-test.ps1'
+      - 'dependencies.json'
+      - 'version.json'
+      - 'taxi-camera-mounts.cfg'
+      - 'licenses/native-runtime-notices.txt'
+      - '.github/workflows/release.yml'
+      - '!**/*.md'
+      - '!**/.clang-format'
+      - '!**/.gitignore'
   workflow_dispatch:
 
 permissions:
