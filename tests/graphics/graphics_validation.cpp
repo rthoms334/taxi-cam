@@ -1880,9 +1880,13 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
                                         IID_PPV_ARGS(clear_readback.put())),
         "ClearState readback");
   const auto before_clear_stamps = runtime::snapshot(key).stamps;
-  const auto before_clears = win::graphics_status().clear_states;
   generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+  // Count the explicit API call before submission can run other observed lists.
+  const auto before_clears = win::graphics_status().clear_states;
   list->ClearState(cleared.pipeline.get());
+  const auto after_clear_call = win::graphics_status().clear_states;
+  std::printf("ClearState explicit call: %llu -> %llu\n", before_clears, after_clear_call);
+  require(after_clear_call == before_clears + 1, "Observe the explicit native ClearState once");
   list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);
   list->SetGraphicsRootSignature(cleared.root.get());
   const UINT clear_parameters[]{64, 64, 0, 0};
@@ -1914,7 +1918,8 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
     }
   clear_readback->Unmap(0, &clear_none);
   require(runtime::snapshot(key).stamps == before_clear_stamps, "ClearState discards the pending PFD stamp");
-  require(win::graphics_status().clear_states == before_clears + 1, "Observe native ClearState once");
+  std::printf("ClearState after submission: %llu -> %llu; pipeline pixels and pending-stamp discard passed\n", after_clear_call,
+              win::graphics_status().clear_states);
   reset();
   // Native BeginRenderPass switches the command-list vtable. State changed
   // through that active table must survive a later deferred PFD stamp, even
