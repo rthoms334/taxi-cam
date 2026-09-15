@@ -34,6 +34,7 @@ void require_wrong_host() {
 void require_inert(const nc::ProbeSnapshot& snapshot) {
   require(!snapshot.hook_installed, "Wrong host installed an engine observer hook");
   require(!snapshot.accepting_requests, "Wrong host accepted a native scene request");
+  require(!snapshot.restart_pending && !snapshot.recovery_pending, "Wrong host queued native camera recovery");
   require(!snapshot.pose_captured, "Wrong host reported a captured private-engine pose");
   for (const auto& pose : snapshot.mounted_poses)
     require(pose.position == nc::Vector3{} && pose.target == nc::Vector3{} && pose.up == nc::Vector3{} && pose.fov == 0,

@@ -79,6 +79,10 @@ class SceneRecovery {
     ++sequence_;
   }
   void failed(SceneStopReason reason, std::uint64_t now) noexcept {
+    // Only explicit Start/Stop transitions can clear a verified identity
+    // refusal. Later failures must not silently turn it into an automatic retry.
+    if (reason_ == SceneStopReason::identity_refused && reason != SceneStopReason::identity_refused)
+      return;
     reason_ = reason;
     stopped_at_ = now;
     healthy_since_ = last_progress_ = 0;

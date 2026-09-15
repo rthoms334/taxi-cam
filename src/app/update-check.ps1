@@ -38,8 +38,14 @@ function Select-UpdateAsset($Release, [uint32[]]$Current) {
     $tag = [string]$Release.tag_name
     $version = ConvertTo-UpdateVersion $tag
     if (-not (Test-NewerUpdate $version $Current)) { return $null }
-    $name = 'taxi-cam-' + $tag.Substring(1) + '-windows-x64-setup.exe'
+    $name = 'taxi-cam-' + ($version[0..2] -join '.') + '-windows-x64-setup.exe'
+    $legacyName = 'taxi-cam-' + $tag.Substring(1) + '-windows-x64-setup.exe'
     $assets = @($Release.assets | Where-Object { $_.name -ceq $name })
+    $legacyAssets = @($Release.assets | Where-Object { $_.name -ceq $legacyName })
+    if ($assets.Count -gt 1 -or $legacyAssets.Count -gt 1) { throw 'Duplicate Windows installer assets.' }
+    # An advertised clean name is authoritative, even when its metadata is bad.
+    # Only releases without it can use the exact older build-number filename.
+    if ($assets.Count -eq 0) { $name = $legacyName; $assets = $legacyAssets }
     if ($assets.Count -ne 1) { throw 'Expected one exact Windows installer asset.' }
     $asset = $assets[0]
     $expected = "https://github.com/$script:Repository/releases/download/$tag/$name"

@@ -57,7 +57,11 @@ The generated header and Windows manifest live under `build/native/generated/`; 
 
 Tags retain `v<application-version>-build.<workflow-run-number>`, such as `v0.8.1-build.13`, so existing updaters continue to recognize releases. The build suffix identifies an artifact; it does not replace the advancing semantic version. The workflow run number is recorded in the validation receipt, while local builds use build number zero. Packaging refuses a `build.N` label that differs from the compiled build number.
 
-Installer assets use `taxi-cam-<version>-build.<number>-windows-x64-setup.exe`. The updater compares version components and build numbers numerically, ignores drafts and prereleases, and requires the matching installer asset from the fixed project release repository. Downloads are bounded and verified before execution. Automatic checks run off the UI thread, with a manual tray action available; installing requires user confirmation and a closed simulator.
+Installer assets use `taxi-cam-<version>-windows-x64-setup.exe`, such as `taxi-cam-0.9.0-windows-x64-setup.exe`. The build number remains in the release tag, runtime ZIP name and validation receipts for traceability. Existing published downloads keep their original names.
+
+The updater compares version components and build numbers numerically, ignores drafts and prereleases, and selects the exact installer filename for the release from the fixed project repository. It prefers the name without a build number and can also read older releases using `taxi-cam-<version>-build.<number>-windows-x64-setup.exe`. Downloads are bounded and verified before execution. Automatic checks run off the UI thread, with a manual tray action available; installing requires user confirmation and a closed simulator.
+
+Version 0.8.18 introduces this filename support. The updater embedded in 0.8.17 and earlier only accepts the old build-number name, so users of those versions must download and run a current installer manually once.
 
 The updater uses GitHub's unauthenticated public release API. The release repository and its installer assets must be publicly readable; private repositories return HTTP 404 to this client. No GitHub credential is embedded in the application. Make the repository public and publish a release containing setup before automatic updates can be used by end users. Local installation and the isolated updater tests work independently of repository visibility.
 

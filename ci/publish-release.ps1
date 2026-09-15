@@ -16,7 +16,8 @@ $receipt = Assert-TaxiNativeReceipt (Split-Path -Parent $receiptPath)
 $packagePath = (Resolve-Path -LiteralPath $Package).Path
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $expectedBase = "taxi-cam-$($receipt.version)-build.$BuildNumber-windows-x64"
-if ([IO.Path]::GetFileName($installerPath) -cne "$expectedBase-setup.exe" -or
+$expectedInstaller = "taxi-cam-$($receipt.version)-windows-x64-setup.exe"
+if ([IO.Path]::GetFileName($installerPath) -cne $expectedInstaller -or
     [IO.Path]::GetFileName($packagePath) -cne "$expectedBase.zip" -or $receipt.buildNumber -ne $BuildNumber) {
     throw 'Release asset names and validated application must match the release build.'
 }
@@ -75,6 +76,8 @@ $notes = @(
     "Windows x64 native package from commit [$($Commit.Substring(0,7))](https://github.com/$Repository/commit/$Commit).",
     '',
     'Download the Windows x64 setup EXE and run it with MSFS and Taxi Cam closed. Existing paths and calibration are preserved. SHA256SUMS.txt covers the installer and optional runtime ZIP.',
+    '',
+    'Upgrading from 0.8.17 or earlier: download and run setup manually once. Those versions only recognise the old installer filename containing a build number; 0.8.18 and later support the shorter name.',
     '',
     "Licence: GNU GPL version 3 only. [Corresponding source, including build and installation scripts](https://github.com/$Repository/archive/$Commit.zip) for these binaries; [browse this exact revision](https://github.com/$Repository/tree/$Commit). The installer and runtime ZIP include LICENSE.txt and third-party notices.",
     '',

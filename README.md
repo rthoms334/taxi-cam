@@ -25,7 +25,7 @@ For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above
 2. Close MSFS and exit Taxi Cam if it is already running.
 3. Run setup and follow the prompts to confirm your simulator folder and startup settings.
 
-Taxi Cam starts with MSFS after installation. You can also launch it from the Windows Start menu.
+Taxi Cam starts with MSFS after installation. On its first launch, **Settings** opens so you can explore the controls. Close the window or select **Hide to tray** to keep the app running in the system tray. Later automatic starts stay in the tray; opening Taxi Cam from the Windows Start menu shows Settings again. The first-launch choice is remembered across updates.
 
 ## Using Taxi Cam
 
@@ -81,6 +81,8 @@ Please report unexpected behaviour using **Report a bug**.
 ## Updates and removal
 
 Use **Check for updates** in the tray menu, or download the latest installer from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and Taxi Cam before installing an update. Your saved settings are kept.
+
+If you are running **0.8.17 or earlier**, download and run setup manually once. Those versions' updaters require the old installer filename containing a build number; **0.8.18 and later** recognise the shorter `taxi-cam-<version>-windows-x64-setup.exe` name.
 
 Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, open **Overview → Flight-deck control → Keyboard shortcuts…**, select **Reset shortcuts**, then **Save changes** in that editor.
 

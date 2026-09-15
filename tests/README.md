@@ -6,8 +6,13 @@ Run `build.ps1 -Validate` from the repository root with the pinned toolchain. It
 
 The native validation run includes `tests/app/camera_hotkeys_test.cpp`: Ctrl + Shift + L / R / B defaults, saved combinations, editor reset and conflict handling, hidden-window dispatch, and synchronization with supported aircraft TAXI controls. Profile checks cover the iniBuilds A380's manual-only controls and separate saved calibration. These fixtures do not operate a live aircraft's buttons.
 
+`tests/app/startup_state_test.cpp` checks first-launch Settings visibility, later tray starts, explicit manual opens, failed state writes and preview isolation using a private fixture directory. `tests/app/camera_status_test.cpp` verifies that stopped cameras and pending recovery do not report a generic frame wait, while recovered cameras stop showing historical temporary failures.
+
+`tests/camera/manager_inspection_test.cpp` checks every manager-chain read and reread, field changes and identity refusals. `tests/camera/scene_recovery_test.cpp` covers temporary pair and manager failures followed by guarded cleanup and bounded retry, plus fatal identity refusal across later failures. These checks do not establish the cause of an individual simulator memory-read failure.
+
 Additional focused checks remain available:
 
+- `tests/app/updater_test.ps1`: selection of current and legacy installer filenames, exact release URLs, version ordering, duplicate rejection and digest/checksum validation.
 - `tests/graphics/scene_capture_build.ps1`: capture packet pixels, producer/consumer fences and storage reuse; see [capture contracts](../docs/scene-capture-validation.md).
 - `tests/graphics/scene_capture_manager_test.ps1`: recording lifetime, submission receipts and capture publication.
 - `tests/graphics/scene_frame_output_test.ps1`: stable output composition and synchronization.

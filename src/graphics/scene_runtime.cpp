@@ -258,7 +258,7 @@ void reset_feed(std::uint64_t key) {
     discard(*item);
     item->status.output = false;
     item->committed = {};
-    item->status.message = "Waiting for fresh completed camera images from this scene test.";
+    item->status.message = "Waiting for the first completed images from both camera views.";
   }
 }
 bool set_display_exposure(std::uint64_t key, float ev) {

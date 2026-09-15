@@ -32,10 +32,83 @@ struct Engine {
   }
   ec::EngineCallbacks callbacks() { return {this, initialize, create, erase}; }
 };
+
+void manager_failure_recovery() {
+  constexpr ec::ManagerToken manager{9, 3};
+  Engine engine;
+  ec::PairController pair;
+  SceneRecovery recovery;
+  recovery.start();
+  pair.request_independent_pose();
+  require(pair.process_update(manager, engine.callbacks()), "Manager recovery initial pair");
+  const auto original = pair.snapshot().owned_ids;
+
+  // A temporary pair failure already queued cleanup when the next manager
+  // inspection becomes unavailable. Neither failed inspection may call native
+  // erase. The original IDs must remain owned until a fresh valid update.
+  recovery.failed(SceneStopReason::inspection_unavailable, 100);
+  pair.request_disable();
+  recovery.failed(SceneStopReason::inspection_unavailable, 460);
+  pair.request_disable();
+  require(recovery.pending() && recovery.attempts() == 0 && pair.snapshot().owned_ids == original && engine.erases == 0,
+          "Temporary manager inspection consumed ownership or disabled pair recovery");
+  require(!recovery.retry(5000, pair.snapshot(), true), "Manager recovery bypassed unprocessed cleanup");
+  require(pair.process_update(manager, engine.callbacks()) && pair.snapshot().state == ec::State::cleanup_pending,
+          "Validated update did not preserve unconfirmed cleanup");
+  require(!recovery.retry(5000, pair.snapshot(), true) && engine.creates == 2, "Unconfirmed IDs permitted recreation");
+  engine.allow_erase = true;
+  require(pair.process_update(manager, engine.callbacks()) && !pair.snapshot().owned_ids[0] && !pair.snapshot().owned_ids[1],
+          "Fresh guarded cleanup did not confirm absence");
+  require(!recovery.retry(5000, pair.snapshot(), false), "Manager retry bypassed fresh aircraft pose");
+  require(recovery.retry(5000, pair.snapshot(), true), "Temporary pair then manager failure did not recover");
+  pair.request_independent_pose();
+  require(pair.process_update(manager, engine.callbacks()) && engine.creates == 4 && pair.snapshot().owned_ids != original,
+          "Recovery did not create exactly one new pair");
+
+  // A manager-only temporary failure must also queue cleanup for an otherwise
+  // active pair. Exercise every remaining retry, with repeated unavailable
+  // samples between attempts; these must never refill the retry budget.
+  for (unsigned attempt = 2; attempt <= SceneRecovery::maximum_retries; ++attempt) {
+    const auto retained = pair.snapshot().owned_ids;
+    const auto creates = engine.creates, erases = engine.erases;
+    const auto at = std::uint64_t(attempt) * 10000;
+    for (unsigned sample = 0; sample < 4; ++sample) {
+      recovery.failed(SceneStopReason::inspection_unavailable, at + sample);
+      pair.request_disable();
+    }
+    require(recovery.pending() && recovery.attempts() == attempt - 1 && pair.snapshot().owned_ids == retained &&
+                engine.creates == creates && engine.erases == erases,
+            "Failed manager inspection called native callbacks or reset retry accounting");
+    require(pair.process_update(manager, engine.callbacks()), "Fresh manager-only cleanup update");
+    require(recovery.retry(at + 3000, pair.snapshot(), true) && recovery.attempts() == attempt,
+            "Confirmed manager-only cleanup did not use one bounded retry");
+    pair.request_independent_pose();
+    require(pair.process_update(manager, engine.callbacks()) && engine.creates == creates + 2,
+            "Manager-only retry duplicated or omitted a pair");
+  }
+  pair.request_disable();
+  require(pair.process_update(manager, engine.callbacks()), "Final bounded cleanup");
+  for (unsigned sample = 0; sample < 16; ++sample)
+    recovery.failed(SceneStopReason::inspection_unavailable, 50000 + sample);
+  require(!recovery.pending() && !recovery.retry(99999, pair.snapshot(), true) && recovery.attempts() == SceneRecovery::maximum_retries,
+          "Repeated manager faults revived an exhausted retry budget");
+
+  recovery.start();
+  recovery.failed(SceneStopReason::inspection_unavailable, 100);
+  recovery.failed(SceneStopReason::identity_refused, 460);
+  const auto refused_sequence = recovery.sequence();
+  for (const auto later : {SceneStopReason::pose_invalid, SceneStopReason::creation_failed, SceneStopReason::exception,
+                           SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent})
+    recovery.failed(later, 1000);
+  require(recovery.reason() == SceneStopReason::identity_refused && !recovery.pending() && recovery.sequence() == refused_sequence &&
+              !recovery.retry(99999, pair.snapshot(), true),
+          "Later unavailable inspection downgraded an actual manager identity mismatch");
+}
 }  // namespace
 
 int main() {
   test_view_retirement();
+  manager_failure_recovery();
   SceneRecovery recovery;
   ec::Snapshot clean;
   require(!recovery.retry(9999, clean, true), "No initial invented request");

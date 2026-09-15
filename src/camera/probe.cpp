@@ -1,14 +1,15 @@
 #include "probe.hpp"
 
-#include "aircraft_inventory.hpp"
-#include "owned_entry_inventory.hpp"
-#include "owned_view.hpp"
-#include "../hooks/observer_hook.hpp"
 #include "../graphics/scene_handoff.hpp"
+#include "../hooks/observer_hook.hpp"
 #include "activation_mask.hpp"
+#include "aircraft_inventory.hpp"
 #include "aircraft_scene_pose.hpp"
 #include "body_pose_provider.hpp"
 #include "local_memory.hpp"
+#include "manager_inspection.hpp"
+#include "owned_entry_inventory.hpp"
+#include "owned_view.hpp"
 #include "probe_inspection_gate.hpp"
 #include "profile.hpp"
 #include "render_schedule.hpp"
@@ -33,11 +34,9 @@ namespace taxi_camera::native_camera {
 namespace {
 namespace ec = engine_camera;
 
-constexpr std::uint32_t kManagerTable = 133571232;
+constexpr std::uint32_t kManagerTable = kManagerVtable;
 constexpr std::uint32_t kUpdateSlot = kManagerTable + 15 * 8;
 constexpr std::uint32_t kUpdate = 17648544;
-constexpr std::uint32_t kOwnerGlobal = 173790440;
-constexpr std::uint32_t kRendererGlobal = 173790384;
 
 struct Runtime {
   std::mutex mutex;
@@ -161,56 +160,40 @@ bool word(LocalMemoryReader& reader, std::uint64_t address, T& output) noexcept 
   return reader.read(address, &output, sizeof(output));
 }
 
-bool image_word(Runtime& runtime, std::uint32_t rva, std::uint64_t& output) {
-  LocalImageReader reader(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
-  return reader.read(rva, &output, sizeof(output));
-}
-
-struct Handle {
-  std::uint64_t control = 0;
-  std::uint32_t generation = 0;
-  std::uint32_t extra = 0;
-};
-
 // Called only from this manager's update thunk, immediately before its original.
 // Cached pointer, weak handle and vptr must all agree, then be reread.
 // An enclosing transaction may borrow this pure stage. Its caller must finish
 // the shared cache before using the provisional Runtime identity for any call.
-bool manager_context(Runtime& runtime, void* current_manager, ScopedLocalMemoryQueryCache* shared = nullptr) {
+bool manager_context(Runtime& runtime,
+                     void* current_manager,
+                     ScopedLocalMemoryQueryCache* shared = nullptr,
+                     ManagerInspection* outcome = nullptr) {
+  const auto refused = [&](ManagerInspection result) {
+    if (outcome)
+      *outcome = result;
+    return false;
+  };
   std::optional<ScopedLocalMemoryQueryCache> queries;
   if (shared) {
     if (!shared->is_current())
-      return false;
+      return refused({ManagerInspectionStatus::unavailable, "Manager inspection transaction is no longer current."});
   } else {
     queries.emplace();
   }
   LocalMemoryReader reader(512);
-  std::uint64_t owner = 0, renderer = 0, cached = 0, payload = 0, vptr = 0;
-  std::uint32_t generation = 0;
-  Handle handle{};
-  if (!image_word(runtime, kOwnerGlobal, owner) || !owner || !image_word(runtime, kRendererGlobal, renderer) || !renderer ||
-      !word(reader, owner + 2496, cached) || cached != reinterpret_cast<std::uintptr_t>(current_manager) ||
-      !word(reader, owner + 2480, handle) || !handle.control || !word(reader, handle.control + 28, generation) ||
-      generation != handle.generation || !word(reader, handle.control, payload) || payload != cached || !word(reader, cached, vptr) ||
-      vptr != runtime.base + kManagerTable)
-    return false;
-  std::uint64_t second = 0;
-  Handle handle_again{};
-  std::uint32_t generation_again = 0;
-  if (!image_word(runtime, kOwnerGlobal, second) || second != owner || !image_word(runtime, kRendererGlobal, second) ||
-      second != renderer || !word(reader, owner + 2496, second) || second != cached || !word(reader, owner + 2480, handle_again) ||
-      std::memcmp(&handle, &handle_again, sizeof(handle)) != 0 || !word(reader, handle.control + 28, generation_again) ||
-      generation_again != generation || !word(reader, handle.control, second) || second != cached || !word(reader, cached, second) ||
-      second != vptr)
-    return false;
-  if (runtime.owned_control && runtime.owned_control != handle.control)
-    return false;
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
+  const auto result =
+      inspect_manager_identity(image, reader, runtime.base, reinterpret_cast<std::uintptr_t>(current_manager), runtime.owned_control);
+  if (!result)
+    return refused(result);
   if (queries && !queries->finish())
-    return false;
-  runtime.manager = cached;
-  runtime.renderer = renderer;
-  runtime.control = handle.control;
-  runtime.token = {cached, static_cast<std::uint64_t>(generation) + 1};
+    return refused({ManagerInspectionStatus::unavailable, "Manager memory-region metadata changed during inspection."});
+  runtime.manager = result.manager;
+  runtime.renderer = result.renderer;
+  runtime.control = result.control;
+  runtime.token = {result.manager, result.generation};
+  if (outcome)
+    *outcome = result;
   return true;
 }
 
@@ -772,8 +755,20 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   return absent;
 }
 
-void record_stop(Runtime& runtime, SceneStopReason reason, const char* detail, std::uint64_t now) {
+void record_stop(Runtime& runtime,
+                 SceneStopReason reason,
+                 const char* detail,
+                 std::uint64_t now,
+                 std::optional<std::uint64_t> expected_start_revision = std::nullopt) {
   const std::lock_guard lock(runtime.mutex);
+  // An inspection belongs to the request it sampled. Do not overwrite recovery
+  // state that a newer explicit Start/Stop has already replaced.
+  if (expected_start_revision && runtime.requested_start_revision != *expected_start_revision)
+    return;
+  // Preserve the matching detail while the recovery policy retains a fatal
+  // identity refusal. Only an explicit Start/Stop may leave that state.
+  if (runtime.recovery.reason() == SceneStopReason::identity_refused && reason != SceneStopReason::identity_refused)
+    return;
   if (runtime.recovery.reason() == reason && runtime.stop_detail == detail && (runtime.recovery.pending() || !retryable_scene_stop(reason)))
     return;
   runtime.recovery.failed(reason, now);
@@ -912,11 +907,13 @@ void observer(void* manager) noexcept {
     std::array<ec::OwnedViewSnapshot, 2> prepared_views{};
     SceneCaptureTicket prepared_ticket{};
     std::uint32_t prepared_free_views = 0;
+    ManagerInspection manager_inspection;
     const auto inspect_manager = [&] {
       if (fuse_pair) {
         prepared_ticket = timed(runtime, ProbeStage::handoff, [] { return scene_handoff().begin_capture(); });
         ScopedLocalMemoryQueryCache queries;
-        const bool manager_valid = timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, &queries); });
+        const bool manager_valid =
+            timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, &queries, &manager_inspection); });
         if (manager_valid && runtime.token == before.owner)
           inspect_pair(runtime, before.owned_ids, report, prepared_views, false, &queries);
         const bool stable = queries.finish();
@@ -932,7 +929,7 @@ void observer(void* manager) noexcept {
         report.dimensions = {};
         report.flags = {};
       }
-      return timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); });
+      return timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, nullptr, &manager_inspection); });
     };
     const auto start_body = requested_start ? sample_body_pose(now) : BodyPoseSnapshot{};
     if (profile_hold) {
@@ -952,9 +949,27 @@ void observer(void* manager) noexcept {
       runtime.schedule = next_schedule;
     } else if (!inspect_manager()) {
       scene_handoff().stop_scene();
-      record_stop(runtime, SceneStopReason::identity_refused, "Manager/renderer identity did not pass its complete guard.", now);
-      report.message = "Waiting for a stable manager/renderer lifetime; no native call made.";
-      report.pair = before;
+      const bool temporary = manager_inspection.temporary();
+      record_stop(runtime, temporary ? SceneStopReason::inspection_unavailable : SceneStopReason::identity_refused,
+                  manager_inspection.detail, now, start_revision);
+      {
+        const std::lock_guard lock(runtime.mutex);
+        // Consume a queued initial start too: after this stop, only the bounded
+        // recovery path may create again after fresh guards and confirmed cleanup.
+        if (requested_start && runtime.requested_start && runtime.requested_start_revision == start_revision) {
+          runtime.requested_start = false;
+          ++runtime.requested_start_revision;
+        }
+      }
+      // Mailbox only. No cleanup/native call is allowed in this failed pass.
+      // The next valid update repeats every guard and retains IDs until erase
+      // confirms absence. This also handles a temporary failure of an active pair.
+      if (temporary)
+        runtime.pair.request_disable();
+      report.message =
+          std::string(temporary ? "Camera manager inspection temporarily unavailable: " : "Camera manager identity refused: ") +
+          manager_inspection.detail;
+      report.pair = runtime.pair.snapshot();
     } else {
       LocalMemoryReader reader;
       ec::ViewPoolSnapshot pool;
@@ -1261,6 +1276,7 @@ void observer(void* manager) noexcept {
       report.profile_transition_failed = runtime.profile_transition.failed();
       report.accepting_requests = runtime.recovery.requested();
       report.recovery_pending = runtime.recovery.pending();
+      report.restart_pending = runtime.requested_start;
       report.recovery_attempts = runtime.recovery.attempts();
       report.stop_sequence = runtime.recovery.sequence();
       report.stop_reason = runtime.recovery.reason();
@@ -1517,6 +1533,7 @@ ProbeSnapshot scene_snapshot() {
   result.profile_transition_ready = runtime.profile_transition.ready();
   result.profile_transition_failed = runtime.profile_transition.failed();
   result.recovery_pending = runtime.recovery.pending();
+  result.restart_pending = runtime.requested_start;
   result.recovery_attempts = runtime.recovery.attempts();
   result.stop_sequence = runtime.recovery.sequence();
   result.stop_reason = runtime.recovery.reason();

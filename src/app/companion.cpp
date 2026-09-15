@@ -14,6 +14,7 @@
 #include "launcher_log.hpp"
 #include "../shared/protocol.hpp"
 #include "settings_store.hpp"
+#include "startup_state.hpp"
 #include "camera_hotkeys.hpp"
 #include "bug_report.hpp"
 #include "../shared/manual_camera_intent.hpp"
@@ -1601,8 +1602,14 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
     DestroyWindow(main);
     return 1;
   }
-  if (!background_start)
+  const win::StartupSettings startup(win::settings_directory(), background_start, preview_ui);
+  if (startup.should_show()) {
     ShowWindow(main, SW_SHOW);
+    if (!startup.record_shown(IsWindowVisible(main) != FALSE, worker != nullptr)) {
+      notice = L"Could not remember the first launch. Settings may reopen next time.";
+      InvalidateRect(main, nullptr, FALSE);
+    }
+  }
   MSG message{};
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
     if (!IsDialogMessageW(main, &message)) {

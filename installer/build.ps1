@@ -43,10 +43,11 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'build/native/validation.json') -Des
 & (Join-Path $repoRoot 'installer/embed-uninstaller.ps1') -Output (Join-Path $work 'uninstall-scripts.iss') -RuntimeScript (Join-Path $repoRoot 'installer/runtime.ps1') -UninstallScript (Join-Path $repoRoot 'installer/uninstall.ps1') -ExeXmlScript (Join-Path $repoRoot 'installer/exe_xml.ps1')
 $compiler = & (Join-Path $repoRoot 'installer/bootstrap.ps1')
 $output = Join-Path $repoRoot 'build/packages'
-$asset = Join-Path $output ($base + '-setup.exe')
-if (Test-Path -LiteralPath $asset) { throw 'Installer already exists; retain release assets and use a new build.' }
+$installerBase = "taxi-cam-$version-windows-x64-setup"
+$asset = Join-Path $output ($installerBase + '.exe')
+if (Test-Path -LiteralPath $asset) { throw 'Installer already exists; retain release assets and use a fresh worktree or application version.' }
 $log = Join-Path $work 'compiler.log'
-& $compiler "/DPayloadDir=$payload" "/DInternalDir=$work" "/DAppVersion=$version" "/DBuildNumber=$buildNumber" "/DOutputBase=$base-setup" "/O$output" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> $log
+& $compiler "/DPayloadDir=$payload" "/DInternalDir=$work" "/DAppVersion=$version" "/DBuildNumber=$buildNumber" "/DOutputBase=$installerBase" "/O$output" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> $log
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $asset)) { throw "Installer compilation failed. See $log" }
 [ordered]@{version=$version;buildNumber=$buildNumber;sourceCommit=$info.sourceCommit;sourceDirty=$info.sourceDirty;installerSha256=(Get-FileHash -LiteralPath $asset).Hash;packageSha256=(Get-FileHash -LiteralPath $zip).Hash;files=$receipt.files;compilerPayload=$payload;compilerInternal=$work} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($asset + '.json') -Encoding utf8
 Write-Output $asset

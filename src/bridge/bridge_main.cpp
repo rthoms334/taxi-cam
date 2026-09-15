@@ -11,6 +11,7 @@
 #include "../shared/companion_control.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/scene_demand.hpp"
+#include "camera_status.hpp"
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
 #include "native_hooks.hpp"
@@ -469,6 +470,7 @@ DWORD run_impl() {
                        : is("detected")           ? "PFD identities changed. Re-select the aircraft profile or choose the PFDs manually."
                                                   : "Checking the iniBuilds A380 display group across three active samples.";
     }
+    const auto stopped_camera = camera_stop_message(scene);
     const char* message =
         !connected          ? "Waiting for Windows companion heartbeat."
         : !settings.enabled ? "Camera service paused."
@@ -481,6 +483,7 @@ DWORD run_impl() {
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
         : (!targets[0] || !targets[1])         ? target_message
         : !active && settings.calibration_mask ? "Calibration requested on the selected display."
+        : stopped_camera                       ? stopped_camera
         : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."
         : !active && manual_only               ? "Ready. Use camera hotkeys or the left/right preview controls."
         : !active && !settings.follow_taxi     ? "Manual control selected. Enable a preview or TAXI buttons on Overview."

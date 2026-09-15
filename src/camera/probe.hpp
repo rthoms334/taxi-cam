@@ -1,7 +1,7 @@
 #pragma once
 
-#include "entry_pair.hpp"
 #include "aircraft_mounts.hpp"
+#include "entry_pair.hpp"
 #include "scene_recovery.hpp"
 
 #include <array>
@@ -79,6 +79,8 @@ struct ProbeSnapshot {
   bool view_waiting = false;
   std::uint64_t view_wait_count = 0;
   bool recovery_pending = false;
+  // A bounded retry has been accepted and is waiting for pose/creation.
+  bool restart_pending = false;
   unsigned recovery_attempts = 0;
   std::uint64_t stop_sequence = 0;
   SceneStopReason stop_reason = SceneStopReason::none;

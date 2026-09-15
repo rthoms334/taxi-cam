@@ -8,6 +8,7 @@ $repo = $repoRoot
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $receipt = Get-Content -Raw -LiteralPath ($installerPath + '.json') | ConvertFrom-Json
 if ((Get-FileHash -LiteralPath $installerPath).Hash -ne $receipt.installerSha256) { throw 'Installer hash does not match its build receipt.' }
+if ([IO.Path]::GetFileName($installerPath) -cne "taxi-cam-$($receipt.version)-windows-x64-setup.exe") { throw 'Installer filename must contain the application version without a build-number suffix.' }
 $testRoot = Join-Path $repo ('build/installer-tests/' + [Guid]::NewGuid().ToString('N'))
 $sim = Join-Path $testRoot 'sim'; $xmlPath = Join-Path $testRoot 'config/exe.xml'
 New-Item -ItemType Directory -Force -Path $sim,(Split-Path -Parent $xmlPath) | Out-Null
