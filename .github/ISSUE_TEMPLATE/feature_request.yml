@@ -1,0 +1,18 @@
+name: Feature request
+description: Suggest a new capability or improvement. Use Bug report for something that is broken.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help you do?
+      description: Describe the need and the aircraft or workflow involved. Please search existing requests first.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested behaviour
+      description: Describe how you would like it to work and any alternatives you have considered.
+    validations:
+      required: true

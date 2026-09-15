@@ -89,6 +89,14 @@ Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDA
 
 The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Camera size is **768 × 255** for the nose and **768 × 504** for the tail.
 
+## Reporting a problem
+
+Click the **bug icon above the version number** in Taxi Cam's sidebar, or choose **Report a bug** in the tray menu. This opens a GitHub bug report with the app version, current settings and runtime counters filled in. Review it, describe what happened, attach the requested files and submit using your GitHub account. You can also open the [bug report form](https://github.com/rthoms334/taxi-cam/issues/new?template=bug_report.yml) directly.
+
+Use **Diagnostics → Open log folder**, or press **Win+R** and enter `%LOCALAPPDATA%\Taxi Cam`. Attach a ZIP containing `bridge.log` and `profiles/fbw-a380x.ini`, where available. For crashes, include the matching Windows application error details from Reliability Monitor or Event Viewer. Note the incident time and time zone. If the app failed before creating a log, include the error and explain which files are missing.
+
+The form asks for Taxi Cam/MSFS/aircraft versions, Windows and GPU details, graphics settings, reproduction steps and screenshots where useful. Review attachments for personal information such as usernames and local paths before sharing them. The app opens a draft; attachments and submission are completed on GitHub.
+
 ## Uninstall
 
 With MSFS and Taxi Cam closed, uninstall **Taxi Cam** from Windows Installed apps. Setup removes its startup entry and application files. Saved settings and calibration are retained.

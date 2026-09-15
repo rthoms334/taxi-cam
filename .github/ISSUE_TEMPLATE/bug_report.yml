@@ -1,0 +1,145 @@
+name: Bug report
+description: Report a Taxi Cam problem with the details and diagnostics needed to investigate.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please report one problem per issue and search existing issues first.
+        In Taxi Cam, click the **bug icon above the version number** in the sidebar to prefill the version and runtime snapshot.
+        Review the information, add your logs and reproduction steps, then submit this form.
+        If a detail or file is unavailable, explain why so installation and startup failures can still be reported.
+
+  - type: input
+    id: taxi_cam_version
+    attributes:
+      label: Taxi Cam version and build
+      description: Copy the version shown at the bottom left of Settings. Include the release/installer filename, or the commit for a source build. Avoid just saying "latest".
+      placeholder: Version, release/installer filename, or source commit
+    validations:
+      required: true
+
+  - type: input
+    id: simulator_version
+    attributes:
+      label: MSFS 2024 version and store
+      description: Include the full simulator version, Steam or Microsoft Store/Xbox app, and whether you use a simulator beta.
+    validations:
+      required: true
+
+  - type: input
+    id: aircraft
+    attributes:
+      label: Aircraft and add-on version
+      description: Include the aircraft variant, add-on version and stable/development channel. For installation issues before loading an aircraft, say so.
+      placeholder: FlyByWire A380X, add-on version and update channel
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Windows, hardware and graphics settings
+      description: Include Windows version/build (Win+R → winver), CPU, RAM, GPU and driver version, resolution, render scale, upscaling, frame generation and VR use. List capture tools, overlays or graphics add-ons such as OBS or ReShade, or say none.
+      placeholder: |
+        Windows version/build:
+        CPU / RAM:
+        GPU / driver version:
+        Resolution / render scale / upscaling / frame generation:
+        VR:
+        Capture tools, overlays and graphics add-ons:
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened and what did you expect?
+      description: Describe the actual and expected behaviour. For camera problems, identify the left/right/both PFDs and nose/tail/both views. Copy any exact error message.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and flight conditions
+      description: Describe the steps from starting Taxi Cam and MSFS to the problem. Include airport/scenery, stand or runway, time of day/weather, approximate ground speed, TAXI-button state, and any aircraft switch, flight reload or graphics change. For installation/update issues, include the installer filename, failed step and error.
+      placeholder: |
+        1. Start...
+        2. Load...
+        3. Press/change...
+        4. Observe...
+        Flight conditions (or not applicable):
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does this happen?
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+        - Not yet retested
+    validations:
+      required: true
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: When did it start and what have you tried?
+      description: Include the last working Taxi Cam/MSFS/aircraft version if known, recent updates or changes, and results of any troubleshooting already tried. Say "unknown" or "not tried" where appropriate; you do not need to repeat a crash or reset your calibration.
+    validations:
+      required: true
+
+  - type: textarea
+    id: runtime_snapshot
+    attributes:
+      label: Taxi Cam runtime snapshot
+      description: Prefilled by the app's Report a bug button. When reporting directly on GitHub, attach screenshots of Overview, Diagnostics and PFD routing, or describe their status and settings. If the app cannot open, say so.
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Collect the logs and saved settings
+
+        Open **Diagnostics → Open log folder**, or press **Win+R**, paste `%LOCALAPPDATA%\Taxi Cam` and press Enter.
+        Copy these files from the affected session into a ZIP and attach it below:
+
+        - `bridge.log` — the main runtime log. Include the full log around the problem, not only the last line.
+        - `profiles/fbw-a380x.ini` — saved aircraft settings and camera calibration, if present.
+
+        Note the incident's date, local time and time zone so we can match your description to the evidence.
+        If installation or bridge startup failed before logs were created, explain that and include the error screenshot instead.
+        Review text files before uploading: logs can contain your Windows username and local aircraft paths. Redact personal path components in the copies you attach.
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and saved settings
+      description: Drag your ZIP into this field or use the attachment button. Include the incident time and list the files attached. If an expected file is missing, name it and explain why. Adding text here does not attach the files automatically.
+      placeholder: |
+        Incident date / local time / time zone:
+        Attached files:
+        Missing files and reason (if any):
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots, video or crash details
+      description: For visual issues, show the affected PFD and camera views; video helps with flicker or motion. For crashes, add the matching Windows Reliability Monitor or Event Viewer application error (faulting application/module, exception code, offset and time), if available. Include installation error screenshots here too.
+
+  - type: checkboxes
+    id: evidence_check
+    attributes:
+      label: Report checklist
+      options:
+        - label: I attached the available logs and affected settings, or explained which files could not be collected and why.
+          required: true
+        - label: I reviewed the report and attachments for personal information before sharing them.
+          required: true

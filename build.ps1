@@ -105,6 +105,7 @@ if ($Validate) {
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
+        @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
         @{Name='aircraft-layout'; Sources=@('src/camera/aircraft_inventory.cpp','tests/camera/aircraft_inventory_test.cpp')},
         @{Name='native-slots'; Sources=@('tests/graphics/native_slots_test.cpp')},
         @{Name='native-root-state'; Sources=@('tests/graphics/root_state_test.cpp','src/graphics/pfd_stamp_state.cpp')},
@@ -169,7 +170,7 @@ if ($Validate) {
         tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','exact DLL smoke',
             'settings persistence and IPC','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
             'compositor formats and exposure','scene handoff and resource state','queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','camera ownership','aircraft layout compatibility','exe.xml preservation and rename migration',
-            'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));
+            'native imports and header dependency closure','release selection, download integrity and updater handoff guards','bug report URL encoding, bounds and diagnostic privacy'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'validation.json') -Encoding utf8

@@ -11,6 +11,7 @@
 #include "launcher.hpp"
 #include "../shared/protocol.hpp"
 #include "settings_store.hpp"
+#include "bug_report.hpp"
 #include "updater.hpp"
 
 namespace {
@@ -21,7 +22,7 @@ constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr COLORREF Background = RGB(17, 21, 28), Sidebar = RGB(12, 16, 22), Card = RGB(26, 32, 41), Border = RGB(44, 54, 67),
                    Text = RGB(232, 238, 246), Muted = RGB(154, 170, 188), Accent = RGB(66, 219, 184);
 HINSTANCE instance{};
-HWND window{};
+HWND window{}, report_tooltip{};
 HFONT normal{}, small{}, title_font{}, heading{};
 HBRUSH background_brush{}, card_brush{};
 HICON icon{};
@@ -34,6 +35,7 @@ std::wstring installation, expected_simulator, notice = L"Changes are saved for 
 std::mutex app_mutex;
 win::Settings current;
 win::Status status;
+bool received_bridge_status{};  // Guarded by app_mutex; retained across simulator sessions.
 std::wstring connection = L"Waiting for Microsoft Flight Simulator 2024";
 std::atomic<bool> running{true};
 std::atomic<DWORD> simulator_pid{};
@@ -84,6 +86,29 @@ HWND child(const wchar_t* type, const wchar_t* label, int id, int x, int y, int 
 HWND button(const wchar_t* label, int id, int x, int y, int w = 130, int h = 36) {
   return child(L"BUTTON", label, id, x, y, w, h, BS_OWNERDRAW);
 }
+void draw_bug_icon(HDC dc, const RECT& bounds, COLORREF color) {
+  const int x = (bounds.left + bounds.right) / 2 - scale(20), y = (bounds.top + bounds.bottom) / 2 - scale(20);
+  HPEN pen = CreatePen(PS_SOLID, scale(2), color);
+  const auto old_pen = SelectObject(dc, pen), old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+  const auto line = [&](int x1, int y1, int x2, int y2) {
+    MoveToEx(dc, x + scale(x1), y + scale(y1), nullptr);
+    LineTo(dc, x + scale(x2), y + scale(y2));
+  };
+  line(17, 10, 14, 6);
+  line(23, 10, 26, 6);
+  Ellipse(dc, x + scale(16), y + scale(9), x + scale(24), y + scale(17));
+  Ellipse(dc, x + scale(13), y + scale(14), x + scale(27), y + scale(31));
+  line(20, 15, 20, 30);
+  for (const bool right : {false, true}) {
+    const auto side = [&](int coordinate) { return right ? 40 - coordinate : coordinate; };
+    line(side(13), 18, side(8), 15);
+    line(side(13), 23, side(6), 23);
+    line(side(14), 28, side(8), 32);
+  }
+  SelectObject(dc, old_brush);
+  SelectObject(dc, old_pen);
+  DeleteObject(pen);
+}
 void edit(double value, int id, int x, int y, int w = 110) {
   wchar_t buffer[64];
   std::swprintf(buffer, 64, id == 201 || id == 202 ? L"%.4g" : L"%.10g", value);
@@ -125,6 +150,30 @@ win::Settings draft() {
 void publish(const win::Settings& value) {
   const std::lock_guard lock(app_mutex);
   current = value;
+}
+void report_bug() {
+  win::BugReportContext context;
+  {
+    const std::lock_guard lock(app_mutex);
+    context.settings = current;
+    context.status = status;
+    context.bridge_seen = received_bridge_status;
+    context.simulator_running = simulator_pid.load() != 0;
+  }
+  context.now = GetTickCount64();
+  context.ui_preview = preview_ui;
+  context.unsaved_edits = dirty;
+  const auto url = win::bug_report_url(context);
+  const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+  if (result <= 32) {
+    MessageBoxW(window,
+                L"Could not open your browser. Open github.com/rthoms334/taxi-cam/issues and choose Bug report. "
+                L"Attach logs from Diagnostics > Open log folder and include your Taxi Cam version.",
+                L"Taxi Cam bug report", MB_OK | MB_ICONWARNING);
+    return;
+  }
+  notice = L"Bug report opened. Review the details and attach logs before submitting on GitHub.";
+  InvalidateRect(window, nullptr, FALSE);
 }
 void dirty_notice() {
   dirty = true;
@@ -230,6 +279,10 @@ void target_combos(const win::Settings& s) {
 }
 void build_controls() {
   refreshing = true;
+  if (report_tooltip) {
+    DestroyWindow(report_tooltip);
+    report_tooltip = nullptr;
+  }
   for (HWND h : controls)
     DestroyWindow(h);
   controls.clear();
@@ -238,6 +291,18 @@ void build_controls() {
   const wchar_t* names[]{L"Overview", L"Camera views", L"Display", L"PFD routing", L"Diagnostics"};
   for (int i = 0; i < 5; ++i)
     navigation.push_back(button(names[i], 100 + i, 20, 156 + i * 49, 166, 40));
+  const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
+  report_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
+  if (report_tooltip) {
+    TOOLINFOW tip{};
+    tip.cbSize = sizeof(tip);
+    tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tip.hwnd = window;
+    tip.uId = reinterpret_cast<UINT_PTR>(report_button);
+    tip.lpszText = const_cast<wchar_t*>(L"Report a bug");
+    SendMessageW(report_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+  }
   button(L"Menu", 602, 930, 37, 80, 34);
   button(L"Save changes", 500, 835, 686, 175, 42);
   button(L"Hide to tray", 501, 650, 686, 165, 42);
@@ -532,6 +597,7 @@ DWORD WINAPI connection_worker(void*) {
       {
         const std::lock_guard lock(app_mutex);
         status = sample;
+        received_bridge_status = received_bridge_status || sample.heartbeat != 0;
       }
       PostMessageW(window, StatusMessage, 0, 0);
     }
@@ -716,7 +782,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         break;
       const int id = static_cast<int>(item->CtlID);
       const bool selected = (id >= 100 && id < 105 && id - 100 == page) || is_on(id, draft());
-      HBRUSH surround = CreateSolidBrush(id >= 100 && id < 105 ? Sidebar : Background);
+      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 105) || id == 512 ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
       const bool primary = id == 500;
@@ -730,16 +796,22 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       SelectObject(item->hDC, oldp);
       DeleteObject(brush);
       DeleteObject(pen);
-      wchar_t label[160];
-      GetWindowTextW(item->hwndItem, label, 160);
-      SelectObject(item->hDC, normal);
-      SetTextColor(item->hDC, primary ? Background : selected ? Accent : Text);
-      SetBkMode(item->hDC, TRANSPARENT);
       RECT r = item->rcItem;
-      InflateRect(&r, -scale(10), 0);
-      DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      if (id == 512) {
+        draw_bug_icon(item->hDC, r, Accent);
+        InflateRect(&r, -scale(4), -scale(4));
+      } else {
+        wchar_t label[160];
+        GetWindowTextW(item->hwndItem, label, 160);
+        SelectObject(item->hDC, normal);
+        SetTextColor(item->hDC, primary ? Background : selected ? Accent : Text);
+        SetBkMode(item->hDC, TRANSPARENT);
+        InflateRect(&r, -scale(10), 0);
+        DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      }
       if (item->itemState & ODS_FOCUS) {
-        InflateRect(&r, -2, -4);
+        if (id != 512)
+          InflateRect(&r, -2, -4);
         DrawFocusRect(item->hDC, &r);
       }
       return TRUE;
@@ -757,6 +829,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         AppendMenuW(menu, MF_STRING, 600, L"Settings");
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
+        AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 601, L"Exit");
         POINT p;
@@ -768,6 +841,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           show();
         if (selected == 603)
           check_updates(true);
+        if (selected == 512)
+          report_bug();
         if (selected == 601) {
           stop_service();
           DestroyWindow(hwnd);
@@ -799,6 +874,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 602) {
         PostMessageW(hwnd, TrayMessage, 0, WM_CONTEXTMENU);
+        return 0;
+      }
+      if (id == 512) {
+        report_bug();
         return 0;
       }
       if (id == 500) {
@@ -913,6 +992,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         ShowWindow(hwnd, SW_HIDE);
       return 0;
     case WM_DESTROY:
+      if (report_tooltip) {
+        DestroyWindow(report_tooltip);
+        report_tooltip = nullptr;
+      }
       stop_service();
       tray(false);
       PostQuitMessage(0);
