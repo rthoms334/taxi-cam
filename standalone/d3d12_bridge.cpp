@@ -127,7 +127,6 @@ struct Registry {
   PfdTargetDetector detector;
   const profiles::AircraftProfile* profile = &profiles::A380;
   unsigned active_mask{}, calibration_mask{};
-  unsigned graphics_state_test = 0;
   std::array<std::shared_ptr<Resource>, 2> selected_resources{};
   std::array<std::atomic<ID3D12Resource*>, 2> selected_native{};
   std::array<std::atomic<std::uint64_t>, 2> selected_ids{};
@@ -144,9 +143,7 @@ struct Registry {
   std::atomic<std::uint64_t> preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
   std::atomic<const char*> preferred_copy_reason{"not_attempted"};
   std::atomic<std::uint64_t> dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{};
-  std::atomic<std::uint64_t> dynamic_depth_bias_restores{}, dynamic_strip_cut_restores{};
-  std::atomic<std::uint64_t> sample_position_calls{}, sample_position_restores{}, state_test_roundtrips{};
-  std::atomic<std::uint64_t> state_test_target_roundtrips{}, state_test_shader_roundtrips{};
+  std::atomic<std::uint64_t> sample_position_calls{};
   WriteBudget calibration_budget;
 };
 Registry& registry() {
@@ -622,7 +619,7 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
                            static_cast<LONG>(content.bottom)};
     const PfdCopyProof::Key proof_key{reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id};
     const auto model = list->copy_proof.mode(proof_key);
-    if (!r.graphics_state_test && model != PfdCopyProof::Mode::unknown) {
+    if (model != PfdCopyProof::Mode::unknown) {
       ++r.preferred_copy_attempts;
       // ensure_list's boundary registration has already proved identical QI7.
       auto* enhanced = model == PfdCopyProof::Mode::enhanced_rt ? static_cast<ID3D12GraphicsCommandList7*>(native) : nullptr;
@@ -634,19 +631,17 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
         continue;
       }
       r.preferred_copy_reason = "private_copy_refused";
-    } else if (r.graphics_state_test) {
-      r.preferred_copy_reason = "diagnostic_no_draw";
     } else {
       ++r.preferred_copy_no_proof;
       r.preferred_copy_reason = list->copy_proof.reason(proof_key);
     }
     // Shader delivery is terminal work on a DIRECT recording. Intermediate
     // boundaries retain the typed target, without replaying application roots.
-    if (!r.graphics_state_test && !recording_end) {
+    if (!recording_end) {
       ++r.shader_deferred;
       continue;
     }
-    if (!r.graphics_state_test && !r.close_forward_verified) {
+    if (!r.close_forward_verified) {
       ++r.close_forward_refused;
       continue;
     }
@@ -665,57 +660,14 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
     const boundary::ScopedBypass bypass;
     const D3D12_CPU_DESCRIPTOR_HANDLE target{list->snapshot_rtvs->GetCPUDescriptorHandleForHeapStart().ptr +
                                              SIZE_T{8 + side} * r.rtv_stride};
-    const bool targets_only = r.graphics_state_test == 2;
-    const bool shader_only = r.graphics_state_test >= 3;
-    const auto group = r.graphics_state_test == 4   ? PfdStateGroup::pipeline
-                       : r.graphics_state_test == 5 ? PfdStateGroup::root_bindings
-                       : r.graphics_state_test == 6 ? PfdStateGroup::raster
-                                                    : PfdStateGroup::all;
-    if (targets_only) {
-      // Keep the same current-output and submission admission as state replay;
-      // only the graphics-state operation is removed from this diagnostic.
-      const auto output = runtime::snapshot(r.key);
-      if (!output.output || output.failed || !list->graphics.can_restore(native) ||
-          !runtime::manager().register_consumer_recording(native)) {
-        ++r.fallback_state_refused;
-        continue;
-      }
-    }
-    if (!shader_only)
-      native->OMSetRenderTargets(1, &target, FALSE, nullptr);
+    native->OMSetRenderTargets(1, &target, FALSE, nullptr);
     ++r.fallback_attempts;
-    const bool terminal_draw = recording_end && !r.graphics_state_test;
-    const bool stamped =
-        targets_only ||
-        (terminal_draw
-             ? runtime::stamp_at_recording_end(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
-                                               view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner)
-             : runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
-                              view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test, group));
-    // Restore the CURRENT raw OM bindings, including valid descriptors that
-    // predate tracking. Never replay the bindings from when the PFD was queued.
-    if (!shader_only && !terminal_draw)
-      native->OMSetRenderTargets(list->raw_rtv_count, list->raw_rtvs.data(), FALSE, list->raw_has_dsv ? &list->raw_dsv : nullptr);
-    if (stamped) {
-      if (r.graphics_state_test) {
-        ++r.state_test_roundtrips;
-        if (!shader_only)
-          ++r.state_test_target_roundtrips;
-        if (!targets_only)
-          ++r.state_test_shader_roundtrips;
-      } else {
-        ++r.fallback_stamps;
-        if (terminal_draw)
-          ++r.recording_end_draws;
-      }
-      if (!targets_only && !terminal_draw) {
-        if (group == PfdStateGroup::all || group == PfdStateGroup::raster)
-          r.sample_position_restores += list->graphics.has_sample_positions();
-        if (group == PfdStateGroup::all || group == PfdStateGroup::pipeline) {
-          r.dynamic_depth_bias_restores += list->graphics.has_depth_bias();
-          r.dynamic_strip_cut_restores += list->graphics.has_strip_cut();
-        }
-      }
+    // This is the last work recorded before native Close. Leave our bindings
+    // in place: no application commands follow and no root replay is needed.
+    if (runtime::stamp_at_recording_end(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
+                                        view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner)) {
+      ++r.fallback_stamps;
+      ++r.recording_end_draws;
       list->pending_rt[side] = false;
       list->pending_pfds[side] = {};
     }
@@ -770,8 +722,6 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
   {
     const std::lock_guard lock(r.mutex);
     refresh_selected(r);
-    if (r.graphics_state_test)
-      return;
     std::shared_ptr<Resource> item;
     unsigned side = 0;
     for (unsigned i = 0; i < 2; ++i)
@@ -1690,17 +1640,11 @@ GraphicsStatus graphics_status() noexcept {
   result.preferred_copy_no_proof = r.preferred_copy_no_proof.load();
   result.preferred_copy_reason = r.preferred_copy_reason.load();
   result.sample_position_calls = r.sample_position_calls.load();
-  result.sample_position_restores = r.sample_position_restores.load();
-  result.state_test_roundtrips = r.state_test_roundtrips.load();
-  result.state_test_target_roundtrips = r.state_test_target_roundtrips.load();
-  result.state_test_shader_roundtrips = r.state_test_shader_roundtrips.load();
   result.recording_end_draws = r.recording_end_draws.load();
   result.shader_deferred = r.shader_deferred.load();
   result.close_forward_refused = r.close_forward_refused.load();
   result.dynamic_depth_bias_calls = r.dynamic_depth_bias_calls.load();
   result.dynamic_strip_cut_calls = r.dynamic_strip_cut_calls.load();
-  result.dynamic_depth_bias_restores = r.dynamic_depth_bias_restores.load();
-  result.dynamic_strip_cut_restores = r.dynamic_strip_cut_restores.load();
   return result;
 }
 std::vector<PfdTargetObservation> pfd_inventory() {
@@ -1742,11 +1686,6 @@ void set_calibration(unsigned mask, unsigned budget) noexcept {
   refresh_selected(r);
   r.calibration_budget.set_limit(budget);
 }
-void set_graphics_state_test(unsigned mode) noexcept {
-  auto& r = registry();
-  const std::lock_guard lock(r.mutex);
-  r.graphics_state_test = mode <= 6 ? mode : 0;
-}
 void set_target_mask(unsigned mask) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
@@ -1766,7 +1705,6 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   {
     const std::lock_guard lock(r.mutex);
     r.active_mask = r.calibration_mask = 0;
-    r.graphics_state_test = 0;
     // This entry point starts an explicit aircraft/profile session, including a
     // reload of the same adapter. Ordinary texture replacement uses forget().
     r.routes.reset();

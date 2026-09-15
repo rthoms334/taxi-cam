@@ -10,6 +10,8 @@ bool set_patch_profile(std::uint64_t device_key, std::uint32_t profile);
 // Exact, positively observed native RT-exit boundary only. Never infer a
 // barrier model from an RTV bind, draw, OM switch or Close. No app draw/state
 // setters; the original application barrier remains the caller's responsibility.
+// A validated cold request reserves bounded metadata and returns false without
+// GPU work. service() builds that exact patch for subsequent copy opportunities.
 bool copy_patch(ID3D12GraphicsCommandList*,
                 std::uint64_t device_key,
                 ID3D12Resource* target,
@@ -25,6 +27,8 @@ struct Snapshot {
   std::uint64_t frames = 0;
   std::uint64_t stamps = 0;
   std::uint64_t state_skips = 0;
+  std::uint32_t patch_requests = 0;
+  std::uint64_t patch_draws = 0;
   float display_exposure_ev = -8.8f;
   float ground_speed_knots = 0;
   bool ground_speed_valid = false;
@@ -45,22 +49,10 @@ void reset_feed(std::uint64_t key);
 void set_composition(std::uint64_t key, const profiles::Composition& layout);
 void service();
 Snapshot snapshot(std::uint64_t key);
-// Optional half-open content bounds inside destination; nullptr fills the
-// destination. Any surrounding destination border is opaque black.
-bool stamp(ID3D12GraphicsCommandList*,
-           const PfdGraphicsState&,
-           std::uint64_t key,
-           DXGI_FORMAT format,
-           UINT width,
-           UINT height,
-           DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
-           const D3D12_RECT* destination = nullptr,
-           const D3D12_RECT* content = nullptr,
-           bool draw = true,
-           PfdStateGroup group = PfdStateGroup::all);
 // Terminal DIRECT-list entry only: immediately before native Close, after all
 // application commands. Caller supplies the guarded retained RTV; successful
 // recording intentionally leaves our state bound and never replays app roots.
+// Optional half-open content bounds leave an opaque black destination border.
 bool stamp_at_recording_end(ID3D12GraphicsCommandList*,
                             const PfdGraphicsState&,
                             std::uint64_t key,

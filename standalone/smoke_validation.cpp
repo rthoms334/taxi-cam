@@ -54,11 +54,11 @@ int wmain(int argc, wchar_t** argv) {
     owner.unlock();
     require(reader.lock(100), "Read mailbox lock");
     require(reader.data()->settings.camera_rate == 60, "Settings exchange");
-    require(ProtocolVersion == 6 && reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
+    require(ProtocolVersion == 7 && reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
                 reader.data()->settings.tail_upper == std::array<float, 2>{0.25f, 0.625f} &&
                 reader.data()->settings.tail_corner == std::array<float, 2>{0.1875f, 0.75f} &&
                 reader.data()->settings.tail_inner == std::array<float, 2>{0.375f, 0.875f},
-            "Guide pairs exchanged in protocol6");
+            "Guide pairs exchanged in protocol7");
     require(reader.data()->settings.profile_request == 17 && reader.data()->settings.aircraft_session_epoch == 23,
             "Profile retry and flight scope exchanged");
     reader.unlock();

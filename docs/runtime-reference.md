@@ -96,7 +96,7 @@ The **Reference guides** page edits `nose_dot`, `tail_upper`, `tail_corner` and 
 
 The nose dots have a 4.5-pixel radius; tail brackets use a two-pixel distance threshold in the working image. Their positions should be calibrated against the visible tyres at the chosen camera framing before being promoted to shipped defaults.
 
-The GS box uses thin antialiased lettering with two character spaces between the white `GS` label and the coloured speed value. Ground speed is rounded to whole knots in the range 0–99. Invalid, stale or overflowing values display `--`. The existing 60-knot automatic cutoff controls camera activation independently.
+The GS box uses thin antialiased lettering with two character spaces between the white `GS` label and the coloured speed value. Ground speed is truncated to whole knots (for example, 12.9 displays as 12). Invalid, stale or overflowing values display `--`. The existing 60-knot automatic cutoff controls camera activation independently.
 
 Source: [compositor and guides](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp).
 
@@ -110,11 +110,13 @@ Each session gets one background attempt lasting up to five seconds. The first c
 
 ## PFD-copy diagnostics
 
+The `Camera retention` log includes `patch_requests`, the number of distinct admitted format/size/content slots, and `patch_draws`, the cumulative number of private patch draws recorded during composition. Repeated matching requests reuse a slot. Both remain zero until a validated copy opportunity requests a patch. After admission, every requested slot is refreshed on later compositions so previously recorded copies remain current across profile changes. `patch_draws` includes prepared work that may be discarded; it is not a completed-frame count.
+
 The bridge log reports `PFD copy admission` alongside the normal camera counters. `rt_metadata` counts selected-target RT exits seen in native barrier metadata; `rt_callbacks` counts those admitted by the recording/pass checks. `pending_matches` shows same-recording PFD evidence. `view_resolved` also includes verified selected targets whose earlier draw was recorded elsewhere. `attempts`, `rejected`, `state_skips` and `reason` distinguish missing/conflicting typed-view evidence from output or recording rejection. These are cumulative observations, not completed GPU-frame counts.
 
 The `PFD scope` line records selected RT-exit scope flags (enabled=1, active pass=2, suspended pass=4, invalid recording=8, prior work=16), base/nonbase subresource counts and split barriers. It also reports completed calibration-clear recordings and the automatic/manual/calibration control masks.
 
-The `PFD boundary copy` line counts attempts and completed copy recordings at target changes or command-list closure. `no_proof` and `reason` identify recordings without usable render-target transition evidence; their drawing fallback waits for native DIRECT command-list closure. `dynamic_bias_calls` and `dynamic_strip_calls` count observed application overrides. Their `restores` counters apply to optional graphics-state diagnostics; normal recording-end drawing does not replay application state.
+The `PFD boundary copy` line counts attempts and completed copy recordings at target changes or command-list closure. `no_proof` and `reason` identify recordings without usable render-target transition evidence; their drawing fallback waits for native DIRECT command-list closure.
 
 The `PFD guarded draw` line reports attempts, successful stamps and query/state refusals separately from texture copies. Its additional fields are:
 
@@ -126,7 +128,7 @@ The `PFD guarded draw` line reports attempts, successful stamps and query/state 
 
 A drawing attempt requires a verified target, current image, complete state evidence and no open paired query or render pass. `Close` must forward to `D3D12Core.dll`, `d3d12.dll`, or the official `D3D12SDKLayers.dll` debug layer. The bridge binds its own camera pipeline and target without replaying application state afterward. A recording gets at most one closure attempt; only a successful native `Reset` permits another. Independently proved texture copies retain their own admission and resource-state restoration.
 
-Camera composition can succeed while PFD writes are refused. When images exist but no PFD write has yet been recorded, the app reports that it is waiting for a verified write opportunity. These are recorded-operation counters, not proof that a frame was presented or that display flashing is resolved.
+Camera composition can succeed while PFD writes are refused. When images exist but no PFD write has yet been recorded, the app reports that it is waiting for a verified write opportunity. These counters report recorded operations; they do not confirm that a frame was presented.
 
 ## Exposure
 
@@ -183,12 +185,6 @@ Source: [IPC](../standalone/protocol.hpp), [control loop](../standalone/bridge_m
 
 ## Diagnostics
 
-**Graphics state test** cycles through **Off**, **All**, **Targets only**, **Shader state only**, **Pipeline only**, **Root bindings only**, and **Raster state only**. With a TAXI request or manual camera preview active, the test modes keep camera capture and composition running but omit camera pixel drawing and PFD copies. All repeats both render-target binding and shader-state restoration; Targets only changes and restores RTV/DSV bindings; Shader state only changes and restores the overlay pipeline, root arguments, topology, viewports and scissors without changing RTV/DSV bindings. The three narrower modes isolate the pipeline (including observed dynamic depth bias and strip cut), root signature and arguments, or topology/viewports/scissors and observed sample positions. Each narrower mode restores only the state it changes. Cycle back to Off to return to normal camera delivery. Existing command recordings can persist until MSFS redraws the display. The test is off by default, is not saved to configuration, and clears on Stop camera tests or an aircraft-session/profile change.
-
-These tests exercise application-state changes and restoration at display boundaries. Normal camera delivery instead uses a proved texture copy or a final draw at native command-list closure, without replaying application bindings.
-
-The `PFD state diagnostic` log reports `mode` (0-6), its `name`, successful `roundtrips`, and separate `targets` and `shaders` operation counts, independently of camera stamps. `sample_position_calls` counts native programmable sample-pattern setters, and `restores` counts diagnostic recordings that restored an observed pattern. These counters establish whether the application uses the state; they do not establish the cause of a visible flash.
-
 The bridge writes a status snapshot to the companion and appends metadata to:
 
 ~~~text
@@ -220,6 +216,8 @@ A counter measures work at its stage, not frames visibly presented. For example,
 The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. At low simulator update rates, opening and closing can therefore require work on every manager update even at the 15 fps setting; the setting does not guarantee 15 completed frames per camera or remove the cost of those updates. Compare render-thread and GPU timings with TAXI off/on at the same cockpit view when investigating stutter.
 
 `probe_ms`, `query_ms` and `read_ms` describe the last serviced inspection callback, not every simulator frame. `inspections` counts serviced callbacks; its change over a log interval gives their frequency. Skipped callbacks leave the last timings visible. `clear_states` counts observed application graphics-state resets. These measurements exclude MSFS scene rendering and GPU time.
+
+For an established pair, manager and pair inspection share one fresh read-only memory-region transaction. Field values and trace rereads are still checked, then the region metadata is revalidated before publication or any native call. No cached metadata or field values carry across engine calls or frames. Lifecycle changes invalidate the provisional result and require fresh inspection.
 
 | Symptom | Inspect |
 | --- | --- |

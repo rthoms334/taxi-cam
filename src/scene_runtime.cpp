@@ -198,6 +198,13 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
              height = static_cast<UINT>(destination.bottom - destination.top);
   const D3D12_RECT local{content.left - destination.left, content.top - destination.top, content.right - destination.left,
                          content.bottom - destination.top};
+  // Only a fully validated native copy opportunity may request private work.
+  // A cold request records no app commands; terminal delivery remains available
+  // until a later composition publishes this exact typed patch.
+  if (!item->output.request_patch(format, width, height, local)) {
+    ++item->status.state_skips;
+    return false;
+  }
   const auto patch = item->output.patch(format, width, height, local);
   if (!patch.buffer || patch.buffer == target || patch.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT ||
       patch.footprint.Footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT || !manager().register_consumer_recording(list)) {
@@ -345,6 +352,8 @@ Snapshot snapshot(std::uint64_t key) {
   Snapshot result;
   if (const auto* item = find(key)) {
     result = item->status;
+    result.patch_requests = item->output.patch_requests();
+    result.patch_draws = item->output.patch_draws();
     if (result.output && !current_output(*item)) {
       result.output = false;
       result.message = "Scene output identity changed; waiting for fresh completed camera images.";
@@ -352,44 +361,6 @@ Snapshot snapshot(std::uint64_t key) {
   }
   result.capture = manager().statistics();
   return result;
-}
-bool stamp(ID3D12GraphicsCommandList* list,
-           const PfdGraphicsState& state,
-           std::uint64_t key,
-           DXGI_FORMAT format,
-           UINT width,
-           UINT height,
-           DXGI_FORMAT depth_format,
-           const D3D12_RECT* destination,
-           const D3D12_RECT* content,
-           bool draw,
-           PfdStateGroup group) {
-  if (!valid_pfd_state_group(group) || (draw && group != PfdStateGroup::all))
-    return false;
-  const std::lock_guard lock(runtime().mutex);
-  auto* item = find(key);
-  if (!item || !current_output(*item) || item->status.failed)
-    return false;
-  for (std::size_t i = 0; i < Formats.size(); ++i) {
-    if (Formats[i] != format)
-      continue;
-    for (std::size_t d = 0; d < DepthFormats.size(); ++d) {
-      if (DepthFormats[d] != depth_format)
-        continue;
-      const auto slot = i * DepthFormats.size() + d;
-      if (item->stamp_ready[slot] && state.complete() && manager().register_consumer_recording(list) &&
-          item->stamps[slot].record_buffer(list, state, item->native, item->output.address(), width, height, destination, content, draw,
-                                           group)) {
-        if (draw)
-          ++item->status.stamps;
-        return true;
-      }
-      ++item->status.state_skips;
-      return false;
-    }
-  }
-  ++item->status.state_skips;
-  return false;
 }
 bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
                             const PfdGraphicsState& state,

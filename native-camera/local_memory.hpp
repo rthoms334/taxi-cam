@@ -61,6 +61,8 @@ class ScopedLocalMemoryQueryCache {
   ScopedLocalMemoryQueryCache(const ScopedLocalMemoryQueryCache&) = delete;
   ScopedLocalMemoryQueryCache& operator=(const ScopedLocalMemoryQueryCache&) = delete;
   bool finish() noexcept;
+  // A borrowed pure substage may join only the currently active transaction.
+  bool is_current() const noexcept;
   // Reader implementation only. A failed RPM also poisons this stage.
   SIZE_T query(const void* address, MEMORY_BASIC_INFORMATION& region) noexcept;
   void fail() noexcept { failed_ = true; }

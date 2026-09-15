@@ -48,8 +48,7 @@ int main() {
     CompanionControl control;
     require(!control.connected(1000) && !control.settings().enabled, "No enable before first message");
     Settings settings;
-    require(settings.graphics_state_test == 0 && valid_settings(settings), "Graphics state test defaults off");
-    settings.graphics_state_test = 1;
+    require(valid_settings(settings), "Default settings are valid");
     settings.camera_rate = 60;
     settings.exposure = -7.3f;
     settings.follow_taxi = 0;
@@ -65,31 +64,10 @@ int main() {
     publish(owner, 10000, settings);
     control.refresh(reader);
     require(control.connected(10000), "Fresh companion accepted");
-    require(ProtocolVersion == 6 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 7 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
-            "Protocol6 guide coordinates roundtrip");
-    require(control.settings().graphics_state_test == 1, "Diagnostic flag roundtrips through IPC");
-    constexpr const char* expected_modes[]{
-        "off", "all", "targets_only", "shader_state_only", "pipeline_only", "root_bindings_only", "raster_state_only"};
-    require(MaximumGraphicsStateTestMode == 6, "Diagnostic range preserves existing values and adds exactly three modes");
-    for (unsigned mode = 0; mode <= MaximumGraphicsStateTestMode; ++mode) {
-      auto diagnostic = settings;
-      diagnostic.graphics_state_test = mode;
-      publish(owner, 10000, diagnostic);
-      control.refresh(reader);
-      require(control.connected(10000) && control.settings().graphics_state_test == mode,
-              "Every graphics diagnostic mode roundtrips through IPC");
-      require(std::strcmp(graphics_state_mode_name(mode), expected_modes[mode]) == 0, "Diagnostic mode has stable log name");
-    }
-    for (const unsigned bad_mode : {7u, std::numeric_limits<unsigned>::max()}) {
-      auto invalid = settings;
-      invalid.graphics_state_test = bad_mode;
-      publish(owner, 10000, invalid);
-      control.refresh(reader);
-      require(!control.connected(10000) && !control.settings().enabled, "Malformed diagnostic flag refuses IPC");
-      require(std::strcmp(graphics_state_mode_name(bad_mode), "invalid") == 0, "Invalid diagnostic log name is bounded");
-    }
+            "Protocol7 guide coordinates roundtrip");
     for (auto member : {&Settings::nose_dot, &Settings::tail_upper, &Settings::tail_corner, &Settings::tail_inner}) {
       for (unsigned axis = 0; axis < 2; ++axis) {
         for (float value :
@@ -117,7 +95,7 @@ int main() {
         require(held.manual_mask == 3 && held.camera_rate == 60 && held.exposure == settings.exposure && held.mounts == settings.mounts &&
                     held.route_request == 12 && held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
                     held.tail_upper == settings.tail_upper && held.tail_corner == settings.tail_corner &&
-                    held.tail_inner == settings.tail_inner && held.graphics_state_test == 1,
+                    held.tail_inner == settings.tail_inner,
                 "Preserve exact settings during contention");
       }
       require(!control.connected(15001), "Contention cannot extend heartbeat deadline");
@@ -152,10 +130,10 @@ int main() {
     control.refresh(reader);
     require(control.connected(17000), "Valid message restores connection");
     require(owner.lock(1000), "Protocol mutation lock");
-    owner.data()->version = 5;
+    owner.data()->version = 6;
     owner.unlock();
     control.refresh(reader);
-    require(!control.connected(17000), "Old protocol5 invalidates the protocol6 diagnostic layout");
+    require(!control.connected(17000), "Old protocol6 is rejected by the protocol7 settings layout");
     require(owner.lock(1000), "Restore protocol lock");
     owner.data()->version = ProtocolVersion;
     owner.unlock();

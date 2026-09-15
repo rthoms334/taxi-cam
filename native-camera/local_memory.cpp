@@ -192,7 +192,7 @@ SIZE_T ScopedLocalMemoryQueryCache::query(const void* address, MEMORY_BASIC_INFO
   // one observation. This queries metadata only: no extra bytes are read. The
   // result is usable only when it contains the actual field; a preceding guard,
   // reservation or protection split falls back to the exact requested address.
-  // There is no merging, eviction or cross-stage reuse. finish() still freshly
+  // There is no merging, eviction or reuse beyond this transaction. finish() freshly
   // compares every saved region, including any newly observed prefix pages.
   constexpr std::uintptr_t window_size = 65536;
   const auto window_start = value - value % window_size;
@@ -204,6 +204,10 @@ SIZE_T ScopedLocalMemoryQueryCache::query(const void* address, MEMORY_BASIC_INFO
   }
   regions_[count_++] = region;
   return sizeof(region);
+}
+
+bool ScopedLocalMemoryQueryCache::is_current() const noexcept {
+  return active_ && !failed_ && active_query_cache == this;
 }
 
 bool ScopedLocalMemoryQueryCache::finish() noexcept {

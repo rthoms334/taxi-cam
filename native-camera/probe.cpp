@@ -24,6 +24,7 @@
 #include <cstring>
 #include <cwchar>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 
 namespace taxi_camera::native_camera {
@@ -90,6 +91,7 @@ struct Runtime {
   std::uint64_t renderer = 0;
   ec::ManagerToken token{};
   unsigned creations = 0;
+  bool lifecycle_touched = false;
   bool creation_valid = false;
   bool pose_captured = false;
   bool pose_busy = false;
@@ -170,8 +172,16 @@ struct Handle {
 
 // Called only from this manager's update thunk, immediately before its original.
 // Cached pointer, weak handle and vptr must all agree, then be reread.
-bool manager_context(Runtime& runtime, void* current_manager) {
-  ScopedLocalMemoryQueryCache queries;
+// An enclosing transaction may borrow this pure stage. Its caller must finish
+// the shared cache before using the provisional Runtime identity for any call.
+bool manager_context(Runtime& runtime, void* current_manager, ScopedLocalMemoryQueryCache* shared = nullptr) {
+  std::optional<ScopedLocalMemoryQueryCache> queries;
+  if (shared) {
+    if (!shared->is_current())
+      return false;
+  } else {
+    queries.emplace();
+  }
   LocalMemoryReader reader(512);
   std::uint64_t owner = 0, renderer = 0, cached = 0, payload = 0, vptr = 0;
   std::uint32_t generation = 0;
@@ -193,7 +203,7 @@ bool manager_context(Runtime& runtime, void* current_manager) {
     return false;
   if (runtime.owned_control && runtime.owned_control != handle.control)
     return false;
-  if (!queries.finish())
+  if (queries && !queries->finish())
     return false;
   runtime.manager = cached;
   runtime.renderer = renderer;
@@ -268,8 +278,12 @@ void inspect_pair(Runtime& runtime,
                   const std::array<ec::EntryId, 2>& ids,
                   ProbeSnapshot& report,
                   std::array<ec::OwnedViewSnapshot, 2>& views,
-                  bool publish = true) {
+                  bool publish = true,
+                  ScopedLocalMemoryQueryCache* shared = nullptr) {
   views = {};
+  // Borrowed results remain provisional and may never publish a handoff here.
+  if (shared && (publish || !shared->is_current()))
+    return;
   runtime.inspection_stop = SceneStopReason::none;
   runtime.stage_error = "Owned view validation failed; removal requested.";
   const auto refuse = [&](SceneStopReason reason, const char* detail) {
@@ -282,7 +296,9 @@ void inspect_pair(Runtime& runtime,
   };
   const auto ticket = publish ? timed(runtime, ProbeStage::handoff, [] { return scene_handoff().begin_capture(); }) : SceneCaptureTicket{};
   std::array<std::uint64_t, 2> resources{};
-  ScopedLocalMemoryQueryCache queries;
+  std::optional<ScopedLocalMemoryQueryCache> queries;
+  if (!shared)
+    queries.emplace();
   LocalMemoryReader reader;
   const auto pool = timed(runtime, ProbeStage::pool, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
   report.free_views = pool.valid ? pool.free_count : 0;
@@ -339,7 +355,7 @@ void inspect_pair(Runtime& runtime,
       }
     }
   }
-  if (!queries.finish()) {
+  if (queries && !queries->finish()) {
     runtime.inspection_changed = true;
     runtime.inspection_stop = SceneStopReason::inspection_unavailable;
     runtime.stage_error = "Memory-region metadata changed during pair inspection; no result was accepted.";
@@ -360,12 +376,12 @@ void inspect_pair(Runtime& runtime,
 // to pose, resize or handoff code. Keep the complete table/pool and association
 // guards, but do not touch Camera/material/output data that false activation
 // neither reads nor writes. Each cache ends before the first private call.
-bool close_owned_pair(Runtime& runtime, const ec::Snapshot& pair, ProbeSnapshot& report) {
-  if (runtime.token != pair.owner)
-    return false;
+bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair, ProbeSnapshot& report) {
   std::array<ec::OwnedViewCloseSnapshot, 2> views{};
   {
     ScopedLocalMemoryQueryCache queries;
+    if (!timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, &queries); }) || runtime.token != pair.owner)
+      return false;
     LocalMemoryReader reader;
     const auto pool = timed(runtime, ProbeStage::pool, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
     if (!pool.valid)
@@ -543,6 +559,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
 }
 bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
   auto& runtime = *static_cast<Runtime*>(opaque);
+  runtime.lifecycle_touched = true;
   // Only a real creation request reaches this callback, after prior cleanup.
   // Stop requests cannot call the pose getters or descriptor initializer.
   if (runtime.creations == 0) {
@@ -569,6 +586,7 @@ bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
 
 ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorStorage& descriptor) noexcept {
   auto& runtime = *static_cast<Runtime*>(opaque);
+  runtime.lifecycle_touched = true;
   if (runtime.creations >= runtime.resized_ids.size()) {
     runtime.creation_valid = false;
     runtime.stage_error = "The owned-view creation limit was reached.";
@@ -667,6 +685,7 @@ bool resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool 
 
 bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   auto& runtime = *static_cast<Runtime*>(opaque);
+  runtime.lifecycle_touched = true;
   if (!manager_context(runtime, reinterpret_cast<void*>(token.identity)) || token != runtime.token)
     return false;
   LocalMemoryReader reader;
@@ -830,6 +849,38 @@ void observer(void* manager) noexcept {
                             (runtime.gates[0] || runtime.gates[1]) && !before.request_pending && !before.creation_pending &&
                             !requested_start && !runtime.resize_warmup.pending() && !runtime.resize_recovery.pending() &&
                             !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed;
+    // Only an established pair can combine these adjacent read-only stages.
+    // No lifecycle callback, publication or private call runs inside the cache.
+    // A callback requested meanwhile invalidates the prepared view result below.
+    const bool fuse_pair = inspection_state.established_pair && pair_ready && !before.request_pending && !before.creation_pending &&
+                           !requested_start && !runtime.resize_warmup.pending() && !runtime.resize_recovery.pending() &&
+                           !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed && !profile_hold;
+    bool prepared_pair = false;
+    std::array<ec::OwnedViewSnapshot, 2> prepared_views{};
+    SceneCaptureTicket prepared_ticket{};
+    std::uint32_t prepared_free_views = 0;
+    const auto inspect_manager = [&] {
+      if (fuse_pair) {
+        prepared_ticket = timed(runtime, ProbeStage::handoff, [] { return scene_handoff().begin_capture(); });
+        ScopedLocalMemoryQueryCache queries;
+        const bool manager_valid = timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, &queries); });
+        if (manager_valid && runtime.token == before.owner)
+          inspect_pair(runtime, before.owned_ids, report, prepared_views, false, &queries);
+        const bool stable = queries.finish();
+        if (manager_valid && stable) {
+          prepared_pair = runtime.token == before.owner;
+          prepared_free_views = report.free_views;
+          return true;
+        }
+        // Never consume a provisional identity after failed endpoint validation.
+        // The ordinary fresh path retains its existing refusal/recovery policy.
+        prepared_views = {};
+        report.ready = report.resource_present = {};
+        report.dimensions = {};
+        report.flags = {};
+      }
+      return timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); });
+    };
     const auto start_body = requested_start ? sample_body_pose(now) : BodyPoseSnapshot{};
     if (profile_hold) {
       service_profile_transition(runtime, manager, report);
@@ -844,10 +895,9 @@ void observer(void* manager) noexcept {
       // aircraft graphs repeatedly while its first telemetry is still pending.
       report.pair = before;
       report.message = std::string("Waiting for read-only aircraft telemetry: ") + start_body.error;
-    } else if (close_only && timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); }) &&
-               close_owned_pair(runtime, before, report)) {
+    } else if (close_only && close_owned_pair(runtime, manager, before, report)) {
       runtime.schedule = next_schedule;
-    } else if (!timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); })) {
+    } else if (!inspect_manager()) {
       scene_handoff().stop_scene();
       record_stop(runtime, SceneStopReason::identity_refused, "Manager/renderer identity did not pass its complete guard.", now);
       report.message = "Waiting for a stable manager/renderer lifetime; no native call made.";
@@ -862,6 +912,7 @@ void observer(void* manager) noexcept {
                      [&] { return inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); }); });
       report.free_views = pool.valid ? pool.free_count : 0;
       runtime.creations = 0;
+      runtime.lifecycle_touched = false;
       runtime.creation_valid = pool.valid && pool.free_count >= 2;
       ec::EngineCallbacks callbacks{&runtime, initialize, create, erase};
       timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
@@ -924,8 +975,20 @@ void observer(void* manager) noexcept {
             runtime.resize_warmup.finish(pair.owned_ids, runtime.updates);
         }
         std::array<ec::OwnedViewSnapshot, 2> views{};
-        if (!closed_warmup)
-          inspect_pair(runtime, pair.owned_ids, report, views);
+        if (!closed_warmup) {
+          if (prepared_pair && !runtime.lifecycle_touched && pair.owner == before.owner && pair.owned_ids == before.owned_ids &&
+              pair.failure == ec::Failure::none && pair.blocked == ec::Blocked::none && !pair.request_pending && !pair.creation_pending) {
+            views = prepared_views;
+            report.free_views = prepared_free_views;
+            if (report.ready[0] && report.ready[1])
+              report.outputs_matched = timed(runtime, ProbeStage::handoff, [&] {
+                return scene_handoff().publish(prepared_ticket, {runtime.token.identity, runtime.token.generation}, pair.owned_ids,
+                                               {views[0].resource_address, views[1].resource_address});
+              });
+          } else {
+            inspect_pair(runtime, pair.owned_ids, report, views);
+          }
+        }
         const bool wait_for_views = runtime.view_wait.observe(now, pair,
                                                               !runtime.resize_warmup.pending() && runtime.scheduled_ids == pair.owned_ids &&
                                                                   runtime.resized_ids == pair.owned_ids &&

@@ -80,6 +80,8 @@ if ($Validate) {
     $gpu = Join-Path $out 'native-graphics-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'standalone/graphics_validation.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $gpu
     if ($LASTEXITCODE -ne 0) { throw 'Native validation compilation failed.' }
+    & $gpu --patch-demand
+    if ($LASTEXITCODE -ne 0) { throw 'Lazy patch demand admission failed.' }
     if (-not $WarpOnly) {
         & $gpu
         if ($LASTEXITCODE -ne 0) { throw 'Hardware native graphics validation failed.' }
@@ -123,6 +125,15 @@ if ($Validate) {
         & $gpu @grayArgs
         if ($LASTEXITCODE -ne 0) { throw "Textured gray PFD fallback regression failed: $grayAdapter" }
     }
+    $frameOutputTest = Join-Path $out 'scene-frame-output-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'src/scene_frame_output_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $frameOutputTest
+    if ($LASTEXITCODE -ne 0) { throw 'Lazy patch replay validation compilation failed.' }
+    if (-not $WarpOnly) {
+        & $frameOutputTest
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware lazy patch replay validation failed.' }
+    }
+    & $frameOutputTest --warp
+    if ($LASTEXITCODE -ne 0) { throw 'WARP lazy patch replay validation failed.' }
     $fontGpu = Join-Path $out 'gs-font-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'validation/gs_font_validation.cpp') @libs '-o' $fontGpu
     if ($LASTEXITCODE -ne 0) { throw 'GS font validation compilation failed.' }
@@ -202,6 +213,7 @@ if ($Validate) {
         @{Name='target-assignment'; Sources=@('standalone/target_assignment_test.cpp')},
         @{Name='pfd-detector'; Sources=@('tests/pfd_target_detector_test.cpp')},
         @{Name='display-exposure'; Sources=@('tests/display_exposure_test.cpp')},
+        @{Name='ground-speed-display'; Sources=@('tests/ground_speed_display_test.cpp')},
         @{Name='calibration'; Sources=@('tests/calibration_test.cpp')},
         @{Name='write-budget'; Sources=@('tests/write_budget_test.cpp')},
         @{Name='queue-submit'; Sources=@('engine-hook/queue_submit_observer_test.cpp','engine-hook/queue_submit_observer.cpp')}
@@ -262,7 +274,7 @@ if ($Validate) {
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         dynamicGraphicsStateTests=@($dynamicStateResults)
         samplePositionTests=@($sampleResults)
-        tests=@($gpuTests + @('pre-existing graphics objects','terminal command-list PFD drawing without application root replay','textured gray alpha and mip preservation with terminal PFD draws and repeated submissions','scoped barrier metadata lookup caching','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','all/target/shader/pipeline/root/raster diagnostic pixel preservation and controls','camera border and inset composition','antialiased GS glyphs and two-character spacing','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','early camera preparation and activation timings','bounded grounded prewarm and retained foreground takeover','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
+        tests=@($gpuTests + @('pre-existing graphics objects','terminal command-list PFD drawing without application root replay','textured gray alpha and mip preservation with terminal PFD draws and repeated submissions','scoped barrier metadata lookup caching','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','isolated graphics-state regression coverage','lazy typed patch demand, discard and cross-profile replay','fractional ground-speed truncation and raw-speed cutoff','camera border and inset composition','antialiased GS glyphs and two-character spacing','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','shared read-only inspection transaction with fresh endpoint validation','early camera preparation and activation timings','bounded grounded prewarm and retained foreground takeover','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
             'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));

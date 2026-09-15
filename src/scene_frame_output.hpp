@@ -39,6 +39,13 @@ class SceneFrameOutput {
   bool set_ground_speed(float knots, bool valid) noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
   bool set_patch_profile(std::uint32_t profile) noexcept;
+  // Metadata-only demand, admitted against the current profile's exact shape.
+  // Requests never allocate or record GPU work. Every admitted slot remains
+  // refreshed on later compositions, including after profile changes, because
+  // closed application recordings can replay its stable buffer indefinitely.
+  bool request_patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) noexcept;
+  std::uint32_t patch_requests() const noexcept { return patch_requests_; }
+  std::uint64_t patch_draws() const noexcept { return patch_draws_; }
   // Stable process-retained buffer; consumer registration/timeline is required
   // before every recorded copy. No allocation or CPU image access here.
   Patch patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
@@ -60,13 +67,16 @@ class SceneFrameOutput {
  private:
   bool fail(const char* error) noexcept;
   bool prepare_patches() noexcept;
+  bool valid_patch_request(DXGI_FORMAT, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   struct PatchStorage {
     Patch view;
     ID3D12Resource* texture = nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
     D3D12_RECT content{};
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT width = 0, height = 0;
     unsigned drawer = 0;
-    bool written = false;
+    bool written = false, recorded = false;
   };
   ID3D12Device* device_ = nullptr;
   ID3D12CommandQueue* queue_ = nullptr;
@@ -78,7 +88,8 @@ class SceneFrameOutput {
   std::array<PfdStampD3D12*, 4> patch_drawers_{};
   std::array<PatchStorage, 8> patches_{};
   ID3D12DescriptorHeap* patch_heap_ = nullptr;
-  std::uint32_t patch_profile_ = 1;
+  std::uint32_t patch_profile_ = 1, patch_requests_ = 0;
+  std::uint64_t patch_draws_ = 0;
   D3D12_GPU_VIRTUAL_ADDRESS address_ = 0;
   std::uint64_t submitted_ = 0;
   bool prepared_ = false;

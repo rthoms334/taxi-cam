@@ -245,7 +245,7 @@ DWORD run_impl() {
           ground.valid,
           ground.on_ground,
           velocity.valid,
-          settings.calibration_mask != 0 || settings.single_camera != 0 || settings.graphics_state_test != 0,
+          settings.calibration_mask != 0 || settings.single_camera != 0,
           velocity.knots};
     };
     bool background_warmup = false;
@@ -306,7 +306,6 @@ DWORD run_impl() {
     // loss close the render gates immediately.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
-    win::set_graphics_state_test(connected && settings.enabled ? settings.graphics_state_test : 0);
     auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
     composition.speed_color = settings.speed_color;
     composition.nose_dot = settings.nose_dot;
@@ -444,13 +443,6 @@ DWORD run_impl() {
                           : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
                           : !requested || failed                 ? scene.message.c_str()
                           : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
-                          : settings.graphics_state_test && output.output
-                              ? (settings.graphics_state_test == 2   ? "Graphics state test: render-target bindings only; no camera pixels."
-                                 : settings.graphics_state_test == 3 ? "Graphics state test: shader-state replay only; no camera pixels."
-                                 : settings.graphics_state_test == 4 ? "Graphics state test: pipeline only; no camera pixels."
-                                 : settings.graphics_state_test == 5 ? "Graphics state test: root bindings only; no camera pixels."
-                                 : settings.graphics_state_test == 6 ? "Graphics state test: raster state only; no camera pixels."
-                                                                     : "Graphics state test: all state replay active; no camera pixels.")
                           : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD write opportunity."
                                                             : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
@@ -553,34 +545,24 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
-      char diagnostic_detail[256];
-      std::snprintf(
-          diagnostic_detail, sizeof(diagnostic_detail),
-          "PFD state diagnostic: mode=%u name=%s roundtrips=%llu targets=%llu shaders=%llu sample_position_calls=%llu restores=%llu",
-          settings.graphics_state_test, win::graphics_state_mode_name(settings.graphics_state_test),
-          static_cast<unsigned long long>(graphics.state_test_roundtrips),
-          static_cast<unsigned long long>(graphics.state_test_target_roundtrips),
-          static_cast<unsigned long long>(graphics.state_test_shader_roundtrips),
-          static_cast<unsigned long long>(graphics.sample_position_calls),
-          static_cast<unsigned long long>(graphics.sample_position_restores));
-      log_status(status, diagnostic_detail);
       char retention_detail[256];
-      std::snprintf(retention_detail, sizeof(retention_detail),
-                    "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s",
-                    static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
-                    static_cast<unsigned long long>(output.capture.quarantined), prewarm.name());
+      std::snprintf(
+          retention_detail, sizeof(retention_detail),
+          "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu",
+          static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
+          static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
+          static_cast<unsigned long long>(output.patch_draws));
       log_status(status, retention_detail);
       char copy_detail[512];
       std::snprintf(copy_detail, sizeof(copy_detail),
                     "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s | "
-                    "dynamic_bias_calls=%llu restores=%llu dynamic_strip_calls=%llu restores=%llu",
+                    "dynamic_bias_calls=%llu dynamic_strip_calls=%llu sample_position_calls=%llu",
                     static_cast<unsigned long long>(graphics.preferred_copy_attempts),
                     static_cast<unsigned long long>(graphics.preferred_copy_stamps),
                     static_cast<unsigned long long>(graphics.preferred_copy_no_proof), graphics.preferred_copy_reason,
                     static_cast<unsigned long long>(graphics.dynamic_depth_bias_calls),
-                    static_cast<unsigned long long>(graphics.dynamic_depth_bias_restores),
                     static_cast<unsigned long long>(graphics.dynamic_strip_cut_calls),
-                    static_cast<unsigned long long>(graphics.dynamic_strip_cut_restores));
+                    static_cast<unsigned long long>(graphics.sample_position_calls));
       log_status(status, copy_detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {

@@ -19,8 +19,43 @@ bool SceneFrameOutput::set_patch_profile(std::uint32_t profile) noexcept {
   patch_profile_ = profile;
   return true;
 }
+bool SceneFrameOutput::valid_patch_request(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept {
+  const auto* profile = profiles::find(patch_profile_);
+  if (!profile || failed_ ||
+      !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
+                                 static_cast<unsigned>(format)))
+    return false;
+  const auto outer = profiles::display_rect(*profile, 0), inner = profiles::display_content_rect(*profile, 0);
+  const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                         static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+  return width && width <= 16384 && height && height <= 16384 && width == outer.right - outer.left && height == outer.bottom - outer.top &&
+         same_rect(content, local);
+}
+bool SceneFrameOutput::request_patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) noexcept {
+  if (!valid_patch_request(format, width, height, content))
+    return false;
+  unsigned drawer = 0;
+  while (drawer < PatchFormats.size() && PatchFormats[drawer] != format)
+    ++drawer;
+  if (drawer == PatchFormats.size())
+    return false;
+  for (const auto& p : patches_)
+    if (p.width == width && p.height == height && p.format == format && same_rect(p.content, content))
+      return true;
+  for (auto& p : patches_)
+    if (!p.width) {
+      p.format = format;
+      p.width = width;
+      p.height = height;
+      p.content = content;
+      p.drawer = drawer;
+      ++patch_requests_;
+      return true;
+    }
+  return false;
+}
 SceneFrameOutput::Patch SceneFrameOutput::patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept {
-  if (!failed_ && submitted_)
+  if (valid_patch_request(format, width, height, content) && submitted_)
     for (const auto& p : patches_)
       if (p.written && p.view.footprint.Footprint.Format == format && p.view.footprint.Footprint.Width == width &&
           p.view.footprint.Footprint.Height == height && same_rect(p.content, content))
@@ -96,38 +131,15 @@ bool SceneFrameOutput::initialize(ID3D12Device* device) noexcept {
 }
 
 bool SceneFrameOutput::prepare_patches() noexcept {
-  const auto* profile = profiles::find(patch_profile_);
-  if (!profile)
-    return fail("The PFD patch profile is unavailable.");
-  const auto outer = profiles::display_rect(*profile, 0);
-  const auto inner = profiles::display_content_rect(*profile, 0);
-  const UINT width = outer.right - outer.left, height = outer.bottom - outer.top;
-  const D3D12_RECT content{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
-                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
-  const D3D12_RECT destination{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
-  if (!width || width > 16384 || !height || height > 16384)
-    return fail("The private PFD patch dimensions are invalid.");
   const auto base = patch_heap_->GetCPUDescriptorHandleForHeapStart();
   const auto stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-  for (unsigned format = 0; format < PatchFormats.size(); ++format) {
-    if (!profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
-                                   static_cast<unsigned>(PatchFormats[format])))
+  for (auto& storage : patches_) {
+    auto* patch = &storage;
+    if (!patch->width)
       continue;
-    PatchStorage* patch = nullptr;
-    for (auto& p : patches_)
-      if (p.view.buffer && p.view.footprint.Footprint.Format == PatchFormats[format] && p.view.footprint.Footprint.Width == width &&
-          p.view.footprint.Footprint.Height == height && same_rect(p.content, content)) {
-        patch = &p;
-        break;
-      }
-    if (!patch) {
-      for (auto& p : patches_)
-        if (!p.view.buffer && !p.texture) {
-          patch = &p;
-          break;
-        }
-      if (!patch)
-        return fail("The bounded private PFD patch storage is full.");
+    const auto width = patch->width, height = patch->height;
+    const D3D12_RECT destination{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    if (!patch->texture) {
       D3D12_HEAP_PROPERTIES heap{};
       heap.Type = D3D12_HEAP_TYPE_DEFAULT;
       heap.CreationNodeMask = heap.VisibleNodeMask = 1;
@@ -136,7 +148,7 @@ bool SceneFrameOutput::prepare_patches() noexcept {
       desc.Width = width;
       desc.Height = height;
       desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
-      desc.Format = PatchFormats[format];
+      desc.Format = patch->format;
       desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
       if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
                                                   IID_PPV_ARGS(&patch->texture))))
@@ -153,15 +165,13 @@ bool SceneFrameOutput::prepare_patches() noexcept {
         return fail("Creating a stable private PFD patch buffer failed.");
       patch->rtv = {base.ptr + static_cast<SIZE_T>(patch - patches_.data()) * stride};
       device_->CreateRenderTargetView(patch->texture, nullptr, patch->rtv);
-      patch->content = content;
-      patch->drawer = format;
     }
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition = {patch->texture, 0, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET};
     list_->ResourceBarrier(1, &barrier);
     list_->OMSetRenderTargets(1, &patch->rtv, FALSE, nullptr);
-    if (!patch_drawers_[patch->drawer]->record_private_patch(list_, device_, address_, width, height, &destination, &content))
+    if (!patch_drawers_[patch->drawer]->record_private_patch(list_, device_, address_, width, height, &destination, &patch->content))
       return fail("Recording the private PFD patch failed.");
     barrier.Transition = {patch->texture, 0, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
     list_->ResourceBarrier(1, &barrier);
@@ -177,7 +187,8 @@ bool SceneFrameOutput::prepare_patches() noexcept {
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
     list_->ResourceBarrier(1, &barrier);
-    patch->written = true;
+    patch->recorded = true;
+    ++patch_draws_;
   }
   return true;
 }
@@ -236,6 +247,11 @@ bool SceneFrameOutput::submit() noexcept {
   ++submitted_;
   if (FAILED(queue_->Signal(fence_, submitted_)))
     return fail("Signaling the private composition completion fence failed.");
+  for (auto& patch : patches_)
+    if (patch.recorded) {
+      patch.written = true;
+      patch.recorded = false;
+    }
   return true;
 }
 
@@ -244,6 +260,8 @@ bool SceneFrameOutput::discard_prepared() noexcept {
     return false;
   if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_, nullptr)) || FAILED(list_->Close()))
     return fail("Discarding the never-submitted private composition list failed.");
+  for (auto& patch : patches_)
+    patch.recorded = false;
   prepared_ = false;
   return true;
 }

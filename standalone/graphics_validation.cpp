@@ -7,9 +7,48 @@
 #include <d3d11on12.h>
 #include "d3d12_bridge.hpp"
 #include "native_hooks.hpp"
+#include "../src/scene_frame_output.hpp"
 namespace {
 namespace win = taxi_camera::standalone;
 namespace runtime = taxi_camera::scene_runtime;
+void patch_demand_case() {
+  taxi_camera::SceneFrameOutput output;
+  const auto request = [&](const taxi_camera::profiles::AircraftProfile& profile, DXGI_FORMAT format) {
+    const auto outer = taxi_camera::profiles::display_rect(profile, 0);
+    const auto inner = taxi_camera::profiles::display_content_rect(profile, 0);
+    const UINT width = outer.right - outer.left, height = outer.bottom - outer.top;
+    const D3D12_RECT content{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                             static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+    const auto before = output.patch_requests();
+    require(!output.request_patch(format, width + 1, height, content), "Wrong patch width cannot reserve work");
+    auto wrong = content;
+    ++wrong.left;
+    require(!output.request_patch(format, width, height, wrong), "Wrong content rectangle cannot reserve work");
+    require(!output.request_patch(DXGI_FORMAT_R8G8B8A8_TYPELESS, width, height, content), "Untyped patch cannot reserve work");
+    require(output.patch_requests() == before && !output.patch_draws(), "Refused requests cannot mutate demand or record work");
+    require(output.request_patch(format, width, height, content), "Exact current-profile patch demand admitted");
+    const auto admitted = output.patch_requests();
+    require(output.request_patch(format, width, height, content) && output.patch_requests() == admitted,
+            "Repeated copy demand shares one stable slot");
+    require(!output.patch(format, width, height, content).buffer && !output.patch_draws(),
+            "Metadata admission never allocates, records or publishes a GPU patch");
+  };
+  require(!output.patch_requests() && !output.patch_draws(), "No patch work before copy demand");
+  request(taxi_camera::profiles::A380, DXGI_FORMAT_R8G8B8A8_UNORM);
+  require(output.patch_requests() == 1, "A380 admits one requested slot");
+  require(output.set_patch_profile(2), "Select A350 metadata without a GPU");
+  for (const auto format :
+       {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB})
+    request(taxi_camera::profiles::A359, format);
+  require(output.patch_requests() == 5, "A350 requests retain the earlier A380 replay slot");
+  require(output.set_patch_profile(3), "Select A350-1000");
+  request(taxi_camera::profiles::A35K, DXGI_FORMAT_R8G8B8A8_UNORM);
+  require(output.patch_requests() == 5, "Matching profile geometry reuses its exact typed slot");
+  require(!output.set_patch_profile(99) && output.set_patch_profile(1), "Invalid profile refuses without losing prior slots");
+  request(taxi_camera::profiles::A380, DXGI_FORMAT_R8G8B8A8_UNORM);
+  require(output.patch_requests() == 5 && !output.patch_draws(), "Profile roundtrip retains bounded demand without GPU work");
+  std::printf("PASS CPU-only typed patch demand: cold, invalid, duplicate, typed formats and retained profile geometry.\n");
+}
 struct ClearStatePipeline {
   Reference<ID3D12RootSignature> root;
   Reference<ID3D12PipelineState> pipeline;
@@ -708,7 +747,7 @@ void textured_gray_fallback(ID3D12Device* device,
     check(list->Reset(allocator, nullptr), "Fresh ordinary gray recording");
   };
   submit();  // Source preparation cannot supply tested PFD RT-entry evidence.
-  std::uint64_t checked = 0, fallback_count = 0, roundtrip_count = 0;
+  std::uint64_t checked = 0, fallback_count = 0;
   std::array<double, 16> means{};
   unsigned case_index = 0;
   for (UINT output_format = 0; output_format < 2; ++output_format) {
@@ -716,10 +755,8 @@ void textured_gray_fallback(ID3D12Device* device,
     for (UINT input_format = 0; input_format < 2; ++input_format) {
       for (UINT mip = 0; mip < 4; ++mip) {
         std::vector<unsigned char> baseline;
-        for (UINT on = 0; on < 8; ++on) {
-          const bool draw = on == 1, diagnostic = on >= 2;
-          const unsigned mode = diagnostic ? on - 1 : 0;
-          win::set_graphics_state_test(mode);
+        for (UINT on = 0; on < 2; ++on) {
+          const bool draw = on != 0;
           win::set_target_mask(on ? 1 : 0);
           const auto before = win::graphics_status();
           const float background[]{.15f, .15f, .15f, 1};
@@ -737,8 +774,7 @@ void textured_gray_fallback(ID3D12Device* device,
           list->SetGraphicsRoot32BitConstants(0, 4, parameters, 0);
           list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
           // Native trim quad is outside the camera patch, with alpha accumulating
-          // twice. Production must defer its camera draw until both are recorded;
-          // diagnostics must preserve the state needed by the second native draw.
+          // twice. Camera delivery must wait until both draws are recorded.
           const D3D12_VIEWPORT viewport{812, 800, 64, 64, 0, 1};
           const D3D12_RECT scissor{812, 800, 876, 864};
           list->RSSetViewports(1, &viewport);
@@ -746,14 +782,11 @@ void textured_gray_fallback(ID3D12Device* device,
           const auto target_rtv = rtv(output_format);
           list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);
           list->DrawInstanced(3, 1, 0, 0);
-          list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);  // Stage production; diagnostics still replay here.
+          list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);  // Stage the target without changing shader state.
           const auto delivered = win::graphics_status();
           require(delivered.fallback_stamps == before.fallback_stamps && delivered.recording_end_draws == before.recording_end_draws &&
-                      delivered.state_test_roundtrips == before.state_test_roundtrips + diagnostic &&
-                      delivered.state_test_target_roundtrips == before.state_test_target_roundtrips + (mode == 1 || mode == 2) &&
-                      delivered.state_test_shader_roundtrips == before.state_test_shader_roundtrips + (mode == 1 || mode >= 3) &&
                       delivered.preferred_copy_stamps == before.preferred_copy_stamps,
-                  "OM stages production without drawing; diagnostics exercise only selected state and never a private copy");
+                  "OM stages the target without a shader draw or an unproven private copy");
           list->DrawInstanced(3, 1, 0, 0);  // No application state rebind at all.
           require(win::graphics_status().fallback_stamps == before.fallback_stamps,
                   "Production camera draw cannot precede the final unrebound native gray draw");
@@ -762,13 +795,11 @@ void textured_gray_fallback(ID3D12Device* device,
           const auto closed = win::graphics_status();
           require(closed.fallback_stamps == before.fallback_stamps + draw &&
                       closed.recording_end_draws == before.recording_end_draws + draw &&
-                      closed.state_test_roundtrips == delivered.state_test_roundtrips &&
                       closed.preferred_copy_stamps == before.preferred_copy_stamps &&
                       closed.close_forward_refused == before.close_forward_refused,
-                  "Close records exactly one production camera draw; diagnostic and copy counts stay unchanged");
+                  "Close records exactly one camera draw; no private copy without transition evidence");
           win::set_target_mask(0);
           fallback_count += draw;
-          roundtrip_count += diagnostic;
           for (UINT level = 0; level < 4; ++level) {
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -799,7 +830,7 @@ void textured_gray_fallback(ID3D12Device* device,
               for (UINT x = 0; x < fp.Footprint.Width; ++x) {
                 const SIZE_T offset = fp.Offset + SIZE_T{y} * fp.Footprint.RowPitch + 4 * x;
                 const bool inside = !level && x < 806 && y < 763;
-                if (on && (!inside || diagnostic)) {
+                if (on && !inside) {
                   require(std::memcmp(actual + offset, baseline.data() + offset, 4) == 0,
                           "Native textured gray/alpha pixels, gutter, trim or lower mip changed after shader fallback");
                   ++checked;
@@ -812,8 +843,6 @@ void textured_gray_fallback(ID3D12Device* device,
           }
           if (draw)
             require(changed_patch > 1000, "The final camera draw must survive closed-list reexecution and visibly write the patch");
-          else if (diagnostic)
-            require(!changed_patch, "State-only roundtrip must not write any camera pixels");
           else
             means[case_index] = sum / 4096.;
           readback->Unmap(0, &none);
@@ -830,7 +859,6 @@ void textured_gray_fallback(ID3D12Device* device,
       require(means[output * 8 + input * 4 + 3] > means[output * 8 + input * 4] + 15, "Mip control must measurably change sampled gray");
   }
   require(means[8] > means[0] + 15, "sRGB RTV control must measurably change encoded gray");
-  win::set_graphics_state_test(0);
   check(device->GetDeviceRemovedReason(), "Gray fixture device health");
   Reference<ID3D12InfoQueue> messages;
   const bool debug_messages = SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(messages.put())));
@@ -852,8 +880,8 @@ void textured_gray_fallback(ID3D12Device* device,
   runtime::manager().stop_source_tracking();
   scene_handoff().stop_scene();
   runtime::reset_feed(key);
-  std::printf("PASS textured gray %s: 16 UNORM/sRGB/mip/alpha cases; fallback=%llu roundtrip=%llu preferredcopy=0; preserved pixels=%llu\n",
-              warp ? "WARP" : "hardware", fallback_count, roundtrip_count, checked);
+  std::printf("PASS textured gray %s: 16 UNORM/sRGB/mip/alpha cases; fallback=%llu preferredcopy=0; preserved pixels=%llu\n",
+              warp ? "WARP" : "hardware", fallback_count, checked);
 }
 void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bool textured_gray = false) {
   const auto& profile = a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
@@ -979,10 +1007,38 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
               static_cast<unsigned long long>(capture.frames), static_cast<unsigned long long>(capture.capture.source_draws),
               capture.capture.tail_status);
   require(capture.output && capture.frames, "Actual native draw -> queue -> capture -> composition");
+  require(!capture.patch_requests && !capture.patch_draws, "Close output preparation records no unsolicited typed patches");
   if (textured_gray) {
     textured_gray_fallback(device.get(), queue.get(), allocator.get(), list.get(), key, second, warp);
     return;
   }
+  if (!query_fallback) {
+    // A cold, proven copy opportunity requests metadata only. Its pending
+    // target must still receive normal terminal delivery at native Close.
+    // Establish COMMON before the tested recording. Two transitions before
+    // its first Draw are deliberately ambiguous to PfdCopyProof.
+    win::set_target_mask(0);
+    transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+    submit();
+    reset();
+    win::set_target_mask(1);
+    transition(list.get(), textures[2].get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    generator.record(list.get(), rtvs[2], display_width, 1024, false, 0, 0);
+    const auto cold = win::graphics_status();
+    const auto before_cold = runtime::snapshot(key);
+    list->OMSetRenderTargets(1, &rtvs[3], FALSE, nullptr);
+    const auto requested = runtime::snapshot(key);
+    require(requested.patch_requests == 1 && !requested.patch_draws && requested.stamps == before_cold.stamps,
+            "Cold native copy request adds one exact patch slot without drawing or copying");
+    submit();
+    const auto delivered = win::graphics_status();
+    require(delivered.preferred_copy_stamps == cold.preferred_copy_stamps &&
+                delivered.recording_end_draws == cold.recording_end_draws + 1 && runtime::snapshot(key).stamps == before_cold.stamps + 1,
+            "Absent private patch preserves terminal Close fallback");
+    win::set_target_mask(0);
+    reset();
+  }
+  const auto delivery_baseline = runtime::snapshot(key).stamps;
   // OBS Game Capture uses D3D11On12 to copy the swap-chain backbuffer on the
   // application's queue. Exercise that API sequence without launching OBS.
   const auto before_interop = runtime::manager().statistics();
@@ -1002,6 +1058,9 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
     Sleep(1);
   }
   require(runtime::snapshot(key).frames > frames_before_interop, "Camera capture survives unrelated D3D11On12 Game Capture copy");
+  require(runtime::snapshot(key).patch_requests == (query_fallback ? 0u : 1u) &&
+              runtime::snapshot(key).patch_draws == (query_fallback ? 0u : runtime::snapshot(key).frames - frames_before_interop),
+          "Each new composition generates only the requested format; Close-only output generates none");
   if (prefer_copy) {
     Reference<ID3D12Resource> other;
     create_texture(device.get(), texture_description(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM), other.put());
@@ -1423,7 +1482,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
   list->RSSetScissorRects(1, &lower);
   for (unsigned draw = 0; draw < 1000; ++draw)
     list->DrawInstanced(3, 1, 0, 0);
-  require(runtime::snapshot(key).stamps == 0, "Active query defers fallback; repeated glyph draws do not stamp");
+  require(runtime::snapshot(key).stamps == delivery_baseline, "Active query defers fallback; repeated glyph draws do not stamp");
   std::array<Reference<ID3D12Resource>, 2> readbacks;
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
   UINT64 bytes{};
@@ -1495,7 +1554,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
   }
   list->EndQuery(private_copy_guard.get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
   submit();
-  require(successful_copies() == 2 && runtime::snapshot(key).stamps == 2,
+  require(successful_copies() == 2 && runtime::snapshot(key).stamps == delivery_baseline + 2,
           "One private patch per PFD: legacy and enhanced RT-exit boundaries");
   ID3D12CommandList* replay[]{list.get()};
   queue->ExecuteCommandLists(1, replay);
@@ -1727,20 +1786,52 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
     const float background[]{0, 0, 0, 1};
     list->ClearRenderTargetView(typed_rtv, background, 0, nullptr);
     ClearStatePipeline typed_pipeline(device.get(), false, format);
-    list->SetPipelineState(typed_pipeline.pipeline.get());
-    list->SetGraphicsRootSignature(typed_pipeline.root.get());
-    const UINT constants[]{64, 64, 0, 0};
-    list->SetGraphicsRoot32BitConstants(0, 4, constants, 0);
-    const D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
-    const D3D12_RECT scissor{0, 0, 1, 1};
-    list->RSSetViewports(1, &viewport);
-    list->RSSetScissorRects(1, &scissor);
-    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    list->OMSetRenderTargets(1, &typed_rtv, FALSE, nullptr);
-    list->DrawInstanced(3, 1, 0, 0);
+    const auto draw_typed = [&] {
+      list->SetPipelineState(typed_pipeline.pipeline.get());
+      list->SetGraphicsRootSignature(typed_pipeline.root.get());
+      const UINT constants[]{64, 64, 0, 0};
+      list->SetGraphicsRoot32BitConstants(0, 4, constants, 0);
+      const D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
+      const D3D12_RECT scissor{0, 0, 1, 1};
+      list->RSSetViewports(1, &viewport);
+      list->RSSetScissorRects(1, &scissor);
+      list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      list->OMSetRenderTargets(1, &typed_rtv, FALSE, nullptr);
+      list->DrawInstanced(3, 1, 0, 0);
+    };
+    draw_typed();
+    const auto cold = runtime::snapshot(key);
+    transition(list.get(), typed.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    require(runtime::snapshot(key).stamps == cold.stamps && runtime::snapshot(key).patch_requests == cold.patch_requests + 1 &&
+                runtime::snapshot(key).patch_draws == cold.patch_draws,
+            "First request for another typed format records no speculative copy");
+    transition(list.get(), typed.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    submit();
+    reset();
+    win::set_target_mask(0);
+    const auto before_refresh = runtime::snapshot(key);
+    generator.record(list.get(), rtvs[0], pane_width, nose_height, false, 0, 0);
+    generator.record(list.get(), rtvs[1], pane_width, tail_height, false, 0, 1);
+    for (UINT feed = 0; feed < 2; ++feed) {
+      transition(list.get(), textures[feed].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      transition(list.get(), textures[feed].get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+    submit();
+    reset();
+    const auto ready_by = GetTickCount64() + 1000;
+    while (runtime::snapshot(key).frames == before_refresh.frames && GetTickCount64() < ready_by) {
+      runtime::service();
+      Sleep(1);
+    }
+    const auto refreshed = runtime::snapshot(key);
+    require(refreshed.frames > before_refresh.frames &&
+                refreshed.patch_draws - before_refresh.patch_draws == (refreshed.frames - before_refresh.frames) * refreshed.patch_requests,
+            "New typed demand is generated while every prior replay slot keeps refreshing");
+    win::set_target_mask(3);
+    draw_typed();
     const auto before = runtime::snapshot(key).stamps;
     transition(list.get(), typed.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    require(runtime::snapshot(key).stamps == before + 1, "Typed target receives exactly one private copy");
+    require(runtime::snapshot(key).stamps == before + 1, "Demanded typed target receives exactly one private copy");
     D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
     source.pResource = typed.get();
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -2276,11 +2367,16 @@ int wmain(int argc, wchar_t** argv) {
         textured_gray = a350 = true;
       else if (std::wcscmp(argv[i], L"--profile-switch") == 0)
         profile_switch = true;
+      else if (std::wcscmp(argv[i], L"--patch-demand") == 0)
+        continue;
       else if (std::wcscmp(argv[i], L"--prefer-copy") == 0)
         prefer_copy = true;
       else
         return 2;
     }
+    patch_demand_case();
+    if (argc == 2 && std::wcscmp(argv[1], L"--patch-demand") == 0)
+      return 0;
     if (profile_switch)
       active_profile_switch_case(warp);
     else

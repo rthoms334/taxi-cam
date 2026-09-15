@@ -248,6 +248,74 @@ void cached_queries() {
   }
 }
 
+void fused_inspection_transactions() {
+  Allocation allocation(16384);
+  std::fill(allocation.data, allocation.data + allocation.size, 0x57);
+  // Two pure graph stages retain independent readers and complete trace rereads.
+  // They may share metadata only with the currently active outer transaction.
+  const auto stage = [&](ScopedLocalMemoryQueryCache& transaction, std::size_t offset, bool change_field = false) {
+    if (!transaction.is_current())
+      return false;
+    LocalMemoryReader reader;
+    std::uint64_t first = 0, second = 0;
+    if (!reader.read(allocation.address(offset), &first, sizeof(first)))
+      return false;
+    if (change_field)
+      allocation.data[offset] ^= 1u;
+    return reader.read(allocation.address(offset), &second, sizeof(second)) && first == second;
+  };
+  LocalMemoryMetrics separate, fused;
+  {
+    ScopedLocalMemoryMetrics measured(separate);
+    for (const auto offset : {0u, 128u}) {
+      ScopedLocalMemoryQueryCache transaction;
+      require(stage(transaction, offset) && transaction.finish(), "Separate inspection failed");
+    }
+  }
+  {
+    ScopedLocalMemoryMetrics measured(fused);
+    ScopedLocalMemoryQueryCache transaction;
+    require(stage(transaction, 0) && stage(transaction, 128), "Fused stages did not share their active transaction");
+    require(transaction.finish(), "Fused transaction was not revalidated before publication");
+    require(!transaction.is_current() && !stage(transaction, 0), "A completed proof was borrowed across an operation boundary");
+  }
+  require(separate.query_calls == 4 && fused.query_calls == 2 && separate.read_calls == 4 && fused.read_calls == 4 &&
+              separate.requested_bytes == 32 && fused.requested_bytes == 32,
+          "Fusing adjacent stages failed to remove repeated queries or changed exact field/trace reads");
+  {
+    ScopedLocalMemoryQueryCache transaction;
+    require(!stage(transaction, 0, true), "Shared metadata hid an identity change from the complete trace reread");
+    require(transaction.finish(), "A byte-only fixture change incorrectly changed memory metadata");
+  }
+  {
+    ScopedLocalMemoryQueryCache transaction;
+    require(stage(transaction, 0), "Protection-change first stage failed");
+    DWORD previous = 0;
+    require(VirtualProtect(allocation.data, allocation.size, PAGE_READONLY, &previous) != FALSE, "Could not change stage protection");
+    require(stage(transaction, 128), "Readable second stage unexpectedly failed");
+    require(!transaction.finish(), "Fused stages accepted protection changes before their single endpoint check");
+    require(VirtualProtect(allocation.data, allocation.size, previous, &previous) != FALSE, "Could not restore stage protection");
+  }
+  {
+    ScopedLocalMemoryQueryCache outer;
+    require(stage(outer, 0), "Outer transaction setup failed");
+    {
+      ScopedLocalMemoryQueryCache inner;
+      require(!outer.is_current() && !stage(outer, 128), "A pure stage borrowed a hidden outer transaction");
+      require(stage(inner, 128) && inner.finish(), "Independent nested transaction failed");
+    }
+    require(outer.is_current() && outer.finish(), "Nested scope lost the outer transaction");
+  }
+  {
+    LocalMemoryMetrics after_operation;
+    ScopedLocalMemoryMetrics measured(after_operation);
+    // A private-operation boundary requires a new proof, even for the same field.
+    ScopedLocalMemoryQueryCache transaction;
+    require(stage(transaction, 0) && transaction.finish() && after_operation.query_calls == 2,
+            "Post-operation inspection reused prior region metadata");
+  }
+}
+
 void cache_protection_changes() {
   SYSTEM_INFO info{};
   GetSystemInfo(&info);
@@ -967,6 +1035,7 @@ int main() {
   public_query_equivalence();
   measured_reads();
   cached_queries();
+  fused_inspection_transactions();
   cache_protection_changes();
   cache_bounds();
   cache_profile();

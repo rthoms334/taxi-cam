@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../profiles/catalog.hpp"
+#include "ground_speed_display.hpp"
 #include "native_device_identity.hpp"
 
 #include <d3d12.h>
@@ -73,9 +74,9 @@ class CameraCompositorD3D12 {
   bool reference_guides() const noexcept { return reference_guides_; }
   void set_reference_guides(bool enabled) noexcept { reference_guides_ = enabled; }
   void set_ground_speed(float knots, bool valid) noexcept {
-    const float rounded = std::floor(knots + 0.5f);
-    ground_speed_valid_ = valid && std::isfinite(knots) && knots >= 0 && rounded <= 99;
-    ground_speed_ = ground_speed_valid_ ? static_cast<UINT>(rounded) : 0;
+    const auto display = ground_speed_display(knots, valid);
+    ground_speed_valid_ = display.valid;
+    ground_speed_ = display.knots;
   }
   // Recorded root constants capture this value. No resource/descriptors change.
   bool set_display_exposure(float ev) noexcept {

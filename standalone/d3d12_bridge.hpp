@@ -16,9 +16,7 @@ struct GraphicsStatus {
   std::uint64_t fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
   std::uint64_t preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
   const char* preferred_copy_reason = "not_attempted";
-  std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, dynamic_depth_bias_restores{}, dynamic_strip_cut_restores{};
-  std::uint64_t sample_position_calls{}, sample_position_restores{}, state_test_roundtrips{};
-  std::uint64_t state_test_target_roundtrips{}, state_test_shader_roundtrips{};
+  std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
 };
 bool initialize_graphics() noexcept;
@@ -30,10 +28,6 @@ std::vector<PfdTargetObservation> pfd_inventory();
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
-// Temporary diagnostic: 0 Off, 1 All, 2 Targets only, 3 Shader state only,
-// 4 Pipeline only, 5 Root bindings only, 6 Raster state only.
-// Every nonzero mode omits PFD draws/copies; camera processing remains active.
-void set_graphics_state_test(unsigned mode) noexcept;
 std::array<std::uint64_t, 2> target_ids() noexcept;
 void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;
