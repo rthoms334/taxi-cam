@@ -489,7 +489,8 @@ float segment_distance(float2 sample_position, float2 first, float2 last) {
 // marks do not claim metric clearance after mount, attitude or FOV changes.
 bool reference_guide(float2 position, bool nose) {
   float2 local = float2(min(position.x, 768 - position.x), nose ? position.y : position.y - 259);
-  if (nose) return length(local - float2(0.14 * 768, 0.48 * 255)) <= 4.5;
+  // Filled 14 x 14 pixel squares, centred on the existing nose references.
+  if (nose) return all(abs(local - float2(0.14 * 768, 0.48 * 255)) < 7);
   // The reference bracket's bounding-box centre is near (0.335, 0.69);
   // its outside lower corner is farther out and below that centre.
   float2 corner = float2(0.305 * 768, 0.75 * 504);

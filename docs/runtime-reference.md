@@ -82,7 +82,7 @@ Pixel coordinates start at the top left. Row ranges below are inclusive.
 
 The logical gap between panes is four rows. The visible divider covers ten additional rows of each pane; the camera render sizes and tail sampling origin remain unchanged.
 
-Nose reference dots are at 14% and 86% of image width, 48% of nose-pane height, with a 4.5-pixel radius. Each tail bracket consists of two mirrored segments through normalized tail-pane points `(0.33, 0.625)`, `(0.305, 0.75)` and `(0.365, 0.758)`. The stroke uses a two-pixel distance threshold.
+Nose reference markers are filled 14-by-14-pixel magenta squares in the working image, centred at 14% and 86% of image width and 48% of nose-pane height. Each tail bracket consists of two mirrored segments through normalized tail-pane points `(0.33, 0.625)`, `(0.305, 0.75)` and `(0.365, 0.758)`. The stroke uses a two-pixel distance threshold.
 
 Ground speed is rounded to whole knots in the range 0–999. Invalid or stale data displays `--`.
 

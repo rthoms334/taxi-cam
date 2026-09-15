@@ -314,7 +314,16 @@ void pixel_case(ID3D12Device* device,
         return pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 255 && pixel[3] == 255;
       };
       require(is_magenta(107, 122) && is_magenta(660, 122) && !is_magenta(107, 109) && !is_magenta(120, 122),
-              "Nose reference dots retained an old L-shaped arm");
+              "Nose reference square centres or outside edges are incorrect");
+      unsigned nose_pixels = 0;
+      for (UINT y = 100; y < 145; ++y)
+        for (UINT x = 90; x < 678; ++x)
+          if (is_magenta(x, y)) {
+            require(((x >= 101 && x < 115) || (x >= 653 && x < 667)) && y >= 115 && y < 129,
+                    "Nose marker exceeds its centred 14px square");
+            ++nose_pixels;
+          }
+      require(nose_pixels == 392, "Both A380 nose markers must be filled 14-by-14 squares");
       require(is_magenta(234, 637) && is_magenta(533, 637) && is_magenta(253, 574) && is_magenta(514, 574) && is_magenta(279, 641) &&
                   is_magenta(488, 641) && !is_magenta(245, 631),
               "Tail reference brackets missed the reference photograph landmarks");

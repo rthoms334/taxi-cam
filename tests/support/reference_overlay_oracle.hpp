@@ -43,7 +43,7 @@ inline bool pixel(unsigned x, unsigned y, std::array<unsigned char, 4>& out, boo
   const double px = std::min(double(x) + 0.5, 768 - (double(x) + 0.5)), py = double(y) + 0.5 - (nose ? 0 : 259);
   if (nose) {
     const double dx = px - .14 * 768, dy = py - .48 * 255;
-    if (dx * dx + dy * dy > 4.5 * 4.5)
+    if (std::abs(dx) >= 7 || std::abs(dy) >= 7)
       return false;
     out = {255, 0, 255, 255};
     return true;
