@@ -32,7 +32,7 @@ Saves validate the complete settings object, flush a temporary UTF-16 file and r
 | `camera_rate` | 15 | Integer 15–60, activation limit per camera |
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
-| `exposure` | −8.8; iniBuilds A380: −11.5 | Daytime EV, −16 to +4 |
+| `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |
 | `speed_red`, `speed_green`, `speed_blue` | Profile colour | Normalized RGB, 0�1, edited with the colour picker |
 | `night_boost` | 4 | Maximum automatic boost, 0–8 EV |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
@@ -49,7 +49,7 @@ The following controls are session-only and start cleared:
 | `left_id`, `right_id` | Assign current display texture IDs |
 | `route_request` | Identify a new explicit assignment request |
 
-Side masks are **0 off, 1 left, 2 right, 3 both**. Using manual preview or a [keyboard shortcut](keyboard-shortcuts.md) disables automatic TAXI control in the UI; re-enable **TAXI buttons** on Overview to return to aircraft control. The iniBuilds A380 uses manual control because its cockpit TAXI buttons are INOP.
+Side masks are **0 off, 1 left, 2 right, 3 both**. Using a manual preview disables automatic TAXI control in the UI; re-enable **TAXI buttons** on Overview to return to aircraft control. [Keyboard shortcuts](keyboard-shortcuts.md) preserve that setting and synchronize the selected cockpit TAXI buttons where supported. The iniBuilds A380 uses manual control because its cockpit TAXI buttons are INOP.
 
 PFD routing selections apply immediately. Each side may use an explicit current texture ID or **Automatic assignment**. Automatic detection preserves an explicitly selected side and identifies the other from the same confirmed pair. Selecting the same nonzero ID for both sides shows an error and preserves the accepted assignment. Changing aircraft profile starts fresh target discovery; ordinary loss of both resource identities still requires an explicit assignment before side order can be trusted.
 
@@ -166,7 +166,7 @@ Mutex:   Local\380TaxiCamera.Control.<MSFS_PID>
 Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 ~~~
 
-The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `6` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
+The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `8` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair. Session-only TAXI requests carry a serial, selected sides and desired states. Status returns fresh button telemetry and request acknowledgement; these commands are never saved in aircraft calibration.
 
 The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 

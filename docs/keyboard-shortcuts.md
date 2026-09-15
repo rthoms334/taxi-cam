@@ -14,7 +14,9 @@ Click a shortcut field and press the combination you want, then select **Save ch
 
 The status below each action reports whether Windows accepted the shortcut. If another app has registered the same combination, choose a different one or close that app and select **Save changes** to retry. A conflicting shortcut does not prevent the other shortcuts from working.
 
-Using a shortcut selects manual camera control and ends target calibration. On aircraft with working TAXI buttons, turn **Overview → TAXI buttons** back on to return control to those buttons. The iniBuilds A380's INOP buttons are not used; its cameras use the keyboard or **PFD routing** previews. Turning its last calibration target off leaves manual control selected.
+Shortcuts preserve **Overview → TAXI buttons**, whether it is on or off, and end target calibration. On FBW A380 and iniBuilds A350, they update the aircraft's corresponding TAXI button state: turning a display off by shortcut also turns its cockpit button off. With **TAXI buttons** enabled, subsequent cockpit clicks continue to control the displays. With it disabled, the camera preview is controlled manually and shortcuts still synchronize their selected aircraft buttons. The iniBuilds A380's INOP buttons are not used; its cameras use manual keyboard requests or **PFD routing** previews.
+
+Aircraft button control requires current simulator telemetry. A pending toggle waits for acknowledgement before another event can be sent for that side; the speed cutoff takes priority over an ON request. If the aircraft cannot confirm the change, Taxi Cam reports it rather than repeatedly toggling the button.
 
 Shortcuts do not turn on a disabled camera service. Aircraft identity, flight-session checks and the speed cutoff still apply. Display requests reset when the flight or selected aircraft changes and when Taxi Cam restarts. Shortcuts preserve unfinished calibration edits in the settings window.
 

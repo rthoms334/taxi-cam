@@ -1,6 +1,6 @@
+#include "../../src/shared/profile_selection.hpp"
 #include <cassert>
 #include <cstdio>
-#include "../../src/shared/profile_selection.hpp"
 
 int main() {
   using namespace taxi_camera::standalone;
@@ -8,6 +8,9 @@ int main() {
   previous.profile = 2;
   previous.profile_request = 8;
   previous.aircraft_session_epoch = 12;
+  previous.taxi_request = 34;
+  previous.taxi_selected_mask = 3;
+  previous.taxi_desired_mask = 2;
   Settings selected;
   selected.mounts[0][2] = 27.123;
   selected.exposure = -7.5f;
@@ -19,11 +22,13 @@ int main() {
   assert(selected.profile == 1 && selected.profile_request == 9 && !selected.auto_profile);
   assert(selected.aircraft_session_epoch == 12 && !selected.left_id && !selected.right_id && !selected.route_request);
   assert(!selected.manual_mask && !selected.calibration_mask && !selected.scene_test);
+  assert(selected.taxi_request == 35 && !selected.taxi_selected_mask && !selected.taxi_desired_mask);
   assert(selected.mounts[0][2] == 27.123 && selected.exposure == -7.5f);
   // Reselecting the displayed profile must be a new action without resetting calibration.
   auto retry = selected;
   assert(prepare_profile_selection(retry, selected, false));
   assert(retry.profile == selected.profile && retry.profile_request == 10 && retry.mounts == selected.mounts);
+  assert(retry.taxi_request > selected.taxi_request);
   auto automatic = previous;
   assert(prepare_profile_selection(automatic, retry, true));
   assert(automatic.profile == 2 && automatic.profile_request == 11 && automatic.auto_profile);

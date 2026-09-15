@@ -63,7 +63,7 @@ struct AircraftProfile {
   // Target pixels: the outer display region is black around this camera inset.
   DisplayInsets camera_padding{16, 12, 16, 0};
   PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
-  float exposure = -8.8f;
+  float exposure = -11.5f;
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -138,7 +138,6 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.composition.tail_upper = {0.34f, 0.52f};
   p.composition.tail_corner = {0.305f, 0.65f};
   p.composition.tail_inner = {0.355f, 0.65f};
-  p.exposure = -11.5f;
   // Live-selected PFDs use one mip. Exclude the observed five-mip static
   // resources; other active displays still require target identity checks.
   p.mips = 1;

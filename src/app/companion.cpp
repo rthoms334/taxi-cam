@@ -519,13 +519,17 @@ void toggle_camera_from_hotkey(unsigned action) {
     sample = status;
   }
   const auto now = GetTickCount64();
-  const bool fresh = sample.heartbeat && now >= sample.heartbeat && now - sample.heartbeat <= 3000 &&
-                     sample.aircraft_session_epoch == s.aircraft_session_epoch && sample.active_profile == s.profile;
-  win::toggle_manual_camera(s, action, fresh ? sample.taxi_mask : 0);
+  const auto result = win::request_camera_hotkey(s, action, sample, now);
+  if (result == win::CameraHotkeyResult::unavailable) {
+    notice = s.enabled ? L"Waiting for current aircraft TAXI-button state. Try the shortcut again when connected."
+                       : L"The camera service is off. Enable it before using aircraft camera shortcuts.";
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
   publish(s);
   dirty_notice();
-  notice = L"Manual camera request: left " + std::wstring(s.manual_mask & 1 ? L"on" : L"off") + L", right " +
-           (s.manual_mask & 2 ? L"on" : L"off") + L". TAXI-button control is off.";
+  notice = L"Camera request: left " + std::wstring(s.manual_mask & 1 ? L"on" : L"off") + L", right " +
+           (s.manual_mask & 2 ? L"on" : L"off") + L".";
   if (!s.enabled)
     notice = L"Camera request updated. The camera service is off.";
   for (unsigned side = 0; side < 2; ++side) {
@@ -533,7 +537,7 @@ void toggle_camera_from_hotkey(unsigned action) {
     SetDlgItemTextW(window, 224 + side, label.c_str());
     SetDlgItemTextW(window, 226 + side, side ? L"Calibrate right: Off" : L"Calibrate left: Off");
   }
-  SetDlgItemTextW(window, 221, L"TAXI buttons: Off");
+  SetDlgItemTextW(window, 221, s.follow_taxi ? L"TAXI buttons: On" : L"TAXI buttons: Off");
   SetDlgItemTextW(window, 229, L"Scene test: Off");
   InvalidateRect(window, nullptr, FALSE);
 }

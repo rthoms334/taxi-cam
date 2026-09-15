@@ -1,8 +1,8 @@
+#include "../../src/shared/companion_control.hpp"
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <thread>
-#include "../../src/shared/companion_control.hpp"
 namespace {
 unsigned checks{};
 void require(bool ok, const char* label) {
@@ -59,15 +59,26 @@ int main() {
     settings.tail_corner = {0.1875f, 0.75f};
     settings.tail_inner = {0.375f, 0.875f};
     settings.route_request = 12;
+    settings.taxi_request = 7;
+    settings.taxi_selected_mask = 3;
+    settings.taxi_desired_mask = 2;
     settings.left_id = 149;
     settings.right_id = 148;
     publish(owner, 10000, settings);
     control.refresh(reader);
     require(control.connected(10000), "Fresh companion accepted");
-    require(ProtocolVersion == 7 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 8 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
-            "Protocol7 guide coordinates roundtrip");
+            "Protocol8 guide coordinates roundtrip");
+    require(control.settings().taxi_request == 7 && control.settings().taxi_selected_mask == 3 && control.settings().taxi_desired_mask == 2,
+            "Protocol8 scoped aircraft TAXI request roundtrip");
+    auto invalid_request = settings;
+    invalid_request.taxi_selected_mask = 1;
+    require(!valid_settings(invalid_request), "Aircraft request cannot change an unselected side");
+    invalid_request = settings;
+    invalid_request.taxi_request = 0;
+    require(!valid_settings(invalid_request), "Aircraft request must have a nonzero serial");
     for (auto member : {&Settings::nose_dot, &Settings::tail_upper, &Settings::tail_corner, &Settings::tail_inner}) {
       for (unsigned axis = 0; axis < 2; ++axis) {
         for (float value :

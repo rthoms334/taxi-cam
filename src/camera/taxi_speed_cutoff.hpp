@@ -59,6 +59,12 @@ class TaxiSpeedCutoff {
     if (side < 2 && accepted)
       waiting_[side] = true;
   }
+  // A correlated SimConnect rejection proves the accepted command did not
+  // execute. Keep OFF pending and the retry delay; release only its ACK wait.
+  void rejected(unsigned side) noexcept {
+    if (side < 2)
+      waiting_[side] = false;
+  }
   bool inhibited() const noexcept { return over_ || pending_ != 0; }
   unsigned pending() const noexcept { return pending_; }
 

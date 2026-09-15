@@ -35,7 +35,7 @@ Taxi Cam starts with MSFS after installation. You can also launch it from the Wi
 
 The cameras switch off above **60 knots**. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 
-Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + F9** toggles the left display, **Ctrl + Shift + F10** the right and **Ctrl + Shift + F11** both. In **Settings → Overview → Flight-deck control**, select **Keyboard shortcuts…** to configure or disable them. Using a shortcut selects manual camera control. See [Keyboard controls](docs/keyboard-shortcuts.md) for details.
+Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + F9** toggles the left display, **Ctrl + Shift + F10** the right and **Ctrl + Shift + F11** both. In **Settings → Overview → Flight-deck control**, select **Keyboard shortcuts…** to configure or disable them. On aircraft with working TAXI buttons, shortcuts also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard controls](docs/keyboard-shortcuts.md) for details.
 
 ## Adjusting the views
 

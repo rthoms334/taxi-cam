@@ -9,14 +9,16 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 7;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 8;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
-  float exposure = -8.8f, night_boost = 4.f;
+  float exposure = profiles::A380.exposure, night_boost = 4.f;
   std::uint64_t route_request{}, left_id{}, right_id{};
   std::uint64_t profile_request{};         // Session-only: selecting the same profile is an explicit retry.
   std::uint64_t aircraft_session_epoch{};  // Scope manual previews and texture IDs to the observed flight.
+  std::uint64_t taxi_request{};            // Session-only desired aircraft button state from a shortcut.
+  std::uint32_t taxi_selected_mask{}, taxi_desired_mask{};
   std::uint32_t auto_profile = 1;
   std::array<float, 3> speed_color = profiles::A380.composition.speed_color;
   // Normalized left-side guide positions; the right side mirrors X. These are
@@ -44,6 +46,8 @@ struct Status {
   std::uint32_t graphics_ready{}, scene_ready{}, taxi_mask{}, speed_inhibited{}, candidate_count{};
   std::uint32_t active_profile{}, detected_profile{};
   std::uint64_t identity_sample_ms{}, aircraft_session_epoch{};
+  std::uint64_t taxi_buttons_sample_ms{}, taxi_request_seen{}, taxi_request_retired{};
+  std::uint32_t taxi_buttons_valid{}, taxi_buttons_mask{}, taxi_request_pending{}, taxi_request_failed{};
   char aircraft_type[256]{}, aircraft_path[260]{};
   float speed{}, exposure{};
   double probe_cpu_ms{}, probe_max_ms{};
@@ -67,6 +71,8 @@ inline bool valid_settings(const Settings& s) noexcept {
       return false;
   if (s.auto_profile > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
       s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 || s.calibration_budget > 16384)
+    return false;
+  if (s.taxi_selected_mask > 3 || (s.taxi_desired_mask & ~s.taxi_selected_mask) || (!s.taxi_request && s.taxi_selected_mask))
     return false;
   for (const auto& m : s.mounts) {
     for (const double v : m)

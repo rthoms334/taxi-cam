@@ -66,6 +66,7 @@ struct State {
   std::uint64_t taxi_ms = 0;
   const char* taxi_error = "not_initialized";
   TaxiSpeedCutoff speed_cutoff;
+  TaxiButtonCommand button_commands;
   const char* cutoff_status = "below_speed_limit";
   double ambient = 0, brightness = 0;
   std::uint64_t lighting_ms = 0;
@@ -90,6 +91,7 @@ void reset_session_locked() noexcept {
   state.timing.last_sample_ms = state.timing.last_interval_ms = 0;
   state.taxi_left = state.taxi_right = false;
   state.speed_cutoff = {};
+  state.button_commands.reset_session();
   state.cutoff_status = "below_speed_limit";
   state.calibrated = false;
   state.calibration_samples = 0;
@@ -361,6 +363,7 @@ DWORD WINAPI worker(void*) noexcept {
   // L variables are directly readable through public SimConnect as FLOAT64.
   // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_addtodatadefinition/
   std::array<DWORD, 64> taxi_packets{};
+  std::array<DWORD, 2> taxi_command_packets{};
   unsigned taxi_packet_cursor = 0;
   const auto remember_taxi_packet = [&]() {
     DWORD id = 0;
@@ -562,6 +565,8 @@ DWORD WINAPI worker(void*) noexcept {
         bool on_ground_exception = false;
         for (const auto sent : taxi_packets)
           taxi_exception = taxi_exception || (sent && sent == exception[4]);
+        for (const auto sent : taxi_command_packets)
+          taxi_exception = taxi_exception || (sent && sent == exception[4]);
         for (const auto sent : lighting_packets)
           lighting_exception = lighting_exception || (sent && sent == exception[4]);
         for (const auto sent : on_ground_packets)
@@ -580,6 +585,16 @@ DWORD WINAPI worker(void*) noexcept {
           state.error = "simconnect_exception";
           ReleaseSRWLockExclusive(&state.lock);
         }
+        // Keep command correlation independently of the bounded telemetry
+        // packet ring; a late rejection must release the right side's ACK wait.
+        for (unsigned side = 0; side < 2; ++side)
+          if (taxi_command_packets[side] && taxi_command_packets[side] == exception[4]) {
+            AcquireSRWLockExclusive(&state.lock);
+            state.button_commands.rejected(side);
+            state.speed_cutoff.rejected(side);
+            ReleaseSRWLockExclusive(&state.lock);
+            taxi_command_packets[side] = 0;
+          }
       } else if (header[2] == 3) {
         failure("simulator_quit");
         SetEvent(state.stop);
@@ -590,34 +605,58 @@ DWORD WINAPI worker(void*) noexcept {
       break;
     const auto speed = get_ground_speed();
     const auto buttons = get_taxi_buttons();
+    const auto command_now = GetTickCount64();
     AcquireSRWLockExclusive(&state.lock);
-    const auto commands = state.speed_cutoff.update(GetTickCount64(), speed.valid, speed.knots, buttons.valid,
+    const auto commands = state.speed_cutoff.update(command_now, speed.valid, speed.knots, buttons.valid,
                                                     (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms,
                                                     profile.speed_cutoff_knots, !manual_only);
     state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
                           : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
                                                            : "below_speed_limit";
+    const auto epoch = state.aircraft_session.epoch();
+    const auto identity = state.identity.sample(command_now);
+    const auto decision = state.button_commands.step(
+        {command_now, epoch, buttons.sample_ms, profile.id, (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), commands,
+         state.aircraft_session.running() && identity.fresh && identity.detected_profile == profile.id, buttons.valid, speed.valid,
+         state.speed_cutoff.inhibited(), !manual_only, speed.knots, profile.speed_cutoff_knots});
     ReleaseSRWLockExclusive(&state.lock);
     for (unsigned side = 0; side < 2; ++side) {
-      if (!(commands & (1u << side)))
+      if (!(decision.send_mask & (1u << side)))
+        continue;
+      AcquireSRWLockShared(&state.lock);
+      const auto send_now = GetTickCount64();
+      const auto current_identity = state.identity.sample(send_now);
+      const bool current = state.button_commands.current(decision, side, send_now) && state.aircraft_session.epoch() == epoch &&
+                           state.aircraft_session.running() && current_identity.fresh && current_identity.detected_profile == profile.id;
+      ReleaseSRWLockShared(&state.lock);
+      if (!current || WaitForSingleObject(state.stop, 0) == WAIT_OBJECT_0)
         continue;
       // Public SimConnect priority flag: GroupID is an explicit priority.
       // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_transmitclientevent/
-      double off = 0;
+      double desired = (decision.desired_mask & (1u << side)) ? 1 : 0;
       const bool accepted = taxi_events[side] && aircraft_matches_profile() &&
                             (profile.taxi_control == profiles::TaxiControl::lvar_off
-                                 ? set_data && SUCCEEDED(set_data(session, 10 + side, 0, 0, 0, sizeof(off), &off))
+                                 ? set_data && SUCCEEDED(set_data(session, 10 + side, 0, 0, 0, sizeof(desired), &desired))
                                  : transmit_event && SUCCEEDED(transmit_event(session, 0, 10 + side, 0, 1, 16)));
       if (taxi_events[side])
         remember_taxi_packet();
+      taxi_command_packets[side] = 0;
+      if (accepted && last_packet)
+        last_packet(session, &taxi_command_packets[side]);
       AcquireSRWLockExclusive(&state.lock);
-      state.speed_cutoff.sent(side, accepted);
-      state.cutoff_status = accepted ? "waiting_for_taxi_off" : "taxi_off_event_unavailable";
+      state.button_commands.sent(decision, side, accepted, GetTickCount64());
+      if (decision.cutoff_mask & (1u << side)) {
+        state.speed_cutoff.sent(side, accepted);
+        state.cutoff_status = accepted ? "waiting_for_taxi_off" : "taxi_off_event_unavailable";
+      }
       ReleaseSRWLockExclusive(&state.lock);
     }
   }
   on_ground_failure("on_ground_session_closed");
   taxi_failure("taxi_session_closed");
+  AcquireSRWLockExclusive(&state.lock);
+  state.button_commands.reset_session();
+  ReleaseSRWLockExclusive(&state.lock);
   lighting_failure("lighting_session_closed");
   close(session);
   CloseHandle(notification);
@@ -759,6 +798,7 @@ void shutdown_body_pose_provider() noexcept {
   state.lighting_error = "not_initialized";
   state.taxi_left = state.taxi_right = false;
   state.speed_cutoff = {};
+  state.button_commands.reset_session();
   state.cutoff_status = "below_speed_limit";
   state.calibrated = false;
   state.calibration_samples = 0;
@@ -863,6 +903,19 @@ TaxiButtonSample get_taxi_buttons() noexcept {
   const auto out = taxi_buttons_locked(GetTickCount64());
   ReleaseSRWLockShared(&state.lock);
   return out;
+}
+void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted) noexcept {
+  AcquireSRWLockExclusive(&state.lock);
+  const auto* profile = profiles::find(profile_id.load());
+  state.button_commands.update(request, permitted, GetTickCount64(), state.aircraft_session.epoch(), profile ? profile->id : 0,
+                               profile && profile->taxi_control != profiles::TaxiControl::manual_only);
+  ReleaseSRWLockExclusive(&state.lock);
+}
+TaxiButtonRequestStatus get_taxi_button_request_status() noexcept {
+  AcquireSRWLockShared(&state.lock);
+  const auto result = state.button_commands.status();
+  ReleaseSRWLockShared(&state.lock);
+  return result;
 }
 LightingSample get_lighting() noexcept {
   AcquireSRWLockShared(&state.lock);

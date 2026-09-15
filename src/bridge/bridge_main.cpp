@@ -116,6 +116,12 @@ DWORD run_impl() {
     const bool connected = control.connected(now);
     const auto session_epoch = native_camera::get_aircraft_session_epoch();
     const bool session_settings = settings.aircraft_session_epoch == session_epoch;
+    const bool command_context = connected && session_settings && settings.enabled && !changing_profile &&
+                                 settings.profile == applied_profile && settings.profile_request == applied_profile_request &&
+                                 session_epoch == applied_session_epoch && native_camera::aircraft_matches_profile();
+    native_camera::update_taxi_button_request(
+        {settings.taxi_request, settings.aircraft_session_epoch, settings.profile, settings.taxi_selected_mask, settings.taxi_desired_mask},
+        command_context);
     if (connected && (changing_profile || settings.profile != applied_profile || settings.profile_request != applied_profile_request ||
                       session_epoch != applied_session_epoch)) {
       if (!changing_profile || settings.profile != pending_profile || settings.profile_request != pending_profile_request ||
@@ -393,6 +399,17 @@ DWORD run_impl() {
     status.detected_profile = identity.fresh ? identity.detected_profile : 0;
     status.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
     status.aircraft_session_epoch = session_epoch;
+    // Read acknowledgement first: a retired command must never be paired with
+    // the earlier rendering sample from before its lamp change was observed.
+    const auto taxi_request_status = native_camera::get_taxi_button_request_status();
+    const auto command_buttons = native_camera::get_taxi_buttons();
+    status.taxi_buttons_valid = command_buttons.valid;
+    status.taxi_buttons_mask = (command_buttons.left_on ? 1u : 0u) | (command_buttons.right_on ? 2u : 0u);
+    status.taxi_buttons_sample_ms = command_buttons.sample_ms;
+    status.taxi_request_seen = taxi_request_status.serial;
+    status.taxi_request_retired = taxi_request_status.pending_mask ? 0 : taxi_request_status.serial;
+    status.taxi_request_pending = taxi_request_status.pending_mask;
+    status.taxi_request_failed = taxi_request_status.failed;
     std::memcpy(status.aircraft_type, identity.type.data(), sizeof(status.aircraft_type));
     std::memcpy(status.aircraft_path, identity.path.data(), sizeof(status.aircraft_path));
     status.graphics_ready = graphics.ready;
@@ -460,7 +477,9 @@ DWORD run_impl() {
         : failed            ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
-        : (!targets[0] || !targets[1])                                                                  ? target_message
+        : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
+            ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
+        : (!targets[0] || !targets[1])         ? target_message
         : !active && settings.calibration_mask ? "Calibration requested on the selected display."
         : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."
         : !active && manual_only               ? "Ready. Use camera hotkeys or the left/right preview controls."

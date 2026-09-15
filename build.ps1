@@ -226,6 +226,7 @@ if ($Validate) {
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
         @{Name='scene-demand'; Sources=@('tests/camera/scene_demand_test.cpp','src/camera/entry_pair.cpp')},
+        @{Name='taxi-button-command'; Sources=@('tests/camera/taxi_button_command_test.cpp')},
         @{Name='aircraft-layout'; Sources=@('src/camera/aircraft_inventory.cpp','tests/camera/aircraft_inventory_test.cpp')},
         @{Name='native-slots'; Sources=@('tests/graphics/native_slots_test.cpp')},
         @{Name='crash-evidence'; Sources=@('tests/graphics/crash_evidence_test.cpp')},

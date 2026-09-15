@@ -3,6 +3,7 @@
 #include <limits>
 #include "aircraft_identity.hpp"
 #include "aircraft_mounts.hpp"
+#include "taxi_button_command.hpp"
 namespace taxi_camera::native_camera {
 struct BodyPoseSnapshot {
   bool valid = false;
@@ -72,6 +73,10 @@ OnGroundSample get_on_ground() noexcept;
 // Cached FCU TAXI light levels; independent of body calibration. Invalid or
 // older-than-500ms telemetry must not be interpreted as an authoritative OFF.
 TaxiButtonSample get_taxi_buttons() noexcept;
+// Cache-only bridge API. The existing SimConnect worker owns all sends.
+// Permission must be refreshed; false consumes/cancels the current request.
+void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted) noexcept;
+TaxiButtonRequestStatus get_taxi_button_request_status() noexcept;
 struct TaxiCutoffStatus {
   bool inhibited = false;
   unsigned pending_off = 0;

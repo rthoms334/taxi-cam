@@ -174,6 +174,101 @@ void manual_intent_checks() {
     require(!s.manual_mask && !s.calibration_mask && s.aircraft_session_epoch == 19, "Flight change clears shortcut requests");
   }
 }
+void aircraft_hotkey_intent_checks() {
+  using namespace win;
+  Status sample;
+  sample.heartbeat = sample.taxi_buttons_sample_ms = 1000;
+  sample.aircraft_session_epoch = 7;
+  sample.taxi_buttons_valid = 1;
+  for (unsigned profile : {1u, 2u, 3u}) {
+    sample.active_profile = sample.detected_profile = profile;
+    for (unsigned follow : {0u, 1u}) {
+      for (unsigned initial = 0; initial < 4; ++initial) {
+        Settings settings;
+        settings.profile = profile;
+        settings.follow_taxi = follow;
+        settings.manual_mask = initial;
+        settings.aircraft_session_epoch = 7;
+        sample.taxi_buttons_mask = initial;
+        require(request_camera_hotkey(settings, 0, sample, 1000) == CameraHotkeyResult::aircraft && settings.follow_taxi == follow &&
+                    settings.manual_mask == (initial ^ 1u),
+                "Supported-aircraft shortcuts preserve either TAXI-control setting");
+        require(settings.taxi_selected_mask == 1 && settings.taxi_desired_mask == ((initial ^ 1u) & 1u),
+                "Left shortcut addresses only the left aircraft button");
+        require(request_camera_hotkey(settings, 0, sample, 1001) == CameraHotkeyResult::aircraft && settings.manual_mask == initial &&
+                    settings.taxi_desired_mask == (initial & 1u),
+                "Rapid reversal uses pending intent while telemetry still has the old state");
+        require(request_camera_hotkey(settings, 1, sample, 1002) == CameraHotkeyResult::aircraft && settings.taxi_selected_mask == 3 &&
+                    settings.taxi_desired_mask == (initial ^ 2u),
+                "A peer action retains outstanding state for the first side");
+        require(request_camera_hotkey(settings, 2, sample, 1003) == CameraHotkeyResult::aircraft &&
+                    settings.taxi_desired_mask == ((initial ^ 2u) == 3 ? 0u : 3u) && settings.follow_taxi == follow,
+                "Both shortcut converges to both ON or both OFF without changing control mode");
+        sample.taxi_request_seen = sample.taxi_request_retired = settings.taxi_request;
+        sample.taxi_buttons_mask = 2;
+        settings.follow_taxi = 1;
+        require(request_camera_hotkey(settings, 1, sample, 1004) == CameraHotkeyResult::aircraft && !settings.taxi_desired_mask,
+                "After acknowledgement, new cockpit state takes precedence over old shortcut intent");
+        sample.taxi_request_seen = sample.taxi_request_retired = 0;
+        const auto before = settings;
+        sample.taxi_buttons_valid = 0;
+        require(request_camera_hotkey(settings, 0, sample, 1005) == CameraHotkeyResult::unavailable &&
+                    settings.taxi_request == before.taxi_request && settings.follow_taxi == before.follow_taxi,
+                "Missing button telemetry does not guess OFF or change the setting");
+        sample.taxi_buttons_valid = 1;
+        require(request_camera_hotkey(settings, 0, sample, 1501) == CameraHotkeyResult::unavailable,
+                "Stale aircraft button state refuses a shortcut command");
+        reset_aircraft_session(settings, 8);
+        require(settings.taxi_request > before.taxi_request && !settings.taxi_selected_mask && !settings.taxi_desired_mask,
+                "Aircraft session change removes pending button commands");
+        require(request_camera_hotkey(settings, 0, sample, 1005) == CameraHotkeyResult::unavailable,
+                "Old flight telemetry cannot create a request for the new flight");
+      }
+    }
+  }
+  Settings partial;
+  partial.aircraft_session_epoch = 7;
+  partial.taxi_request = 10;
+  partial.taxi_selected_mask = partial.taxi_desired_mask = 3;
+  sample.active_profile = sample.detected_profile = partial.profile;
+  sample.taxi_buttons_mask = 0;  // Left acknowledged ON, then was turned OFF in the cockpit.
+  sample.taxi_request_seen = 10;
+  sample.taxi_request_pending = 2;
+  auto next = partial;
+  require(request_camera_hotkey(next, 0, sample, 1000) == CameraHotkeyResult::aircraft && next.manual_mask == 3 &&
+              next.taxi_selected_mask == 3 && next.taxi_desired_mask == 3,
+          "Completed left side follows the cockpit while right remains pending");
+  next = partial;
+  require(request_camera_hotkey(next, 1, sample, 1000) == CameraHotkeyResult::aircraft && !next.manual_mask &&
+              next.taxi_selected_mask == 2 && !next.taxi_desired_mask,
+          "Reversing pending right does not reassert completed left intent");
+  sample.taxi_request_seen = 11;
+  next = partial;
+  require(request_camera_hotkey(next, 1, sample, 1000) == CameraHotkeyResult::aircraft && next.manual_mask == 2 &&
+              next.taxi_request == 12 && next.taxi_selected_mask == 2 && next.taxi_desired_mask == 2,
+          "Older local intent is not replayed when backend acknowledgement has advanced");
+  sample.taxi_request_pending = 0;
+  Settings manual;
+  manual.profile = 4;
+  manual.follow_taxi = 0;
+  require(request_camera_hotkey(manual, 2, {}, 0) == CameraHotkeyResult::manual && manual.manual_mask == 3 && !manual.taxi_request,
+          "INOP aircraft uses manual display intent without aircraft commands");
+  Settings saved;
+  saved.profile = 2;
+  saved.taxi_request = 9;
+  saved.taxi_selected_mask = 3;
+  saved.taxi_desired_mask = 1;
+  require(save_settings(saved), "Save calibration with an outstanding runtime command");
+  Settings loaded;
+  require(load_settings(loaded, L"", 2) && !loaded.taxi_request && !loaded.taxi_selected_mask && !loaded.taxi_desired_mask,
+          "Aircraft button commands are never replayed from saved settings");
+  sample.active_profile = sample.detected_profile = 2;
+  sample.taxi_request_seen = 123;
+  sample.taxi_request_retired = 123;
+  loaded.aircraft_session_epoch = sample.aircraft_session_epoch;
+  require(request_camera_hotkey(loaded, 0, sample, 1000) == CameraHotkeyResult::aircraft && loaded.taxi_request == 124,
+          "A restarted companion issues a serial above the existing bridge's consumed requests");
+}
 void ui_checks() {
   preview_ui = true;
   current = {};
@@ -251,18 +346,24 @@ void ui_checks() {
   command(226);
   require(current.follow_taxi, "Ending existing-aircraft calibration still restores TAXI buttons");
   current.manual_mask = 0;
+  current.enabled = 1;
   current.aircraft_session_epoch = 10;
   status = {};
   status.heartbeat = GetTickCount64();
   status.aircraft_session_epoch = 10;
   status.active_profile = 2;
-  status.taxi_mask = 3;
+  status.detected_profile = 2;
+  status.taxi_buttons_valid = 1;
+  status.taxi_buttons_sample_ms = status.heartbeat;
+  status.taxi_buttons_mask = 3;
+  status.taxi_mask = 0;  // No delivered image is not proof of a cockpit button being OFF.
   toggle_camera_from_hotkey(0);
-  require(current.manual_mask == 2, "Hotkey takeover toggles the displayed side while preserving its automatic peer");
+  require(current.manual_mask == 2 && current.follow_taxi && current.taxi_selected_mask == 1 && current.taxi_desired_mask == 0,
+          "Hotkey requests cockpit OFF from button telemetry while retaining TAXI-button control");
   status.aircraft_session_epoch = 11;
-  status.taxi_mask = 0;
+  status.taxi_buttons_mask = 0;
   toggle_camera_from_hotkey(1);
-  require(current.manual_mask == 2 && current.aircraft_session_epoch == 11,
+  require(current.manual_mask == 2 && current.aircraft_session_epoch == 11 && current.follow_taxi && current.taxi_selected_mask == 2,
           "A shortcut synchronizes a new flight before setting its session-scoped request");
 }
 void native_registration_checks() {
@@ -283,6 +384,8 @@ void native_registration_checks() {
           "Hidden companion window owns its global shortcut");
   current.follow_taxi = 0;
   current.manual_mask = 0;
+  current.taxi_request = current.taxi_selected_mask = current.taxi_desired_mask = 0;
+  status.heartbeat = status.taxi_buttons_sample_ms = GetTickCount64();
   PostMessageW(window, WM_HOTKEY, CameraHotkeyFirstId, MAKELPARAM(fixture[0].modifiers, fixture[0].key));
   MSG message{};
   require(PeekMessageW(&message, window, WM_HOTKEY, WM_HOTKEY, PM_REMOVE), "Hidden window receives the hotkey action message");
@@ -331,6 +434,7 @@ int main() {
     registration_checks();
     persistence_checks();
     manual_intent_checks();
+    aircraft_hotkey_intent_checks();
     ui_checks();
     native_registration_checks();
     hotkey_registration.clear();
