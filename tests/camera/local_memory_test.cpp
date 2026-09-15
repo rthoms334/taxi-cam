@@ -44,6 +44,97 @@ struct Allocation {
   std::uint64_t address(std::size_t offset = 0) const { return reinterpret_cast<std::uintptr_t>(data + offset); }
 };
 
+void public_query_equivalence() {
+  // Both public APIs document identical consecutive-region MBI semantics.
+  // https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex
+  const auto compare = [](const void* address) {
+    MEMORY_BASIC_INFORMATION implicit{}, explicit_process{};
+    const auto first = VirtualQuery(address, &implicit, sizeof(implicit));
+    const auto second = VirtualQueryEx(GetCurrentProcess(), address, &explicit_process, sizeof(explicit_process));
+    require(first == sizeof(implicit) && second == first, "Public query APIs returned different metadata lengths");
+    require(implicit.BaseAddress == explicit_process.BaseAddress && implicit.AllocationBase == explicit_process.AllocationBase &&
+                implicit.AllocationProtect == explicit_process.AllocationProtect && implicit.RegionSize == explicit_process.RegionSize &&
+                implicit.State == explicit_process.State && implicit.Protect == explicit_process.Protect &&
+                implicit.Type == explicit_process.Type,
+            "Explicit current-process query changed allocation, extent, state, protection or type");
+    return explicit_process;
+  };
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const auto page = std::size_t(info.dwPageSize);
+  Allocation allocation(page * 16);
+  for (const DWORD protection : {DWORD(PAGE_READONLY), DWORD(PAGE_READWRITE), DWORD(PAGE_NOACCESS), DWORD(PAGE_EXECUTE),
+                                 DWORD(PAGE_EXECUTE_READ), DWORD(PAGE_EXECUTE_READWRITE), DWORD(PAGE_READWRITE | PAGE_GUARD)}) {
+    DWORD previous = 0;
+    require(VirtualProtect(allocation.data, allocation.size, protection, &previous) != FALSE,
+            "Could not set equivalence fixture protection");
+    for (unsigned offset = 0; offset < 16; ++offset) {
+      const auto region = compare(allocation.data + offset * page + 13);
+      require(region.State == MEM_COMMIT && region.Type == MEM_PRIVATE && region.Protect == protection,
+              "Public query altered requested protection or consumed a guard page");
+    }
+  }
+  DWORD previous = 0;
+  require(VirtualProtect(allocation.data, allocation.size, PAGE_READWRITE, &previous) != FALSE, "Could not restore equivalence fixture");
+  require(VirtualProtect(allocation.data + 3 * page, page, PAGE_READONLY, &previous) != FALSE, "Could not create query split fixture");
+  for (unsigned offset = 0; offset < 16; ++offset)
+    compare(allocation.data + offset * page);
+  require(VirtualFree(allocation.data + 8 * page, page, MEM_DECOMMIT) != FALSE, "Could not decommit equivalence fixture");
+  require(compare(allocation.data + 8 * page).State == MEM_RESERVE, "Explicit query accepted decommitted page as committed");
+  compare(allocation.data + 7 * page);
+  compare(allocation.data + 9 * page);
+  require(VirtualAlloc(allocation.data + 8 * page, page, MEM_COMMIT, PAGE_READWRITE) == allocation.data + 8 * page,
+          "Could not recommit equivalence fixture");
+  require(compare(allocation.data + 8 * page).State == MEM_COMMIT, "Explicit query did not observe recommit");
+  {
+    Allocation reservation(page * 3, MEM_RESERVE);
+    require(compare(reservation.data + page).State == MEM_RESERVE, "Explicit query changed reserved region identity");
+  }
+  const auto mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(page), nullptr);
+  require(mapping != nullptr, "Could not create public query mapping fixture");
+  const auto mapped = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, page);
+  require(mapped && compare(mapped).Type == MEM_MAPPED, "Explicit query lost mapped-file type");
+  require(UnmapViewOfFile(mapped) != FALSE && CloseHandle(mapping) != FALSE, "Could not release public query mapping fixture");
+  require(compare(GetModuleHandleW(nullptr)).Type == MEM_IMAGE, "Explicit query lost main-image type");
+  auto* released = VirtualAlloc(nullptr, page, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  require(released != nullptr && VirtualFree(released, 0, MEM_RELEASE) != FALSE, "Could not create released query fixture");
+  require(compare(released).State == MEM_FREE, "Explicit query lost released-region state");
+  MEMORY_BASIC_INFORMATION invalid{};
+  const auto* inaccessible = reinterpret_cast<const void*>(std::numeric_limits<std::uintptr_t>::max());
+  require(VirtualQuery(inaccessible, &invalid, sizeof(invalid)) == 0 &&
+              VirtualQueryEx(GetCurrentProcess(), inaccessible, &invalid, sizeof(invalid)) == 0,
+          "Explicit query accepted an out-of-range address");
+
+  // Compare identical wrapper work on this process only. This does not model
+  // MSFS's address map, thread scheduling or any installed instrumentation.
+  Allocation benchmark(page * 16);
+  LARGE_INTEGER frequency{}, start{}, middle{}, end{};
+  constexpr unsigned repeats = 512;
+  constexpr unsigned queries_per_stage = 28;
+  std::uint64_t implicit_bytes = 0, explicit_bytes = 0;
+  require(QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&start), "Could not start public wrapper benchmark");
+  for (unsigned run = 0; run < repeats; ++run)
+    for (unsigned pass = 0; pass < 2; ++pass)
+      for (unsigned offset = 14; offset > 0; --offset) {
+        MEMORY_BASIC_INFORMATION region{};
+        require(VirtualQuery(benchmark.data + offset * page, &region, sizeof(region)) == sizeof(region), "Implicit query benchmark failed");
+        implicit_bytes += region.RegionSize;
+      }
+  require(QueryPerformanceCounter(&middle), "Could not time implicit queries");
+  for (unsigned run = 0; run < repeats; ++run)
+    for (unsigned pass = 0; pass < 2; ++pass)
+      for (unsigned offset = 14; offset > 0; --offset) {
+        MEMORY_BASIC_INFORMATION region{};
+        require(VirtualQueryEx(GetCurrentProcess(), benchmark.data + offset * page, &region, sizeof(region)) == sizeof(region),
+                "Explicit current-process query benchmark failed");
+        explicit_bytes += region.RegionSize;
+      }
+  require(QueryPerformanceCounter(&end) && implicit_bytes == explicit_bytes, "Public wrappers did not query equivalent extents");
+  std::printf(
+      "Own-process public query wrappers: queries_each=%u VirtualQuery_ms=%.6f VirtualQueryEx_ms=%.6f per28; live benefit unmeasured.\n",
+      repeats * queries_per_stage, double(middle.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart / repeats,
+      double(end.QuadPart - middle.QuadPart) * 1000 / frequency.QuadPart / repeats);
+}
 void measured_reads() {
   Allocation allocation(8192);
   LocalMemoryReader reader;
@@ -154,6 +245,74 @@ void cached_queries() {
     }
     require(reader.read(allocation.address(), output.data(), 8) && metrics.query_calls == 2 && metrics.query_cache_hits == 0,
             "Destruction leaked an unvalidated cache into later operations");
+  }
+}
+
+void fused_inspection_transactions() {
+  Allocation allocation(16384);
+  std::fill(allocation.data, allocation.data + allocation.size, 0x57);
+  // Two pure graph stages retain independent readers and complete trace rereads.
+  // They may share metadata only with the currently active outer transaction.
+  const auto stage = [&](ScopedLocalMemoryQueryCache& transaction, std::size_t offset, bool change_field = false) {
+    if (!transaction.is_current())
+      return false;
+    LocalMemoryReader reader;
+    std::uint64_t first = 0, second = 0;
+    if (!reader.read(allocation.address(offset), &first, sizeof(first)))
+      return false;
+    if (change_field)
+      allocation.data[offset] ^= 1u;
+    return reader.read(allocation.address(offset), &second, sizeof(second)) && first == second;
+  };
+  LocalMemoryMetrics separate, fused;
+  {
+    ScopedLocalMemoryMetrics measured(separate);
+    for (const auto offset : {0u, 128u}) {
+      ScopedLocalMemoryQueryCache transaction;
+      require(stage(transaction, offset) && transaction.finish(), "Separate inspection failed");
+    }
+  }
+  {
+    ScopedLocalMemoryMetrics measured(fused);
+    ScopedLocalMemoryQueryCache transaction;
+    require(stage(transaction, 0) && stage(transaction, 128), "Fused stages did not share their active transaction");
+    require(transaction.finish(), "Fused transaction was not revalidated before publication");
+    require(!transaction.is_current() && !stage(transaction, 0), "A completed proof was borrowed across an operation boundary");
+  }
+  require(separate.query_calls == 4 && fused.query_calls == 2 && separate.read_calls == 4 && fused.read_calls == 4 &&
+              separate.requested_bytes == 32 && fused.requested_bytes == 32,
+          "Fusing adjacent stages failed to remove repeated queries or changed exact field/trace reads");
+  {
+    ScopedLocalMemoryQueryCache transaction;
+    require(!stage(transaction, 0, true), "Shared metadata hid an identity change from the complete trace reread");
+    require(transaction.finish(), "A byte-only fixture change incorrectly changed memory metadata");
+  }
+  {
+    ScopedLocalMemoryQueryCache transaction;
+    require(stage(transaction, 0), "Protection-change first stage failed");
+    DWORD previous = 0;
+    require(VirtualProtect(allocation.data, allocation.size, PAGE_READONLY, &previous) != FALSE, "Could not change stage protection");
+    require(stage(transaction, 128), "Readable second stage unexpectedly failed");
+    require(!transaction.finish(), "Fused stages accepted protection changes before their single endpoint check");
+    require(VirtualProtect(allocation.data, allocation.size, previous, &previous) != FALSE, "Could not restore stage protection");
+  }
+  {
+    ScopedLocalMemoryQueryCache outer;
+    require(stage(outer, 0), "Outer transaction setup failed");
+    {
+      ScopedLocalMemoryQueryCache inner;
+      require(!outer.is_current() && !stage(outer, 128), "A pure stage borrowed a hidden outer transaction");
+      require(stage(inner, 128) && inner.finish(), "Independent nested transaction failed");
+    }
+    require(outer.is_current() && outer.finish(), "Nested scope lost the outer transaction");
+  }
+  {
+    LocalMemoryMetrics after_operation;
+    ScopedLocalMemoryMetrics measured(after_operation);
+    // A private-operation boundary requires a new proof, even for the same field.
+    ScopedLocalMemoryQueryCache transaction;
+    require(stage(transaction, 0) && transaction.finish() && after_operation.query_calls == 2,
+            "Post-operation inspection reused prior region metadata");
   }
 }
 
@@ -309,6 +468,120 @@ void cache_profile() {
               milliseconds(middle.QuadPart - started.QuadPart), milliseconds(finished.QuadPart - middle.QuadPart));
 }
 
+void descending_cache_profile() {
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const auto page = std::size_t(info.dwPageSize);
+  Allocation allocation(page * 16);
+  std::fill(allocation.data, allocation.data + allocation.size, 0x39);
+  LocalMemoryReader reader;
+  LocalMemoryMetrics metrics;
+  LARGE_INTEGER frequency{}, start{}, finish{};
+  require(QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&start), "Descending benchmark clock unavailable");
+  constexpr unsigned repeats = 128;
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    for (unsigned repeat = 0; repeat < repeats; ++repeat) {
+      reader.reset_budget();
+      ScopedLocalMemoryQueryCache cache;
+      // Graph traversal may discover lower-address objects after higher ones.
+      // Each requested field and its exact consistency reread remain present.
+      for (unsigned pass = 0; pass < 2; ++pass)
+        for (unsigned offset = 14; offset > 0; --offset) {
+          std::uint64_t value = 0;
+          require(reader.read(allocation.address(offset * page), &value, sizeof(value)) && value == 0x3939393939393939ull,
+                  "Descending cached field or complete reread changed");
+        }
+      require(cache.finish(), "Descending cache endpoint proof failed");
+    }
+  }
+  require(QueryPerformanceCounter(&finish), "Descending benchmark clock unavailable at endpoint");
+  require(metrics.query_calls == 2 * repeats && metrics.read_calls == 28 * repeats && metrics.requested_bytes == 224 * repeats,
+          "Canonical query failed to reduce descending queries or omitted exact fields");
+  std::printf("Descending own-allocation graph: queries_per_stage=%llu exact_reads=28 bytes=224 stage_ms=%.6f query_ms=%.6f\n",
+              static_cast<unsigned long long>(metrics.query_calls / repeats),
+              double(finish.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart / repeats,
+              double(metrics.query_ticks) * 1000 / frequency.QuadPart / repeats);
+}
+void canonical_query_ranges() {
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const auto page = std::size_t(info.dwPageSize);
+  Allocation allocation(65536);
+  require(page == 4096 && allocation.address() % 65536 == 0, "Canonical query fixture needs this host's aligned 64 KiB allocation");
+  std::fill(allocation.data, allocation.data + allocation.size, 0x39);
+  LocalMemoryReader reader;
+  for (const DWORD protection : {DWORD(PAGE_NOACCESS), DWORD(PAGE_READWRITE | PAGE_GUARD), DWORD(PAGE_READONLY)}) {
+    DWORD previous = 0;
+    require(VirtualProtect(allocation.data, page, protection, &previous) != FALSE, "Could not protect preceding query page");
+    LocalMemoryMetrics metrics;
+    {
+      ScopedLocalMemoryMetrics measured(metrics);
+      ScopedLocalMemoryQueryCache cache;
+      std::uint64_t output = 0;
+      require(reader.read(allocation.address(3 * page), &output, sizeof(output)) && output == 0x3939393939393939ull,
+              "Earlier metadata query changed the actual field read");
+      require(cache.finish() && metrics.query_calls == 3 && metrics.read_calls == 1 && metrics.requested_bytes == 8,
+              "Preceding split did not use exact-address fallback and exact endpoint proof");
+    }
+    MEMORY_BASIC_INFORMATION prefix{};
+    require(VirtualQuery(allocation.data, &prefix, sizeof(prefix)) == sizeof(prefix) && prefix.Protect == protection,
+            "Earlier metadata query consumed a guard or changed preceding protection");
+    require(VirtualProtect(allocation.data, page, PAGE_READWRITE, &previous) != FALSE, "Could not restore preceding query page");
+  }
+  require(VirtualFree(allocation.data, page, MEM_DECOMMIT) != FALSE, "Could not decommit preceding query page");
+  {
+    LocalMemoryMetrics metrics;
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    require(reader.read(allocation.address(3 * page), &output, sizeof(output)) && cache.finish() && metrics.query_calls == 3 &&
+                metrics.read_calls == 1 && output == 0x3939393939393939ull,
+            "Reserved preceding page bypassed exact-address fallback");
+  }
+  require(VirtualAlloc(allocation.data, page, MEM_COMMIT, PAGE_READWRITE) == allocation.data, "Could not recommit preceding page");
+  std::fill(allocation.data, allocation.data + page, 0x39);
+  // Changes outside the actual field still invalidate the broader observation.
+  for (const auto changed : {0u, 3u, 15u}) {
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    DWORD previous = 0;
+    require(reader.read(allocation.address(8 * page), &output, sizeof(output)), "Canonical extent initial read failed");
+    require(VirtualProtect(allocation.data + changed * page, page, PAGE_READONLY, &previous) != FALSE, "Could not split canonical extent");
+    require(reader.read(allocation.address(8 * page), &output, sizeof(output)) && !cache.finish(),
+            "Changed preceding/succeeding page escaped canonical endpoint proof");
+    require(VirtualProtect(allocation.data + changed * page, page, PAGE_READWRITE, &previous) != FALSE,
+            "Could not restore canonical extent");
+  }
+  // The fixed region cap still bounds both fallback queries and every endpoint.
+  std::vector<std::unique_ptr<Allocation>> allocations;
+  for (unsigned i = 0; i <= ScopedLocalMemoryQueryCache::kRegionLimit; ++i) {
+    auto item = std::make_unique<Allocation>(65536);
+    DWORD previous = 0;
+    require(VirtualProtect(item->data, page, PAGE_NOACCESS, &previous) != FALSE, "Could not create bounded fallback fixture");
+    allocations.push_back(std::move(item));
+  }
+  {
+    LocalMemoryMetrics metrics;
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    for (unsigned i = 0; i < ScopedLocalMemoryQueryCache::kRegionLimit; ++i)
+      require(reader.read(allocations[i]->address(page), &output, sizeof(output)), "Allowed bounded fallback read failed");
+    require(metrics.query_calls == 128 && cache.finish() && metrics.query_calls == 192 && metrics.read_calls == 64,
+            "Fallback query plus endpoint exceeded or omitted fixed 192-call maximum");
+  }
+  {
+    LocalMemoryMetrics metrics;
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    std::uint64_t output = 0;
+    for (unsigned i = 0; i < ScopedLocalMemoryQueryCache::kRegionLimit; ++i)
+      require(reader.read(allocations[i]->address(page), &output, sizeof(output)), "Bounded fallback cap setup failed");
+    require(!reader.read(allocations.back()->address(page), &output, sizeof(output)) && metrics.query_calls == 128 && !cache.finish(),
+            "Region cap issued an extra canonical or fallback query");
+  }
+}
 void private_memory_reads() {
   SYSTEM_INFO info{};
   GetSystemInfo(&info);
@@ -759,11 +1032,15 @@ void synthetic_headers() {
 }  // namespace
 
 int main() {
+  public_query_equivalence();
   measured_reads();
   cached_queries();
+  fused_inspection_transactions();
   cache_protection_changes();
   cache_bounds();
   cache_profile();
+  descending_cache_profile();
+  canonical_query_ranges();
   private_memory_reads();
   large_private_fields();
   bulk_read_profile();

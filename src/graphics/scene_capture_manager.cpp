@@ -1,5 +1,6 @@
 #include "scene_capture_manager.hpp"
 #include "../hooks/render_boundary_observer.hpp"
+#include "../profiles/catalog.hpp"
 #include "native_device_identity.hpp"
 
 #include <chrono>
@@ -236,9 +237,9 @@ bool SceneCaptureManager::register_source_candidate(std::uint64_t key,
                                                     std::uint64_t generation,
                                                     const D3D12_RESOURCE_DESC& desc,
                                                     source_state::Model initial) noexcept {
-  if (!resource || !generation || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.Width != 768 ||
-      (desc.Height != 255 && desc.Height != 504) || desc.MipLevels != 1 || desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 ||
-      desc.SampleDesc.Quality || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
+  if (!resource || !generation || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+      !profiles::camera_candidate(static_cast<UINT>(desc.Width), desc.Height) || desc.MipLevels != 1 || desc.DepthOrArraySize != 1 ||
+      desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
       (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) != 0 ||
       (desc.Format != DXGI_FORMAT_R11G11B10_FLOAT && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
        desc.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT))
@@ -322,24 +323,31 @@ void SceneCaptureManager::after_source_draw(ID3D12GraphicsCommandList* native, s
     if (!source || source->generation != key.generation || source->device_key != item->device_key)
       continue;
     item->source_touched = true;
-    if (!allowed)
+    if (!allowed) {
+      ++stats_.invalid_draws;
       item->source_effects.invalidate();
-    else {
+    } else {
       item->source_effects.append({key, source_state::Effect::Kind::draw});
       // The exact application Draw has completed but has not returned to its
       // caller: its actual bound RTV source is still a live resource argument.
       // Keep one reference per recording, never a registry-lifetime reference.
-      if (source_tracking_ && !retain_source_lease(item->source_leases, item->source_lease_count, key, source->native))
+      if (source_tracking_ && !retain_source_lease(item->source_leases, item->source_lease_count, key, source->native)) {
+        ++stats_.source_lease_failures;
         item->source_effects.invalidate();
+      }
       ++stats_.source_draws;
     }
   }
 }
-void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList* native, std::uint64_t generation, bool global) noexcept {
+void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList* native,
+                                                      std::uint64_t generation,
+                                                      bool global,
+                                                      std::uint32_t reasons) noexcept {
   if (source_stage.owner == this && source_stage.list == native)
     source_stage = {};
   const std::lock_guard lock(mutex_);
   if (auto* item = list(native); item && item->object_generation == generation) {
+    stats_.last_invalidation_reasons = reasons;
     item->source_effects.invalidate();
     item->source_touched |= global;
   }
@@ -384,6 +392,7 @@ void SceneCaptureManager::observe_source_legacy(ID3D12GraphicsCommandList* nativ
     return;
   if (barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
     if (!barrier.Aliasing.pResourceBefore || !barrier.Aliasing.pResourceAfter) {
+      ++stats_.global_aliases;
       item->source_touched = true;
       item->source_effects.invalidate();
     } else {
@@ -873,9 +882,29 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
                                                      ID3D12CommandList* const* native_lists) noexcept {
   if (transaction_owner || !native_lists || !count || count > engine_hook::queue_submit::kMaximumCommandLists)
     return 0;
-  std::unique_lock submission_lock(submission_mutex_);
+  // Discovery can acquire the bridge registry lock. Run it before submission
+  // serialization to avoid registry -> runtime -> submission -> registry.
+  // The actual Execute arguments keep these native objects alive throughout.
   observe_unknown_lists(queue, count, native_lists);
+  {
+    const std::lock_guard lock(mutex_);
+    bool known_unrelated = true;
+    for (UINT index = 0; index < count; ++index) {
+      const auto* item = list(static_cast<ID3D12GraphicsCommandList*>(native_lists[index]));
+      if (!item || item->awaiting_native_reset || item->packets || item->consumer || item->source_touched) {
+        known_unrelated = false;
+        break;
+      }
+    }
+    // Only fully observed recordings with no owned work or source-state effects
+    // can bypass ordering. Unknown recordings keep conservative invalidation.
+    if (known_unrelated)
+      return 0;
+  }
+  std::unique_lock submission_lock(submission_mutex_);
   const std::lock_guard lock(mutex_);
+  // Re-read every recording after serialization: Reset/retirement may have
+  // changed its identity, effects or leases while this submission was waiting.
   Device* owner = nullptr;
   std::uint16_t mask = 0;
   bool consumer = false;
@@ -920,8 +949,10 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
       for (UINT index = 0; index < count; ++index) {
         const auto* item = list(static_cast<ID3D12GraphicsCommandList*>(native_lists[index]));
         if (item && item->source_touched) {
-          if (!owner->source_states.apply(item->source_effects))
+          if (!owner->source_states.apply(item->source_effects)) {
             ++stats_.invalid_source_recordings;
+            stats_.recording_overflows += item->source_effects.overflowed;
+          }
           // The source reference is already owned by the recording. Snapshot
           // it before original Execute so concurrent successful Reset cannot
           // retire the only lease before the post-submit tail acquires it.

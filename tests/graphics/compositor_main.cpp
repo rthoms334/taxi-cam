@@ -145,7 +145,12 @@ void pixel_case(ID3D12Device* device,
                 bool check_refusals,
                 Result& result,
                 const std::array<float, 2>& exposures = {-8, -4},
-                bool overlay_case = false) {
+                bool overlay_case = false,
+                bool round_nose = false) {
+  auto layout = taxi_camera::profiles::A380.composition;
+  if (round_nose)
+    layout.square_nose_markers = taxi_camera::profiles::A359.composition.square_nose_markers;
+  compositor.set_composition(layout);
   std::array<Reference<ID3D12Resource>, 2> sources;
   for (std::size_t index = 0; index < sources.size(); ++index) {
     const auto& source = source_descriptions[index];
@@ -319,25 +324,38 @@ void pixel_case(ID3D12Device* device,
       for (UINT y = 100; y < 145; ++y)
         for (UINT x = 90; x < 678; ++x)
           if (is_magenta(x, y)) {
-            require(((x >= 101 && x < 115) || (x >= 653 && x < 667)) && y >= 115 && y < 129,
-                    "Nose marker exceeds its centred 14px square");
+            if (!round_nose)
+              require(((x >= 101 && x < 115) || (x >= 653 && x < 667)) && y >= 115 && y < 129,
+                      "Nose marker exceeds its centred 14px square");
             ++nose_pixels;
           }
-      require(nose_pixels == 392, "Both A380 nose markers must be filled 14-by-14 squares");
+      if (round_nose)
+        require(nose_pixels == 226 && !is_magenta(100, 114) && !is_magenta(115, 129),
+                "A350 nose markers must be 12-pixel-diameter circles");
+      else
+        require(nose_pixels == 392, "Both A380 nose markers must be filled 14-by-14 squares");
       require(is_magenta(234, 637) && is_magenta(533, 637) && is_magenta(253, 574) && is_magenta(514, 574) && is_magenta(279, 641) &&
                   is_magenta(488, 641) && !is_magenta(245, 631),
               "Tail reference brackets missed the reference photograph landmarks");
     }
+    reference_overlay_oracle::FontCoverage font_coverage;
     for (UINT y = 0; y < 1024; ++y) {
       const auto* row = static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch;
       for (UINT x = 0; x < 768; ++x) {
+        const int font_cell = reference_overlay_oracle::font_cell(x, y, overlay_case && frame == 0, 11);
+        if (font_cell >= 0) {
+          require(font_coverage.observe(font_cell, row + x * 4), "GS font lost its opaque white-label/green-value colour contract");
+          ++result.checked_pixels;
+          continue;
+        }
         std::array<unsigned char, 4> expected{0, 0, 0, 255};
         int tolerance = 0;
         if (y >= 763) {
           expected = SentinelBytes;
           ++result.lower_pixels;
-        } else if (reference_overlay_oracle::pixel(x, y, expected, overlay_case && frame == 0, overlay_case && frame == 0, 11)) {
-          if (y >= 245 && y < 269)
+        } else if (reference_overlay_oracle::pixel(x, y, expected, overlay_case && frame == 0, overlay_case && frame == 0, 11,
+                                                   round_nose)) {
+          if (y >= 251 && y < 263)
             ++result.divider_pixels;
           if (expected == std::array<unsigned char, 4>{255, 0, 255, 255})
             ++result.magenta_pixels;
@@ -365,6 +383,7 @@ void pixel_case(ID3D12Device* device,
         ++result.checked_pixels;
       }
     }
+    require(font_coverage.complete(overlay_case && frame == 0, 11), "GS glyphs are missing, filled rectangles or missing antialiasing");
     const D3D12_RANGE no_writes{0, 0};
     readbacks[frame]->Unmap(0, &no_writes);
     ++result.frames;
@@ -433,16 +452,17 @@ Result run(bool force_warp) {
   const std::array<Source, 2> mixed{pairs[0][0], pairs.back()[1]};
   pixel_case(device.get(), compositor, generator, mixed, false, result);
   // Record on/off states before one submit. Pixel oracle covers magenta
-  // dots/bracket landmarks, mirror symmetry, permanent24px divider, GS11 versus '--', and
+  // dots/bracket landmarks, mirror symmetry, divider, opaque GS11/'--' glyph coverage, and
   // every unmarked camera/lower-trim pixel. No descriptor or shader changes.
   pixel_case(device.get(), compositor, generator, pairs[0], false, result, {-8, -8}, true);
+  pixel_case(device.get(), compositor, generator, pairs[0], false, result, {-8, -8}, true, true);
   auto night = pairs.back();
   night[0].night = night[1].night = true;
   pixel_case(device.get(), compositor, generator, night, false, result,
              {Compositor::DefaultExposureEv, Compositor::DefaultExposureEv + taxi_camera::DisplayExposureController::DefaultNightBoostEv});
   result.statistics = compositor.statistics();
-  require(result.statistics.shader_compiles == 2 && result.statistics.descriptor_writes == 19 && result.statistics.input_changes == 9 &&
-              result.statistics.recordings == 18 && result.night_rgb_checks == 2 && result.float_pixels > 1000000 &&
+  require(result.statistics.shader_compiles == 2 && result.statistics.descriptor_writes == 21 && result.statistics.input_changes == 10 &&
+              result.statistics.recordings == 20 && result.night_rgb_checks == 2 && result.float_pixels > 1000000 &&
               result.packed_float_pixels > 2900000 && result.magenta_pixels > 400,
           "Unexpected compositor rebuild, descriptor update or recording count");
   compositor.release();

@@ -53,7 +53,7 @@ std::atomic<CopyResource> original_copy_resource{nullptr};
 std::atomic<CopyTexture> original_copy_texture{nullptr};
 std::atomic<std::uint64_t> legacy_calls{0}, enhanced_calls{0}, legacy_candidates{0}, enhanced_candidates{0}, pass_refusals{0},
     batch_refusals{0};
-std::atomic<std::uint64_t> copy_resource_calls{0}, copy_texture_calls{0}, metadata_truncated_calls{0};
+std::atomic<std::uint64_t> copy_resource_calls{0}, copy_texture_calls{0}, metadata_truncated_calls{0}, maximum_legacy_batch{0};
 std::array<Slot, 8> slots{{{26}, {68}, {69}, {80}, {12}, {13}, {16}, {17}}};
 struct ActiveEndSlot {
   void* table = nullptr;
@@ -121,6 +121,24 @@ void notify_invalidation(ID3D12GraphicsCommandList* list, std::uint64_t generati
   if (reasons && callbacks.recording_invalidated && same_identity(list, generation))
     callbacks.recording_invalidated(callbacks.context, list, generation, reasons);
 }
+// Keep optional client cache scopes balanced even when identity changes during
+// metadata callbacks. The guard is destroyed before any injection or native call.
+struct MetadataScope {
+  ID3D12GraphicsCommandList* list;
+  std::uint64_t generation;
+  void* context;
+  void (*end)(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept;
+  MetadataScope(ID3D12GraphicsCommandList* value, std::uint64_t id) noexcept
+      : list(value), generation(id), context(callbacks.context),
+        end(callbacks.metadata_begin && callbacks.metadata_end ? callbacks.metadata_end : nullptr) {
+    if (end)
+      callbacks.metadata_begin(context, list, generation);
+  }
+  ~MetadataScope() {
+    if (end)
+      end(context, list, generation);
+  }
+};
 bool global_uncertainty(std::uint32_t reasons) noexcept {
   return (reasons & ~(InvalidationPassBegin | InvalidationSplitBarrier | InvalidationAliasOrDiscard)) != 0;
 }
@@ -243,6 +261,53 @@ void STDMETHODCALLTYPE copy_texture(ID3D12GraphicsCommandList* list,
     callbacks.after_copy_texture(callbacks.context, list, identity.generation, destination, x, y, z, source, box,
                                  same_safe(list, identity.generation));
 }
+// Only called after a complete bounded metadata scan excludes global uncertainty.
+// This adds O(2*N) comparisons and never uses the generic quadratic prefix scan.
+void selected_legacy(ID3D12GraphicsCommandList* list,
+                     std::uint64_t generation,
+                     UINT count,
+                     const D3D12_RESOURCE_BARRIER* barriers) noexcept {
+  if (!callbacks.selected_legacy_targets || !same_safe(list, generation)) {
+    ++batch_refusals;
+    return;
+  }
+  std::array<ID3D12Resource*, 2> targets{};
+  const UINT selected = callbacks.selected_legacy_targets(callbacks.context, list, generation, targets.data(), 2);
+  if (!selected || selected > targets.size() || !targets[0] || (selected == 2 && (!targets[1] || targets[0] == targets[1])) ||
+      !same_safe(list, generation)) {
+    ++batch_refusals;
+    return;
+  }
+  std::array<bool, 2> seen{};
+  UINT remaining = selected;
+  for (UINT n = 0; n < count && remaining; ++n) {
+    const auto& b = barriers[n];
+    // Preserve the generic prefix guard: even another resource's alias has
+    // unknown heap overlap. NULL aliases likewise refuse the remaining targets.
+    if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+      ++batch_refusals;
+      break;
+    }
+    if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
+      continue;
+    for (UINT target = 0; target < selected; ++target) {
+      if (seen[target] || b.Transition.pResource != targets[target])
+        continue;
+      seen[target] = true;
+      --remaining;
+      // Every first transition consumes this target, including splits or other
+      // states/subresources; a later RT exit cannot assume the pre-batch state.
+      if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE || b.Transition.StateBefore != D3D12_RESOURCE_STATE_RENDER_TARGET ||
+          b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ||
+          (b.Transition.Subresource != 0 && b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES))
+        continue;
+      if (!same_safe(list, generation))
+        return;
+      ++legacy_candidates;
+      callbacks.before_legacy(callbacks.context, list, generation, b.Transition);
+    }
+  }
+}
 void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const D3D12_RESOURCE_BARRIER* barriers) noexcept {
   const auto original = original_legacy.load(std::memory_order_acquire);
   if (inside) {
@@ -251,13 +316,23 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
   }
   const Guard guard;
   const auto identity = lookup(list);
-  if (identity.generation)
+  if (identity.generation) {
     ++legacy_calls;
+    auto maximum = maximum_legacy_batch.load(std::memory_order_relaxed);
+    while (count > maximum && !maximum_legacy_batch.compare_exchange_weak(maximum, count, std::memory_order_relaxed)) {
+    }
+  }
   auto uncertainty = scope_invalidation(identity);
-  if (count && (!barriers || count > 4096))
+  const bool metadata_complete =
+      !count || (barriers && count <= maximum_legacy_metadata_barriers &&
+                 reinterpret_cast<std::uintptr_t>(barriers) <= UINTPTR_MAX - std::uint64_t(count) * sizeof(*barriers));
+  if (!metadata_complete) {
     uncertainty |= InvalidationBarrierBatch;
-  if (identity.generation && barriers) {
-    const auto count_observed = count > 4096 ? 4096 : count;
+    if (identity.generation)
+      ++metadata_truncated_calls;
+  }
+  if (identity.generation && metadata_complete && barriers) {
+    const auto count_observed = count;
     for (UINT n = 0; n < count_observed; ++n) {
       const auto& b = barriers[n];
       if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING)
@@ -275,10 +350,9 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
         uncertainty |= InvalidationBarrierBatch;
     }
   }
-  if (identity.generation && callbacks.observe_legacy && barriers) {
-    const auto count_observed = count > 4096 ? 4096 : count;
-    if (count > 4096)
-      ++metadata_truncated_calls;
+  if (identity.generation && metadata_complete && callbacks.observe_legacy && barriers) {
+    const MetadataScope metadata(list, identity.generation);
+    const auto count_observed = count;
     const auto scope = scope_flags(identity) | (global_uncertainty(uncertainty) ? ScopeInvalidRecording : 0u);
     for (UINT n = 0; n < count_observed; ++n) {
       if (!same_identity(list, identity.generation))
@@ -290,8 +364,10 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
   // leave a seemingly complete state from its last observed prefix element.
   notify_invalidation(list, identity.generation, uncertainty);
   if (allowed(identity)) {
-    if (!barriers || !count || count > 256)
+    if (!metadata_complete || global_uncertainty(uncertainty) || !barriers || !count)
       ++batch_refusals;
+    else if (count > 256)
+      selected_legacy(list, identity.generation, count, barriers);
     else
       for (UINT n = 0; n < count; ++n) {
         const auto& b = barriers[n];
@@ -487,6 +563,7 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
     if (!metadata_complete)
       ++metadata_truncated_calls;
     else {
+      const MetadataScope metadata(list, identity.generation);
       const auto scope = scope_flags(identity) | (global_uncertainty(uncertainty) ? ScopeInvalidRecording : 0u);
       for (UINT g = 0; g < count; ++g) {
         if (groups[g].Type != D3D12_BARRIER_TYPE_TEXTURE)
@@ -501,7 +578,7 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
   }
   notify_invalidation(list, identity.generation, uncertainty);
   if (allowed(identity)) {
-    if (!texture_batches(count, groups))
+    if (!metadata_complete || global_uncertainty(uncertainty) || !texture_batches(count, groups))
       ++batch_refusals;
     else
       for (UINT group = 0; group < count; ++group) {
@@ -622,7 +699,8 @@ bool same_callbacks(const Callbacks& a, const Callbacks& b) noexcept {
   return a.context == b.context && a.before_legacy == b.before_legacy && a.before_enhanced == b.before_enhanced &&
          a.observe_legacy == b.observe_legacy && a.observe_enhanced == b.observe_enhanced &&
          a.after_copy_resource == b.after_copy_resource && a.after_copy_texture == b.after_copy_texture && a.after_draw == b.after_draw &&
-         a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended;
+         a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended &&
+         a.selected_legacy_targets == b.selected_legacy_targets && a.metadata_begin == b.metadata_begin && a.metadata_end == b.metadata_end;
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
   {
@@ -832,13 +910,17 @@ Result repair_protection() noexcept {
   DWORD error = 0;
   return repair(error) ? result("protection_restored") : result("protection_restore_failed", error);
 }
+bool recording_allows_injection(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  return list && generation && same_safe(list, generation);
+}
 bool operational() noexcept {
   return enabled.load(std::memory_order_acquire);
 }
 Statistics statistics() noexcept {
   return {legacy_calls.load(),        enhanced_calls.load(),     legacy_candidates.load(),
           enhanced_candidates.load(), pass_refusals.load(),      batch_refusals.load(),
-          copy_resource_calls.load(), copy_texture_calls.load(), metadata_truncated_calls.load()};
+          copy_resource_calls.load(), copy_texture_calls.load(), metadata_truncated_calls.load(),
+          maximum_legacy_batch.load()};
 }
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 std::uint32_t validation_state(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {

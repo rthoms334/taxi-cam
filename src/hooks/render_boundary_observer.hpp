@@ -6,6 +6,9 @@
 #include <cstdint>
 
 namespace taxi_camera::engine_hook::render_boundary {
+// Linear metadata inspection, without allocations or resource dereferences.
+// Generic insertion is capped at 256; larger complete batches admit only the two explicitly selected PFD identities.
+inline constexpr UINT maximum_legacy_metadata_barriers = 1u << 20;
 enum ScopeFlags : std::uint32_t {
   ScopeEnabled = 1,
   ScopeActivePass = 2,
@@ -45,7 +48,9 @@ struct Callbacks {
                           std::uint64_t object_generation,
                           const D3D12_TEXTURE_BARRIER&) noexcept = nullptr;
   // Metadata only, before RT/pass filters; never issue GPU work here. Inspect
-  // at most4096 barriers/64 groups per call, without dereferencing resources.
+  // Legacy batches are inspected completely up to the explicit metadata bound;
+  // larger/null/overflowing spans are rejected in full. Enhanced metadata is
+  // bounded to 4096 barriers/64 groups. No resource pointer is dereferenced.
   // Legacy delivery includes exact transition, alias and UAV records; NULL
   // alias arguments retain their wildcard meaning. Unknown types invalidate.
   void (*observe_legacy)(void*,
@@ -96,6 +101,25 @@ struct Callbacks {
                        const D3D12_RENDER_PASS_RENDER_TARGET_DESC*,
                        const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*) noexcept = nullptr;
   void (*pass_ended)(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept = nullptr;
+  // Optional comparison-only selection for complete legacy batches >256.
+  // Called once with capacity two, outside locks, under the reentry guard.
+  // Return zero, one, or two distinct nonnull pointers; no resource dereference,
+  // lifetime acquisition or GPU commands here. Actual before_legacy arguments
+  // still require caller-owned generation/lifetime/shape admission. At most one
+  // first eligible transition per selected resource is delivered before the
+  // unchanged original batch. All metadata and pass guards remain mandatory.
+  UINT (*selected_legacy_targets)(void*,
+                                  ID3D12GraphicsCommandList*,
+                                  std::uint64_t object_generation,
+                                  ID3D12Resource** targets,
+                                  UINT capacity) noexcept = nullptr;
+  // Optional paired metadata scope, outside observer locks. Begin/end bracket
+  // only the complete metadata loop, including early identity refusal. No GPU
+  // work or retained native-object ownership is granted. Implementations may
+  // cache lifetime-qualified metadata until end; individual guards still apply.
+  // Both callbacks must be provided; a partial pair is ignored.
+  void (*metadata_begin)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
+  void (*metadata_end)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;
@@ -107,6 +131,7 @@ struct Statistics {
   std::uint64_t legacy_calls = 0, enhanced_calls = 0, legacy_candidates = 0, enhanced_candidates = 0;
   std::uint64_t pass_refusals = 0, batch_refusals = 0;
   std::uint64_t copy_resource_calls = 0, copy_texture_calls = 0, metadata_truncated_calls = 0;
+  std::uint64_t maximum_legacy_batch = 0;
 };
 // Explicit live native DIRECT object. QI7 must succeed and return this identical
 // interface pointer before its extended vtable slots are inspected. Eight slots
@@ -135,6 +160,10 @@ void invalidate_recording(ID3D12GraphicsCommandList*,
 Result remove() noexcept;
 Result repair_protection() noexcept;
 bool operational() noexcept;
+// Permission for caller-owned work at an actual native list boundary. This is
+// only recording/pass permission; callers must separately prove the bound RTV,
+// resource lifetime/state and complete graphics restoration.
+bool recording_allows_injection(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;
 Statistics statistics() noexcept;
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 // Test-only scalar state; never part of the production add-on interface.

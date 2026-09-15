@@ -29,6 +29,7 @@ struct Recording {
   std::array<Effect, capacity> effects{};
   std::size_t count = 0;
   bool invalid = false;
+  bool overflowed = false;
 
   // Repeated draw evidence collapses across independent keys until this key's
   // next state effect. Transitions only collapse when consecutively identical.
@@ -38,6 +39,7 @@ struct Recording {
   void reset() noexcept {
     count = 0;
     invalid = false;
+    overflowed = false;
   }
 };
 

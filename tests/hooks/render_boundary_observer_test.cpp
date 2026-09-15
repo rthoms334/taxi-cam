@@ -10,6 +10,21 @@ namespace obs = taxi_camera::engine_hook::render_boundary;
 namespace {
 std::atomic<unsigned> protect_calls{0};
 std::atomic<unsigned> query_calls{0}, rpm_calls{0};
+unsigned metadata_begins = 0, metadata_ends = 0, metadata_depth = 0, metadata_errors = 0;
+bool retire_metadata = false, retire_metadata_begin = false;
+void metadata_begin(void*, ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  if (retire_metadata_begin)
+    obs::unregister_list(list, generation);
+  ++metadata_begins;
+  if (++metadata_depth != 1)
+    ++metadata_errors;
+}
+void metadata_end(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept {
+  ++metadata_ends;
+  if (metadata_depth != 1)
+    ++metadata_errors;
+  metadata_depth = 0;
+}
 unsigned fail_protect_call = 0;
 unsigned fail_rpm_call = 0, short_rpm_call = 0;
 SIZE_T last_rpm_bytes = 0;
@@ -101,6 +116,8 @@ original_draw_indexed(ID3D12GraphicsCommandList* list, UINT count, UINT instance
   evidence.vertex_offset = offset;
 }
 void STDMETHODCALLTYPE original_legacy(ID3D12GraphicsCommandList* list, UINT count, const D3D12_RESOURCE_BARRIER* barriers) {
+  if (metadata_depth)
+    ++metadata_errors;
   ++evidence.legacy;
   evidence.forwarded_list = list;
   evidence.legacy_count = count;
@@ -108,6 +125,8 @@ void STDMETHODCALLTYPE original_legacy(ID3D12GraphicsCommandList* list, UINT cou
   note(2);
 }
 void STDMETHODCALLTYPE original_enhanced(ID3D12GraphicsCommandList7* list, UINT count, const D3D12_BARRIER_GROUP* groups) {
+  if (metadata_depth)
+    ++metadata_errors;
   ++evidence.enhanced;
   evidence.forwarded_list = list;
   evidence.enhanced_count = count;
@@ -168,6 +187,8 @@ void callback_legacy(void*,
                      ID3D12GraphicsCommandList* list,
                      std::uint64_t generation,
                      const D3D12_RESOURCE_TRANSITION_BARRIER& value) noexcept {
+  if (metadata_depth)
+    ++metadata_errors;
   ++evidence.legacy_callbacks;
   evidence.callback_generation = generation;
   evidence.callback_resource = value.pResource;
@@ -183,6 +204,8 @@ void callback_legacy(void*,
     obs::unregister_list(list, generation);
 }
 void callback_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t generation, const D3D12_TEXTURE_BARRIER& value) noexcept {
+  if (metadata_depth)
+    ++metadata_errors;
   ++evidence.enhanced_callbacks;
   evidence.callback_generation = generation;
   evidence.callback_resource = value.pResource;
@@ -198,7 +221,11 @@ void callback_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t ge
   if (evidence.retire)
     obs::unregister_list(list, generation);
 }
-void raw_legacy(void*, ID3D12GraphicsCommandList*, std::uint64_t, const D3D12_RESOURCE_BARRIER& barrier, std::uint32_t flags) noexcept {
+void raw_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t generation, const D3D12_RESOURCE_BARRIER& barrier, std::uint32_t flags) noexcept {
+  if (metadata_depth != 1)
+    ++metadata_errors;
+  if (retire_metadata)
+    obs::unregister_list(list, generation);
   ++evidence.raw_legacy;
   evidence.raw_scope = flags;
   evidence.raw_type = barrier.Type;
@@ -210,6 +237,8 @@ void raw_legacy(void*, ID3D12GraphicsCommandList*, std::uint64_t, const D3D12_RE
       barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ? barrier.Transition.StateBefore : D3D12_RESOURCE_STATE_COMMON;
 }
 void raw_enhanced(void*, ID3D12GraphicsCommandList7*, std::uint64_t, const D3D12_TEXTURE_BARRIER&, std::uint32_t flags) noexcept {
+  if (metadata_depth != 1)
+    ++metadata_errors;
   ++evidence.raw_enhanced;
   evidence.raw_scope = flags;
 }
@@ -265,7 +294,7 @@ void invalidated(void*, ID3D12GraphicsCommandList* list, std::uint64_t generatio
   }
 }
 const obs::Callbacks callbacks{nullptr,        callback_legacy, callback_enhanced, raw_legacy, raw_enhanced,
-                               after_resource, after_texture,   after_draw,        invalidated};
+                               after_resource, after_texture,   after_draw,        invalidated, nullptr, nullptr, nullptr, metadata_begin, metadata_end};
 D3D12_RESOURCE_BARRIER legacy_transition(ID3D12Resource* resource) {
   D3D12_RESOURCE_BARRIER value{};
   value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -815,7 +844,24 @@ int main() {
     obs::successful_reset(list, 2);
     raw_before = evidence.raw_legacy;
     check_legacy(4097, metadata_barriers.data(), 0, "Metadata cap relaxed native capture cap");
-    require(evidence.raw_legacy == raw_before + 4096, "Legacy metadata bound incorrect");
+    require(evidence.raw_legacy == raw_before + 4097, "Complete large legacy metadata was truncated");
+    const auto large_invalidations = evidence.invalidations;
+    metadata_barriers.resize(65537, transition);
+    metadata_barriers.back() = legacy_transition(other_resource);
+    raw_before = evidence.raw_legacy;
+    check_legacy(static_cast<UINT>(metadata_barriers.size()), metadata_barriers.data(), 0,
+                 "Large metadata batch relaxed native capture cap");
+    require(evidence.raw_legacy == raw_before + metadata_barriers.size() && evidence.invalidations == large_invalidations &&
+                (evidence.raw_scope & obs::ScopeInvalidRecording) == 0,
+            "Valid large batch invalidated otherwise persistent source state");
+    require(obs::statistics().maximum_legacy_batch == metadata_barriers.size(), "Largest legacy batch was not recorded");
+    // The original API is still called exactly once, but an oversized span is
+    // refused before inspecting any prefix (the supplied small array is safe).
+    raw_before = evidence.raw_legacy;
+    check_legacy(obs::maximum_legacy_metadata_barriers + 1, metadata_barriers.data(), 0, "Oversize batch forwarding changed");
+    require(evidence.raw_legacy == raw_before && evidence.invalidations == large_invalidations + 1 &&
+                (evidence.invalid_reasons & obs::InvalidationBarrierBatch),
+            "Oversize metadata guard lost");
     auto enhanced_raw_before = evidence.raw_enhanced;
     D3D12_BARRIER_GROUP metadata_group{};
     metadata_group.Type = D3D12_BARRIER_TYPE_TEXTURE;
@@ -893,7 +939,7 @@ int main() {
     list->ResourceBarrier(1, &uncertain);
     require((evidence.invalid_reasons & obs::InvalidationBarrierBatch) != 0 && (evidence.raw_scope & obs::ScopeInvalidRecording) != 0,
             "Unknown transition flags were treated as source-specific split metadata");
-    list->ResourceBarrier(4097, metadata_barriers.data());
+    list->ResourceBarrier(obs::maximum_legacy_metadata_barriers + 1, metadata_barriers.data());
     require((evidence.invalid_reasons & obs::InvalidationBarrierBatch) != 0, "Truncated legacy metadata remained usable");
     auto uncertain_texture = texture;
     uncertain_texture.Flags = D3D12_TEXTURE_BARRIER_FLAG_DISCARD;
@@ -939,6 +985,24 @@ int main() {
     evidence.retire_copy_original = false;
     require(evidence.after_resources == old_after, "Post-copy callback crossed destroyed generation");
     require(obs::register_list(list, 3, callbacks).ready, "Copy-retired address cannot register new generation");
+    const auto scope_begin_before = metadata_begins, scope_end_before = metadata_ends, raw_scope_before = evidence.raw_legacy;
+    std::array<D3D12_RESOURCE_BARRIER, 3> retire_batch{transition, transition, transition};
+    retire_metadata = true;
+    list->ResourceBarrier(static_cast<UINT>(retire_batch.size()), retire_batch.data());
+    retire_metadata = false;
+    require(metadata_begins == scope_begin_before + 1 && metadata_ends == scope_end_before + 1 && !metadata_depth &&
+                evidence.raw_legacy == raw_scope_before + 1,
+            "Metadata scope failed to unwind after per-item identity retirement");
+    require(obs::register_list(list, 3, callbacks).ready, "Metadata-retired generation cannot re-register");
+    const auto begin_retire_raw = evidence.raw_legacy, begin_retire_scopes = metadata_begins;
+    retire_metadata_begin = true;
+    list->ResourceBarrier(static_cast<UINT>(retire_batch.size()), retire_batch.data());
+    retire_metadata_begin = false;
+    require(evidence.raw_legacy == begin_retire_raw && metadata_begins == begin_retire_scopes + 1 && metadata_begins == metadata_ends,
+            "Begin-side identity retirement escaped RAII or delivered stale metadata");
+    require(obs::register_list(list, 3, callbacks).ready, "Begin-retired generation cannot re-register");
+    require(metadata_begins == metadata_ends && !metadata_depth && !metadata_errors,
+            "Legacy/enhanced metadata escaped balanced unlocked batch scopes");
     std::vector<Fake> more(8192, Fake{table.data()});
     for (std::size_t n = 0; n < 8191; ++n)
       require(obs::register_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&more[n]), 3, callbacks).ready, "Registry early refusal");

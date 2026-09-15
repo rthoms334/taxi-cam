@@ -28,7 +28,10 @@ std::uint64_t elapsed_ticks(std::uint64_t start) noexcept {
 SIZE_T query_memory_uncached(const void* address, MEMORY_BASIC_INFORMATION& region) noexcept {
   auto* const metrics = active_metrics;
   const auto start = metrics ? performance_tick() : 0;
-  const auto result = VirtualQuery(address, &region, sizeof(region));
+  // Use the documented explicit-process entry point with only the current
+  // process pseudo-handle. The MBI contract and all caller validation remain
+  // unchanged; no handle/PID or lower-level syscall path is configurable here.
+  const auto result = VirtualQueryEx(GetCurrentProcess(), address, &region, sizeof(region));
   if (metrics) {
     ++metrics->query_calls;
     metrics->query_ticks += elapsed_ticks(start);
@@ -180,12 +183,31 @@ SIZE_T ScopedLocalMemoryQueryCache::query(const void* address, MEMORY_BASIC_INFO
       return sizeof(region);
     }
   }
-  if (count_ == regions_.size() || query_memory_uncached(address, region) != sizeof(region) || !region_contains(region, value, 1)) {
+  if (count_ == regions_.size()) {
     failed_ = true;
     return 0;
   }
+  // VirtualQuery reports only the suffix beginning at its queried page. Probe
+  // the containing 64 KiB window first so descending graph fields can share
+  // one observation. This queries metadata only: no extra bytes are read. The
+  // result is usable only when it contains the actual field; a preceding guard,
+  // reservation or protection split falls back to the exact requested address.
+  // There is no merging, eviction or reuse beyond this transaction. finish() freshly
+  // compares every saved region, including any newly observed prefix pages.
+  constexpr std::uintptr_t window_size = 65536;
+  const auto window_start = value - value % window_size;
+  if (query_memory_uncached(reinterpret_cast<const void*>(window_start), region) != sizeof(region) || !region_contains(region, value, 1)) {
+    if (window_start == value || query_memory_uncached(address, region) != sizeof(region) || !region_contains(region, value, 1)) {
+      failed_ = true;
+      return 0;
+    }
+  }
   regions_[count_++] = region;
   return sizeof(region);
+}
+
+bool ScopedLocalMemoryQueryCache::is_current() const noexcept {
+  return active_ && !failed_ && active_query_cache == this;
 }
 
 bool ScopedLocalMemoryQueryCache::finish() noexcept {

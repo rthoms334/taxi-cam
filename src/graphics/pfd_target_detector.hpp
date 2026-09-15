@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include "../profiles/catalog.hpp"
 
 namespace taxi_camera {
 
@@ -39,6 +40,11 @@ class PfdTargetDetector {
 
   const PfdTargetDetection& snapshot() const noexcept { return detection_; }
 
+  void configure(const profiles::AircraftProfile& profile) noexcept {
+    profile_ = &profile;
+    reset();
+  }
+
   void reset() noexcept {
     previous_count_ = 0;
     baseline_valid_ = false;
@@ -54,7 +60,7 @@ class PfdTargetDetector {
     std::size_t current_count = 0;
     for (std::size_t i = 0; i < count; ++i) {
       const auto& value = observations[i];
-      if (value.width != 768 || value.height != 1024 || value.levels != 5 || value.format != 28)
+      if (!profiles::matches_display(*profile_, value.width, value.height, value.levels, value.format))
         continue;
       if (value.id == 0) {
         reset();
@@ -122,7 +128,9 @@ class PfdTargetDetector {
     }
     // In the verified sessions the higher of the two resource IDs is LEFT;
     // which PFD happened to draw more often does not determine its side.
-    const std::array<std::uint64_t, 2> pair{std::max(busiest[0].id, busiest[1].id), std::min(busiest[0].id, busiest[1].id)};
+    std::array<std::uint64_t, 2> pair{std::max(busiest[0].id, busiest[1].id), std::min(busiest[0].id, busiest[1].id)};
+    if (!profile_->higher_id_left)
+      std::swap(pair[0], pair[1]);
     if (pair != pending_) {
       clear("stabilizing");
       pending_ = pair;
@@ -136,6 +144,7 @@ class PfdTargetDetector {
   }
 
  private:
+  const profiles::AircraftProfile* profile_ = &profiles::A380;
   struct Counter {
     std::uint64_t id = 0;
     std::uint64_t draws = 0;

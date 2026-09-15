@@ -49,18 +49,24 @@ bool read(std::uint64_t address, T& output) noexcept {
 }
 }  // namespace
 
-bool plan_view_resize(const ViewDimensions& inherited, unsigned feed, ViewDimensions& desired) noexcept {
+bool plan_view_resize(const ViewDimensions& inherited,
+                      unsigned feed,
+                      ViewDimensions& desired,
+                      const profiles::CameraPanes& panes) noexcept {
   desired = {};
-  if (!dimensions_valid(inherited) || feed >= kCameraPaneDimensions.size())
+  if (!dimensions_valid(inherited) || feed >= panes.size() || panes[feed][0] < 32 || panes[feed][0] > 2048 || panes[feed][1] < 32 ||
+      panes[feed][1] > 2048)
     return false;
-  desired.fill(kCameraPaneDimensions[feed]);
+  desired.fill(panes[feed]);
   return true;
 }
 
-ViewResizeResult resize_owned_view(const engine_camera::OwnedViewSnapshot& view,
-                                   unsigned feed,
-                                   const ViewDimensions& desired,
-                                   const ViewResizeCallbacks& callbacks) noexcept {
+static ViewResizeResult change_view_dimensions(const engine_camera::OwnedViewSnapshot& view,
+                                               unsigned feed,
+                                               const ViewDimensions& desired,
+                                               const ViewResizeCallbacks& callbacks,
+                                               const profiles::CameraPanes& panes,
+                                               bool initialize_output) noexcept {
   ViewResizeResult result;
   const auto fail = [&](ViewResizeStatus status) {
     result.status = status;
@@ -68,13 +74,16 @@ ViewResizeResult resize_owned_view(const engine_camera::OwnedViewSnapshot& view,
   };
   if (!view.complete || !view.ready || view.status != engine_camera::OwnedViewStatus::ready || view.read_failures ||
       (view.error && *view.error) || !view.view_address || (view.view_address & 7u) ||
-      view.view_address > std::numeric_limits<std::uintptr_t>::max() - 160 || !callbacks.refresh_projection || !callbacks.ensure_output)
+      view.view_address > std::numeric_limits<std::uintptr_t>::max() - 160 || !callbacks.refresh_projection ||
+      (initialize_output && !callbacks.ensure_output))
     return fail(ViewResizeStatus::invalid_snapshot);
   ViewDimensions planned{};
-  if (!plan_view_resize(view.dimensions, feed, planned) || !dimensions_valid(desired) || desired != planned)
+  if (!plan_view_resize(view.dimensions, feed, planned, panes) || !dimensions_valid(desired) || desired != planned)
     return fail(ViewResizeStatus::invalid_dimensions);
   if (!(view.flags[0] & 1u))
     return fail(ViewResizeStatus::gate_open);
+  if (!initialize_output && (view.mode != 2 || !view.resource_present || view.output_dimensions != desired[0]))
+    return fail(ViewResizeStatus::output_mismatch);
   const auto field = view.view_address + 16;
   if (!writable_private(field, sizeof(desired)) || !writable_private(view.view_address + 48, sizeof(view.flags)))
     return fail(ViewResizeStatus::invalid_mapping);
@@ -104,15 +113,31 @@ ViewResizeResult resize_owned_view(const engine_camera::OwnedViewSnapshot& view,
     return fail(ViewResizeStatus::read_failed);
   if (current != desired || flags != view.flags)
     return fail(ViewResizeStatus::changed);
-  if (callbacks.ensure_output(callbacks.context, view.view_address) != view.view_address + 144)
+  if (initialize_output && callbacks.ensure_output(callbacks.context, view.view_address) != view.view_address + 144)
     return fail(ViewResizeStatus::allocation_failed);
   if (!read(field, current) || !read(view.view_address + 48, flags))
     return fail(ViewResizeStatus::read_failed);
   if (current != desired || flags != view.flags)
     return fail(ViewResizeStatus::changed);
-  result.status = ViewResizeStatus::resized;
+  result.status = initialize_output ? ViewResizeStatus::resized : ViewResizeStatus::dimensions_restored;
   result.complete = true;
   return result;
+}
+
+ViewResizeResult resize_owned_view(const engine_camera::OwnedViewSnapshot& view,
+                                   unsigned feed,
+                                   const ViewDimensions& desired,
+                                   const ViewResizeCallbacks& callbacks,
+                                   const profiles::CameraPanes& panes) noexcept {
+  return change_view_dimensions(view, feed, desired, callbacks, panes, true);
+}
+
+ViewResizeResult restore_owned_view_dimensions(const engine_camera::OwnedViewSnapshot& view,
+                                               unsigned feed,
+                                               const ViewDimensions& desired,
+                                               const ViewResizeCallbacks& callbacks,
+                                               const profiles::CameraPanes& panes) noexcept {
+  return change_view_dimensions(view, feed, desired, callbacks, panes, false);
 }
 
 const char* view_resize_status_name(ViewResizeStatus status) noexcept {
@@ -121,6 +146,10 @@ const char* view_resize_status_name(ViewResizeStatus status) noexcept {
       return "not attempted";
     case ViewResizeStatus::resized:
       return "resized";
+    case ViewResizeStatus::dimensions_restored:
+      return "dimension fields restored; existing output retained";
+    case ViewResizeStatus::output_mismatch:
+      return "existing output does not match the requested pane; no reallocation attempted";
     case ViewResizeStatus::unchanged:
       return "already at requested resolution";
     case ViewResizeStatus::invalid_snapshot:

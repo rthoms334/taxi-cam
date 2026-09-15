@@ -45,6 +45,11 @@ struct ProbeSnapshot {
   bool hook_installed = false;
   bool accepting_requests = false;
   bool pose_captured = false;
+  std::uint64_t profile_transition_token = 0;
+  std::uint32_t profile_transition_id = 0;
+  bool profile_transition_pending = false;
+  bool profile_transition_ready = false;
+  bool profile_transition_failed = false;
   MountPair mounts = default_mounts();
   std::array<MountedPose, 2> mounted_poses{};
   std::uint64_t updates = 0;
@@ -64,6 +69,7 @@ struct ProbeSnapshot {
   std::uint32_t thread_id = 0;
   std::uint32_t free_views = 0;
   std::array<bool, 2> ready{};
+  std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};
   bool outputs_matched = false;
   std::array<std::array<std::array<std::int32_t, 2>, 3>, 2> dimensions{};
@@ -84,17 +90,20 @@ struct ProbeSnapshot {
 // the fixed main executable and pins this add-on until process exit. Engine
 // functions are never called here: requests are consumed by the update observer.
 void request_scene_test(bool reuse_calibration = false) noexcept;
+// Each request gets a unique completion token. Zero refuses the request.
+// Existing views are closed/revalidated by the observer and are never replaced.
+std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept;
 // Button mode retains public telemetry so another button press can restart.
 void request_scene_stop(bool keep_telemetry = false) noexcept;
-// Retire a ready pair whose capture state was lost. Uses the same bounded
-// cleanup/fresh-pose recovery policy; never resets native identity failures.
-bool request_capture_recovery() noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
 // Limits activation opportunities to 15..60 per second per selected feed.
+// Close activation gates while retaining owned views; no ownership changes.
+void suspend_scene_rendering(bool suspended) noexcept;
 void request_scene_rate(unsigned rate, unsigned feeds = 2) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
+bool request_scene_profile(std::uint32_t id) noexcept;
 bool request_scene_mounts(const MountPair& mounts) noexcept;
 ProbeSnapshot scene_snapshot();
 

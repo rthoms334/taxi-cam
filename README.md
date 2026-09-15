@@ -36,7 +36,7 @@ Nose-wheel and tail cameras for Microsoft Flight Simulator 2024, controlled by t
 
 The camera image occupies the upper part of the Primary Flight Display (PFD): nose-wheel view above, tail view below, with ground speed, magenta reference marks and a black divider. The lower trim display remains visible.
 
-- **Aircraft:** FlyByWire A380X
+- **Aircraft:** FlyByWire A380X; iniBuilds A350-900 / ULR and A350-1000 adapters under live validation
 - **Platform:** Windows x64, MSFS 2024
 - **Delivery:** Windows tray application and an in-simulator DLL.
 
@@ -47,9 +47,9 @@ Taxi Cam asks MSFS to render two additional views of the aircraft and its surrou
 1. **MSFS starts the tray app.** An `exe.xml` entry launches `taxi-cam.exe`, which loads `taxi-camera-bridge.dll` into the simulator.
 2. **The bridge reads the aircraft.** SimConnect supplies TAXI-button state, aircraft position and orientation, ground speed and ambient lighting.
 3. **MSFS renders the cameras.** The bridge calls the simulator's internal camera functions to position independent nose and tail views relative to the aircraft.
-4. **The GPU combines the images.** The bridge copies the rendered views, adds the divider, reference marks and ground speed, then draws the result into the enabled PFD texture.
+4. **The GPU combines the images.** The bridge copies the rendered views and adds the divider, reference marks and ground speed. It updates the enabled PFD through a verified texture copy or a camera draw at the end of the aircraft's graphics command recording.
 
-Left TAXI enables the left PFD; right TAXI enables the right PFD. Both displays share the same pair of cameras. Images remain on the GPU throughout capture and display.
+Left TAXI enables the left PFD; right TAXI enables the right PFD. Both displays share the same pair of cameras. While a supported aircraft is stationary on the ground, Taxi Cam prepares that pair in the background and then parks it for the first button press. Switching TAXI off retains the pair with rendering stopped. Images remain on the GPU throughout capture and display.
 
 Compatibility is checked against the required private code and memory layout. Simulator updates are allowed when these checks pass. If a required signature changes or moves, the camera stays disabled and the app reports the failed check; an updated Taxi Cam integration may be needed.
 
@@ -65,7 +65,7 @@ The download must pass SHA-256 verification before setup can launch. Accepting t
 
 ## Use
 
-1. Start MSFS and load the A380X.
+1. Start MSFS and load the aircraft. Select its matching profile in **Overview**.
 2. Allow a few seconds for the app to identify the PFD textures.
 3. Press the left or right EFIS **TAXI** button to enable that display. Press it again to switch the camera off.
 
@@ -79,15 +79,16 @@ If the camera appears on the wrong display, open **PFD routing** to identify, as
 
 | Page | Controls |
 | --- | --- |
-| Overview | Camera service, TAXI-button control and camera rate |
+| Overview | Automatic aircraft selection, camera service, TAXI-button control and camera rate |
 | Camera views | Independent position, pitch, yaw and field of view for each camera |
-| Display | Manual exposure and automatic night adjustment |
+| Display | Manual exposure, automatic night adjustment and ground-speed colour |
 | PFD routing | Left/right display assignment, preview and target identification |
 | Diagnostics | Scene test, single-camera test and runtime counters |
+| Reference guides | Nose-dot and mirrored tail-bracket positions, live preview and profile reset |
 
-Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDATA%\Taxi Cam\profiles\fbw-a380x.ini`.
+Use **Apply live** on Reference guides to align the markers while the camera runs. Select **Save changes** to keep adjustments for that aircraft profile. Settings are stored in `%LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini`.
 
-The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Camera size is **768 × 255** for the nose and **768 × 504** for the tail.
+The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Each camera renders at the pane size specified by its aircraft profile.
 
 ## Reporting a problem
 
@@ -131,7 +132,7 @@ Every push to `main` runs the [Windows release workflow](.github/workflows/relea
 | --- | --- |
 | [Architecture](docs/architecture.md) | How the app creates camera views and puts them on the PFD |
 | [Runtime reference](docs/runtime-reference.md) | Setting values, timing, IPC and diagnostics |
-| [Aircraft integration](docs/aircraft-profiles.md) | The A380 controls, display identification and camera geometry |
+| [Aircraft integration](docs/aircraft-profiles.md) | Aircraft controls, display identification, camera geometry and profile selection |
 | [Releases](docs/releases.md) | Automated builds, package contents and publication |
 | [Repository structure](docs/repository-structure.md) | Source modules, tests, tools and build entry points |
 

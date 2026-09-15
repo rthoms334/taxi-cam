@@ -39,8 +39,18 @@ inline std::wstring settings_path(const Settings& s) {
       name += wchar_t(c);
   return folder + L"\\" + name + L".ini";
 }
-inline bool load_settings(Settings& s, const std::wstring& installation) {
+inline bool load_settings(Settings& s, const std::wstring& installation, std::uint32_t profile_id = 0) {
+  if (!profile_id)
+    profile_id = GetPrivateProfileIntW(L"aircraft", L"profile", 1, (settings_directory() + L"\\settings.ini").c_str());
+  const auto* profile = profiles::find(profile_id);
+  if (!profile)
+    profile = &profiles::A380;
   Settings value;
+  value.profile = profile->id;
+  value.mounts = profile->mounts;
+  value.speed_color = profile->composition.speed_color;
+  reset_guide_settings(value, *profile);
+  value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, (settings_directory() + L"\\settings.ini").c_str());
   auto path = settings_path(value);
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
     const auto legacy = legacy_settings_path(path);
@@ -54,6 +64,10 @@ inline bool load_settings(Settings& s, const std::wstring& installation) {
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
     // Import the user's existing camera calibration once. The companion becomes
     // the settings owner; stale installer defaults never override later UI edits.
+    if (profile->id != profiles::A380.id) {
+      s = value;
+      return true;
+    }
     const auto mount_path = installation + L"\\taxi-camera-mounts.cfg";
     HANDLE file = CreateFileW(mount_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE) {
@@ -92,6 +106,17 @@ inline bool load_settings(Settings& s, const std::wstring& installation) {
   value.single_camera = integer(L"display", L"single_camera", 0);
   value.calibration_budget = integer(L"display", L"calibration_budget", 4096);
   value.automatic_exposure = integer(L"display", L"automatic_exposure", 1);
+  constexpr const wchar_t* color_keys[]{L"speed_red", L"speed_green", L"speed_blue"};
+  for (unsigned c = 0; c < 3; ++c)
+    value.speed_color[c] = static_cast<float>(read(L"display", color_keys[c], value.speed_color[c]));
+  auto guide = [&](std::array<float, 2>& position, const wchar_t* x_key, const wchar_t* y_key) {
+    position[0] = static_cast<float>(read(L"guides", x_key, position[0]));
+    position[1] = static_cast<float>(read(L"guides", y_key, position[1]));
+  };
+  guide(value.nose_dot, L"nose_dot_x", L"nose_dot_y");
+  guide(value.tail_upper, L"tail_upper_x", L"tail_upper_y");
+  guide(value.tail_corner, L"tail_corner_x", L"tail_corner_y");
+  guide(value.tail_inner, L"tail_inner_x", L"tail_inner_y");
   value.exposure = static_cast<float>(read(L"display", L"exposure", -8.8));
   value.night_boost = static_cast<float>(read(L"display", L"night_boost", 4));
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
@@ -114,11 +139,15 @@ inline bool save_settings(const Settings& s) {
       std::swprintf(text, 4096,
                     L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\n"
                     L"[display]\r\ncamera_rate=%u\r\nsingle_camera=%u\r\nautomatic_exposure=%u\r\nexposure=%.9g\r\nnight_boost=%."
-                    L"9g\r\ncalibration_budget=%u\r\n"
+                    L"9g\r\ncalibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\nspeed_blue=%.9g\r\n"
+                    L"[guides]\r\nnose_dot_x=%.9g\r\nnose_dot_y=%.9g\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\n"
+                    L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
                     L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
                     L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
                     s.enabled, s.follow_taxi, s.auto_detect, s.camera_rate, s.single_camera, s.automatic_exposure, s.exposure,
-                    s.night_boost, s.calibration_budget, n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5]);
+                    s.night_boost, s.calibration_budget, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.nose_dot[0], s.nose_dot[1],
+                    s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1],
+                    n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5]);
   if (count <= 0)
     return false;
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -130,6 +159,12 @@ inline bool save_settings(const Settings& s) {
   const DWORD bytes = static_cast<DWORD>(count * sizeof(wchar_t));
   ok = ok && WriteFile(file, text, bytes, &wrote, nullptr) && wrote == bytes && FlushFileBuffers(file);
   CloseHandle(file);
-  return ok && MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+  if (!ok || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return false;
+  wchar_t profile_text[16];
+  std::swprintf(profile_text, 16, L"%u", s.profile);
+  const auto selection = settings_directory() + L"\\settings.ini";
+  return WritePrivateProfileStringW(L"aircraft", L"profile", profile_text, selection.c_str()) &&
+         WritePrivateProfileStringW(L"aircraft", L"automatic", s.auto_profile ? L"1" : L"0", selection.c_str());
 }
 }  // namespace taxi_camera::standalone

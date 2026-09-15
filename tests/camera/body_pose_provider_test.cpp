@@ -236,8 +236,86 @@ int offline_tests() {
   check(!testing::accept_taxi_packet(lighting_packet.data(), 56, now));
   check(!testing::accept_lighting_packet(taxi_packet.data(), 56, now));
   check(!testing::accept_lighting_packet(packet.data(), packet.size(), now));
+  // Aircraft lifecycle drops every cached telemetry contract. A profile
+  // transaction may stop/restart the provider but must not create more epochs.
+  const auto before_epoch = get_aircraft_session_epoch();
+  std::array<DWORD, 6> sim_event{24, 0, 4, 0, AircraftSessionLifecycle::SimEvent, 1};
+  check(!testing::accept_session_packet(sim_event.data(), sizeof(sim_event)));
+  check(get_aircraft_session_epoch() == before_epoch);
+  std::array<unsigned char, 288> load_event{};
+  const std::array<DWORD, 6> load_header{288, 0, 6, 0, AircraftSessionLifecycle::AircraftEvent, 0};
+  std::memcpy(load_event.data(), load_header.data(), sizeof(load_header));
+  std::strcpy(reinterpret_cast<char*>(load_event.data() + 24), "SimObjects/Airplanes/FlyByWire_A380X/aircraft.cfg");
+  check(testing::accept_session_packet(load_event.data(), load_event.size()));
+  check(get_aircraft_session_epoch() == before_epoch + 1);
+  check(!get_ground_speed().valid && !get_taxi_buttons().valid && !get_lighting().valid);
+  check(!get_body_telemetry_timing().fresh && !get_body_telemetry_timing().last_sample_ms);
+  check(!get_taxi_cutoff().inhibited && !get_taxi_cutoff().pending_off && !sample_body_pose(now).calibration_required);
+  check(select_aircraft_profile(1) && get_aircraft_session_epoch() == before_epoch + 1);
+  check(!testing::accept_session_packet(sim_event.data(), sizeof(sim_event)) && get_aircraft_session_epoch() == before_epoch + 1);
+  check(testing::accept_session_packet(load_event.data(), load_event.size()) && get_aircraft_session_epoch() == before_epoch + 2);
+  // A coherent identity change also catches a missed lifecycle notification.
+  std::array<unsigned char, 296> identity_type{};
+  const std::array<DWORD, 10> identity_type_header{296, 0, 8, 5, 0, 5, 0, 0, 1, 1};
+  std::memcpy(identity_type.data(), identity_type_header.data(), sizeof(identity_type_header));
+  std::strcpy(reinterpret_cast<char*>(identity_type.data() + 40), "ATCCOM.ATC_NAME AIRBUS.0.text");
+  std::array<unsigned char, 284> identity_path{};
+  const std::array<DWORD, 6> identity_path_header{284, 0, 15, 6, 0, 0};
+  std::memcpy(identity_path.data(), identity_path_header.data(), sizeof(identity_path_header));
+  std::strcpy(reinterpret_cast<char*>(identity_path.data() + 24), "SimObjects/Airplanes/FlyByWire_A380X/aircraft.cfg");
+  const auto identity_now = GetTickCount64();
+  check(!testing::accept_identity_packet(identity_type.data(), identity_type.size(), identity_now));
+  check(!testing::accept_identity_packet(identity_path.data(), identity_path.size(), identity_now));
+  check(aircraft_matches_profile());
+  check(testing::accept_lighting_packet(lighting_packet.data(), 56, identity_now));
+  std::strcpy(reinterpret_cast<char*>(identity_type.data() + 40), "C172");
+  check(!testing::accept_identity_packet(identity_type.data(), identity_type.size(), identity_now + 1));
+  check(aircraft_matches_profile());
+  std::strcpy(reinterpret_cast<char*>(identity_path.data() + 24), "SimObjects/Airplanes/Asobo_C172/aircraft.cfg");
+  check(testing::accept_identity_packet(identity_path.data(), identity_path.size(), identity_now + 1));
+  check(get_aircraft_session_epoch() == before_epoch + 3 && !aircraft_matches_profile() && !get_lighting().valid);
+  std::array<unsigned char, 48> ground_packet{};
+  const std::array<DWORD, 10> ground_header{48, 0, 8, 7, 2883584, 7, 0, 0, 1, 1};
+  const auto refresh_ground = [&](double value) {
+    std::memcpy(ground_packet.data(), ground_header.data(), sizeof(ground_header));
+    std::memcpy(ground_packet.data() + 40, &value, sizeof(value));
+  };
+  check(!get_on_ground().valid);
+  for (double value : {0.0, 1.0}) {
+    refresh_ground(value);
+    check(testing::accept_on_ground_packet(ground_packet.data(), ground_packet.size(), 10000));
+    const auto sample = testing::on_ground_at(10000);
+    check(sample.valid && sample.on_ground == (value == 1) && sample.sample_ms == 10000);
+  }
+  check(testing::on_ground_at(10500).valid && !testing::on_ground_at(10501).valid && !testing::on_ground_at(9999).valid);
+  check(std::strcmp(testing::on_ground_at(10501).error, "on_ground_telemetry_stale") == 0);
+  for (DWORD bytes = 0; bytes < ground_packet.size(); ++bytes)
+    check(!testing::accept_on_ground_packet(ground_packet.data(), bytes, 10000));
+  check(!testing::accept_on_ground_packet(ground_packet.data(), 49, 10000));
+  check(!testing::accept_on_ground_packet(nullptr, 48, 10000));
+  check(!testing::accept_on_ground_packet(ground_packet.data(), 48, 0));
+  for (unsigned field : {0u, 2u, 3u, 5u, 6u, 9u}) {
+    refresh_ground(1);
+    const DWORD wrong = ground_header[field] + 1;
+    std::memcpy(ground_packet.data() + field * 4, &wrong, 4);
+    check(!testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
+  }
+  refresh();
+  check(testing::accept_aircraft_packet(packet.data(), packet.size(), 10000));
+  const auto independent_speed = testing::ground_speed_at(10000);
+  for (double value : {-1.0, 0.5, 2.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+    refresh_ground(value);
+    check(testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
+    check(!testing::on_ground_at(10000).valid);
+    check(testing::ground_speed_at(10000).knots == independent_speed.knots);
+  }
+  refresh_ground(1);
+  check(testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
+  check(testing::accept_session_packet(load_event.data(), load_event.size()));
+  check(!testing::on_ground_at(10000).valid);
   shutdown_body_pose_provider();
   check(!get_ground_speed().valid && std::isnan(get_ground_speed().knots));
+  check(!get_on_ground().valid && std::strcmp(get_on_ground().error, "not_initialized") == 0);
   check(!get_taxi_buttons().valid && std::strcmp(get_taxi_buttons().error, "not_initialized") == 0);
   check(!get_lighting().valid && std::strcmp(get_lighting().error, "not_initialized") == 0);
   std::printf(

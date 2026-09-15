@@ -47,13 +47,15 @@ inline const char* scene_stop_reason_name(SceneStopReason reason) noexcept {
 }
 
 inline bool retryable_scene_stop(SceneStopReason reason) noexcept {
-  return reason == SceneStopReason::inspection_unavailable || reason == SceneStopReason::owned_entry_absent ||
-         reason == SceneStopReason::resolution_changed || reason == SceneStopReason::capture_stalled;
+  // Dimension drift uses the retained-pair path. It must never trigger erase
+  // and recreation of camera entries that the renderer may still reference.
+  return reason == SceneStopReason::inspection_unavailable || reason == SceneStopReason::owned_entry_absent;
 }
 
 inline bool temporary_pose_unavailable(const char* reason) noexcept {
   return reason && (!std::strcmp(reason, "telemetry_busy") || !std::strcmp(reason, "aircraft_telemetry_stale") ||
-                    !std::strcmp(reason, "camera_telemetry_stale") || !std::strcmp(reason, "not_initialized"));
+                    !std::strcmp(reason, "camera_telemetry_stale") || !std::strcmp(reason, "not_initialized") ||
+                    !std::strcmp(reason, "aircraft_session_changed"));
 }
 
 // Observer policy, serialized by the probe mailbox mutex. No native calls.
@@ -91,6 +93,10 @@ class SceneRecovery {
     pending_ = false;
     ++attempts_;
     return true;
+  }
+  void resumed_retained_resolution() noexcept {
+    if (requested_ && !pending_ && reason_ == SceneStopReason::resolution_changed)
+      reason_ = SceneStopReason::none;
   }
   bool requested() const noexcept { return requested_; }
   void capture_progress(std::uint64_t now) noexcept {

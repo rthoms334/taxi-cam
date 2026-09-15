@@ -100,6 +100,7 @@ try {
         $installed += $name
         Copy-Item -LiteralPath (Join-Path $staging $name) -Destination $target -Force
         if ((Get-FileHash -LiteralPath $target).Hash -ne $receipt.files.PSObject.Properties[$name].Value) { throw "Installed binary verification failed: $name" }
+        Assert-TaxiVisibleInstallPath $target
     }
     $mount = Join-Path $dest 'taxi-camera-mounts.cfg'
     if (-not (Test-Path -LiteralPath $mount)) {

@@ -15,6 +15,60 @@ void PfdGraphicsState::reset(std::uint64_t generation, bool native_observations)
   generation_ = generation;
   observed_ = native_observations;
 }
+void PfdGraphicsState::depth_bias(d3d12_extended::CommandList9* native, float bias, float clamp, float slope) noexcept {
+  if (!native || (dynamic_native_ && dynamic_native_ != native) || !std::isfinite(bias) || !std::isfinite(clamp) || !std::isfinite(slope)) {
+    invalidate("dynamic_depth_bias_invalid");
+    return;
+  }
+  dynamic_native_ = native;
+  depth_bias_ = {bias, clamp, slope};
+  depth_bias_known_ = true;
+}
+void PfdGraphicsState::strip_cut(d3d12_extended::CommandList9* native, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE value) noexcept {
+  if (!native || (dynamic_native_ && dynamic_native_ != native) || value < D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED ||
+      value > D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF) {
+    invalidate("dynamic_strip_cut_invalid");
+    return;
+  }
+  dynamic_native_ = native;
+  strip_cut_ = value;
+  strip_cut_known_ = true;
+}
+void PfdGraphicsState::sample_positions(ID3D12GraphicsCommandList1* native,
+                                        UINT samples,
+                                        UINT pixels,
+                                        const D3D12_SAMPLE_POSITION* positions) noexcept {
+  if (!native || (sample_native_ && sample_native_ != native)) {
+    invalidate("sample_position_interface_mismatch");
+    return;
+  }
+  if (!samples && !pixels && !positions) {
+    sample_native_ = nullptr;
+    sample_count_ = sample_pixels_ = 0;
+    sample_positions_ = {};
+    return;
+  }
+  if ((samples != 1 && samples != 2 && samples != 4 && samples != 8 && samples != 16) || (pixels != 1 && pixels != 4) ||
+      samples > 16 / pixels || !positions) {
+    invalidate("sample_position_arguments_invalid");
+    return;
+  }
+  for (UINT n = 0; n < samples * pixels; ++n)
+    if (positions[n].X < -8 || positions[n].X > 7 || positions[n].Y < -8 || positions[n].Y > 7) {
+      invalidate("sample_position_coordinates_invalid");
+      return;
+    }
+  sample_native_ = native;
+  sample_count_ = samples;
+  sample_pixels_ = pixels;
+  std::copy_n(positions, samples * pixels, sample_positions_.begin());
+}
+void PfdGraphicsState::restore_sample_positions(ID3D12GraphicsCommandList* native) const noexcept {
+  if (!has_sample_positions() || sample_native_ != native)
+    return;
+  auto positions = sample_positions_;
+  sample_native_->SetSamplePositions(sample_count_, sample_pixels_, positions.data());
+}
 void PfdGraphicsState::bind_root(ID3D12RootSignature* root,
                                  std::uint64_t generation,
                                  const PfdRootLayout& layout,
@@ -244,40 +298,58 @@ UINT PfdGraphicsState::undefined_table_count() const noexcept {
       ++count;
   return count;
 }
-void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list) const noexcept {
-  list->SetPipelineState(pipeline_);
-  list->SetGraphicsRootSignature(root_);
-  if (observed_arguments_)
-    for (UINT n = 0; n < observed_word_count_; ++n)
-      list->SetGraphicsRoot32BitConstant(observed_word_keys_[n] / 64, constants_[n], observed_word_keys_[n] % 64);
-  for (UINT n = 0; n < layout_.count; ++n) {
-    if (observed_arguments_ && (!layout_.parameters[n].count || layout_.parameters[n].kind == PfdRootKind::constants || !values_[n].known))
-      continue;
-    const auto& value = values_[n];
-    switch (layout_.parameters[n].kind) {
-      case PfdRootKind::constants:
-        list->SetGraphicsRoot32BitConstants(n, layout_.parameters[n].count, constants_.data() + constant_offsets_[n], 0);
-        break;
-      case PfdRootKind::table:
-        // SetGraphicsRootSignature restored all argument slots to undefined.
-        // Preserve that prior state for a positively undefined table; never
-        // invent a null or stale descriptor handle. All known tables replay.
-        if (value.known)
-          list->SetGraphicsRootDescriptorTable(n, {value.address});
-        break;
-      case PfdRootKind::cbv:
-        list->SetGraphicsRootConstantBufferView(n, value.address);
-        break;
-      case PfdRootKind::srv:
-        list->SetGraphicsRootShaderResourceView(n, value.address);
-        break;
-      case PfdRootKind::uav:
-        list->SetGraphicsRootUnorderedAccessView(n, value.address);
-        break;
+void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list, PfdStateGroup group) const noexcept {
+  const bool pipeline = includes_pfd_state_group(group, PfdStateGroup::pipeline);
+  const bool raster = includes_pfd_state_group(group, PfdStateGroup::raster);
+  if (!valid_pfd_state_group(group) || (pipeline && (depth_bias_known_ || strip_cut_known_) && dynamic_native_ != list) ||
+      (raster && has_sample_positions() && sample_native_ != list))
+    return;
+  if (pipeline) {
+    list->SetPipelineState(pipeline_);
+    if (depth_bias_known_)
+      dynamic_native_->RSSetDepthBias(depth_bias_[0], depth_bias_[1], depth_bias_[2]);
+    if (strip_cut_known_)
+      dynamic_native_->IASetIndexBufferStripCutValue(strip_cut_);
+  }
+  if (includes_pfd_state_group(group, PfdStateGroup::root_bindings)) {
+    list->SetGraphicsRootSignature(root_);
+    if (observed_arguments_)
+      for (UINT n = 0; n < observed_word_count_; ++n)
+        list->SetGraphicsRoot32BitConstant(observed_word_keys_[n] / 64, constants_[n], observed_word_keys_[n] % 64);
+    for (UINT n = 0; n < layout_.count; ++n) {
+      if (observed_arguments_ &&
+          (!layout_.parameters[n].count || layout_.parameters[n].kind == PfdRootKind::constants || !values_[n].known))
+        continue;
+      const auto& value = values_[n];
+      switch (layout_.parameters[n].kind) {
+        case PfdRootKind::constants:
+          list->SetGraphicsRoot32BitConstants(n, layout_.parameters[n].count, constants_.data() + constant_offsets_[n], 0);
+          break;
+        case PfdRootKind::table:
+          // SetGraphicsRootSignature restored all argument slots to undefined.
+          // Preserve that prior state for a positively undefined table; never
+          // invent a null or stale descriptor handle. All known tables replay.
+          if (value.known)
+            list->SetGraphicsRootDescriptorTable(n, {value.address});
+          break;
+        case PfdRootKind::cbv:
+          list->SetGraphicsRootConstantBufferView(n, value.address);
+          break;
+        case PfdRootKind::srv:
+          list->SetGraphicsRootShaderResourceView(n, value.address);
+          break;
+        case PfdRootKind::uav:
+          list->SetGraphicsRootUnorderedAccessView(n, value.address);
+          break;
+      }
     }
   }
-  list->IASetPrimitiveTopology(topology_);
-  list->RSSetViewports(viewport_count_, viewports_.data());
-  list->RSSetScissorRects(scissor_count_, scissors_.data());
+  if (raster) {
+    restore_sample_positions(list);
+    list->IASetPrimitiveTopology(topology_);
+    list->RSSetViewports(viewport_count_, viewports_.data());
+    list->RSSetScissorRects(scissor_count_, scissors_.data());
+  }
 }
+
 }  // namespace taxi_camera

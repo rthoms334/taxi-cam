@@ -1,4 +1,5 @@
 #include "../../src/camera/scene_recovery.hpp"
+#include "view_retirement_test.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +35,7 @@ struct Engine {
 }  // namespace
 
 int main() {
+  test_view_retirement();
   SceneRecovery recovery;
   ec::Snapshot clean;
   require(!recovery.retry(9999, clean, true), "No initial invented request");
@@ -42,15 +44,14 @@ int main() {
   for (const auto* error : {"", "invalid_basis", "outside_calibration_radius", "identity_mismatch"})
     require(!temporary_pose_unavailable(error), "Identity and numeric failures remain fatal");
   require(!temporary_pose_unavailable(nullptr), "Null error never classified temporary");
-  for (const auto reason : {SceneStopReason::none, SceneStopReason::explicit_stop, SceneStopReason::identity_refused,
-                            SceneStopReason::pose_invalid, SceneStopReason::creation_failed, SceneStopReason::exception}) {
+  for (const auto reason :
+       {SceneStopReason::none, SceneStopReason::explicit_stop, SceneStopReason::identity_refused, SceneStopReason::pose_invalid,
+        SceneStopReason::creation_failed, SceneStopReason::exception, SceneStopReason::capture_stalled}) {
     recovery.start();
     recovery.failed(reason, 10);
     require(!recovery.pending() && !recovery.retry(99999, clean, true), "Fatal failure cannot retry");
   }
-  for (const auto reason :
-       {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent, SceneStopReason::resolution_changed,
-        SceneStopReason::capture_stalled}) {
+  for (const auto reason : {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent}) {
     recovery.start();
     recovery.failed(reason, 100);
     require(recovery.pending() && recovery.reason() == reason, "Recoverable reason is recorded");
@@ -93,7 +94,11 @@ int main() {
   require(pair.process_update(manager, engine.callbacks()), "Suspended controller update");
   require(pair.snapshot().owned_ids == original && engine.erases == 0 && engine.creates == 2,
           "Temporary pose gap retains IDs without repeated creation or erase");
-  recovery.failed(SceneStopReason::resolution_changed, 100);
+  recovery.failed(SceneStopReason::resolution_changed, 90);
+  require(!recovery.pending() && !recovery.retry(5000, pair.snapshot(), true), "Resolution change cannot recreate retained views");
+  recovery.resumed_retained_resolution();
+  require(recovery.reason() == SceneStopReason::none && recovery.requested(), "Retained resolution recovery preserves demand");
+  recovery.failed(SceneStopReason::owned_entry_absent, 100);
   pair.request_disable();
   require(pair.process_update(manager, engine.callbacks()), "First cleanup update");
   require(pair.snapshot().state == ec::State::cleanup_pending && pair.snapshot().owned_ids == original,
@@ -122,7 +127,7 @@ int main() {
   require(!recovery.pending() && !recovery.retry(99999, clean, true), "Retry storm is bounded");
   recovery.start();
   require(recovery.attempts() == 0 && recovery.reason() == SceneStopReason::none, "Explicit new Start resets retry budget");
-  recovery.failed(SceneStopReason::capture_stalled, 1000);
+  recovery.failed(SceneStopReason::inspection_unavailable, 1000);
   require(recovery.retry(3000, clean, true), "Capture stall uses confirmed cleanup policy");
   recovery.capture_progress(4000);
   recovery.capture_progress(20000);

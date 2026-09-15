@@ -30,7 +30,7 @@ class RenderSchedule {
     next_feed_ = 0;
   }
 
-  std::array<bool, 2> tick(std::uint64_t now_ms) noexcept {
+  std::array<bool, 2> tick(std::uint64_t now_ms, bool suspended = false) noexcept {
     const bool was_active = active_[0] || active_[1];
     active_ = {};
     if (have_time_ && now_ms < previous_time_) {
@@ -45,7 +45,7 @@ class RenderSchedule {
     previous_time_ = now_ms;
     // Even after a long stall, close the last pulse for an entire observer
     // interval. Never leave a gate continuously on while trying to catch up.
-    if (was_active)
+    if (was_active || suspended)
       return active_;
     const auto per_feed_ms = (1000u + rate_ - 1) / rate_;
     const auto total_rate = rate_ * feeds_;

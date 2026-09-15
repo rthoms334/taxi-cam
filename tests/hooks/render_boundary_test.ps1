@@ -21,3 +21,17 @@ $taskReceipt = [ordered]@{
   limitation = 'Synthetic public COM calls in an isolated process; actual hardware/WARP capture ordering is tested separately by scene_capture_manager_test.ps1 --boundary-observer modes.'
 }
 $taskReceipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $taskOutput 'result.json') -Encoding utf8
+
+$selectedExecutable = Join-Path $taskOutput 'selected-boundary-proof.exe'
+& $Compiler @taskCommon '-DTAXI_RENDER_BOUNDARY_VALIDATION' '-DTAXI_SELECTED_BARRIER_FIX' `
+  (Join-Path $taskRoot 'tests/graphics/selected_boundary_proof.cpp') `
+  (Join-Path $taskRoot 'src/hooks/render_boundary_observer.cpp') '-static' '-o' $selectedExecutable
+if ($LASTEXITCODE -ne 0) { throw 'Selected PFD boundary proof compilation failed.' }
+$selectedResult = & $selectedExecutable
+if ($LASTEXITCODE -ne 0) { throw 'Selected PFD boundary refusal/large-batch proof failed.' }
+$selectedResult | Write-Output
+[ordered]@{
+  binarySha256 = (Get-FileHash -LiteralPath $selectedExecutable -Algorithm SHA256).Hash
+  result = ($selectedResult | ConvertFrom-Json)
+  limitation = 'Isolated COM fixture; selected PFD copies are also tested on hardware and WARP.'
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $taskOutput 'selected-result.json') -Encoding utf8

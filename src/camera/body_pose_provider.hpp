@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <limits>
+#include "aircraft_identity.hpp"
 #include "aircraft_mounts.hpp"
 namespace taxi_camera::native_camera {
 struct BodyPoseSnapshot {
@@ -13,6 +14,12 @@ struct BodyPoseSnapshot {
 struct GroundSpeedSample {
   bool valid = false;
   double knots = std::numeric_limits<double>::quiet_NaN();
+  std::uint64_t sample_ms = 0;
+  const char* error = "not_initialized";
+};
+struct OnGroundSample {
+  bool valid = false;
+  bool on_ground = false;
   std::uint64_t sample_ms = 0;
   const char* error = "not_initialized";
 };
@@ -39,6 +46,12 @@ struct LightingSample {
 };
 // Public SimConnect worker only. Call lifecycle functions outside DllMain and
 // private engine callbacks. Never acquires or changes the simulator camera.
+bool select_aircraft_profile(std::uint32_t id) noexcept;
+AircraftIdentitySample get_aircraft_identity() noexcept;
+// Changes only when the flight/aircraft session changes. Selecting the
+// adapter does not itself change this epoch.
+std::uint64_t get_aircraft_session_epoch() noexcept;
+bool aircraft_matches_profile() noexcept;
 bool initialize_body_pose_provider() noexcept;
 void shutdown_body_pose_provider() noexcept;
 void reset_body_pose_calibration() noexcept;
@@ -53,6 +66,9 @@ BodyTelemetryTiming get_body_telemetry_timing() noexcept;
 // Cached public GROUND VELOCITY in knots, independent of body calibration.
 // No simulator calls; a sample older than500ms is unavailable, never zeroed.
 GroundSpeedSample get_ground_speed() noexcept;
+// Optional SIM ON GROUND telemetry only gates background prewarming. A stale
+// sample never prevents an explicit TAXI request from using the existing path.
+OnGroundSample get_on_ground() noexcept;
 // Cached FCU TAXI light levels; independent of body calibration. Invalid or
 // older-than-500ms telemetry must not be interpreted as an authoritative OFF.
 TaxiButtonSample get_taxi_buttons() noexcept;
@@ -67,8 +83,12 @@ TaxiCutoffStatus get_taxi_cutoff() noexcept;
 LightingSample get_lighting() noexcept;
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
+bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept;
+bool accept_identity_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 bool accept_aircraft_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept;
+bool accept_on_ground_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
+OnGroundSample on_ground_at(std::uint64_t now_ms) noexcept;
 bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 TaxiButtonSample taxi_buttons_at(std::uint64_t now_ms) noexcept;
 bool accept_lighting_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;

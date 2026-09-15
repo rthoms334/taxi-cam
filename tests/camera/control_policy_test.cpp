@@ -53,10 +53,12 @@ int main() {
   assert(!progress.observe(1, false, 4024, 800000, true));
   assert(!progress.observe(100, true, 4024, 800000, true));
   assert(!progress.observe(2099, true, 4024, 850000, true));
-  assert(progress.observe(2100, true, 4024, 852344, true));  // Observed time-change failure.
+  assert(progress.observe(2100, true, 4024, 852344, true));
+  assert(progress.stalled());  // Observed time-change failure.
   assert(!progress.observe(2101, true, 4024, 852344, true));
   assert(!progress.observe(5000, false, 4024, 852344, true));  // No retry during cleanup/stale pose.
-  assert(!progress.observe(5001, true, 4025, 852345, false));  // Fresh capture restores progress.
+  assert(!progress.observe(5001, true, 4025, 852345, false));
+  assert(!progress.stalled());  // Fresh capture restores progress.
   assert(!progress.observe(9000, true, 4025, 852345, true));
   assert(!progress.observe(12000, true, 4025, 852345, true));  // No source draws: no speculation.
   assert(progress.observe(12001, true, 4025, 852346, true));

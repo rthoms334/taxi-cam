@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 #include "../../src/shared/companion_control.hpp"
@@ -47,17 +48,41 @@ int main() {
     CompanionControl control;
     require(!control.connected(1000) && !control.settings().enabled, "No enable before first message");
     Settings settings;
+    require(valid_settings(settings), "Default settings are valid");
     settings.camera_rate = 60;
     settings.exposure = -7.3f;
     settings.follow_taxi = 0;
     settings.manual_mask = 3;
     settings.mounts[0][2] = 27.25;
+    settings.nose_dot = {0.125f, 0.375f};
+    settings.tail_upper = {0.25f, 0.625f};
+    settings.tail_corner = {0.1875f, 0.75f};
+    settings.tail_inner = {0.375f, 0.875f};
     settings.route_request = 12;
     settings.left_id = 149;
     settings.right_id = 148;
     publish(owner, 10000, settings);
     control.refresh(reader);
     require(control.connected(10000), "Fresh companion accepted");
+    require(ProtocolVersion == 7 && control.settings().nose_dot == settings.nose_dot &&
+                control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
+                control.settings().tail_inner == settings.tail_inner,
+            "Protocol7 guide coordinates roundtrip");
+    for (auto member : {&Settings::nose_dot, &Settings::tail_upper, &Settings::tail_corner, &Settings::tail_inner}) {
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        for (float value :
+             {-0.001f, axis ? 1.001f : 0.501f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+          auto invalid = settings;
+          (invalid.*member)[axis] = value;
+          publish(owner, 10000, invalid);
+          control.refresh(reader);
+          require(!control.connected(10000) && !control.settings().enabled, "Invalid guide IPC cannot enable cameras");
+        }
+      }
+    }
+    publish(owner, 10000, settings);
+    control.refresh(reader);
+    require(control.connected(10000), "Valid guides restore IPC after malformed packets");
     {
       BusyWriter writer(owner);
       writer.wait();
@@ -68,7 +93,9 @@ int main() {
         require(control.connected(now), "Both PFDs stay requested during live heartbeat");
         const auto& held = control.settings();
         require(held.manual_mask == 3 && held.camera_rate == 60 && held.exposure == settings.exposure && held.mounts == settings.mounts &&
-                    held.route_request == 12 && held.left_id == 149 && held.right_id == 148,
+                    held.route_request == 12 && held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
+                    held.tail_upper == settings.tail_upper && held.tail_corner == settings.tail_corner &&
+                    held.tail_inner == settings.tail_inner,
                 "Preserve exact settings during contention");
       }
       require(!control.connected(15001), "Contention cannot extend heartbeat deadline");
@@ -103,10 +130,10 @@ int main() {
     control.refresh(reader);
     require(control.connected(17000), "Valid message restores connection");
     require(owner.lock(1000), "Protocol mutation lock");
-    owner.data()->version = 999;
+    owner.data()->version = 6;
     owner.unlock();
     control.refresh(reader);
-    require(!control.connected(17000), "Changed protocol invalidates cache");
+    require(!control.connected(17000), "Old protocol6 is rejected by the protocol7 settings layout");
     require(owner.lock(1000), "Restore protocol lock");
     owner.data()->version = ProtocolVersion;
     owner.unlock();

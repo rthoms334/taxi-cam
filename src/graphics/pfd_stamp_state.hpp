@@ -4,12 +4,23 @@
 #define NOMINMAX
 #endif
 #include <d3d12.h>
+#include "d3d12_command_list9.hpp"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
 
 namespace taxi_camera {
+
+// Partial groups are no-draw diagnostics; normal stamping always uses all.
+enum class PfdStateGroup { all, pipeline, root_bindings, raster };
+inline constexpr bool valid_pfd_state_group(PfdStateGroup group) noexcept {
+  return group == PfdStateGroup::all || group == PfdStateGroup::pipeline || group == PfdStateGroup::root_bindings ||
+         group == PfdStateGroup::raster;
+}
+inline constexpr bool includes_pfd_state_group(PfdStateGroup group, PfdStateGroup member) noexcept {
+  return group == PfdStateGroup::all || group == member;
+}
 
 enum class PfdRootKind : std::uint8_t { constants, table, cbv, srv, uav };
 struct PfdRootParameter {
@@ -40,7 +51,27 @@ class PfdGraphicsState {
     if (!invalid_reason_)
       invalid_reason_ = reason;
   }
-  void bind_pipeline(ID3D12PipelineState* pipeline) noexcept { pipeline_ = pipeline; }
+  void bind_pipeline(ID3D12PipelineState* pipeline) noexcept {
+    pipeline_ = pipeline;
+    // Even assigning the SAME PSO resets these overrides to its defaults.
+    depth_bias_known_ = strip_cut_known_ = false;
+    dynamic_native_ = nullptr;
+  }
+  // Caller has verified this exact native pointer by QI for CommandList9 and
+  // observed the matching original setter on this recording.
+  void depth_bias(d3d12_extended::CommandList9* native, float bias, float clamp, float slope) noexcept;
+  void strip_cut(d3d12_extended::CommandList9* native, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE value) noexcept;
+  // Custom sample positions survive PSO changes. The single-sample stamp must
+  // normalize its pattern and restore the application's exact prior state.
+  void sample_positions(ID3D12GraphicsCommandList1* native, UINT samples, UINT pixels, const D3D12_SAMPLE_POSITION* positions) noexcept;
+  bool has_sample_positions() const noexcept { return sample_count_ != 0; }
+  void restore_sample_positions(ID3D12GraphicsCommandList* native) const noexcept;
+  bool has_depth_bias() const noexcept { return depth_bias_known_; }
+  bool has_strip_cut() const noexcept { return strip_cut_known_; }
+  bool can_restore(ID3D12GraphicsCommandList* native) const noexcept {
+    return complete() && (!(depth_bias_known_ || strip_cut_known_) || dynamic_native_ == native) &&
+           (!has_sample_positions() || sample_native_ == native);
+  }
   void bind_root(ID3D12RootSignature* root,
                  std::uint64_t layout_generation,
                  const PfdRootLayout& layout,
@@ -66,7 +97,7 @@ class PfdGraphicsState {
   ID3D12RootSignature* root() const noexcept { return root_; }
   std::uint64_t layout_generation() const noexcept { return layout_generation_; }
   // Restore the exact observed native graphics bindings after the stamp.
-  void restore(ID3D12GraphicsCommandList* native) const noexcept;
+  void restore(ID3D12GraphicsCommandList* native, PfdStateGroup group = PfdStateGroup::all) const noexcept;
 
  private:
   bool parameter(UINT index, PfdRootKind kind) noexcept;
@@ -74,6 +105,13 @@ class PfdGraphicsState {
   bool observed_ = false;
   std::uint64_t generation_ = 0, layout_generation_ = 0;
   ID3D12PipelineState* pipeline_ = nullptr;
+  d3d12_extended::CommandList9* dynamic_native_ = nullptr;
+  bool depth_bias_known_ = false, strip_cut_known_ = false;
+  std::array<float, 3> depth_bias_{};
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut_ = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+  ID3D12GraphicsCommandList1* sample_native_ = nullptr;
+  UINT sample_count_ = 0, sample_pixels_ = 0;
+  std::array<D3D12_SAMPLE_POSITION, 16> sample_positions_{};
   ID3D12RootSignature* root_ = nullptr;
   PfdRootLayout layout_{};
   std::array<PfdRootValue, 64> values_{};

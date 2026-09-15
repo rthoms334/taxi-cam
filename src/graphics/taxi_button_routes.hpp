@@ -53,6 +53,18 @@ class TaxiButtonRoutes {
  public:
   std::array<std::uint64_t, 2> targets{};
 
+  // Explicit device/profile session change only. Resource destruction uses forget().
+  void reset() noexcept { *this = {}; }
+
+  // The caller first validates supplied nonzero resource IDs. Zero requests
+  // automatic detection for that side; both zero starts a fresh explicit request.
+  bool select_explicit(const std::array<std::uint64_t, 2>& selection) noexcept {
+    if (selection[0] && selection[0] == selection[1])
+      return false;
+    targets = selection;
+    assigned_ = selection[0] != 0 || selection[1] != 0;
+    return true;
+  }
   bool assign(unsigned side, std::uint64_t id) noexcept {
     if (side >= targets.size() || id == 0 || targets[1 - side] == id)
       return false;

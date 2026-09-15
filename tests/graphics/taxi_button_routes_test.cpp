@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <limits>
 
+#include "../../src/graphics/pfd_target_detector.hpp"
 #include "../../src/graphics/taxi_button_routes.hpp"
 
 int main() {
@@ -102,5 +103,82 @@ int main() {
   assert(replacements.adopt_detected({100000, 90000}));  // Explicit manual side remains authoritative.
   assert(replacements.targets[1] == 90000);
 
+  // Existing live A350 textures stay eligible across the deliberate A35K ->
+  // A359 profile change. Clearing only public IDs used to leave assigned_ set,
+  // permanently refusing even a newly confirmed pair in the new profile.
+  static taxi_camera::PfdTargetDetector profile_detector;
+  taxi_camera::TaxiButtonRoutes profile_routes;
+  std::array<taxi_camera::PfdTargetObservation, 2> live{{{280, 10000, 1644, 1024, 1, 27}, {279, 9000, 1644, 1024, 1, 27}}};
+  std::uint64_t now = 10000;
+  const auto confirm = [&](const taxi_camera::profiles::AircraftProfile& profile) {
+    profile_detector.configure(profile);
+    assert(!profile_detector.observe(live.data(), live.size(), now).valid);
+    for (unsigned window = 1; window <= 3; ++window) {
+      live[0].draws += 100;
+      live[1].draws += 90;
+      now += 1000;
+      const auto& observed = profile_detector.observe(live.data(), live.size(), now);
+      assert(observed.valid == (window == 3));
+    }
+    return profile_detector.snapshot().targets;
+  };
+  const auto old_pair = confirm(taxi_camera::profiles::A35K);
+  assert(profile_routes.adopt_detected(old_pair));
+  assert((old_pair == std::array<std::uint64_t, 2>{280, 279}));
+  profile_routes.reset();  // Same operation used by the deliberate profile switch.
+  assert(profile_routes.active_mask(true, true, true) == 0);
+  const auto new_pair = confirm(taxi_camera::profiles::A359);
+  assert(new_pair == old_pair);  // No new texture creation is required.
+  assert(profile_routes.adopt_detected(new_pair));
+  assert(profile_routes.active_mask(true, true, true) == 3);
+  assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
+  profile_routes.forget(280);
+  profile_routes.forget(279);
+  assert(!profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
+  assert(profile_routes.active_mask(true, true, true) == 0);  // Ordinary both-lost remains ambiguous.
+  profile_routes.reset();                                     // A deliberate reload of the same aircraft releases old ownership.
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
+  assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
+  profile_routes.reset();
+  live = {{{380, 0, 768, 1024, 5, 28}, {379, 0, 768, 1024, 5, 28}}};
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A380)));
+  assert(profile_routes.matches(380, 1) && profile_routes.matches(379, 2));
+  profile_routes.reset();
+  live = {{{480, 0, 1644, 1024, 1, 27}, {479, 0, 1644, 1024, 1, 27}}};
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
+  assert(profile_routes.matches(480, 1) && profile_routes.matches(479, 2));
+  profile_routes.reset();
+  assert(!profile_routes.adopt_detected({0, 279}));
+  assert(!profile_routes.adopt_detected({280, 280}));
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A35K)));
+  std::puts("Aircraft session reacquisition: PASS; same-aircraft reload, A350/A380 round trip, ordinary both-lost still refused");
+  // An explicit partial choice is authoritative for that side, independent of
+  // detector ordering. Zero is Auto, never a resource identity.
+  taxi_camera::TaxiButtonRoutes selections;
+  assert(selections.select_explicit({280, 279}));
+  assert(!selections.select_explicit({280, 280}));
+  assert((selections.targets == std::array<std::uint64_t, 2>{280, 279}));
+  assert(selections.select_explicit({280, 0}));
+  assert(selections.active_mask(true, true, true) == 1);
+  assert(!selections.adopt_detected({800, 700}));  // No matching manual anchor.
+  assert(selections.targets[0] == 280 && selections.targets[1] == 0);
+  assert(selections.adopt_detected({900, 280}));
+  assert(selections.targets[0] == 280 && selections.targets[1] == 900);
+  assert(selections.select_explicit({0, 279}));
+  assert(selections.active_mask(true, true, true) == 2);
+  assert(selections.adopt_detected({279, 901}));
+  assert(selections.targets[0] == 901 && selections.targets[1] == 279);
+  selections.forget(901);
+  selections.forget(279);
+  assert(!selections.adopt_detected({902, 903}));  // Ordinary destruction still refuses.
+  assert(selections.select_explicit({0, 0}));
+  assert(selections.active_mask(true, true, true) == 0);
+  assert(selections.adopt_detected({902, 903}));  // Explicit both-Auto releases old ownership.
+  assert(selections.targets[0] == 902 && selections.targets[1] == 903);
+  assert(!selections.select_explicit({904, 904}));
+  assert(selections.targets[0] == 902 && selections.targets[1] == 903);
+  assert(selections.select_explicit({903, 902}));  // Explicit swap replaces both atomically.
+  assert(selections.matches(903, 1) && selections.matches(902, 2));
+  std::puts("Explicit manual/Auto routing: PASS; partial anchors preserved, duplicate pair unchanged");
   std::puts("Taxi button routes: PASS");
 }

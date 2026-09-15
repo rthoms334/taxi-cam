@@ -1,16 +1,20 @@
 #pragma once
 
 #include "owned_view.hpp"
+#include "../profiles/catalog.hpp"
 
 namespace taxi_camera::native_camera {
 
 using ViewDimensions = std::array<std::array<std::int32_t, 2>, 3>;
 
-// Native outputs match their actual PFD panes: feed0 is768x255, feed1 is768x504.
+// Native outputs fit inside the profile camera border: A380 panes are736x251 and736x496.
 // The four-row separator belongs only to the compositor. All three inherited
 // pairs must agree, but their aspect/size does not determine the requested size.
-inline constexpr std::array<std::array<std::int32_t, 2>, 2> kCameraPaneDimensions{{{768, 255}, {768, 504}}};
-bool plan_view_resize(const ViewDimensions& inherited, unsigned feed, ViewDimensions& desired) noexcept;
+inline constexpr auto kCameraPaneDimensions = profiles::A380.camera_panes;
+bool plan_view_resize(const ViewDimensions& inherited,
+                      unsigned feed,
+                      ViewDimensions& desired,
+                      const profiles::CameraPanes& panes = profiles::A380.camera_panes) noexcept;
 
 // The original manager returns before initializing its primary-size cache when
 // it has no entries. Newly created views must survive one ORIGINAL update with
@@ -48,6 +52,8 @@ class ViewResizeWarmup {
 enum class ViewResizeStatus {
   not_attempted,
   resized,
+  dimensions_restored,
+  output_mismatch,
   unchanged,
   invalid_snapshot,
   invalid_dimensions,
@@ -88,7 +94,19 @@ struct ViewResizeCallbacks {
 ViewResizeResult resize_owned_view(const engine_camera::OwnedViewSnapshot& view,
                                    unsigned feed,
                                    const ViewDimensions& desired,
-                                   const ViewResizeCallbacks& callbacks) noexcept;
+                                   const ViewResizeCallbacks& callbacks,
+                                   const profiles::CameraPanes& panes = profiles::A380.camera_panes) noexcept;
+
+// Established mode2 views can have their three size fields overwritten when
+// the primary view changes. Restore only when the fully reread existing Bitmap
+// already has the desired dimensions. No output allocation/replacement occurs;
+// ensure_output is never called. Caller keeps both gates closed, retains the
+// entry IDs, and revalidates the complete chain/resource after this operation.
+ViewResizeResult restore_owned_view_dimensions(const engine_camera::OwnedViewSnapshot& view,
+                                               unsigned feed,
+                                               const ViewDimensions& desired,
+                                               const ViewResizeCallbacks& callbacks,
+                                               const profiles::CameraPanes& panes = profiles::A380.camera_panes) noexcept;
 
 const char* view_resize_status_name(ViewResizeStatus status) noexcept;
 

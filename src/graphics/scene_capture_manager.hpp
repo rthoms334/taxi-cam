@@ -54,6 +54,8 @@ class SceneCaptureManager {
     std::uint64_t source_candidates = 0, source_draws = 0, tail_submissions = 0, tail_captures = 0;
     const char* tail_status = "not_started";
     std::uint64_t unknown_submitted_lists = 0, invalid_source_recordings = 0, scoped_source_invalidations = 0;
+    std::uint64_t invalid_draws = 0, source_lease_failures = 0, global_aliases = 0, recording_overflows = 0;
+    std::uint32_t last_invalidation_reasons = 0;
   };
 
   explicit SceneCaptureManager(SceneHandoff& handoff) noexcept;
@@ -93,7 +95,10 @@ class SceneCaptureManager {
   void after_source_draw(ID3D12GraphicsCommandList*, std::uint64_t object_generation, bool allowed) noexcept;
   void observe_source_legacy(ID3D12GraphicsCommandList*, std::uint64_t object_generation, const D3D12_RESOURCE_BARRIER&) noexcept;
   void observe_source_enhanced(ID3D12GraphicsCommandList*, std::uint64_t object_generation, const D3D12_TEXTURE_BARRIER&) noexcept;
-  void invalidate_source_recording(ID3D12GraphicsCommandList*, std::uint64_t object_generation, bool affects_all_sources = false) noexcept;
+  void invalidate_source_recording(ID3D12GraphicsCommandList*,
+                                   std::uint64_t object_generation,
+                                   bool affects_all_sources = false,
+                                   std::uint32_t reasons = 0) noexcept;
   // Known render-pass/indirect targets affect only their exact resource keys.
   // Missing/truncated target metadata retains the conservative global guard.
   void invalidate_source_targets(ID3D12GraphicsCommandList*,
@@ -146,6 +151,9 @@ class SceneCaptureManager {
   bool register_consumer_recording(ID3D12GraphicsCommandList* native_list) noexcept;
 
   engine_hook::queue_submit::Callbacks callbacks() noexcept;
+  // Discovery runs without submission serialization. Only fully observed,
+  // unrelated recordings bypass it; all other batches revalidate under both
+  // manager and submission locks before retaining leases or queuing a fence.
   std::uint64_t before_submission(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
   void after_submission(ID3D12CommandQueue*, std::uint64_t receipt) noexcept;
   void submission_refused(ID3D12CommandQueue*, engine_hook::queue_submit::Refusal) noexcept;

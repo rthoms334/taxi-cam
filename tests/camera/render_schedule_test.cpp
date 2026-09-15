@@ -79,6 +79,18 @@ void live_rate_changes() {
   require(schedule.tick(52) == std::array<bool, 2>{}, "Lowered rate retains per-feed cooldown");
   require(schedule.tick(76)[1], "Lowered rate resumes without resetting history");
 }
+void suspend_and_resume() {
+  for (unsigned rate : {15u, 60u}) {
+    RenderSchedule schedule;
+    schedule.configure(rate);
+    require(schedule.tick(1000)[0], "Initial pulse before telemetry gap");
+    for (std::uint64_t time = 1001; time < 7000; ++time)
+      require(schedule.tick(time, true) == std::array<bool, 2>{}, "Suspension left a gate open");
+    require(schedule.tick(7000)[1], "Resume must preserve the next camera without recreating the pair");
+    require(schedule.tick(7001) == std::array<bool, 2>{}, "Resume must close the pulse without a catch-up burst");
+    require(schedule.tick(7002) == std::array<bool, 2>{}, "Resume must respect the aggregate rate limit");
+  }
+}
 }  // namespace
 
 int main() {
@@ -89,6 +101,7 @@ int main() {
           cadence(rate, feeds, step);
     changes_and_stalls();
     live_rate_changes();
+    suspend_and_resume();
     std::printf("PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off intervals and no catch-up bursts.\n",
                 checks);
     return 0;

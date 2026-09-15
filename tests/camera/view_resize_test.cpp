@@ -79,7 +79,7 @@ void planning() {
     for (unsigned feed = 0; feed < 2; ++feed) {
       require(nc::plan_view_resize(input, feed, output), "valid dimensions refused");
       for (const auto pair : output)
-        require(pair == std::array<std::int32_t, 2>{768, feed == 0 ? 255 : 504}, "output differs from its exact PFD pane");
+        require(pair == std::array<std::int32_t, 2>{736, feed == 0 ? 251 : 496}, "output differs from its exact PFD pane");
     }
   }
   for (const auto value : {std::numeric_limits<std::int32_t>::min(), -1, 0, 31, 16385, std::numeric_limits<std::int32_t>::max()}) {
@@ -158,7 +158,7 @@ void refusals() {
         fixture.feed = 2;
         break;
       case 14:
-        fixture.desired.fill({768, 504});  // The other feed's valid size must still be refused.
+        fixture.desired.fill({736, 496});  // The other feed's valid size must still be refused.
         break;
     }
     const auto result = nc::resize_owned_view(fixture.view, fixture.feed, fixture.desired, callbacks);
@@ -214,6 +214,58 @@ void stale_fields_and_boundary() {
   require(!result.complete && !result.write_attempted && result.status == nc::ViewResizeStatus::invalid_mapping,
           "partially writable 24-byte span was accepted");
   fixture.unchanged_bytes();
+}
+
+void retained_dimension_restore() {
+  for (unsigned feed = 0; feed < 2; ++feed) {
+    Fixture f(0, feed);
+    f.view.mode = 2;
+    f.view.resource_present = true;
+    f.view.output_dimensions = f.desired[0];
+    auto callbacks = f.callbacks();
+    callbacks.ensure_output = nullptr;  // Established outputs must never be replaced.
+    for (unsigned cycle = 0; cycle < 20; ++cycle) {
+      f.view.dimensions.fill({cycle % 2 ? 2560 : 3413, cycle % 2 ? 1440 : 913});
+      std::memcpy(f.memory + 16, &f.view.dimensions, 24);
+      const auto result = nc::restore_owned_view_dimensions(f.view, feed, f.desired, callbacks);
+      require(result.complete && result.write_attempted && result.status == nc::ViewResizeStatus::dimensions_restored,
+              "primary-size overwrite did not restore existing pane fields");
+      require(f.allocated == 0 && f.refreshed == cycle + 1, "retained recovery allocated an output or missed projection");
+      for (unsigned i = 0; i < f.before.size(); ++i)
+        if (i < 16 || i >= 40)
+          require(f.memory[i] == f.before[i], "retained recovery wrote outside24sizebytes");
+    }
+  }
+  for (unsigned choice = 0; choice < 5; ++choice) {
+    Fixture f;
+    f.view.mode = 2;
+    f.view.resource_present = true;
+    f.view.output_dimensions = f.desired[0];
+    auto callbacks = f.callbacks();
+    if (choice == 0)
+      f.view.mode = 1;
+    if (choice == 1)
+      f.view.resource_present = false;
+    if (choice == 2)
+      ++f.view.output_dimensions[0];
+    if (choice == 3)
+      f.view.flags[0] &= ~1ull;
+    if (choice == 4)
+      callbacks.refresh_projection = nullptr;
+    const auto result = nc::restore_owned_view_dimensions(f.view, f.feed, f.desired, callbacks);
+    require(!result.complete && !result.write_attempted, "unproven retained-output restoration was admitted");
+    f.unchanged_bytes();
+  }
+  for (unsigned failure : {1u, 3u, 4u}) {
+    Fixture f;
+    f.view.mode = 2;
+    f.view.resource_present = true;
+    f.view.output_dimensions = f.desired[0];
+    f.failure = failure;
+    const auto result = nc::restore_owned_view_dimensions(f.view, f.feed, f.desired, f.callbacks());
+    require(!result.complete && result.write_attempted && f.allocated == 0,
+            "partial restoration did not refuse without output replacement");
+  }
 }
 
 void empty_manager_warmup() {
@@ -274,6 +326,7 @@ int main() {
     callback_failures();
     stale_fields_and_boundary();
     empty_manager_warmup();
+    retained_dimension_restore();
     std::printf("PASS: %u owned-view resize checks; only own private fixture memory and mock callbacks used.\n", checks);
     return 0;
   } catch (const std::exception& error) {
