@@ -58,8 +58,6 @@ On **Display**, adjust brightness, automatic night exposure and ground-speed tex
 
 - **Night lighting:** Runway and taxiway lights can look very faint or be difficult to see. Improving their visibility is on the roadmap.
 - **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. Try a lower camera frame rate if needed.
-- **A350-1000 alignment:** The default camera and guide positions are still being checked in the simulator, so you may need to adjust them in Settings.
-- **Reference guides:** The markers do not measure distance or guarantee clearance around the aircraft.
 
 Please report unexpected behaviour using **Report a bug**.
 
@@ -85,21 +83,4 @@ Taxi Cam asks MSFS to render two extra camera views and combines them on the GPU
 - [Builds and releases](docs/releases.md)
 - [Source layout](docs/repository-structure.md)
 
-<details>
-<summary>Building from source</summary>
-
-Run from the repository in PowerShell:
-
-~~~powershell
-.\build.ps1 -Bootstrap -Validate
-.\smoke-test.ps1
-.\installer\bootstrap.ps1
-$zip = .\installer\package.ps1 -BuildLabel build.0 -SourceCommit (git rev-parse HEAD)
-.\installer\build.ps1 -Package $zip
-~~~
-
-Automated checks do not replace testing in MSFS. See [Builds and releases](docs/releases.md) for validation and packaging details.
-
-</details>
-
-Taxi Cam is maintained independently of the aircraft developers. See [Third-party notices](THIRD_PARTY_NOTICES.md).
+See [Third-party notices](THIRD_PARTY_NOTICES.md).
