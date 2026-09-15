@@ -70,9 +70,17 @@ int main() {
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol6 guide coordinates roundtrip");
     require(control.settings().graphics_state_test == 1, "Diagnostic flag roundtrips through IPC");
+    for (unsigned mode = 0; mode <= 3; ++mode) {
+      auto diagnostic = settings;
+      diagnostic.graphics_state_test = mode;
+      publish(owner, 10000, diagnostic);
+      control.refresh(reader);
+      require(control.connected(10000) && control.settings().graphics_state_test == mode,
+              "Every graphics diagnostic mode roundtrips through IPC");
+    }
     {
       auto invalid = settings;
-      invalid.graphics_state_test = 2;
+      invalid.graphics_state_test = 4;
       publish(owner, 10000, invalid);
       control.refresh(reader);
       require(!control.connected(10000) && !control.settings().enabled, "Malformed diagnostic flag refuses IPC");

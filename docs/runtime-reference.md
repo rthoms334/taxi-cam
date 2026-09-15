@@ -100,6 +100,14 @@ The GS box uses thin antialiased lettering with two character spaces between the
 
 Source: [compositor and guides](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp).
 
+## Camera warmup
+
+Warmup requires an enabled, connected service, the current supported aircraft session, valid TAXI and body-pose data, and fresh `SIM ON GROUND` and ground-speed samples confirming on-ground operation at 0â€“0.5 knots. The on-ground subscription is optional and separate from the body-pose packet: missing data prevents background warmup, without disabling ordinary TAXI requests.
+
+Each session gets one background attempt lasting up to five seconds. The first combined frame ends warmup and parks the pair. Foreground activation takes over; stale data, a failure or the time limit ends background work without retrying it. No display or TAXI state is written by warmup.
+
+`Prewarm phase` reports the outcome, elapsed time, retained entry IDs, cumulative native creation count and output availability. Ordinary OFF/ON cycles should reuse the same IDs. The recurring `Camera retention` line also reports `created_total`, owned `snapshot_bytes`, quarantined packet count and the warmup phase. These counters help detect unwanted recreation and growth in our snapshot pool; they do not measure all simulator heap or VRAM use.
+
 ## PFD-copy diagnostics
 
 The bridge log reports `PFD copy admission` alongside the normal camera counters. `rt_metadata` counts selected-target RT exits seen in native barrier metadata; `rt_callbacks` counts those admitted by the recording/pass checks. `pending_matches` shows same-recording PFD evidence. `view_resolved` also includes verified selected targets whose earlier draw was recorded elsewhere. `attempts`, `rejected`, `state_skips` and `reason` distinguish missing/conflicting typed-view evidence from output or recording rejection. These are cumulative observations, not completed GPU-frame counts.
@@ -147,6 +155,8 @@ The mapping carries values, IDs and bounded text. It carries no camera pixels or
 | Aircraft identity sampling / freshness | 1000 ms / 3000 ms |
 | Aircraft pose and GS updates | SimConnect `SIM_FRAME` |
 | GS and TAXI sample freshness | 500 ms |
+| Optional on-ground sampling / freshness | 250 ms / 500 ms |
+| Background camera warmup | One attempt per session; up to 5000 ms |
 | Ambient-light sampling / freshness | 500 ms / 1500 ms |
 | Held TAXI intent after an invalid gap starts | Less than 2000 ms |
 | PFD discovery | 1000 ms; three qualifying windows to confirm |
@@ -163,9 +173,9 @@ Source: [IPC](../standalone/protocol.hpp), [control loop](../standalone/bridge_m
 
 ## Diagnostics
 
-**Graphics state test** is a temporary diagnostic on this page. With a TAXI request or manual camera preview active, it keeps camera capture and composition running and performs the overlay's graphics-state changes and restoration, but omits camera pixel drawing and PFD copies. Turn it off to return to normal camera delivery. Existing command recordings can persist until MSFS redraws the display. The test is off by default, is not saved to configuration, and clears on Stop camera tests or an aircraft-session/profile change.
+**Graphics state test** cycles through **Off**, **All**, **Targets only**, and **Shader state only**. With a TAXI request or manual camera preview active, the three test modes keep camera capture and composition running but omit camera pixel drawing and PFD copies. All repeats both render-target binding and shader-state restoration; Targets only changes and restores RTV/DSV bindings; Shader state only changes and restores the overlay pipeline, root arguments, topology, viewports and scissors without changing RTV/DSV bindings. Cycle back to Off to return to normal camera delivery. Existing command recordings can persist until MSFS redraws the display. The test is off by default, is not saved to configuration, and clears on Stop camera tests or an aircraft-session/profile change.
 
-The `PFD state diagnostic` log reports the switch and successful `roundtrips` separately from camera stamps. `sample_position_calls` counts native programmable sample-pattern setters, and `restores` counts overlays that restored an observed pattern. These counters establish whether the application uses the state; they do not establish the cause of a visible flash.
+The `PFD state diagnostic` log reports `mode` (0–3), successful `roundtrips`, and separate `targets` and `shaders` operation counts, independently of camera stamps. `sample_position_calls` counts native programmable sample-pattern setters, and `restores` counts overlays that restored an observed pattern. These counters establish whether the application uses the state; they do not establish the cause of a visible flash.
 
 The bridge writes a status snapshot to the companion and appends metadata to:
 

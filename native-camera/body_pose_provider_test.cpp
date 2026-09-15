@@ -274,8 +274,48 @@ int offline_tests() {
   std::strcpy(reinterpret_cast<char*>(identity_path.data() + 24), "SimObjects/Airplanes/Asobo_C172/aircraft.cfg");
   check(testing::accept_identity_packet(identity_path.data(), identity_path.size(), identity_now + 1));
   check(get_aircraft_session_epoch() == before_epoch + 3 && !aircraft_matches_profile() && !get_lighting().valid);
+  std::array<unsigned char, 48> ground_packet{};
+  const std::array<DWORD, 10> ground_header{48, 0, 8, 7, 2883584, 7, 0, 0, 1, 1};
+  const auto refresh_ground = [&](double value) {
+    std::memcpy(ground_packet.data(), ground_header.data(), sizeof(ground_header));
+    std::memcpy(ground_packet.data() + 40, &value, sizeof(value));
+  };
+  check(!get_on_ground().valid);
+  for (double value : {0.0, 1.0}) {
+    refresh_ground(value);
+    check(testing::accept_on_ground_packet(ground_packet.data(), ground_packet.size(), 10000));
+    const auto sample = testing::on_ground_at(10000);
+    check(sample.valid && sample.on_ground == (value == 1) && sample.sample_ms == 10000);
+  }
+  check(testing::on_ground_at(10500).valid && !testing::on_ground_at(10501).valid && !testing::on_ground_at(9999).valid);
+  check(std::strcmp(testing::on_ground_at(10501).error, "on_ground_telemetry_stale") == 0);
+  for (DWORD bytes = 0; bytes < ground_packet.size(); ++bytes)
+    check(!testing::accept_on_ground_packet(ground_packet.data(), bytes, 10000));
+  check(!testing::accept_on_ground_packet(ground_packet.data(), 49, 10000));
+  check(!testing::accept_on_ground_packet(nullptr, 48, 10000));
+  check(!testing::accept_on_ground_packet(ground_packet.data(), 48, 0));
+  for (unsigned field : {0u, 2u, 3u, 5u, 6u, 9u}) {
+    refresh_ground(1);
+    const DWORD wrong = ground_header[field] + 1;
+    std::memcpy(ground_packet.data() + field * 4, &wrong, 4);
+    check(!testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
+  }
+  refresh();
+  check(testing::accept_aircraft_packet(packet.data(), packet.size(), 10000));
+  const auto independent_speed = testing::ground_speed_at(10000);
+  for (double value : {-1.0, 0.5, 2.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+    refresh_ground(value);
+    check(testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
+    check(!testing::on_ground_at(10000).valid);
+    check(testing::ground_speed_at(10000).knots == independent_speed.knots);
+  }
+  refresh_ground(1);
+  check(testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
+  check(testing::accept_session_packet(load_event.data(), load_event.size()));
+  check(!testing::on_ground_at(10000).valid);
   shutdown_body_pose_provider();
   check(!get_ground_speed().valid && std::isnan(get_ground_speed().knots));
+  check(!get_on_ground().valid && std::strcmp(get_on_ground().error, "not_initialized") == 0);
   check(!get_taxi_buttons().valid && std::strcmp(get_taxi_buttons().error, "not_initialized") == 0);
   check(!get_lighting().valid && std::strcmp(get_lighting().error, "not_initialized") == 0);
   std::printf(

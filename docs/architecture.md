@@ -43,7 +43,9 @@ The installer adds an `exe.xml` entry that starts the companion in background mo
 
 The companion checks the simulator's executable path, Windows user/session and AMD64 executable structure. Different paths are accepted only when Windows identifies them as the same file, allowing the Xbox installation path and its WindowsApps alias to match. It then loads the bridge using Windows `LoadLibraryW` in the simulator process and calls the DLL's `TaxiCameraStart` export. The bridge starts its control worker after the loader has finished.
 
-The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. An accepted TAXI request starts camera preparation while PFD discovery proceeds independently. Only confirmed, assigned display textures receive the image. The explicit scene test prepares cameras without writing a PFD.
+The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. With the service enabled and fresh data confirming a supported aircraft is on the ground at no more than 0.5 knots, it can prepare the camera pair before the first TAXI press. Warmup renders until the first combined nose/tail frame is available, then closes the render gates and keeps the pair ready. It writes neither PFD images nor TAXI-button state. Display discovery proceeds independently.
+
+Background warmup gets one attempt per aircraft session and a five-second budget. Invalid or stale readiness data, diagnostics, a failure or the budget ending parks the attempt without an automatic retry. An explicit TAXI or scene-test request takes over immediately; it does not wait for background warmup. Only confirmed, assigned display textures receive the image. The explicit scene test prepares cameras without writing a PFD.
 
 Closing the settings window hides it. Exiting the companion clears camera delivery. The bridge and its installed hooks stay loaded until MSFS exits because recorded GPU commands may still refer to their resources.
 
@@ -176,7 +178,9 @@ MSFS can record a GPU command list once and execute it again later. Taxi Cam the
 
 A shared per-device fence timeline orders output writes and PFD reads, including work submitted on different queues. The output cannot be overwritten while an earlier tracked PFD read still needs it. Resources remain alive while recorded commands can reference them.
 
-Turning off one TAXI side stops recording further camera copies to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
+Turning off one TAXI side stops recording further camera copies to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side, the scene test nor the bounded startup warmup requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
+
+The retained pair is shared by both displays; toggling TAXI does not allocate another pair. Owned capture storage has a maximum of 16 snapshot packets and a 256 MiB aggregate budget. Up to eight private PFD patch slots reuse matching allocations. Output buffers, pipelines and resources that recorded GPU work may still reference remain allocated until safe release or simulator exit. These bounds cover Taxi Cam storage, not all memory allocated internally by the simulator or driver.
 
 Source: [native graphics adapter](../standalone/d3d12_bridge.cpp), [private PFD patch rendering](../src/pfd_stamp_d3d12.hpp), [runtime coordination](../src/scene_runtime.cpp).
 

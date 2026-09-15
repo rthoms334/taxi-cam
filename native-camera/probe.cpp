@@ -833,6 +833,12 @@ void observer(void* manager) noexcept {
     const auto start_body = requested_start ? sample_body_pose(now) : BodyPoseSnapshot{};
     if (profile_hold) {
       service_profile_transition(runtime, manager, report);
+    } else if (park_initial_scene(suspended, before.owned_ids[0] || before.owned_ids[1])) {
+      // OFF also parks an unfinished background creation request. Keep its
+      // mailbox request for an explicit resume; never create behind a lost
+      // heartbeat, cutoff or expired prewarm budget, and never erase a pair.
+      report.pair = before;
+      report.message = "Initial camera creation parked until render demand resumes.";
     } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !start_body.valid && !start_body.calibration_required) {
       // Public startup is asynchronous. Do not walk private manager, pool or
       // aircraft graphs repeatedly while its first telemetry is still pending.
@@ -882,7 +888,7 @@ void observer(void* manager) noexcept {
           // Stop and a new Start share this small mailbox transaction. A slow
           // calibration cannot resurrect an enable that the UI has cancelled.
           const std::lock_guard lock(runtime.mutex);
-          if (runtime.requested_start && runtime.requested_start_revision == start_revision) {
+          if (runtime.requested_start && runtime.requested_start_revision == start_revision && !runtime.suspended.load()) {
             scene_handoff().begin_scene();
             runtime.pair.request_independent_pose();
             runtime.requested_start = false;

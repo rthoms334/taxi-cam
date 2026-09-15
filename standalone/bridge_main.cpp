@@ -94,7 +94,8 @@ DWORD run_impl() {
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
   CaptureProgress progress;
-  StartupTiming startup;
+  StartupTiming startup, warmup_startup;
+  win::ScenePrewarm prewarm;
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
@@ -170,6 +171,10 @@ DWORD run_impl() {
         continue;
       }
       win::set_aircraft_profile(pending_profile);
+      if (applied_session_epoch != pending_session_epoch) {
+        prewarm = {};
+        warmup_startup = {};
+      }
       applied_profile = pending_profile;
       applied_profile_request = pending_profile_request;
       applied_session_epoch = pending_session_epoch;
@@ -215,11 +220,54 @@ DWORD run_impl() {
     const bool test_scene =
         connected && session_settings && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
     const auto intent_observed_ms = GetTickCount64();
-    if (!mask && !test_scene)
+    if (!mask && !test_scene && prewarm.phase() != win::ScenePrewarm::Phase::warming)
       failed = false;
     const auto targets = win::target_ids();
     const unsigned assigned = (targets[0] ? 1u : 0u) | (targets[1] ? 2u : 0u);
-    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed);
+    const auto speed = native_camera::get_ground_speed();
+    const auto warm_readiness = [&]() {
+      const auto sampled_now = GetTickCount64();
+      const auto ground = native_camera::get_on_ground();
+      const auto velocity = native_camera::get_ground_speed();
+      const auto pose = native_camera::sample_body_pose(sampled_now);
+      const auto aircraft = native_camera::get_aircraft_identity();
+      const auto current_epoch = native_camera::get_aircraft_session_epoch();
+      return win::ScenePrewarmReadiness{
+          control.connected(GetTickCount64()),
+          settings.aircraft_session_epoch == current_epoch && current_epoch == applied_session_epoch &&
+              settings.profile == applied_profile && settings.profile_request == applied_profile_request,
+          settings.enabled != 0,
+          native_camera::aircraft_matches_profile() && aircraft.fresh && aircraft.detected_profile == settings.profile,
+          win::graphics_status().ready,
+          native_camera::get_taxi_cutoff().inhibited,
+          native_camera::get_taxi_buttons().valid,
+          pose.valid || pose.calibration_required,
+          ground.valid,
+          ground.on_ground,
+          velocity.valid,
+          settings.calibration_mask != 0 || settings.single_camera != 0 || settings.graphics_state_test != 0,
+          velocity.knots};
+    };
+    bool background_warmup = false;
+    if (prewarm.phase() == win::ScenePrewarm::Phase::waiting || prewarm.phase() == win::ScenePrewarm::Phase::warming) {
+      const auto warm_scene = native_camera::scene_snapshot();
+      const auto warm_output = scene_runtime::snapshot(key);
+      const auto previous_warm_phase = prewarm.phase();
+      background_warmup = prewarm.observe(now, warm_readiness().eligible(), mask || test_scene,
+                                          requested && warm_scene.ready[0] && warm_scene.ready[1] && warm_output.output,
+                                          failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
+                                              warm_scene.pair.state == engine_camera::State::blocked);
+      if (prewarm.phase() != previous_warm_phase) {
+        char detail[384]{};
+        std::snprintf(
+            detail, sizeof(detail), "Prewarm phase=%s elapsed_ms=%llu entries=%llu/%llu created_total=%llu output=%u", prewarm.name(),
+            static_cast<unsigned long long>(prewarm.started_ms() && now >= prewarm.started_ms() ? now - prewarm.started_ms() : 0),
+            static_cast<unsigned long long>(warm_scene.pair.owned_ids[0]), static_cast<unsigned long long>(warm_scene.pair.owned_ids[1]),
+            static_cast<unsigned long long>(warm_scene.created_total), warm_output.output);
+        log_status(status, detail);
+      }
+    }
+    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup);
     unsigned active = demand.stamp_mask;
     win::set_target_mask(active);
     win::set_calibration(
@@ -253,10 +301,12 @@ DWORD run_impl() {
       startup.target_ms = GetTickCount64();
       log_startup(status, startup, "targets_ready");
     }
-    // Close render gates on OFF, cutoff, service pause or a lost heartbeat.
+    // Background warmup has zero display demand and closes after one complete
+    // pair or its bounded budget. Otherwise OFF, cutoff, pause and heartbeat
+    // loss close the render gates immediately.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
-    win::set_graphics_state_test(connected && settings.enabled && settings.graphics_state_test);
+    win::set_graphics_state_test(connected && settings.enabled ? settings.graphics_state_test : 0);
     auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
     composition.speed_color = settings.speed_color;
     composition.nose_dot = settings.nose_dot;
@@ -264,26 +314,40 @@ DWORD run_impl() {
     composition.tail_corner = settings.tail_corner;
     composition.tail_inner = settings.tail_inner;
     if (demand.start) {
-      ++startup.attempts;
-      startup.prepare_begin_ms = GetTickCount64();
-      startup.prepare_end_ms = startup.request_begin_ms = startup.request_end_ms = 0;
-      log_startup(status, startup, "prepare_begin");
+      auto& start_timing = background_warmup ? warmup_startup : startup;
+      if (background_warmup) {
+        start_timing.observed = true;
+        start_timing.intent_ms = prewarm.started_ms();
+      }
+      ++start_timing.attempts;
+      start_timing.prepare_begin_ms = GetTickCount64();
+      start_timing.prepare_end_ms = start_timing.request_begin_ms = start_timing.request_end_ms = 0;
+      log_startup(status, start_timing, "prepare_begin");
       const bool prepared = scene_runtime::prepare(key);
-      startup.prepare_end_ms = GetTickCount64();
-      log_startup(status, startup, prepared ? "prepare_ready" : "prepare_failed");
-      if (prepared) {
-        startup.request_begin_ms = GetTickCount64();
-        log_startup(status, startup, "request_begin");
+      start_timing.prepare_end_ms = GetTickCount64();
+      log_startup(status, start_timing, prepared ? "prepare_ready" : "prepare_failed");
+      bool warm_start_allowed = true;
+      if (background_warmup) {
+        // Preparation may compile shaders. Re-read the companion and public
+        // session/ground evidence before queuing any native camera creation.
+        control.refresh(mailbox);
+        warm_start_allowed = prewarm.observe(GetTickCount64(), warm_readiness().eligible(), false, false, !prepared);
+        if (!warm_start_allowed)
+          log_status(status, "Prewarm preparation ended without a native request; eligibility or budget was lost.");
+      }
+      if (prepared && warm_start_allowed) {
+        start_timing.request_begin_ms = GetTickCount64();
+        log_startup(status, start_timing, "request_begin");
         scene_runtime::set_composition(key, composition);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
         requested = native_camera::scene_snapshot().accepting_requests;
-        startup.request_end_ms = GetTickCount64();
-        log_startup(status, startup, requested ? "request_accepted" : "request_refused");
+        start_timing.request_end_ms = GetTickCount64();
+        log_startup(status, start_timing, requested ? "request_accepted" : "request_refused");
       }
+      failed = win::finish_scene_start(prewarm, background_warmup, requested);
       if (!requested) {
-        failed = true;
         active = 0;
         win::set_target_mask(0);
         native_camera::suspend_scene_rendering(true);
@@ -292,7 +356,6 @@ DWORD run_impl() {
     // Normal button changes never call request_scene_stop/reset_feed or release
     // source leases. The profile-change transaction above still owns teardown.
     scene_runtime::set_composition(key, composition);
-    const auto speed = native_camera::get_ground_speed();
     const auto light = native_camera::get_lighting();
     const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
                                          light.ambient, light.sample_ms);
@@ -376,12 +439,15 @@ DWORD run_impl() {
                           : !buttons.valid                       ? buttons.error
                           : (!targets[0] || !targets[1])         ? "Detecting display textures for the selected aircraft profile."
                           : !active && settings.calibration_mask ? "Calibration requested on the selected display."
+                          : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."
                           : !active && !settings.follow_taxi     ? "Manual control selected. Enable a preview or TAXI buttons on Overview."
                           : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
                           : !requested || failed                 ? scene.message.c_str()
                           : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
                           : settings.graphics_state_test && output.output
-                              ? "Graphics state test: camera pixels omitted; native state replay active."
+                              ? (settings.graphics_state_test == 2   ? "Graphics state test: render-target bindings only; no camera pixels."
+                                 : settings.graphics_state_test == 3 ? "Graphics state test: shader-state replay only; no camera pixels."
+                                                                     : "Graphics state test: all state replay active; no camera pixels.")
                           : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD write opportunity."
                                                             : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
@@ -482,11 +548,19 @@ DWORD run_impl() {
       log_status(status, draw_detail);
       char diagnostic_detail[256];
       std::snprintf(diagnostic_detail, sizeof(diagnostic_detail),
-                    "PFD state diagnostic: enabled=%u roundtrips=%llu sample_position_calls=%llu restores=%llu",
+                    "PFD state diagnostic: mode=%u roundtrips=%llu targets=%llu shaders=%llu sample_position_calls=%llu restores=%llu",
                     settings.graphics_state_test, static_cast<unsigned long long>(graphics.state_test_roundtrips),
+                    static_cast<unsigned long long>(graphics.state_test_target_roundtrips),
+                    static_cast<unsigned long long>(graphics.state_test_shader_roundtrips),
                     static_cast<unsigned long long>(graphics.sample_position_calls),
                     static_cast<unsigned long long>(graphics.sample_position_restores));
       log_status(status, diagnostic_detail);
+      char retention_detail[256];
+      std::snprintf(retention_detail, sizeof(retention_detail),
+                    "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s",
+                    static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
+                    static_cast<unsigned long long>(output.capture.quarantined), prewarm.name());
+      log_status(status, retention_detail);
       char copy_detail[512];
       std::snprintf(copy_detail, sizeof(copy_detail),
                     "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s | "

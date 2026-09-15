@@ -17,6 +17,12 @@ struct GroundSpeedSample {
   std::uint64_t sample_ms = 0;
   const char* error = "not_initialized";
 };
+struct OnGroundSample {
+  bool valid = false;
+  bool on_ground = false;
+  std::uint64_t sample_ms = 0;
+  const char* error = "not_initialized";
+};
 struct BodyTelemetryTiming {
   std::uint64_t accepted_samples = 0;
   std::uint64_t last_sample_ms = 0;
@@ -60,6 +66,9 @@ BodyTelemetryTiming get_body_telemetry_timing() noexcept;
 // Cached public GROUND VELOCITY in knots, independent of body calibration.
 // No simulator calls; a sample older than500ms is unavailable, never zeroed.
 GroundSpeedSample get_ground_speed() noexcept;
+// Optional SIM ON GROUND telemetry only gates background prewarming. A stale
+// sample never prevents an explicit TAXI request from using the existing path.
+OnGroundSample get_on_ground() noexcept;
 // Cached FCU TAXI light levels; independent of body calibration. Invalid or
 // older-than-500ms telemetry must not be interpreted as an authoritative OFF.
 TaxiButtonSample get_taxi_buttons() noexcept;
@@ -78,6 +87,8 @@ bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept;
 bool accept_identity_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 bool accept_aircraft_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept;
+bool accept_on_ground_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
+OnGroundSample on_ground_at(std::uint64_t now_ms) noexcept;
 bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 TaxiButtonSample taxi_buttons_at(std::uint64_t now_ms) noexcept;
 bool accept_lighting_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;

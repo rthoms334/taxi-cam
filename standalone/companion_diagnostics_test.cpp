@@ -57,7 +57,9 @@ int main() {
     GetDlgItemTextW(window, 232, label, 96);
     require(std::wstring(label) == L"Graphics state test: Off", "Control explains default state");
     command(232);
-    require(current.graphics_state_test == 1 && is_on(232, current), "Actual toggle publishes diagnostic on");
+    require(current.graphics_state_test == 1 && is_on(232, current), "Actual toggle publishes diagnostic All");
+    GetDlgItemTextW(window, 232, label, 96);
+    require(std::wstring(label) == L"Graphics state test: All", "All state label is explicit");
     require(current.manual_mask == 1 && current.follow_taxi == 0 && current.mounts == original.mounts,
             "Diagnostic preserves preview routing and camera mounts");
     require(!dirty && GetFileAttributesW(win::settings_path(current).c_str()) == INVALID_FILE_ATTRIBUTES,
@@ -70,8 +72,13 @@ int main() {
     GetPrivateProfileStringW(L"display", L"graphics_state_test", L"absent", missing, 32, win::settings_path(current).c_str());
     require(std::wstring(missing) == L"absent", "Diagnostic has no persisted INI key");
     dirty = true;
-    command(232);
-    require(!current.graphics_state_test && dirty, "Diagnostic off preserves unrelated unsaved edits");
+    for (const unsigned mode : {2u, 3u, 0u}) {
+      command(232);
+      require(current.graphics_state_test == mode && dirty, "Diagnostic cycle preserves unrelated unsaved edits");
+      GetDlgItemTextW(window, 232, label, 96);
+      require(std::wstring(label) == graphics_state_label(mode), "Diagnostic mode label matches published mode");
+    }
+    require(!current.graphics_state_test, "Diagnostic cycle returns to normal rendering");
     command(232);
     require(current.graphics_state_test == 1, "Diagnostic can be reenabled");
     current.scene_test = 1;

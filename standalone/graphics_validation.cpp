@@ -548,9 +548,10 @@ void textured_gray_fallback(ID3D12Device* device,
     for (UINT input_format = 0; input_format < 2; ++input_format) {
       for (UINT mip = 0; mip < 4; ++mip) {
         std::vector<unsigned char> baseline;
-        for (UINT on = 0; on < 3; ++on) {
-          const bool draw = on == 1, diagnostic = on == 2;
-          win::set_graphics_state_test(diagnostic);
+        for (UINT on = 0; on < 5; ++on) {
+          const bool draw = on == 1, diagnostic = on >= 2;
+          const unsigned mode = diagnostic ? on - 1 : 0;
+          win::set_graphics_state_test(mode);
           win::set_target_mask(on ? 1 : 0);
           const auto before = win::graphics_status();
           const float background[]{.15f, .15f, .15f, 1};
@@ -580,8 +581,10 @@ void textured_gray_fallback(ID3D12Device* device,
           const auto delivered = win::graphics_status();
           require(delivered.fallback_stamps == before.fallback_stamps + draw &&
                       delivered.state_test_roundtrips == before.state_test_roundtrips + diagnostic &&
+                      delivered.state_test_target_roundtrips == before.state_test_target_roundtrips + (mode == 1 || mode == 2) &&
+                      delivered.state_test_shader_roundtrips == before.state_test_shader_roundtrips + (mode == 1 || mode == 3) &&
                       delivered.preferred_copy_stamps == before.preferred_copy_stamps,
-                  "Gray test must exercise one real shader fallback, never a private copy");
+                  "Gray test must exercise the exact selected draw/state/target operations, never a private copy");
           list->DrawInstanced(3, 1, 0, 0);  // No application state rebind at all.
           win::set_target_mask(0);
           submit();
@@ -648,7 +651,7 @@ void textured_gray_fallback(ID3D12Device* device,
       require(means[output * 8 + input * 4 + 3] > means[output * 8 + input * 4] + 15, "Mip control must measurably change sampled gray");
   }
   require(means[8] > means[0] + 15, "sRGB RTV control must measurably change encoded gray");
-  win::set_graphics_state_test(false);
+  win::set_graphics_state_test(0);
   check(device->GetDeviceRemovedReason(), "Gray fixture device health");
   Reference<ID3D12InfoQueue> messages;
   const bool debug_messages = SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(messages.put())));

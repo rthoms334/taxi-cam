@@ -95,6 +95,11 @@ void edit(double value, int id, int x, int y, int w = 110) {
   auto h = child(L"EDIT", buffer, id, x, y, w, 30, ES_AUTOHSCROLL | ES_LEFT | WS_BORDER);
   SendMessageW(h, EM_SETLIMITTEXT, 32, 0);
 }
+const wchar_t* graphics_state_label(unsigned mode) {
+  constexpr const wchar_t* labels[]{L"Graphics state test: Off", L"Graphics state test: All", L"Graphics state test: Targets only",
+                                    L"Graphics state test: Shader state only"};
+  return labels[mode <= 3 ? mode : 0];
+}
 void toggle(const wchar_t* label, int id, bool enabled, int x, int y, int width = 125) {
   const auto text = std::wstring(label) + (enabled ? L": On" : L": Off");
   button(text.c_str(), id, x, y, width);
@@ -383,8 +388,8 @@ void build_controls() {
     toggle(L"Calibrate right", 227, (s.calibration_mask & 2) != 0, 505, 540, 200);
   } else if (page == 4) {
     toggle(L"Scene test", 229, s.scene_test, 260, 449, 200);
-    toggle(L"Graphics state test", 232, s.graphics_state_test, 476, 449, 250);
-    toggle(L"First camera only", 228, s.single_camera, 737, 449, 235);
+    button(graphics_state_label(s.graphics_state_test), 232, 476, 449, 310);
+    toggle(L"First camera only", 228, s.single_camera, 798, 449, 190);
     edit(s.calibration_budget, 203, 840, 548, 120);
     button(L"Open log folder", 510, 260, 591, 210);
     button(L"Stop camera tests", 511, 500, 591, 210);
@@ -574,7 +579,7 @@ void draw_page(HDC dc) {
     panel(dc, 244, 436, 766, 102);
     text(dc,
          L"Scene test renders without PFD delivery. Graphics state test needs preview/TAXI active.\n"
-         L"It changes/restores overlay state without drawing camera pixels. Temporary; not saved.",
+         L"Cycle All / Targets only / Shader state only. No camera pixels are drawn. Temporary; not saved.",
          260, 488, 730, 42, small, Muted, DT_LEFT | DT_WORDBREAK);
     const auto line = sample.heartbeat ? widen(sample.message) : live;
     text(dc, L"Calibration batches per 50 ms (64–16384)", 260, 546, 550, 27, small, Muted);
@@ -1051,10 +1056,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (!apply(false))
           return 0;
         auto s = draft();
-        s.graphics_state_test = !s.graphics_state_test;
+        s.graphics_state_test = (s.graphics_state_test + 1) % 4;
         publish(s);
         dirty = had_unsaved_changes;
-        notice = s.graphics_state_test ? L"Temporary graphics state test on; camera pixels will not be drawn."
+        notice = s.graphics_state_test ? L"Temporary graphics state test changed; camera pixels will not be drawn."
                                        : L"Graphics state test off; normal camera drawing restored.";
         build_controls();
         return 0;

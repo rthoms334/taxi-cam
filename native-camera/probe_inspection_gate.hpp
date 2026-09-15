@@ -2,6 +2,12 @@
 
 namespace taxi_camera::native_camera {
 
+// OFF must also pause queued creation/recovery when no entries exist. Existing
+// entries still need the ordinary validated path to close gates or clean up.
+inline bool park_initial_scene(bool suspended, bool has_owned_entries) noexcept {
+  return suspended && !has_owned_entries;
+}
+
 struct ProbeInspectionState {
   bool established_pair = false;
   bool suspended = false;

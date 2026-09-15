@@ -126,7 +126,7 @@ struct Registry {
   PfdTargetDetector detector;
   const profiles::AircraftProfile* profile = &profiles::A380;
   unsigned active_mask{}, calibration_mask{};
-  bool graphics_state_test = false;
+  unsigned graphics_state_test = 0;
   std::array<std::shared_ptr<Resource>, 2> selected_resources{};
   std::array<std::atomic<ID3D12Resource*>, 2> selected_native{};
   std::array<std::atomic<std::uint64_t>, 2> selected_ids{};
@@ -143,6 +143,7 @@ struct Registry {
   std::atomic<std::uint64_t> dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{};
   std::atomic<std::uint64_t> dynamic_depth_bias_restores{}, dynamic_strip_cut_restores{};
   std::atomic<std::uint64_t> sample_position_calls{}, sample_position_restores{}, state_test_roundtrips{};
+  std::atomic<std::uint64_t> state_test_target_roundtrips{}, state_test_shader_roundtrips{};
   WriteBudget calibration_budget;
 };
 Registry& registry() {
@@ -651,21 +652,42 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     const boundary::ScopedBypass bypass;
     const D3D12_CPU_DESCRIPTOR_HANDLE target{list->snapshot_rtvs->GetCPUDescriptorHandleForHeapStart().ptr +
                                              SIZE_T{8 + side} * r.rtv_stride};
-    native->OMSetRenderTargets(1, &target, FALSE, nullptr);
+    const bool targets_only = r.graphics_state_test == 2;
+    const bool shader_only = r.graphics_state_test == 3;
+    if (targets_only) {
+      // Keep the same current-output and submission admission as state replay;
+      // only the graphics-state operation is removed from this diagnostic.
+      const auto output = runtime::snapshot(r.key);
+      if (!output.output || output.failed || !list->graphics.can_restore(native) ||
+          !runtime::manager().register_consumer_recording(native)) {
+        ++r.fallback_state_refused;
+        continue;
+      }
+    }
+    if (!shader_only)
+      native->OMSetRenderTargets(1, &target, FALSE, nullptr);
     ++r.fallback_attempts;
-    const bool stamped = runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
-                                        view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test);
+    const bool stamped =
+        targets_only || runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
+                                       view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test);
     // Restore the CURRENT raw OM bindings, including valid descriptors that
     // predate tracking. Never replay the bindings from when the PFD was queued.
-    native->OMSetRenderTargets(list->raw_rtv_count, list->raw_rtvs.data(), FALSE, list->raw_has_dsv ? &list->raw_dsv : nullptr);
+    if (!shader_only)
+      native->OMSetRenderTargets(list->raw_rtv_count, list->raw_rtvs.data(), FALSE, list->raw_has_dsv ? &list->raw_dsv : nullptr);
     if (stamped) {
-      if (r.graphics_state_test)
+      if (r.graphics_state_test) {
         ++r.state_test_roundtrips;
-      else
+        if (!shader_only)
+          ++r.state_test_target_roundtrips;
+        if (!targets_only)
+          ++r.state_test_shader_roundtrips;
+      } else
         ++r.fallback_stamps;
-      r.sample_position_restores += list->graphics.has_sample_positions();
-      r.dynamic_depth_bias_restores += list->graphics.has_depth_bias();
-      r.dynamic_strip_cut_restores += list->graphics.has_strip_cut();
+      if (!targets_only) {
+        r.sample_position_restores += list->graphics.has_sample_positions();
+        r.dynamic_depth_bias_restores += list->graphics.has_depth_bias();
+        r.dynamic_strip_cut_restores += list->graphics.has_strip_cut();
+      }
       list->pending_rt[side] = false;
       list->pending_pfds[side] = {};
     }
@@ -1619,6 +1641,8 @@ GraphicsStatus graphics_status() noexcept {
   result.sample_position_calls = r.sample_position_calls.load();
   result.sample_position_restores = r.sample_position_restores.load();
   result.state_test_roundtrips = r.state_test_roundtrips.load();
+  result.state_test_target_roundtrips = r.state_test_target_roundtrips.load();
+  result.state_test_shader_roundtrips = r.state_test_shader_roundtrips.load();
   result.dynamic_depth_bias_calls = r.dynamic_depth_bias_calls.load();
   result.dynamic_strip_cut_calls = r.dynamic_strip_cut_calls.load();
   result.dynamic_depth_bias_restores = r.dynamic_depth_bias_restores.load();
@@ -1664,10 +1688,10 @@ void set_calibration(unsigned mask, unsigned budget) noexcept {
   refresh_selected(r);
   r.calibration_budget.set_limit(budget);
 }
-void set_graphics_state_test(bool enabled) noexcept {
+void set_graphics_state_test(unsigned mode) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  r.graphics_state_test = enabled;
+  r.graphics_state_test = mode <= 3 ? mode : 0;
 }
 void set_target_mask(unsigned mask) noexcept {
   auto& r = registry();
@@ -1688,7 +1712,7 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   {
     const std::lock_guard lock(r.mutex);
     r.active_mask = r.calibration_mask = 0;
-    r.graphics_state_test = false;
+    r.graphics_state_test = 0;
     // This entry point starts an explicit aircraft/profile session, including a
     // reload of the same adapter. Ordinary texture replacement uses forget().
     r.routes.reset();
