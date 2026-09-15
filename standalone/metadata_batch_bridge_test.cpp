@@ -13,11 +13,89 @@ void require(bool value, const char* message) {
   if (!value)
     throw std::runtime_error(message);
 }
+
+// Only the three IUnknown ABI slots are exercised by device identity checks.
+// Own stand-ins let the CPU fixture count COM traffic without a native device.
+struct Identity final : IUnknown {
+  Identity* canonical = this;
+  unsigned queries = 0;
+  ULONG references = 1;
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+    ++queries;
+    if (!out)
+      return E_POINTER;
+    *out = nullptr;
+    if (iid != __uuidof(IUnknown))
+      return E_NOINTERFACE;
+    *out = static_cast<IUnknown*>(canonical);
+    canonical->AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+  ULONG STDMETHODCALLTYPE Release() override { return --references; }
+  ID3D12Device* device() { return reinterpret_cast<ID3D12Device*>(static_cast<IUnknown*>(this)); }
+};
+unsigned simple_forwards{}, range_forwards{};
+void STDMETHODCALLTYPE
+forward_simple(ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_DESCRIPTOR_HEAP_TYPE) {
+  ++simple_forwards;
 }
+void STDMETHODCALLTYPE forward_ranges(ID3D12Device*,
+                                      UINT,
+                                      const D3D12_CPU_DESCRIPTOR_HANDLE*,
+                                      const UINT*,
+                                      UINT,
+                                      const D3D12_CPU_DESCRIPTOR_HANDLE*,
+                                      const UINT*,
+                                      D3D12_DESCRIPTOR_HEAP_TYPE) {
+  ++range_forwards;
+}
+void descriptor_identity_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  Identity expected, alias, foreign;
+  alias.canonical = &expected;
+  r.device = expected.device();
+  r.ready = true;
+  require(win::same_device(expected.device()) && expected.queries == 0, "Exact retained interface incurred COM identity traffic");
+  require(win::same_device(alias.device()) && alias.queries == 1 && expected.queries == 1,
+          "Alternate interface did not retain canonical IUnknown identity proof");
+  require(!win::same_device(foreign.device()) && !win::same_device(nullptr), "Foreign/null device admitted");
+  require(expected.references == 1 && alias.references == 1 && foreign.references == 1, "Identity checks leaked COM references");
+  win::descriptor_copy_simple.original = reinterpret_cast<void*>(&forward_simple);
+  win::descriptor_copy.original = reinterpret_cast<void*>(&forward_ranges);
+  const auto expected_queries = expected.queries, foreign_queries = foreign.queries;
+  for (auto type : {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER}) {
+    win::descriptors_simple(foreign.device(), 1, {0x100}, {0x200}, type);
+    win::descriptors(foreign.device(), 0, nullptr, nullptr, 0, nullptr, nullptr, type);
+  }
+  require(simple_forwards == 2 && range_forwards == 2, "Irrelevant descriptor calls were not forwarded exactly once");
+  require(expected.queries == expected_queries && foreign.queries == foreign_queries,
+          "Irrelevant descriptor heaps incurred COM identity queries");
+  r.dsv_stride = 32;
+  r.dsvs[0x200] = DXGI_FORMAT_D32_FLOAT;
+  win::descriptors_simple(expected.device(), 1, {0x100}, {0x200}, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+  require(r.dsvs[0x100] == DXGI_FORMAT_D32_FLOAT, "Fast identity path lost selected-device DSV metadata");
+  r.dsvs.erase(0x100);
+  win::descriptors_simple(foreign.device(), 1, {0x100}, {0x200}, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+  require(!r.dsvs.contains(0x100), "Foreign descriptor copy contaminated metadata");
+  const D3D12_CPU_DESCRIPTOR_HANDLE destination{0x100}, source{0x200};
+  win::descriptors(alias.device(), 1, &destination, nullptr, 1, &source, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+  require(r.dsvs[0x100] == DXGI_FORMAT_D32_FLOAT, "Alternate canonical interface lost range-copy metadata");
+  require(simple_forwards == 4 && range_forwards == 3, "Relevant descriptor calls were not forwarded exactly once");
+  require(expected.references == 1 && alias.references == 1 && foreign.references == 1, "Descriptor observation leaked COM references");
+  r.dsvs.clear();
+  r.ready = false;
+  r.device = nullptr;
+  win::descriptor_copy_simple.original = nullptr;
+  win::descriptor_copy.original = nullptr;
+}
+}  // namespace
 int main() {
   namespace win = taxi_camera::standalone;
   namespace boundary = taxi_camera::engine_hook::render_boundary;
   try {
+    descriptor_identity_checks();
     auto& r = win::registry();
     auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x1000);
     auto* first_native = reinterpret_cast<ID3D12Resource*>(0x2000);

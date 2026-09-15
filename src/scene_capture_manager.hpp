@@ -151,6 +151,9 @@ class SceneCaptureManager {
   bool register_consumer_recording(ID3D12GraphicsCommandList* native_list) noexcept;
 
   engine_hook::queue_submit::Callbacks callbacks() noexcept;
+  // Discovery runs without submission serialization. Only fully observed,
+  // unrelated recordings bypass it; all other batches revalidate under both
+  // manager and submission locks before retaining leases or queuing a fence.
   std::uint64_t before_submission(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
   void after_submission(ID3D12CommandQueue*, std::uint64_t receipt) noexcept;
   void submission_refused(ID3D12CommandQueue*, engine_hook::queue_submit::Refusal) noexcept;

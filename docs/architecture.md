@@ -115,6 +115,8 @@ The engine's camera objects identify their output resources. The bridge matches 
 
 The bridge observes rendering, texture copies, resource-state changes and queue submissions. A **resource state** describes how the GPU is currently allowed to use a texture, such as rendering into it or copying from it.
 
+Descriptor-copy observation tracks only render-target and depth-stencil heaps. Other heap types pass straight through without device-identity queries. The registry retains its device interface: the identical pointer proves that identity directly, while alternate interfaces still require matching canonical `IUnknown` identities.
+
 A capture is recorded when one of these paths provides enough information:
 
 | Capture path | Where the copy is inserted |
@@ -183,6 +185,8 @@ The native adapter continues tracking command-list lifetimes, target bindings an
 MSFS can record a GPU command list once and execute it again later. Taxi Cam therefore keeps the output buffer's address stable, allowing those commands to read updated image contents.
 
 A shared per-device fence timeline orders output writes and PFD reads, including work submitted on different queues. The output cannot be overwritten while an earlier tracked PFD read still needs it. Resources remain alive while recorded commands can reference them.
+
+Command-list discovery runs before submission serialization so it cannot acquire the bridge registry while holding the submission lock. Fully observed recordings with no camera packets, PFD reads or camera-source state changes bypass that lock. Unknown and participating recordings still revalidate their metadata under both locks, retain their resource leases and use the shared fence timeline.
 
 Turning off one TAXI side stops recording further camera copies or draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side, the scene test nor the bounded startup warmup requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
 

@@ -264,6 +264,10 @@ bool same_device(ID3D12Device* device) noexcept {
   auto* expected = registry().device;
   if (!device || !expected)
     return false;
+  // The registry retains this exact interface for its entire lifetime. Equal
+  // pointers already prove identity; alternate interfaces still use IUnknown.
+  if (device == expected)
+    return true;
   const bool equal =
       SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&a))) && SUCCEEDED(expected->QueryInterface(IID_PPV_ARGS(&b))) && a && a == b;
   if (a)
@@ -985,8 +989,8 @@ void STDMETHODCALLTYPE descriptors_simple(ID3D12Device* device,
   using F =
       void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_DESCRIPTOR_HEAP_TYPE);
   descriptor_copy_simple.forward<F>()(device, count, dest, src, type);
-  if (!owned_depth && registry().ready && same_device(device) &&
-      (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV))
+  if (!owned_depth && registry().ready && (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV) &&
+      same_device(device))
     observe_safely([&] { copy_descriptors(count, dest, src, type); });
 }
 void STDMETHODCALLTYPE descriptors(ID3D12Device* device,
@@ -1000,8 +1004,8 @@ void STDMETHODCALLTYPE descriptors(ID3D12Device* device,
   using F = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
                                      const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE);
   descriptor_copy.forward<F>()(device, nd, dest, ds, ns, src, ss, type);
-  if (owned_depth || !registry().ready || !same_device(device) ||
-      (type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV && type != D3D12_DESCRIPTOR_HEAP_TYPE_DSV))
+  if (owned_depth || !registry().ready || (type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV && type != D3D12_DESCRIPTOR_HEAP_TYPE_DSV) ||
+      !same_device(device))
     return;
   observe_safely([&] {
     auto& r = registry();

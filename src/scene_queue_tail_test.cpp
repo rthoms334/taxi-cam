@@ -2,11 +2,137 @@
 #define main existing_manager_validation_entry
 #include "scene_capture_manager_test.cpp"
 #undef main
+#include <future>
 #include "../engine-hook/queue_submit_observer.hpp"
 #include "native_device_identity.hpp"
 
 namespace {
-struct TailContext { Manager* manager; };
+namespace submission_lock_fixture {
+struct Device {
+  void** table;
+};
+struct Queue {
+  void** table;
+  Device* device;
+  std::uint64_t last_signal = 0;
+  unsigned waits = 0, signals = 0;
+  bool future_wait = false;
+};
+HRESULT STDMETHODCALLTYPE identity(void* self, REFIID, void** result) {
+  *result = self;
+  return S_OK;
+}
+ULONG STDMETHODCALLTYPE reference(void*) {
+  return 1;
+}
+HRESULT STDMETHODCALLTYPE get_device(Queue* queue, REFIID, void** result) {
+  *result = queue->device;
+  return S_OK;
+}
+// The Windows x64 COM member ABI passes the aggregate-return address after
+// the this pointer; a free function returning the struct would reverse them.
+D3D12_COMMAND_QUEUE_DESC* STDMETHODCALLTYPE description(Queue*, D3D12_COMMAND_QUEUE_DESC* result) {
+  *result = {};
+  result->Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+  return result;
+}
+HRESULT STDMETHODCALLTYPE signal(Queue* queue, ID3D12Fence*, std::uint64_t value) {
+  queue->last_signal = value;
+  ++queue->signals;
+  return S_OK;
+}
+HRESULT STDMETHODCALLTYPE wait_on(Queue* queue, ID3D12Fence*, std::uint64_t value) {
+  queue->future_wait |= value > queue->last_signal;
+  ++queue->waits;
+  return S_OK;
+}
+struct Discovery {
+  Manager* manager;
+  std::atomic<bool> called{false};
+};
+void discover(void* opaque, ID3D12GraphicsCommandList*, std::uint64_t) noexcept {
+  auto& context = *static_cast<Discovery*>(opaque);
+  context.manager->statistics();  // Discovery must not retain the metadata lock either.
+  context.called.store(true, std::memory_order_release);
+}
+void run() {
+  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
+  Device device{device_table};
+  std::array<void*, 19> queue_table{};
+  queue_table[7] = reinterpret_cast<void*>(&get_device);
+  queue_table[14] = reinterpret_cast<void*>(&signal);
+  queue_table[15] = reinterpret_cast<void*>(&wait_on);
+  queue_table[18] = reinterpret_cast<void*>(&description);
+  Queue queue{queue_table.data(), &device};
+  auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
+  taxi_camera::SceneHandoff handoff;
+  auto manager = std::make_unique<Manager>(handoff);
+  auto& owner = manager->devices_[0];
+  owner.key = 7;
+  owner.native = reinterpret_cast<ID3D12Device*>(&device);
+  owner.active = true;
+  // The fixture uses a recording sink, never a D3D12 device or GPU submission.
+  std::array<std::uintptr_t, 2> markers{};
+  auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&markers[0]);
+  auto* unknown = reinterpret_cast<ID3D12GraphicsCommandList*>(&markers[1]);
+  auto& recording = manager->lists_[0];
+  recording.native = known;
+  recording.device_key = 7;
+  recording.object_generation = 19;
+  manager->list_indices_.emplace(known, 0);
+  Discovery discovery{manager.get()};
+  require(manager->set_unknown_list_observer(discover, &discovery), "Install CPU-only discovery callback");
+  const auto blocked = [&](ID3D12GraphicsCommandList* list, bool should_bypass, bool expect_receipt, bool expect_discovery) {
+    discovery.called.store(false, std::memory_order_release);
+    std::unique_lock held(manager->submission_mutex_);
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    auto completed = std::async(std::launch::async, [&] {
+      ID3D12CommandList* batch[]{list};
+      entered.set_value();
+      const auto receipt = manager->before_submission(native_queue, 1, batch);
+      if (receipt)
+        manager->after_submission(native_queue, receipt);
+      return receipt;
+    });
+    started.wait();
+    const bool returned_while_locked = completed.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+    const bool discovered_while_locked = discovery.called.load(std::memory_order_acquire);
+    held.unlock();  // Always release before checking, including regression failure.
+    const auto receipt = completed.get();
+    require(returned_while_locked == should_bypass, "Only known unrelated recordings bypass held submission serialization");
+    require((receipt != 0) == expect_receipt, "Related recordings retain exact transaction admission");
+    require(discovered_while_locked == expect_discovery, "Unknown discovery runs before acquiring submission serialization");
+  };
+  blocked(known, true, false, false);
+  require(!queue.signals && !queue.waits, "Unrelated submission queues no timeline operations");
+  recording.consumer = true;
+  blocked(known, false, true, false);
+  recording.consumer = false;
+  recording.source_touched = true;
+  blocked(known, false, true, false);
+  recording.source_touched = false;
+  recording.packets = 1;
+  blocked(known, false, true, false);
+  recording.packets = 0;
+  require(queue.signals == 3 && queue.waits == 2 && !queue.future_wait && owner.last_signal == 3,
+          "Consumer/source/capture paths preserve ordered Wait and Signal receipts");
+  recording.awaiting_native_reset = true;
+  blocked(known, false, false, false);
+  recording.awaiting_native_reset = false;
+  const taxi_camera::source_state::Key source{0x1234, 1};
+  require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
+  blocked(unknown, false, false, true);
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown &&
+              manager->statistics().unknown_submitted_lists == 2,
+          "Unknown and unobserved submissions retain conservative source invalidation");
+  require(queue.signals == 3 && queue.waits == 2, "Unobserved recordings never invent a receipt");
+  std::printf("PASS CPU-only submission locks: unrelated bypass, discovery lock order, conservative guards and ordered receipts.\n");
+}
+}  // namespace submission_lock_fixture
+struct TailContext {
+  Manager* manager;
+};
 class SourceLifetimeMarker final : public IUnknown {
  public:
   explicit SourceLifetimeMarker(std::atomic<unsigned>& deaths) noexcept : deaths_(deaths) {}
@@ -395,6 +521,10 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
 }  // namespace
 int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::strcmp(argv[1], "--submission-locks") == 0) {
+      submission_lock_fixture::run();
+      return 0;
+    }
     bool warp = false, enhanced = false, born_render_target = false;
     for (int n = 1; n < argc; ++n) {
       if (std::strcmp(argv[n], "--warp") == 0 && !warp) warp = true;

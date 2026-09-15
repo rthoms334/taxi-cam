@@ -882,9 +882,29 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
                                                      ID3D12CommandList* const* native_lists) noexcept {
   if (transaction_owner || !native_lists || !count || count > engine_hook::queue_submit::kMaximumCommandLists)
     return 0;
-  std::unique_lock submission_lock(submission_mutex_);
+  // Discovery can acquire the bridge registry lock. Run it before submission
+  // serialization to avoid registry -> runtime -> submission -> registry.
+  // The actual Execute arguments keep these native objects alive throughout.
   observe_unknown_lists(queue, count, native_lists);
+  {
+    const std::lock_guard lock(mutex_);
+    bool known_unrelated = true;
+    for (UINT index = 0; index < count; ++index) {
+      const auto* item = list(static_cast<ID3D12GraphicsCommandList*>(native_lists[index]));
+      if (!item || item->awaiting_native_reset || item->packets || item->consumer || item->source_touched) {
+        known_unrelated = false;
+        break;
+      }
+    }
+    // Only fully observed recordings with no owned work or source-state effects
+    // can bypass ordering. Unknown recordings keep conservative invalidation.
+    if (known_unrelated)
+      return 0;
+  }
+  std::unique_lock submission_lock(submission_mutex_);
   const std::lock_guard lock(mutex_);
+  // Re-read every recording after serialization: Reset/retirement may have
+  // changed its identity, effects or leases while this submission was waiting.
   Device* owner = nullptr;
   std::uint16_t mask = 0;
   bool consumer = false;
