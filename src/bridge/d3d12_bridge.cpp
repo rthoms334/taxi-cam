@@ -5,17 +5,17 @@
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
-#include "../hooks/render_boundary_observer.hpp"
 #include "../graphics/calibration_d3d12.hpp"
 #include "../graphics/d3d12_command_list9.hpp"
+#include "../graphics/metadata_batch_cache.hpp"
 #include "../graphics/native_device_identity.hpp"
+#include "../graphics/pfd_copy_proof.hpp"
+#include "../graphics/query_scope.hpp"
 #include "../graphics/taxi_button_routes.hpp"
 #include "../graphics/write_budget.hpp"
+#include "../hooks/render_boundary_observer.hpp"
 #include "native_hooks.hpp"
 #include "root_layout.hpp"
-#include "../graphics/metadata_batch_cache.hpp"
-#include "../graphics/query_scope.hpp"
-#include "../graphics/pfd_copy_proof.hpp"
 
 namespace taxi_camera::standalone {
 namespace {
@@ -364,11 +364,7 @@ void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, 
 // The observations below are before native barrier forwarding. They only stage
 // evidence; after_draw promotes it after that barrier and the application draw
 // have both returned. No GPU command is admitted from a pending observation.
-void stage_copy_model(List* list,
-                      ID3D12Resource* target,
-                      PfdCopyProof::Mode model,
-                      const char* reason,
-                      std::uint32_t scope) noexcept {
+void stage_copy_model(List* list, ID3D12Resource* target, PfdCopyProof::Mode model, const char* reason, std::uint32_t scope) noexcept {
   if (!list)
     return;
   // One selection sample decides both paths; a concurrent routing update must
@@ -795,9 +791,9 @@ void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noex
     item->pending_rt = {};
   }
 }
-const boundary::Callbacks Boundaries{nullptr,          before_legacy, before_enhanced, observe_legacy,
-                                     observe_enhanced, copy_resource, copy_texture,    after_draw,
-                                     invalidate,       pass_targets,  pass_ended,      selected_legacy_targets, metadata_begin, metadata_end};
+const boundary::Callbacks Boundaries{
+    nullptr,    before_legacy, before_enhanced, observe_legacy, observe_enhanced,        copy_resource,  copy_texture,
+    after_draw, invalidate,    pass_targets,    pass_ended,     selected_legacy_targets, metadata_begin, metadata_end};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -1409,19 +1405,23 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
   // changes a cell between the admission read and the installation CAS.
   static inline NativeSlot active_slot;
   static void invoke(F forward, C* native, Args... args) noexcept {
+    if (owned_depth || !registry().ready) {
+      forward(native, args...);
+      return;
+    }
+    // A runtime implementation can re-enter a patched setter while forwarding
+    // the caller's operation. Keep one guard across forwarding and observation,
+    // just as Reset does, so only the outer call updates the tracked state.
+    const OwnedWork guard;
     if constexpr (requires(List& l) { Action::before(l, args...); }) {
-      if (!owned_depth && registry().ready) {
-        const OwnedWork guard;
-        observe_safely([&] {
-          if (auto item = find_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native)))
-            Action::before(*item, args...);
-        });
-      }
+      observe_safely([&] {
+        if (auto item = find_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native)))
+          Action::before(*item, args...);
+      });
     }
     forward(native, args...);
-    if (owned_depth || !registry().ready)
+    if (!registry().ready)
       return;
-    const OwnedWork guard;
     observe_safely([&] {
       if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native)))
         Action::apply(*item, args...);

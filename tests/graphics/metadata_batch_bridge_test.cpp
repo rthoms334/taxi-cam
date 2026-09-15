@@ -1,10 +1,10 @@
 // Exercise actual production metadata handlers without a simulator or GPU.
 #define TAXI_METADATA_BATCH_VALIDATION
-#include "../../src/bridge/d3d12_bridge.cpp"
 #include <chrono>
 #include <cstdio>
 #include <stdexcept>
 #include <vector>
+#include "../../src/bridge/d3d12_bridge.cpp"
 
 namespace {
 unsigned checks{};
@@ -90,11 +90,55 @@ void descriptor_identity_checks() {
   win::descriptor_copy_simple.original = nullptr;
   win::descriptor_copy.original = nullptr;
 }
+using ClearHook =
+    taxi_camera::standalone::StateHook<11, decltype(&ID3D12GraphicsCommandList::ClearState), taxi_camera::standalone::ClearState>;
+unsigned outer_clears{}, inner_clears{};
+void STDMETHODCALLTYPE inner_clear(ID3D12GraphicsCommandList*, ID3D12PipelineState*) {
+  ++inner_clears;
+}
+void STDMETHODCALLTYPE outer_clear(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline) {
+  ++outer_clears;
+  // Model a native runtime forwarding through the patched method again.
+  ClearHook::invoke(inner_clear, list, pipeline);
+}
+void state_reentry_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x5000);
+  auto item = std::make_shared<win::List>();
+  item->native = native;
+  item->id = 50;
+  item->ready = true;
+  item->pfd_dirty = true;
+  item->pending_rt = {true, true};
+  item->count = 2;
+  r.lists[native] = item;
+  r.ready = true;
+  const auto before = r.clear_states.load();
+  ClearHook::invoke(outer_clear, native, nullptr);
+  require(outer_clears == 1 && inner_clears == 1, "Reentrant runtime chain forwards each implementation exactly once");
+  require(r.clear_states == before + 1, "Reentrant ClearState is observed once, not once per runtime layer");
+  require(!item->pfd_dirty && !item->pending_rt[0] && !item->pending_rt[1] && !item->count && item->recording == 1,
+          "Outer ClearState clears pending bindings without starting another recording");
+  require(!win::owned_depth, "Reentrant state-call guard is released");
+  {
+    const win::OwnedWork owned;
+    ClearHook::invoke(outer_clear, native, nullptr);
+    require(win::owned_depth == 1, "Caller-owned state-call guard is preserved");
+  }
+  r.ready = false;
+  ClearHook::invoke(outer_clear, native, nullptr);
+  require(outer_clears == 3 && inner_clears == 3 && r.clear_states == before + 1 && !win::owned_depth,
+          "Owned or inactive forwarding cannot create observations or leak nesting depth");
+  r.lists.erase(native);
+  std::puts("PASS state-hook reentry: one observation, exact forwarding, pending bindings cleared, guards retained.");
+}
 }  // namespace
 int main() {
   namespace win = taxi_camera::standalone;
   namespace boundary = taxi_camera::engine_hook::render_boundary;
   try {
+    state_reentry_checks();
     descriptor_identity_checks();
     auto& r = win::registry();
     auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x1000);
@@ -136,8 +180,8 @@ int main() {
     barriers[17].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers[17].UAV.pResource = unrelated_native;
     barriers[5000].Transition = {first_native, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET};
-    barriers.back().Transition = {second_native, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                  D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    barriers.back().Transition = {second_native, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     std::array<double, 2> ms{};
     std::array<std::uint64_t, 2> lookups{};
     for (unsigned batched = 0; batched < 2; ++batched) {
@@ -155,7 +199,8 @@ int main() {
         win::metadata_end(nullptr, native, item->id);
       ms[batched] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
       lookups[batched] = win::metadata_lookup_calls;
-      require(item->pfd_transition && !item->pending_rt[0] && !item->pending_rt[1], "Matching transitions did not invalidate pending RTT evidence");
+      require(item->pfd_transition && !item->pending_rt[0] && !item->pending_rt[1],
+              "Matching transitions did not invalidate pending RTT evidence");
       require(item->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::unknown, "Pre-forward metadata became capture permission");
       item->copy_proof.after_draw(first_key);
       item->copy_proof.after_draw(second_key);
@@ -177,7 +222,8 @@ int main() {
     win::metadata_end(nullptr, native, item->id);
     item->copy_proof.after_draw(first_key);
     require(win::metadata_lookup_calls == 1 && item->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::enhanced_rt &&
-                !item->pending_rt[0] && item->pending_rt[1], "Enhanced metadata did not preserve matching/unrelated semantics");
+                !item->pending_rt[0] && item->pending_rt[1],
+            "Enhanced metadata did not preserve matching/unrelated semantics");
 
     win::metadata_begin(nullptr, native, item->id);
     ++item->recording;  // Same fields renewed by the observed successful native Reset.
@@ -200,15 +246,18 @@ int main() {
     win::observe_legacy(nullptr, native, 41, barriers[5000], scope);
     win::metadata_end(nullptr, native, 41);
     replacement->copy_proof.after_draw(first_key);
-    require(replacement->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::legacy_rt, "Fresh generation failed to establish its own proof");
+    require(replacement->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::legacy_rt,
+            "Fresh generation failed to establish its own proof");
     r.selected_mask = 0;
     win::metadata_begin(nullptr, native, 41);
     win::observe_legacy(nullptr, native, 41, barriers[5000], scope);
     win::metadata_end(nullptr, native, 41);
     replacement->copy_proof.after_draw(first_key);
     require(replacement->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::unknown, "Deselection failed to clear retained proof");
-    std::printf("{\"checks\":%u,\"barriers\":%zu,\"unscopedLookups\":%llu,\"batchedLookups\":%llu,\"unscopedMs\":%.3f,\"batchedMs\":%.3f,\"nativeGpuCalls\":0}\n",
-                checks, barriers.size(), lookups[0], lookups[1], ms[0], ms[1]);
+    std::printf(
+        "{\"checks\":%u,\"barriers\":%zu,\"unscopedLookups\":%llu,\"batchedLookups\":%llu,\"unscopedMs\":%.3f,\"batchedMs\":%.3f,"
+        "\"nativeGpuCalls\":0}\n",
+        checks, barriers.size(), lookups[0], lookups[1], ms[0], ms[1]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());

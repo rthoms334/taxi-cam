@@ -1,8 +1,8 @@
-#include "../support/graphics_fixture.hpp"
 #include <d3d11on12.h>
 #include "../../src/bridge/d3d12_bridge.hpp"
 #include "../../src/bridge/native_hooks.hpp"
 #include "../../src/graphics/scene_frame_output.hpp"
+#include "../support/graphics_fixture.hpp"
 namespace {
 using namespace taxi_camera::testing;
 namespace win = taxi_camera::standalone;
