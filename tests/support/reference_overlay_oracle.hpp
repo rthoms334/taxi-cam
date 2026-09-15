@@ -26,9 +26,13 @@ struct FontCoverage {
     if (cell < 0 || cell >= static_cast<int>(lit.size()) || pixel[3] != 255)
       return false;
     const bool label = cell < 2;
-    if ((label && (pixel[0] != pixel[1] || pixel[1] != pixel[2])) || (!label && (pixel[0] != 0 || pixel[2] != 0)))
+    // Approved common GS colour is RGB 22/109/19. Compare each channel's
+    // coverage against green, allowing one byte of independent UNORM rounding.
+    if ((label && (pixel[0] != pixel[1] || pixel[1] != pixel[2])) ||
+        (!label && (pixel[1] > 109 || std::abs(int(pixel[0]) - int(std::lround(pixel[1] * 22. / 109))) > 1 ||
+                    std::abs(int(pixel[2]) - int(std::lround(pixel[1] * 19. / 109))) > 1)))
       return false;
-    const unsigned coverage = pixel[1];
+    const unsigned coverage = label ? pixel[1] : static_cast<unsigned>(std::lround(pixel[1] * 255. / 109));
     lit[cell] += coverage > 12;
     core[cell] += coverage >= 216;
     antialiased[cell] += coverage > 0 && coverage < 240;
@@ -70,7 +74,7 @@ inline bool pixel(unsigned x,
     return true;
   }
   const std::array<double, 2> corner{.305 * 768, .75 * 504};
-  const std::array<double, 2> upper{.33 * 768, .625 * 504};
+  const std::array<double, 2> upper{.33 * 768, .64 * 504};
   const std::array<double, 2> inner{.365 * 768, .758 * 504};
   auto distance = [&](const auto& a, const auto& b) {
     const double dx = b[0] - a[0], dy = b[1] - a[1], t = std::clamp(((px - a[0]) * dx + (py - a[1]) * dy) / (dx * dx + dy * dy), 0., 1.);

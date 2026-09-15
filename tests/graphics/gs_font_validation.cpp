@@ -112,7 +112,8 @@ int wmain(int argc, wchar_t** argv) {
                 require(p[0] == p[1] && p[1] == p[2], "GS label white antialias");
               else {
                 const auto colour = taxi_camera::profiles::Catalog[profile]->composition.speed_color;
-                require(p[0] == 0 && p[1] <= unsigned(std::lround(255 * colour[1])) &&
+                require(p[1] <= unsigned(std::lround(255 * colour[1])) &&
+                            std::abs(int(p[0]) - int(std::lround(p[1] * colour[0] / colour[1]))) <= 1 &&
                             std::abs(int(p[2]) - int(std::lround(p[1] * colour[2] / colour[1]))) <= 1,
                         "GS speed retains configured colour");
                 if (!profile && sample < 10 && cell == 2)

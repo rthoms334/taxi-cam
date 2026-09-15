@@ -334,9 +334,9 @@ void pixel_case(ID3D12Device* device,
                 "A350 nose markers must be 12-pixel-diameter circles");
       else
         require(nose_pixels == 392, "Both A380 nose markers must be filled 14-by-14 squares");
-      require(is_magenta(234, 637) && is_magenta(533, 637) && is_magenta(253, 574) && is_magenta(514, 574) && is_magenta(279, 641) &&
+      require(is_magenta(234, 637) && is_magenta(533, 637) && is_magenta(253, 582) && is_magenta(514, 582) && is_magenta(279, 641) &&
                   is_magenta(488, 641) && !is_magenta(245, 631),
-              "Tail reference brackets missed the reference photograph landmarks");
+              "Tail reference brackets missed the approved calibration landmarks");
     }
     reference_overlay_oracle::FontCoverage font_coverage;
     for (UINT y = 0; y < 1024; ++y) {

@@ -13,9 +13,9 @@ using CameraPanes = std::array<std::array<std::int32_t, 2>, 2>;
 struct Composition {
   float nose_height = 255, tail_top = 259, divider_top = 251, divider_bottom = 263;
   std::array<float, 2> nose_dot{0.14f, 0.48f};
-  std::array<float, 2> tail_corner{0.305f, 0.75f}, tail_upper{0.33f, 0.625f}, tail_inner{0.365f, 0.758f};
+  std::array<float, 2> tail_corner{0.305f, 0.75f}, tail_upper{0.33f, 0.64f}, tail_inner{0.365f, 0.758f};
   std::array<float, 3> guide_color{1, 0, 1};
-  std::array<float, 3> speed_color{0, 1, 0};
+  std::array<float, 3> speed_color{22.f / 255, 109.f / 255, 19.f / 255};
   // Working-image pixels; padding surrounds the GS label and current value.
   std::array<float, 2> speed_panel_origin{16, 12}, speed_panel_padding{8, 8};
   std::array<float, 2> speed_panel_min_size{0, 0};
@@ -27,14 +27,19 @@ inline constexpr Composition AmberEtacs = [] {
   Composition c;
   c.square_nose_markers = 0;
   c.guide_color = {1, 0.55f, 0};
-  c.speed_color = {0, 0.94f, 0.28f};
-  // Shared A350 image-space guide defaults; live adjustments remain per profile.
+  // A350-900 image-space guide defaults; live adjustments remain per profile.
   c.tail_upper = {0.29f, 0.76f};
   c.tail_corner = {0.26f, 0.87f};
   c.tail_inner = {0.31f, 0.87f};
   return c;
 }();
-inline constexpr Composition AmberEtacsA35K = AmberEtacs;
+inline constexpr Composition AmberEtacsA35K = [] {
+  auto c = AmberEtacs;
+  c.tail_upper = {0.31f, 0.69f};
+  c.tail_corner = {0.29f, 0.85f};
+  c.tail_inner = {0.37f, 0.855f};
+  return c;
+}();
 struct AircraftProfile {
   std::uint32_t id;
   std::string_view key;
@@ -69,8 +74,8 @@ inline constexpr AircraftProfile A380{1,
                                       5};
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
 // The accepted -900 calibration transfers to the -1000 with its physical
-// longitudinal offsets, retaining the same height, pitch and lens. The -1000
-// and its guide alignment still need a live check.
+// longitudinal offsets, retaining the same height, pitch and lens. Composition
+// defaults reflect the user's saved per-aircraft calibrations from 2026-09-15.
 // The compositor retains its bounded 768px working image.
 // Preserve a 32px central gap around the PFD/MFDDivider artwork on both sides.
 inline constexpr AircraftProfile A359{2,
