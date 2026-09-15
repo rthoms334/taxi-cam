@@ -12,6 +12,16 @@
 
 namespace taxi_camera {
 
+// Partial groups are no-draw diagnostics; normal stamping always uses all.
+enum class PfdStateGroup { all, pipeline, root_bindings, raster };
+inline constexpr bool valid_pfd_state_group(PfdStateGroup group) noexcept {
+  return group == PfdStateGroup::all || group == PfdStateGroup::pipeline || group == PfdStateGroup::root_bindings ||
+         group == PfdStateGroup::raster;
+}
+inline constexpr bool includes_pfd_state_group(PfdStateGroup group, PfdStateGroup member) noexcept {
+  return group == PfdStateGroup::all || group == member;
+}
+
 enum class PfdRootKind : std::uint8_t { constants, table, cbv, srv, uav };
 struct PfdRootParameter {
   PfdRootKind kind = PfdRootKind::constants;
@@ -87,7 +97,7 @@ class PfdGraphicsState {
   ID3D12RootSignature* root() const noexcept { return root_; }
   std::uint64_t layout_generation() const noexcept { return layout_generation_; }
   // Restore the exact observed native graphics bindings after the stamp.
-  void restore(ID3D12GraphicsCommandList* native) const noexcept;
+  void restore(ID3D12GraphicsCommandList* native, PfdStateGroup group = PfdStateGroup::all) const noexcept;
 
  private:
   bool parameter(UINT index, PfdRootKind kind) noexcept;

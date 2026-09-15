@@ -61,7 +61,8 @@ class PfdStampD3D12 {
                             UINT height,
                             const D3D12_RECT* destination = nullptr,
                             const D3D12_RECT* content = nullptr,
-                            bool draw = true) noexcept;
+                            bool draw = true,
+                            PfdStateGroup group = PfdStateGroup::all) noexcept;
   // Caller has just forwarded an actual direct draw on this exact native list,
   // with ONE bound matching RTV and the matching optional DSV, outside native pass/bundle, no pending
   // split/aliasing, exact selected bound mip extent and registered generations.
@@ -75,6 +76,7 @@ class PfdStampD3D12 {
   // shader reads (COMMON promotion is valid for buffers). Producer completion
   // and exclusion of concurrent/future writes during every consumer submission
   // are caller fence contracts, not inferred from this scalar GPU address.
+  // A partial state group is accepted only when draw=false.
   // Rectangles are half-open absolute target pixels. Content must be nonempty
   // and contained in destination; nullptr uses the whole destination. The
   // existing single draw maps the complete frame into content and emits opaque
@@ -87,7 +89,8 @@ class PfdStampD3D12 {
                      UINT height,
                      const D3D12_RECT* destination = nullptr,
                      const D3D12_RECT* content = nullptr,
-                     bool draw = true) noexcept;
+                     bool draw = true,
+                     PfdStateGroup group = PfdStateGroup::all) noexcept;
   DXGI_FORMAT format() const noexcept { return format_; }
   DXGI_FORMAT depth_format() const noexcept { return depth_format_; }
   void release() noexcept;

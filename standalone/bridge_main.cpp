@@ -447,6 +447,9 @@ DWORD run_impl() {
                           : settings.graphics_state_test && output.output
                               ? (settings.graphics_state_test == 2   ? "Graphics state test: render-target bindings only; no camera pixels."
                                  : settings.graphics_state_test == 3 ? "Graphics state test: shader-state replay only; no camera pixels."
+                                 : settings.graphics_state_test == 4 ? "Graphics state test: pipeline only; no camera pixels."
+                                 : settings.graphics_state_test == 5 ? "Graphics state test: root bindings only; no camera pixels."
+                                 : settings.graphics_state_test == 6 ? "Graphics state test: raster state only; no camera pixels."
                                                                      : "Graphics state test: all state replay active; no camera pixels.")
                           : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD write opportunity."
                                                             : output.message;
@@ -547,13 +550,15 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.fallback_state_refused));
       log_status(status, draw_detail);
       char diagnostic_detail[256];
-      std::snprintf(diagnostic_detail, sizeof(diagnostic_detail),
-                    "PFD state diagnostic: mode=%u roundtrips=%llu targets=%llu shaders=%llu sample_position_calls=%llu restores=%llu",
-                    settings.graphics_state_test, static_cast<unsigned long long>(graphics.state_test_roundtrips),
-                    static_cast<unsigned long long>(graphics.state_test_target_roundtrips),
-                    static_cast<unsigned long long>(graphics.state_test_shader_roundtrips),
-                    static_cast<unsigned long long>(graphics.sample_position_calls),
-                    static_cast<unsigned long long>(graphics.sample_position_restores));
+      std::snprintf(
+          diagnostic_detail, sizeof(diagnostic_detail),
+          "PFD state diagnostic: mode=%u name=%s roundtrips=%llu targets=%llu shaders=%llu sample_position_calls=%llu restores=%llu",
+          settings.graphics_state_test, win::graphics_state_mode_name(settings.graphics_state_test),
+          static_cast<unsigned long long>(graphics.state_test_roundtrips),
+          static_cast<unsigned long long>(graphics.state_test_target_roundtrips),
+          static_cast<unsigned long long>(graphics.state_test_shader_roundtrips),
+          static_cast<unsigned long long>(graphics.sample_position_calls),
+          static_cast<unsigned long long>(graphics.sample_position_restores));
       log_status(status, diagnostic_detail);
       char retention_detail[256];
       std::snprintf(retention_detail, sizeof(retention_detail),

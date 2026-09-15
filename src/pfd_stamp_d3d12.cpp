@@ -189,12 +189,13 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
                                   UINT height,
                                   const D3D12_RECT* destination,
                                   const D3D12_RECT* content,
-                                  bool draw) noexcept {
+                                  bool draw,
+                                  PfdStateGroup group) noexcept {
   const engine_hook::pfd_state::ScopedBypass bypass;
-  if (!list || !state.can_restore(list))
+  if (!list || !valid_pfd_state_group(group) || (draw && group != PfdStateGroup::all) || !state.can_restore(list))
     return false;
   d3d12_extended::CommandList9* dynamic = nullptr;
-  if (state.has_depth_bias() || state.has_strip_cut()) {
+  if (includes_pfd_state_group(group, PfdStateGroup::pipeline) && (state.has_depth_bias() || state.has_strip_cut())) {
     const auto hr = list->QueryInterface(d3d12_extended::CommandList9Id, reinterpret_cast<void**>(&dynamic));
     if (FAILED(hr) || dynamic != list) {
       if (dynamic)
@@ -203,7 +204,7 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
     }
   }
   ID3D12GraphicsCommandList1* samples = nullptr;
-  if (state.has_sample_positions()) {
+  if (includes_pfd_state_group(group, PfdStateGroup::raster) && state.has_sample_positions()) {
     const auto hr = list->QueryInterface(IID_PPV_ARGS(&samples));
     if (FAILED(hr) || samples != list) {
       if (samples)
@@ -216,9 +217,9 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
     // bind. Our intervening draw has a single-sample PSO and needs defaults.
     samples->SetSamplePositions(0, 0, nullptr);
   }
-  const bool recorded = record_private_patch(list, buffer_device, address, width, height, destination, content, draw);
+  const bool recorded = record_private_patch(list, buffer_device, address, width, height, destination, content, draw, group);
   if (recorded)
-    state.restore(list);
+    state.restore(list, group);
   else if (samples)
     state.restore_sample_positions(list);
   if (samples)
@@ -234,9 +235,11 @@ bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
                                          UINT height,
                                          const D3D12_RECT* destination,
                                          const D3D12_RECT* content,
-                                         bool draw) noexcept {
-  if (!list || !pipeline_ || !address || address % 4 || buffer_device != device_ || width < 1 || height < 2 || width > 16384 ||
-      height > 16384 || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+                                         bool draw,
+                                         PfdStateGroup group) noexcept {
+  if (!valid_pfd_state_group(group) || (draw && group != PfdStateGroup::all) || !list || !pipeline_ || !address || address % 4 ||
+      buffer_device != device_ || width < 1 || height < 2 || width > 16384 || height > 16384 ||
+      list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return false;
   const UINT upper = static_cast<UINT>((static_cast<UINT64>(height) * 763) / 1024);
   if (!upper)
@@ -265,13 +268,18 @@ bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
                           static_cast<UINT>(rect.right - inner.right),
                           static_cast<UINT>(rect.bottom - inner.bottom)};
   const engine_hook::pfd_state::ScopedBypass bypass;
-  list->SetPipelineState(pipeline_);
-  list->SetGraphicsRootSignature(root_);
-  list->SetGraphicsRootShaderResourceView(0, address);
-  list->SetGraphicsRoot32BitConstants(1, 8, constants, 0);
-  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  list->RSSetViewports(1, &viewport);
-  list->RSSetScissorRects(1, &scissor);
+  if (includes_pfd_state_group(group, PfdStateGroup::pipeline))
+    list->SetPipelineState(pipeline_);
+  if (includes_pfd_state_group(group, PfdStateGroup::root_bindings)) {
+    list->SetGraphicsRootSignature(root_);
+    list->SetGraphicsRootShaderResourceView(0, address);
+    list->SetGraphicsRoot32BitConstants(1, 8, constants, 0);
+  }
+  if (includes_pfd_state_group(group, PfdStateGroup::raster)) {
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+  }
   if (draw)
     list->DrawInstanced(3, 1, 0, 0);
   return true;

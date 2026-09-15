@@ -56,5 +56,6 @@ bool stamp(ID3D12GraphicsCommandList*,
            DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
            const D3D12_RECT* destination = nullptr,
            const D3D12_RECT* content = nullptr,
-           bool draw = true);
+           bool draw = true,
+           PfdStateGroup group = PfdStateGroup::all);
 }  // namespace taxi_camera::scene_runtime

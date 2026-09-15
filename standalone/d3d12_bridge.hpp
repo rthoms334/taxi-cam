@@ -29,7 +29,8 @@ std::vector<PfdTargetObservation> pfd_inventory();
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
-// Temporary diagnostic: 0 Off, 1 All, 2 Targets only, 3 Shader state only.
+// Temporary diagnostic: 0 Off, 1 All, 2 Targets only, 3 Shader state only,
+// 4 Pipeline only, 5 Root bindings only, 6 Raster state only.
 // Every nonzero mode omits PFD draws/copies; camera processing remains active.
 void set_graphics_state_test(unsigned mode) noexcept;
 std::array<std::uint64_t, 2> target_ids() noexcept;

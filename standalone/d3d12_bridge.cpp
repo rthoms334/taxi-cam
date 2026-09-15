@@ -653,7 +653,11 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     const D3D12_CPU_DESCRIPTOR_HANDLE target{list->snapshot_rtvs->GetCPUDescriptorHandleForHeapStart().ptr +
                                              SIZE_T{8 + side} * r.rtv_stride};
     const bool targets_only = r.graphics_state_test == 2;
-    const bool shader_only = r.graphics_state_test == 3;
+    const bool shader_only = r.graphics_state_test >= 3;
+    const auto group = r.graphics_state_test == 4   ? PfdStateGroup::pipeline
+                       : r.graphics_state_test == 5 ? PfdStateGroup::root_bindings
+                       : r.graphics_state_test == 6 ? PfdStateGroup::raster
+                                                    : PfdStateGroup::all;
     if (targets_only) {
       // Keep the same current-output and submission admission as state replay;
       // only the graphics-state operation is removed from this diagnostic.
@@ -667,9 +671,9 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     if (!shader_only)
       native->OMSetRenderTargets(1, &target, FALSE, nullptr);
     ++r.fallback_attempts;
-    const bool stamped =
-        targets_only || runtime::stamp(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
-                                       view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test);
+    const bool stamped = targets_only || runtime::stamp(native, list->graphics, r.key, view.format,
+                                                        static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                                                        DXGI_FORMAT_UNKNOWN, &destination, &inner, !r.graphics_state_test, group);
     // Restore the CURRENT raw OM bindings, including valid descriptors that
     // predate tracking. Never replay the bindings from when the PFD was queued.
     if (!shader_only)
@@ -684,9 +688,12 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
       } else
         ++r.fallback_stamps;
       if (!targets_only) {
-        r.sample_position_restores += list->graphics.has_sample_positions();
-        r.dynamic_depth_bias_restores += list->graphics.has_depth_bias();
-        r.dynamic_strip_cut_restores += list->graphics.has_strip_cut();
+        if (group == PfdStateGroup::all || group == PfdStateGroup::raster)
+          r.sample_position_restores += list->graphics.has_sample_positions();
+        if (group == PfdStateGroup::all || group == PfdStateGroup::pipeline) {
+          r.dynamic_depth_bias_restores += list->graphics.has_depth_bias();
+          r.dynamic_strip_cut_restores += list->graphics.has_strip_cut();
+        }
       }
       list->pending_rt[side] = false;
       list->pending_pfds[side] = {};
@@ -1691,7 +1698,7 @@ void set_calibration(unsigned mask, unsigned budget) noexcept {
 void set_graphics_state_test(unsigned mode) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  r.graphics_state_test = mode <= 3 ? mode : 0;
+  r.graphics_state_test = mode <= 6 ? mode : 0;
 }
 void set_target_mask(unsigned mask) noexcept {
   auto& r = registry();

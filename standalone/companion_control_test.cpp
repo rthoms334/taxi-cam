@@ -70,20 +70,25 @@ int main() {
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol6 guide coordinates roundtrip");
     require(control.settings().graphics_state_test == 1, "Diagnostic flag roundtrips through IPC");
-    for (unsigned mode = 0; mode <= 3; ++mode) {
+    constexpr const char* expected_modes[]{
+        "off", "all", "targets_only", "shader_state_only", "pipeline_only", "root_bindings_only", "raster_state_only"};
+    require(MaximumGraphicsStateTestMode == 6, "Diagnostic range preserves existing values and adds exactly three modes");
+    for (unsigned mode = 0; mode <= MaximumGraphicsStateTestMode; ++mode) {
       auto diagnostic = settings;
       diagnostic.graphics_state_test = mode;
       publish(owner, 10000, diagnostic);
       control.refresh(reader);
       require(control.connected(10000) && control.settings().graphics_state_test == mode,
               "Every graphics diagnostic mode roundtrips through IPC");
+      require(std::strcmp(graphics_state_mode_name(mode), expected_modes[mode]) == 0, "Diagnostic mode has stable log name");
     }
-    {
+    for (const unsigned bad_mode : {7u, std::numeric_limits<unsigned>::max()}) {
       auto invalid = settings;
-      invalid.graphics_state_test = 4;
+      invalid.graphics_state_test = bad_mode;
       publish(owner, 10000, invalid);
       control.refresh(reader);
       require(!control.connected(10000) && !control.settings().enabled, "Malformed diagnostic flag refuses IPC");
+      require(std::strcmp(graphics_state_mode_name(bad_mode), "invalid") == 0, "Invalid diagnostic log name is bounded");
     }
     for (auto member : {&Settings::nose_dot, &Settings::tail_upper, &Settings::tail_corner, &Settings::tail_inner}) {
       for (unsigned axis = 0; axis < 2; ++axis) {

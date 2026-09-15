@@ -72,11 +72,25 @@ int main() {
     GetPrivateProfileStringW(L"display", L"graphics_state_test", L"absent", missing, 32, win::settings_path(current).c_str());
     require(std::wstring(missing) == L"absent", "Diagnostic has no persisted INI key");
     dirty = true;
-    for (const unsigned mode : {2u, 3u, 0u}) {
+    constexpr const wchar_t* expected_labels[]{L"Graphics state test: Off",
+                                               L"Graphics state test: All",
+                                               L"Graphics state test: Targets only",
+                                               L"Graphics state test: Shader state only",
+                                               L"Graphics state test: Pipeline only",
+                                               L"Graphics state test: Root bindings only",
+                                               L"Graphics state test: Raster state only"};
+    for (const unsigned mode : {2u, 3u, 4u, 5u, 6u, 0u}) {
       command(232);
       require(current.graphics_state_test == mode && dirty, "Diagnostic cycle preserves unrelated unsaved edits");
       GetDlgItemTextW(window, 232, label, 96);
-      require(std::wstring(label) == graphics_state_label(mode), "Diagnostic mode label matches published mode");
+      require(std::wstring(label) == expected_labels[mode], "Diagnostic mode label matches its stable numeric meaning");
+      require(current.manual_mask == original.manual_mask && current.calibration_mask == original.calibration_mask &&
+                  current.mounts == original.mounts && current.nose_dot == original.nose_dot &&
+                  current.tail_corner == original.tail_corner && current.speed_color == original.speed_color,
+              "Every diagnostic mode preserves routing, calibration, guides and display colour");
+      win::save_settings(current);
+      require(win::load_settings(loaded, L"", 2) && loaded.graphics_state_test == 0,
+              "Every diagnostic mode remains absent from persisted profile settings");
     }
     require(!current.graphics_state_test, "Diagnostic cycle returns to normal rendering");
     command(232);

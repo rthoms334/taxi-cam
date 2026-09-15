@@ -102,6 +102,75 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pipeline.put())), "Create ClearState pipeline");
   }
 };
+// Trace the real stamp setup against a recording sink. Unlike the pixel oracle,
+// this rejects redundant changes to any state outside the chosen diagnostic.
+namespace setup_trace {
+std::vector<unsigned> calls;
+D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE type(void*) {
+  return D3D12_COMMAND_LIST_TYPE_DIRECT;
+}
+void STDMETHODCALLTYPE pipeline(void*, ID3D12PipelineState*) {
+  calls.push_back(25);
+}
+void STDMETHODCALLTYPE root(void*, ID3D12RootSignature*) {
+  calls.push_back(30);
+}
+void STDMETHODCALLTYPE srv(void*, UINT, UINT64) {
+  calls.push_back(40);
+}
+void STDMETHODCALLTYPE constants(void*, UINT, UINT, const void*, UINT) {
+  calls.push_back(36);
+}
+void STDMETHODCALLTYPE topology(void*, D3D_PRIMITIVE_TOPOLOGY) {
+  calls.push_back(20);
+}
+void STDMETHODCALLTYPE viewport(void*, UINT, const D3D12_VIEWPORT*) {
+  calls.push_back(21);
+}
+void STDMETHODCALLTYPE scissor(void*, UINT, const D3D12_RECT*) {
+  calls.push_back(22);
+}
+void STDMETHODCALLTYPE draw(void*, UINT, UINT, UINT, UINT) {
+  calls.push_back(12);
+}
+void verify(ID3D12Device* device, D3D12_GPU_VIRTUAL_ADDRESS address) {
+  using namespace taxi_camera;
+  const win::OwnedWork owned;
+  PfdStampD3D12 stamp;
+  check(stamp.initialize(device, DXGI_FORMAT_R8G8B8A8_UNORM), "Initialize diagnostic setup trace");
+  std::array<void*, 43> slots{};
+  slots[8] = reinterpret_cast<void*>(&type);
+  slots[12] = reinterpret_cast<void*>(&draw);
+  slots[25] = reinterpret_cast<void*>(&pipeline);
+  slots[30] = reinterpret_cast<void*>(&root);
+  slots[40] = reinterpret_cast<void*>(&srv);
+  slots[36] = reinterpret_cast<void*>(&constants);
+  slots[20] = reinterpret_cast<void*>(&topology);
+  slots[21] = reinterpret_cast<void*>(&viewport);
+  slots[22] = reinterpret_cast<void*>(&scissor);
+  auto* pointer = slots.data();
+  auto* list = reinterpret_cast<ID3D12GraphicsCommandList*>(&pointer);
+  const std::array<std::vector<unsigned>, 4> expected{{{25, 30, 40, 36, 20, 21, 22}, {25}, {30, 40, 36}, {20, 21, 22}}};
+  for (unsigned group = 0; group < 4; ++group) {
+    calls.clear();
+    require(stamp.record_private_patch(list, device, address, 768, 1024, nullptr, nullptr, false, static_cast<PfdStateGroup>(group)),
+            "Record exact diagnostic setup group");
+    require(calls == expected[group], "Diagnostic setup touched another state group or issued a draw");
+    if (group) {
+      calls.clear();
+      require(!stamp.record_private_patch(list, device, address, 768, 1024, nullptr, nullptr, true, static_cast<PfdStateGroup>(group)) &&
+                  calls.empty(),
+              "Partial state cannot be used for drawing and must refuse before mutation");
+    }
+  }
+  calls.clear();
+  require(!stamp.record_private_patch(list, device, address, 768, 1024, nullptr, nullptr, false, static_cast<PfdStateGroup>(99)) &&
+              calls.empty(),
+          "Invalid group refuses before mutation");
+  std::puts("PASS diagnostic setup: exact all/pipeline/root/raster setters, no draw; partial draws and invalid group refused.");
+}
+}  // namespace setup_trace
+
 void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   const auto module = LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   require(module != nullptr, "Load system D3D11 for capture interop regression");
@@ -524,6 +593,7 @@ void textured_gray_fallback(ID3D12Device* device,
   const float tint_value[]{.8f, .8f, .8f, .75f};
   std::memcpy(mapped, tint_value, sizeof(tint_value));
   tint->Unmap(0, nullptr);
+  setup_trace::verify(device, tint->GetGPUVirtualAddress());
   std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 4> footprints{};
   UINT64 bytes{};
   device->GetCopyableFootprints(&target_desc, 0, 4, 0, footprints.data(), nullptr, nullptr, &bytes);
@@ -548,7 +618,7 @@ void textured_gray_fallback(ID3D12Device* device,
     for (UINT input_format = 0; input_format < 2; ++input_format) {
       for (UINT mip = 0; mip < 4; ++mip) {
         std::vector<unsigned char> baseline;
-        for (UINT on = 0; on < 5; ++on) {
+        for (UINT on = 0; on < 8; ++on) {
           const bool draw = on == 1, diagnostic = on >= 2;
           const unsigned mode = diagnostic ? on - 1 : 0;
           win::set_graphics_state_test(mode);
@@ -582,7 +652,7 @@ void textured_gray_fallback(ID3D12Device* device,
           require(delivered.fallback_stamps == before.fallback_stamps + draw &&
                       delivered.state_test_roundtrips == before.state_test_roundtrips + diagnostic &&
                       delivered.state_test_target_roundtrips == before.state_test_target_roundtrips + (mode == 1 || mode == 2) &&
-                      delivered.state_test_shader_roundtrips == before.state_test_shader_roundtrips + (mode == 1 || mode == 3) &&
+                      delivered.state_test_shader_roundtrips == before.state_test_shader_roundtrips + (mode == 1 || mode >= 3) &&
                       delivered.preferred_copy_stamps == before.preferred_copy_stamps,
                   "Gray test must exercise the exact selected draw/state/target operations, never a private copy");
           list->DrawInstanced(3, 1, 0, 0);  // No application state rebind at all.

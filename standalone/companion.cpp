@@ -96,9 +96,14 @@ void edit(double value, int id, int x, int y, int w = 110) {
   SendMessageW(h, EM_SETLIMITTEXT, 32, 0);
 }
 const wchar_t* graphics_state_label(unsigned mode) {
-  constexpr const wchar_t* labels[]{L"Graphics state test: Off", L"Graphics state test: All", L"Graphics state test: Targets only",
-                                    L"Graphics state test: Shader state only"};
-  return labels[mode <= 3 ? mode : 0];
+  constexpr const wchar_t* labels[]{L"Graphics state test: Off",
+                                    L"Graphics state test: All",
+                                    L"Graphics state test: Targets only",
+                                    L"Graphics state test: Shader state only",
+                                    L"Graphics state test: Pipeline only",
+                                    L"Graphics state test: Root bindings only",
+                                    L"Graphics state test: Raster state only"};
+  return labels[mode <= win::MaximumGraphicsStateTestMode ? mode : 0];
 }
 void toggle(const wchar_t* label, int id, bool enabled, int x, int y, int width = 125) {
   const auto text = std::wstring(label) + (enabled ? L": On" : L": Off");
@@ -578,8 +583,8 @@ void draw_page(HDC dc) {
     text(dc, data, 637, 156, 350, 236, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 436, 766, 102);
     text(dc,
-         L"Scene test renders without PFD delivery. Graphics state test needs preview/TAXI active.\n"
-         L"Cycle All / Targets only / Shader state only. No camera pixels are drawn. Temporary; not saved.",
+         L"Scene test renders without PFD delivery. Graphics tests need preview/TAXI active.\n"
+         L"Cycle All, Targets, Shader state, Pipeline, Root bindings, Raster state. No camera pixels; temporary, not saved.",
          260, 488, 730, 42, small, Muted, DT_LEFT | DT_WORDBREAK);
     const auto line = sample.heartbeat ? widen(sample.message) : live;
     text(dc, L"Calibration batches per 50 ms (64–16384)", 260, 546, 550, 27, small, Muted);
@@ -1056,7 +1061,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (!apply(false))
           return 0;
         auto s = draft();
-        s.graphics_state_test = (s.graphics_state_test + 1) % 4;
+        s.graphics_state_test = (s.graphics_state_test + 1) % (win::MaximumGraphicsStateTestMode + 1);
         publish(s);
         dirty = had_unsaved_changes;
         notice = s.graphics_state_test ? L"Temporary graphics state test changed; camera pixels will not be drawn."

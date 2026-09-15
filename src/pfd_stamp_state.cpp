@@ -298,47 +298,58 @@ UINT PfdGraphicsState::undefined_table_count() const noexcept {
       ++count;
   return count;
 }
-void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list) const noexcept {
-  if (((depth_bias_known_ || strip_cut_known_) && dynamic_native_ != list) || (has_sample_positions() && sample_native_ != list))
+void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list, PfdStateGroup group) const noexcept {
+  const bool pipeline = includes_pfd_state_group(group, PfdStateGroup::pipeline);
+  const bool raster = includes_pfd_state_group(group, PfdStateGroup::raster);
+  if (!valid_pfd_state_group(group) || (pipeline && (depth_bias_known_ || strip_cut_known_) && dynamic_native_ != list) ||
+      (raster && has_sample_positions() && sample_native_ != list))
     return;
-  list->SetPipelineState(pipeline_);
-  if (depth_bias_known_)
-    dynamic_native_->RSSetDepthBias(depth_bias_[0], depth_bias_[1], depth_bias_[2]);
-  if (strip_cut_known_)
-    dynamic_native_->IASetIndexBufferStripCutValue(strip_cut_);
-  list->SetGraphicsRootSignature(root_);
-  if (observed_arguments_)
-    for (UINT n = 0; n < observed_word_count_; ++n)
-      list->SetGraphicsRoot32BitConstant(observed_word_keys_[n] / 64, constants_[n], observed_word_keys_[n] % 64);
-  for (UINT n = 0; n < layout_.count; ++n) {
-    if (observed_arguments_ && (!layout_.parameters[n].count || layout_.parameters[n].kind == PfdRootKind::constants || !values_[n].known))
-      continue;
-    const auto& value = values_[n];
-    switch (layout_.parameters[n].kind) {
-      case PfdRootKind::constants:
-        list->SetGraphicsRoot32BitConstants(n, layout_.parameters[n].count, constants_.data() + constant_offsets_[n], 0);
-        break;
-      case PfdRootKind::table:
-        // SetGraphicsRootSignature restored all argument slots to undefined.
-        // Preserve that prior state for a positively undefined table; never
-        // invent a null or stale descriptor handle. All known tables replay.
-        if (value.known)
-          list->SetGraphicsRootDescriptorTable(n, {value.address});
-        break;
-      case PfdRootKind::cbv:
-        list->SetGraphicsRootConstantBufferView(n, value.address);
-        break;
-      case PfdRootKind::srv:
-        list->SetGraphicsRootShaderResourceView(n, value.address);
-        break;
-      case PfdRootKind::uav:
-        list->SetGraphicsRootUnorderedAccessView(n, value.address);
-        break;
+  if (pipeline) {
+    list->SetPipelineState(pipeline_);
+    if (depth_bias_known_)
+      dynamic_native_->RSSetDepthBias(depth_bias_[0], depth_bias_[1], depth_bias_[2]);
+    if (strip_cut_known_)
+      dynamic_native_->IASetIndexBufferStripCutValue(strip_cut_);
+  }
+  if (includes_pfd_state_group(group, PfdStateGroup::root_bindings)) {
+    list->SetGraphicsRootSignature(root_);
+    if (observed_arguments_)
+      for (UINT n = 0; n < observed_word_count_; ++n)
+        list->SetGraphicsRoot32BitConstant(observed_word_keys_[n] / 64, constants_[n], observed_word_keys_[n] % 64);
+    for (UINT n = 0; n < layout_.count; ++n) {
+      if (observed_arguments_ &&
+          (!layout_.parameters[n].count || layout_.parameters[n].kind == PfdRootKind::constants || !values_[n].known))
+        continue;
+      const auto& value = values_[n];
+      switch (layout_.parameters[n].kind) {
+        case PfdRootKind::constants:
+          list->SetGraphicsRoot32BitConstants(n, layout_.parameters[n].count, constants_.data() + constant_offsets_[n], 0);
+          break;
+        case PfdRootKind::table:
+          // SetGraphicsRootSignature restored all argument slots to undefined.
+          // Preserve that prior state for a positively undefined table; never
+          // invent a null or stale descriptor handle. All known tables replay.
+          if (value.known)
+            list->SetGraphicsRootDescriptorTable(n, {value.address});
+          break;
+        case PfdRootKind::cbv:
+          list->SetGraphicsRootConstantBufferView(n, value.address);
+          break;
+        case PfdRootKind::srv:
+          list->SetGraphicsRootShaderResourceView(n, value.address);
+          break;
+        case PfdRootKind::uav:
+          list->SetGraphicsRootUnorderedAccessView(n, value.address);
+          break;
+      }
     }
   }
-  restore_sample_positions(list);
-  list->IASetPrimitiveTopology(topology_);
-  list->RSSetViewports(viewport_count_, viewports_.data());
-  list->RSSetScissorRects(scissor_count_, scissors_.data());
+  if (raster) {
+    restore_sample_positions(list);
+    list->IASetPrimitiveTopology(topology_);
+    list->RSSetViewports(viewport_count_, viewports_.data());
+    list->RSSetScissorRects(scissor_count_, scissors_.data());
+  }
 }
+
 }  // namespace taxi_camera
