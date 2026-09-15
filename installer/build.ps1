@@ -18,8 +18,8 @@ $receipt = Assert-TaxiNativeReceipt (Join-Path $repoRoot 'build/native')
 $info = Get-Content -Raw -LiteralPath ([IO.Path]::ChangeExtension($zip, '.build-info.json')) | ConvertFrom-Json
 if ($receipt.version -ne $version -or $receipt.buildNumber -ne $buildNumber -or $info.buildNumber -ne $buildNumber -or $info.sourceCommit -notmatch '^[0-9a-fA-F]{40}$' -or $info.version -ne $version -or $info.build -ne "build.$buildNumber") { throw 'Package version, build number or source provenance does not match.' }
 $manifest = @(Get-Content -Raw -LiteralPath ([IO.Path]::ChangeExtension($zip, '.manifest.json')) | ConvertFrom-Json)
-$allowed = @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')
-if ($manifest.Count -ne $allowed.Count) { throw 'The runtime package must contain exactly four required files.' }
+$allowed = @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','LICENSE.txt','THIRD_PARTY_NOTICES.txt')
+if ($manifest.Count -ne $allowed.Count) { throw 'The runtime package must contain exactly five required files, including LICENSE.txt.' }
 $seen = @{}
 foreach ($entry in $manifest) {
     $relative = [string]$entry.file

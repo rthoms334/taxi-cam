@@ -87,7 +87,7 @@ try {
     $targets = @((Join-Path $destFull 'installation.json'), (Join-Path $destFull '380-taxi-cam.exe'), $ExeXml)
     # Setup can pass an 8.3 temporary path. Directory enumeration expands it,
     # so slicing absolute paths by the original prefix length corrupts targets.
-    foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')) {
+    foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
         $targets += Join-Path $destFull $name
     }
     $legacy = Join-Path $SimulatorDirectory 'taxi-camera-native.addon64'
@@ -112,27 +112,11 @@ try {
             $state.createdLegacyHash = (Get-FileHash -LiteralPath $installedRecord.legacyBackup).Hash
         }
         foreach ($entry in $snapshot) {
-            if ([IO.Path]::GetFileName($entry.path) -eq 'THIRD_PARTY_NOTICES.txt') { continue }
             $entry.installedHash = if (Test-Path -LiteralPath $entry.path -PathType Leaf) { (Get-FileHash -LiteralPath $entry.path).Hash } else { '' }
             $priorHash = if ($entry.existed) { (Get-FileHash -LiteralPath $entry.backup).Hash } else { '' }
             $entry.owned = $entry.installedHash -ne $priorHash
         }
         $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
-        foreach ($name in @('THIRD_PARTY_NOTICES.txt')) {
-            $source = Join-Path $payloadFull $name
-            $target = Join-Path $destFull $name
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-            $entry = @($snapshot | Where-Object { $_.path -eq $target })[0]
-            $entry.installedHash = (Get-FileHash -LiteralPath $source).Hash
-            $entry.owned = $true
-            $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
-            $noticeTemp = Join-Path $destFull ('.notice-' + [Guid]::NewGuid().ToString('N'))
-            try {
-                Copy-Item -LiteralPath $source -Destination $noticeTemp
-                if (Test-Path -LiteralPath $target) { [IO.File]::Replace($noticeTemp, $target, [NullString]::Value) }
-                else { [IO.File]::Move($noticeTemp, $target) }
-            } finally { if (Test-Path -LiteralPath $noticeTemp) { Remove-Item -LiteralPath $noticeTemp } }
-        }
     } catch {
         # install.ps1 owns its own failure rollback. Never undo its concurrent XML edit guard.
         if ($nativeSucceeded) { Restore-Transaction } else { Remove-Item -LiteralPath $statePath }

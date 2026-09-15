@@ -15,7 +15,7 @@ try {
         if ($entries.ContainsKey($relative)) { throw 'Duplicate ZIP entry.' }
         $entries[$relative] = $entry
     }
-    $requiredFiles = @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')
+    $requiredFiles = @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','LICENSE.txt','THIRD_PARTY_NOTICES.txt')
     foreach ($required in $requiredFiles) {
         if (-not $entries.ContainsKey($required)) { throw "Package entry missing: $required" }
     }
@@ -29,6 +29,13 @@ try {
         try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','') }
         finally { $sha.Dispose(); $stream.Dispose() }
         if ($hash -ne $file.sha256) { throw "Package manifest hash mismatch: $($file.file)" }
+        $legalSource = switch ($file.file) {
+            'LICENSE.txt' { Join-Path $repoRoot 'LICENSE' }
+            'THIRD_PARTY_NOTICES.txt' { Join-Path $repoRoot 'licenses/native-runtime-notices.txt' }
+        }
+        if ($legalSource -and $hash -ne (Get-FileHash -LiteralPath $legalSource -Algorithm SHA256).Hash) {
+            throw "Package changed the legal text: $($file.file)"
+        }
     }
     $info = Get-Content -Raw -LiteralPath ($base + '.build-info.json') | ConvertFrom-Json
     if ($info.sourceCommit -ne $commit -or $info.build -ne $label -or $info.simulatorVerified) { throw 'Incorrect package provenance.' }
@@ -39,4 +46,4 @@ if (-not $refused) { throw 'Existing package was overwritten.' }
 $refused = $false
 try { & (Join-Path $root 'installer/package.ps1') -BuildLabel '../escape' | Out-Null } catch { $refused = $true }
 if (-not $refused) { throw 'Invalid package label accepted.' }
-Write-Output "PASS package: exactly $($entries.Count) runtime files, no scripts/docs/license folders, complete manifest hashes, provenance and overwrite/path refusal."
+Write-Output "PASS package: exactly $($entries.Count) runtime files, verbatim GPL license and third-party notices, complete manifest hashes, provenance and overwrite/path refusal."

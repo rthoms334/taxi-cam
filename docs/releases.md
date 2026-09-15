@@ -1,6 +1,6 @@
 # Automated Windows releases
 
-The [Windows release workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency or version configuration, camera defaults, bundled runtime notices, or the release workflow itself. A successful run builds a Windows x64 package and publishes it with release notes at [GitHub Releases](https://github.com/rthoms334/taxi-cam/releases).
+The [Windows release workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency or version configuration, camera defaults, the project licence, bundled runtime notices, or the release workflow itself. A successful run builds a Windows x64 package and publishes it with release notes at [GitHub Releases](https://github.com/rthoms334/taxi-cam/releases).
 
 README, documentation, issue-template and other repository-only changes do not trigger an automatic release. Markdown files and formatting/ignore files are excluded even inside the code directories. A push containing both documentation and a qualifying code change still runs. Keep the workflow's `paths` list current when adding a new build input outside the listed directories.
 
@@ -23,22 +23,27 @@ The validation step runs:
 ~~~powershell
 ./build.ps1 -Validate -WarpOnly
 ./smoke-test.ps1
+./tests/installer/prerequisites_test.ps1
 ./tests/installer/install_test.ps1
 ./tests/installer/package_test.ps1
 ~~~
 
 `-WarpOnly` uses Windows' software Direct3D 12 renderer to exercise GPU capture, composition and PFD drawing. The receipt records WARP as `passed`, hardware GPU validation as `not-run` and `simulatorVerified: false`. Local `build.ps1 -Validate` runs both hardware and WARP tests.
 
+After packaging and compiling setup, `tests/installer/test-installer.ps1 -Installer <setup-path>` verifies the exact installer and its receipt in isolated fixtures. Package checks require the complete five-file payload and byte-for-byte copies of the project licence and third-party notices. Installer checks cover those files during installation, update, rollback and removal, including preservation of user calibration.
+
 ## What to download
 
 | Release asset | Contents |
 | --- | --- |
 | Windows x64 setup EXE | Guided installation, upgrade and uninstallation, with simulator startup integration |
-| Windows x64 ZIP | EXE, DLL, camera defaults and one required runtime notice file |
+| Windows x64 ZIP | EXE, DLL, camera defaults, GPLv3 licence and third-party runtime notices |
 | `SHA256SUMS.txt` | SHA-256 checksums of setup and the ZIP |
 | `validation.json` | Test coverage and exact binary hashes |
 
-The runtime ZIP contains exactly four files in its application directory: `taxi-cam.exe`, `taxi-camera-bridge.dll`, `taxi-camera-mounts.cfg` and `THIRD_PARTY_NOTICES.txt`. It has no loose PowerShell scripts, documentation, license folders, build manifests or validation receipts. Use setup for a normal installation.
+The runtime ZIP contains exactly five files in its application directory: `taxi-cam.exe`, `taxi-camera-bridge.dll`, `taxi-camera-mounts.cfg`, `LICENSE.txt` and `THIRD_PARTY_NOTICES.txt`. It has no loose PowerShell scripts, documentation folders, build manifests or validation receipts. Use setup for a normal installation.
+
+Original Taxi Cam code is licensed under GPLv3 only. Release notes link to the corresponding source archive at the exact built commit, including the build and installation scripts; GitHub also provides source archives for the release tag. Keep that source accessible to binary recipients. The installer places `LICENSE.txt` and `THIRD_PARTY_NOTICES.txt` alongside the application, and third-party licensing remains separate.
 
 Provenance and manifests remain beside the ZIP in the ignored build directory as `<package>.build-info.json` and `<package>.manifest.json`, and are retained in workflow artifacts. The installer adds its uninstaller and installation record, which are needed to manage future upgrades and removal. Build, test and installation scripts remain in the repository.
 
@@ -56,7 +61,7 @@ Installer assets use `taxi-cam-<version>-build.<number>-windows-x64-setup.exe`. 
 
 The updater uses GitHub's unauthenticated public release API. The release repository and its installer assets must be publicly readable; private repositories return HTTP 404 to this client. No GitHub credential is embedded in the application. Make the repository public and publish a release containing setup before automatic updates can be used by end users. Local installation and the isolated updater tests work independently of repository visibility.
 
-Notes contain installation guidance, validation scope, a link to build logs and commits since the most recent published ancestor build. GitHub's generated notes add pull-request and contributor information. The first release includes the available commit history.
+Notes contain installation guidance, GPLv3 licence information, links to the exact corresponding source and build logs, validation scope, and commits since the most recent published ancestor build. GitHub's generated notes add pull-request and contributor information. The first release includes the available commit history.
 
 [The publication script](../ci/publish-release.ps1) targets the exact built commit. It marks a release Latest only when that commit is still the current `main` at publication time.
 

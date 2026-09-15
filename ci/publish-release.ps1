@@ -76,6 +76,8 @@ $notes = @(
     '',
     'Download the Windows x64 setup EXE and run it with MSFS and Taxi Cam closed. Existing paths and calibration are preserved. SHA256SUMS.txt covers the installer and optional runtime ZIP.',
     '',
+    "Licence: GNU GPL version 3 only. [Corresponding source, including build and installation scripts](https://github.com/$Repository/archive/$Commit.zip) for these binaries; [browse this exact revision](https://github.com/$Repository/tree/$Commit). The installer and runtime ZIP include LICENSE.txt and third-party notices.",
+    '',
     'Validation: strict native build, software D3D12 (WARP), smoke, IPC, camera lifecycle, graphics-state, installer and package checks. Hardware GPU and live MSFS checks are not performed on the hosted runner.',
     '',
     "[Build and validation logs]($runUrl)",

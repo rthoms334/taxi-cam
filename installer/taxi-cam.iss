@@ -62,6 +62,7 @@ Name: "{userprograms}\Taxi Cam"; Filename: "{app}\taxi-cam.exe"; WorkingDir: "{a
 [UninstallDelete]
 Type: files; Name: "{app}\taxi-cam.exe"
 Type: files; Name: "{app}\taxi-camera-bridge.dll"
+Type: files; Name: "{app}\LICENSE.txt"
 Type: files; Name: "{app}\THIRD_PARTY_NOTICES.txt"
 ; Calibration, installation record, user settings, logs and historical backups are retained.
 

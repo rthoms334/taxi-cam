@@ -13,7 +13,7 @@ struct CameraHotkey {
 };
 using CameraHotkeys = std::array<CameraHotkey, 3>;
 inline constexpr CameraHotkeys DefaultCameraHotkeys{
-    {{VK_F9, MOD_CONTROL | MOD_SHIFT}, {VK_F10, MOD_CONTROL | MOD_SHIFT}, {VK_F11, MOD_CONTROL | MOD_SHIFT}}};
+    {{'L', MOD_CONTROL | MOD_SHIFT}, {'R', MOD_CONTROL | MOD_SHIFT}, {'B', MOD_CONTROL | MOD_SHIFT}}};
 inline constexpr std::array<const wchar_t*, 3> CameraHotkeyNames{L"Left camera", L"Right camera", L"Both cameras"};
 inline constexpr std::array<const wchar_t*, 3> CameraHotkeyKeys{L"left", L"right", L"both"};
 inline constexpr int CameraHotkeyFirstId = 700;

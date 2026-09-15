@@ -58,6 +58,8 @@ The companion can select the aircraft profile automatically. SimConnect supplies
 
 FBW A380 and A350 profiles supply one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request. The iniBuilds A380 has INOP TAXI buttons and uses manual camera requests from configurable keyboard shortcuts or the companion's previews. All requests retain the aircraft, session, service and speed guards.
 
+The companion registers global left, right and both-display shortcuts, initially Ctrl + Shift + L / R / B. They preserve the TAXI-button follow setting and synchronize the selected cockpit buttons on FBW A380 and A350, including OFF requests. The iniBuilds A380 uses manual requests without guessed aircraft-variable writes. Pending aircraft commands require fresh acknowledgement; their state is session-only. See [Keyboard shortcuts](keyboard-shortcuts.md).
+
 The bridge also needs to know which GPU texture represents each PFD. A cockpit screen is rendered into an off-screen texture before the cockpit model displays it. Many simulator textures have similar dimensions, so Taxi Cam observes their draw activity.
 
 For the FBW A380, detection selects candidates with:
@@ -69,7 +71,7 @@ For the FBW A380, detection selects candidates with:
 
 Initial assignment uses the profile's resource-ID ordering rule. This is a heuristic, so **PFD routing** provides identification, explicit assignment and swap controls. The material-name hints in the aircraft profile do not provide guaranteed GPU labels.
 
-The experimental iniBuilds A380 rule requires exactly eight active 768 × 1024, one-mip RGBA8 typeless displays with stable membership across three one-second windows. It selects the last allocation for the left PFD and third-last for the right, matching two manually identified sessions. Extra, missing or changed members invalidate the automatic selection. See [Aircraft profiles](aircraft-profiles.md#inibuilds-a380-configuration) for its validation limits and manual recovery.
+The iniBuilds A380 rule requires exactly eight active 768 × 1024, one-mip RGBA8 typeless displays with stable membership across three one-second windows. It selects the last allocation for the left PFD and third-last for the right, matching two manually identified sessions. Extra, missing or changed members invalidate the automatic selection. See [Aircraft profiles](aircraft-profiles.md#inibuilds-a380-configuration) for its validation limits and manual recovery.
 
 Each resource gets an ID for its current lifetime. If one PFD is replaced, routing keeps the surviving side's identity. If both assigned textures disappear, manual reassignment can be required. Texture IDs are never saved between simulator sessions.
 
@@ -148,10 +150,10 @@ Source dimensions come from the aircraft profile selected when the pair is creat
 
 - nose view above and tail view below;
 - a 12-pixel black horizontal divider in the composed image;
-- nose reference dots and mirrored tail brackets: magenta for the A380, amber for the A350;
+- nose reference markers and mirrored tail brackets: 14-by-14-pixel magenta nose squares for both A380 profiles, 12-pixel-diameter amber nose circles for the A350;
 - an opaque ground-speed panel inset from the top-left camera edges, with internal padding and a width that fits the current value on both A380 and A350.
 
-Ground speed is read from SimConnect and rendered by Taxi Cam. It is rounded to whole knots; unavailable data displays `--`. The original PFD's GS text is covered by this panel.
+Ground speed is read from SimConnect and rendered by Taxi Cam. Its fractional part is discarded: 12.9 knots displays as 12. Unavailable data displays `--`. The original PFD's GS text is covered by this panel. All profiles start with the same green speed colour, RGB 22 / 109 / 19, while saved colour choices remain specific to each profile.
 
 The guides use adjustable positions within each camera image. Changing the camera mount or field of view does not move them with the wheels; use the Reference guides page to realign them after changing the framing.
 
@@ -222,7 +224,7 @@ Recovery is conditional. It does not infer a valid camera image from a non-null 
 
 ## Aircraft-specific parts
 
-The companion selects **FlyByWire A380X**, **iniBuilds A350-900 / ULR**, **iniBuilds A350-1000** or **iniBuilds A380 (experimental)**. Each profile supplies aircraft identity, control strategy, camera mounts and dimensions, texture constraints, detection policy, display rectangles, composition marks, exposure and speed cutoff. Switching profiles closes and revalidates the retained cameras, then resets telemetry, routing and pose calibration. The new aircraft must provide fresh identity and body-pose data before the pair resumes; the PFD waits for new captures. GPU fixtures do not establish live aircraft behaviour.
+The companion selects **FlyByWire A380X**, **iniBuilds A350-900 / ULR**, **iniBuilds A350-1000** or **iniBuilds A380**. Each profile supplies aircraft identity, control strategy, camera mounts and dimensions, texture constraints, detection policy, display rectangles, composition marks, exposure and speed cutoff. Switching profiles closes and revalidates the retained cameras, then resets telemetry, routing and pose calibration. The new aircraft must provide fresh identity and body-pose data before the pair resumes; the PFD waits for new captures. GPU fixtures do not establish live aircraft behaviour.
 
 Windows startup, settings transport, private camera integration and GPU capture are shared components. Adding an aircraft requires its control, display and geometry integration; changing two variable names is not sufficient. See [Aircraft integration](aircraft-profiles.md).
 

@@ -65,7 +65,9 @@ New-TaxiFixtureImage $client
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'install.log') -Paths
 Assert-That ($exitCode -eq 0) "Isolated first install failed ($exitCode): $testRoot"
 foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) { Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq $receipt.files.PSObject.Properties[$name].Value) "Installed hash mismatch: $name" }
-Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'THIRD_PARTY_NOTICES.txt')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload 'THIRD_PARTY_NOTICES.txt')).Hash) 'Installer omitted or changed the runtime notices.'
+foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
+    Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash) "Installer omitted or changed $name."
+}
 Assert-That (@(Get-ChildItem -LiteralPath $app -Filter '*.ps1' -Recurse).Count -eq 0) 'Installer left loose PowerShell files in the application.'
 Assert-That (@(Get-ChildItem -LiteralPath $app -Directory).Count -eq 0) 'Installer left support or staging folders in the application.'
 [xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
@@ -100,14 +102,21 @@ $launch.SelectSingleNode('//Launch.Addon[Name="380 Taxi Cam"]/Path').InnerText =
 $launch.Save($xmlPath)
 $xmlHash = (Get-FileHash -LiteralPath $xmlPath).Hash
 $recordHash = (Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash
+foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) { [IO.File]::WriteAllText((Join-Path $app $name), "prior $name fixture") }
 $exitCode = Invoke-Setup (Join-Path $testRoot 'rollback-setup.exe') $app (Join-Path $testRoot 'rollback.log')
 Assert-That ($exitCode -ne 0) 'Injected Setup abort did not fail.'
 Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $xmlHash) 'Setup abort did not restore exe.xml.'
 Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash -eq $recordHash) 'Setup abort did not restore installation.json.'
 Assert-That ((Get-FileHash -LiteralPath $oldExe).Hash -eq $oldExeHash) 'Setup abort did not restore the previous executable name and bytes.'
 Assert-That (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-cam.exe'))) 'Setup abort retained the renamed executable.'
+foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
+    Assert-That ([IO.File]::ReadAllText((Join-Path $app $name)) -eq "prior $name fixture") "Setup abort did not restore $name."
+}
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'retry-upgrade.log')
 Assert-That ($exitCode -eq 0 -and -not (Test-Path -LiteralPath $oldExe)) 'Retry after rename rollback did not complete the upgrade.'
+foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
+    Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash) "Retry did not restore the bundled $name."
+}
 $uninstaller = Join-Path $app 'unins000.exe'
 $process = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="' + (Join-Path $testRoot 'uninstall.log') + '"')) -WindowStyle Hidden -Wait -PassThru
 Assert-That ($process.ExitCode -eq 0) 'Isolated uninstall failed.'
@@ -115,6 +124,9 @@ Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Uninstall 
 [xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
 Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 1) 'Uninstall did not preserve exactly the unrelated startup entry.'
 Assert-That (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-cam.exe'))) 'Uninstall retained the installed executable.'
+foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $app $name))) "Uninstall retained $name."
+}
 
 function Invoke-FixtureRuntime([string]$Mode,[string]$App,[string]$State) {
     $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $runtime + '"'),'-Mode',$Mode,
@@ -137,6 +149,9 @@ try {
     Assert-That ($exitCode -ne 0) 'The inner XML concurrency guard did not fail.'
     Assert-That ((Get-Content -Raw -LiteralPath $xmlPath).Contains('<!-- concurrent inner edit -->')) 'Outer rollback erased an XML edit rejected by the inner guard.'
     Assert-That (-not (Test-Path -LiteralPath (Join-Path $innerApp 'taxi-cam.exe'))) 'Inner failure did not roll back the executable.'
+    foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
+        Assert-That (-not (Test-Path -LiteralPath (Join-Path $innerApp $name))) "Inner failure retained $name."
+    }
 } finally { Set-Content -LiteralPath $xmlHelper -Value $originalHelper -Encoding utf8 }
 
 $xml | Set-Content -LiteralPath $xmlPath
@@ -169,7 +184,7 @@ if ($shortLength -gt 0 -and $shortLength -lt $shortBuffer.Capacity -and $shortPa
         $shortApp = Join-Path $testRoot 'short-path-app'; $shortState = Join-Path $testRoot 'short-path-state'
         $exitCode = Invoke-FixtureRuntime 'Install' $shortApp $shortState
         Assert-That ($exitCode -eq 0) 'Short-path payload installation failed.'
-        foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')) {
+        foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
             Assert-That ((Get-FileHash -LiteralPath (Join-Path $shortApp $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash) "Short-path install omitted or changed $name."
         }
         $exitCode = Invoke-FixtureRuntime 'Rollback' $shortApp $shortState

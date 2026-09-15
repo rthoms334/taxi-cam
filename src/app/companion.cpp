@@ -27,11 +27,12 @@ namespace win = standalone;
 constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2;
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
+constexpr wchar_t GithubUrl[] = L"https://github.com/rthoms334/taxi-cam";
 constexpr COLORREF Background = RGB(17, 21, 28), Sidebar = RGB(12, 16, 22), Card = RGB(26, 32, 41), Border = RGB(44, 54, 67),
                    Text = RGB(232, 238, 246), Muted = RGB(154, 170, 188), Accent = RGB(66, 219, 184);
 HINSTANCE instance{};
 HWND window{}, sidebar_tooltip{}, shortcut_window{};
-HFONT normal{}, small{}, title_font{}, heading{};
+HFONT normal{}, small{}, title_font{}, heading{}, version_font{};
 HBRUSH background_brush{}, card_brush{};
 HICON icon{};
 UINT dpi = 96, taskbar_created{};
@@ -132,17 +133,18 @@ void toggle(const wchar_t* label, int id, bool enabled, int x, int y, int width 
   button(text.c_str(), id, x, y, width);
 }
 void make_fonts() {
-  for (HFONT f : {normal, small, title_font, heading})
+  for (HFONT f : {normal, small, title_font, heading, version_font})
     if (f)
       DeleteObject(f);
-  auto make = [](int size, int weight) {
-    return CreateFontW(-scale(size), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+  auto make = [](int size, int weight, bool underline = false) {
+    return CreateFontW(-scale(size), 0, 0, 0, weight, FALSE, underline, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable");
   };
   normal = make(15, FW_NORMAL);
   small = make(13, FW_NORMAL);
   title_font = make(30, FW_SEMIBOLD);
   heading = make(18, FW_SEMIBOLD);
+  version_font = make(13, FW_NORMAL, true);
 }
 std::wstring widen(const char* input) {
   if (!input)
@@ -587,6 +589,8 @@ void build_controls() {
     navigation.push_back(button(names[i], 100 + i, 20, 156 + i * 49, 166, 40));
   const auto donate_button = button(L"Donate", 513, 24, 590, 110, 40);
   const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
+  const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 155, 22);
+  SendMessageW(version_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
   sidebar_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
                                     CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
   if (sidebar_tooltip) {
@@ -599,6 +603,9 @@ void build_controls() {
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     tip.uId = reinterpret_cast<UINT_PTR>(donate_button);
     tip.lpszText = const_cast<wchar_t*>(L"Donate via PayPal");
+    SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    tip.uId = reinterpret_cast<UINT_PTR>(version_link);
+    tip.lpszText = const_cast<wchar_t*>(L"Open Taxi Cam on GitHub");
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
   }
   button(L"Menu", 602, 930, 37, 80, 34);
@@ -742,7 +749,6 @@ void draw_page(HDC dc) {
   text(dc, L"TAXI CAM", 68, 33, 134, 22, heading);
   text(dc, L"Native camera service", 24, 84, 176, 22, small, Muted);
   text(dc, L"WINDOWS COMPANION", 24, 120, 182, 22, small, Muted);
-  text(dc, L"v" TAXI_CAM_VERSION_WIDE, 24, 692, 155, 22, small, Muted);
   const wchar_t* titles[]{L"Taxi camera", L"Camera views", L"Display", L"PFD routing", L"Diagnostics", L"Reference guides"};
   const wchar_t* subtitles[]{L"Your taxi cameras, controlled from the flight deck.",
                              L"Fine-tune each camera independently. Changes stay with this aircraft.",
@@ -1156,6 +1162,12 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     }
     case WM_ERASEBKGND:
       return 1;
+    case WM_SETCURSOR:
+      if (const auto link = GetDlgItem(hwnd, 514); link && reinterpret_cast<HWND>(w) == link && LOWORD(l) == HTCLIENT) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+      }
+      break;
     case WM_PAINT: {
       PAINTSTRUCT ps;
       HDC dc = BeginPaint(hwnd, &ps);
@@ -1186,9 +1198,25 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         break;
       const int id = static_cast<int>(item->CtlID);
       const bool selected = (id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft());
-      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || id == 512 || id == 513 ? Sidebar : Background);
+      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || id == 512 || id == 513 || id == 514 ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
+      if (id == 514) {
+        const int saved = SaveDC(item->hDC);
+        wchar_t label[64]{};
+        GetWindowTextW(item->hwndItem, label, 64);
+        SelectObject(item->hDC, version_font);
+        SetTextColor(item->hDC, item->itemState & ODS_SELECTED ? Text : Accent);
+        SetBkMode(item->hDC, TRANSPARENT);
+        auto bounds = item->rcItem;
+        DrawTextW(item->hDC, label, -1, &bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (item->itemState & ODS_FOCUS) {
+          InflateRect(&bounds, -1, -1);
+          DrawFocusRect(item->hDC, &bounds);
+        }
+        RestoreDC(item->hDC, saved);
+        return TRUE;
+      }
       const bool primary = id == 500;
       const bool down = (item->itemState & ODS_SELECTED) != 0;
       const COLORREF fill = primary ? Accent : selected ? RGB(30, 64, 63) : down ? Border : Card;
@@ -1300,6 +1328,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 513) {
         donate();
+        return 0;
+      }
+      if (id == 514) {
+        const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", GithubUrl, nullptr, nullptr, SW_SHOWNORMAL));
+        if (result <= 32)
+          MessageBoxW(hwnd, L"Could not open your browser. Visit https://github.com/rthoms334/taxi-cam.", L"Taxi Cam on GitHub",
+                      MB_OK | MB_ICONWARNING);
         return 0;
       }
       if (id == 210 && HIWORD(w) == CBN_SELENDOK) {

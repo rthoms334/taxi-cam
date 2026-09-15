@@ -41,6 +41,25 @@ function Assert-Closed {
 }
 Assert-Closed
 Assert-TaxiPrerequisites -SimulatorDirectory $sim
+# Repository builds keep legal text beside the source. Packaged installs must
+# provide both files in their payload; never silently omit either notice.
+$installSources = [ordered]@{}
+$installHashes = @{}
+foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
+    $installSources[$name] = Join-Path $payload $name
+    $installHashes[$name] = $receipt.files.PSObject.Properties[$name].Value
+}
+$repositoryPayload = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build/native'))
+foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
+    $source = Join-Path $payload $name
+    if ($payload -eq $repositoryPayload) {
+        $source = if ($name -eq 'LICENSE.txt') { Join-Path $PSScriptRoot '../LICENSE' }
+            else { Join-Path $PSScriptRoot '../licenses/native-runtime-notices.txt' }
+    }
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Required runtime legal file is missing: $name" }
+    $installSources[$name] = $source
+    $installHashes[$name] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+}
 $hash = if (Test-Path -LiteralPath $ExeXml) { (Get-FileHash -LiteralPath $ExeXml).Hash } else { '' }
 $document = Read-TaxiLaunchXml $ExeXml
 $globalDisabled = $document.DocumentElement.SelectSingleNode('Disabled')
@@ -54,9 +73,9 @@ $tag = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 $staging = Join-Path ([IO.Path]::GetTempPath()) ('taxi-cam-install-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $staging | Out-Null
-foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
-    Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $staging $name)
-    if ((Get-FileHash -LiteralPath (Join-Path $staging $name)).Hash -ne $receipt.files.PSObject.Properties[$name].Value) { throw "Staging verification failed: $name" }
+foreach ($name in $installSources.Keys) {
+    Copy-Item -LiteralPath $installSources[$name] -Destination (Join-Path $staging $name)
+    if ((Get-FileHash -LiteralPath (Join-Path $staging $name)).Hash -ne $installHashes[$name]) { throw "Staging verification failed: $name" }
 }
 $prior = @{}
 $installed = @()
@@ -90,7 +109,7 @@ try {
         $installed += '380-taxi-cam.exe'
         Remove-Item -LiteralPath $oldExe
     }
-    foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
+    foreach ($name in $installSources.Keys) {
         $target = Join-Path $dest $name
         if (Test-Path -LiteralPath $target) {
             $backup = Join-Path $staging ($name + '.backup')
@@ -99,7 +118,7 @@ try {
         }
         $installed += $name
         Copy-Item -LiteralPath (Join-Path $staging $name) -Destination $target -Force
-        if ((Get-FileHash -LiteralPath $target).Hash -ne $receipt.files.PSObject.Properties[$name].Value) { throw "Installed binary verification failed: $name" }
+        if ((Get-FileHash -LiteralPath $target).Hash -ne $installHashes[$name]) { throw "Installed file verification failed: $name" }
         Assert-TaxiVisibleInstallPath $target
     }
     $mount = Join-Path $dest 'taxi-camera-mounts.cfg'

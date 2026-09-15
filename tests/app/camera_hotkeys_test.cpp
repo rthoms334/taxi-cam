@@ -68,11 +68,11 @@ void registration_checks() {
     CameraHotkeyRegistration registration(FakeRegistration::add, FakeRegistration::remove);
     require(registration.configure(fixture, DefaultCameraHotkeys, true) && !FakeRegistration::adds,
             "Preview startup never calls RegisterHotKey");
-    require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, VK_F9)) == -1,
+    require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'L')) == -1,
             "A fabricated hotkey message cannot activate preview bindings");
     require(registration.configure(fixture, DefaultCameraHotkeys, false) && FakeRegistration::adds == 3,
             "Normal startup registers all three independent actions");
-    require(registration.action(CameraHotkeyFirstId + 2, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, VK_F11)) == 2,
+    require(registration.action(CameraHotkeyFirstId + 2, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'B')) == 2,
             "Both action dispatches from the matching chord");
     auto duplicate = DefaultCameraHotkeys;
     duplicate[1] = duplicate[0];
@@ -85,9 +85,9 @@ void registration_checks() {
             "Reconfiguration unregisters all previous bindings before replacement");
     require(registration.conflicts() && registration.status(1).find(L"another app") != std::wstring::npos,
             "Registration conflicts identify the affected action");
-    require(registration.action(CameraHotkeyFirstId + 1, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, VK_F10)) == -1,
+    require(registration.action(CameraHotkeyFirstId + 1, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'R')) == -1,
             "An unavailable action cannot run from WM_HOTKEY");
-    require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, VK_F9)) == -1 &&
+    require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'L')) == -1 &&
                 registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_ALT | MOD_CONTROL, 'L')) == 0,
             "Old queued hotkeys are rejected after changing a shortcut");
     require(registration.configure(fixture, replacement, true) && FakeRegistration::removes == 5 && FakeRegistration::adds == 6,
@@ -299,21 +299,21 @@ void ui_checks() {
   GetWindowTextW(rate, rate_text, 64);
   require(dirty && GetDlgItem(window, 200) == rate && std::wstring(rate_text) == L"-" && current.camera_rate == original_rate,
           "Saving shortcuts preserves unrelated unfinished camera edits");
-  SendDlgItemMessageW(editor, 620, HKM_SETHOTKEY, win::hotkey_control_value({VK_F11, MOD_SHIFT | MOD_CONTROL}), 0);
+  SendDlgItemMessageW(editor, 620, HKM_SETHOTKEY, win::hotkey_control_value({'B', MOD_SHIFT | MOD_CONTROL}), 0);
   shortcut_dialog(editor, WM_COMMAND, MAKEWPARAM(620, EN_CHANGE), 0);
   require(hotkey_draft != hotkey_saved && hotkey_draft[0] == hotkey_draft[2], "Native editor changes are captured as a draft");
   shortcut_command(editor, IDOK);
   wchar_t error[256]{};
   GetDlgItemTextW(editor, 660, error, 256);
   require(
-      hotkey_draft != hotkey_saved && std::wstring(error).find(L"different shortcut") != std::wstring::npos && hotkey_saved[0].key == VK_F9,
+      hotkey_draft != hotkey_saved && std::wstring(error).find(L"different shortcut") != std::wstring::npos && hotkey_saved[0].key == 'L',
       "Duplicate UI bindings show an error and preserve working preferences");
   shortcut_command(editor, 640);
   shortcut_command(editor, IDOK);
   require(hotkey_saved == win::DefaultCameraHotkeys && hotkey_draft == hotkey_saved, "Reset becomes effective only after Save");
   shortcut_command(editor, 630);
   DestroyWindow(editor);
-  require(hotkey_draft == hotkey_saved && hotkey_saved[0].key == VK_F9 && !shortcut_window,
+  require(hotkey_draft == hotkey_saved && hotkey_saved[0].key == 'L' && !shortcut_window,
           "Closing the editor discards unsaved shortcut changes and retains saved bindings");
   SetWindowTextW(rate, L"15");
   command(101);
@@ -330,7 +330,7 @@ void ui_checks() {
           "Hotkeys preserve unfinished numeric edits and their original controls");
   require(!current.enabled && current.manual_mask == 3 && !current.calibration_mask && !current.scene_test,
           "Hidden shortcut request does not turn on a disabled service or leave calibration active");
-  procedure(window, WM_HOTKEY, win::CameraHotkeyFirstId + 2, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, VK_F11));
+  procedure(window, WM_HOTKEY, win::CameraHotkeyFirstId + 2, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'B'));
   require(current.manual_mask == 3, "UI preview cannot activate global shortcuts through WM_HOTKEY");
   SetWindowTextW(field, L"20");
   command(100);

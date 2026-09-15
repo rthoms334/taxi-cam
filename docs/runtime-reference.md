@@ -8,6 +8,18 @@ The graphics implementation uses standard Direct3D 12 interfaces without NVIDIA-
 
 Setup checks the presence and x64 headers of required DLLs, but does not load simulator code or probe the GPU. Xbox/MS Store installations can protect executable contents, so setup checks that `FlightSimulator2024.exe` exists; the launcher validates the loaded AMD64 image when connecting. These prerequisite checks do not establish live simulator compatibility.
 
+## Settings window controls
+
+| Control | Location and behaviour |
+| --- | --- |
+| **Keyboard shortcuts…** | **Overview → Flight-deck control**; configure left, right and both-display toggles. Defaults are Ctrl + Shift + L / R / B. |
+| **TAXI buttons** | Beside the shortcut editor button; follow cockpit TAXI controls where supported. Disabled for the iniBuilds A380, whose buttons are INOP. Shortcuts work with this setting on or off. |
+| **Donate** | Sidebar, above the bug-report icon; opens the PayPal donation page in the default browser. |
+| **Report a bug** | Sidebar bug icon or tray menu; opens the GitHub issue form. |
+| Version number | Bottom of the sidebar; opens the Taxi Cam GitHub repository in the default browser. |
+
+Saved shortcuts survive upgrades. Use **Reset shortcuts**, then **Save changes** in the editor to adopt the current defaults without changing aircraft calibration. See [Keyboard shortcuts](keyboard-shortcuts.md) for conflicts, button synchronization and session behaviour.
+
 ## Settings and files
 
 The companion saves settings to:
@@ -33,7 +45,7 @@ Saves validate the complete settings object, flush a temporary UTF-16 file and r
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
 | `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |
-| `speed_red`, `speed_green`, `speed_blue` | Profile colour | Normalized RGB, 0�1, edited with the colour picker |
+| `speed_red`, `speed_green`, `speed_blue` | 22 / 255, 109 / 255, 19 / 255 for all aircraft (`#166D13`) | Normalized RGB, 0–1, edited with the colour picker |
 | `night_boost` | 4 | Maximum automatic boost, 0–8 EV |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
 
@@ -90,9 +102,10 @@ Pixel coordinates start at the top left. Row ranges below are inclusive. The tab
 
 | Element | Geometry |
 | --- | --- |
-| PFD texture | 768 × 1024, five mips, RGBA8 for automatic detection |
+| FBW A380 PFD texture | 768 × 1024, five mips, RGBA8 for automatic detection |
+| iniBuilds A380 PFD texture | 768 × 1024, one mip; automatic detection requires the complete eight-display group described in [Aircraft integration](aircraft-profiles.md#inibuilds-a380-configuration) |
 | Composed image | 768 × 763 |
-| Camera border (both aircraft) | 16 target pixels left/right, 12 top, 0 bottom; inner height 751 |
+| Camera border (all profiles) | 16 target pixels left/right, 12 top, 0 bottom; inner height 751 |
 | Nose pane | Working rows 0-254; native source 736 x 251 |
 | Tail pane | Working rows 259-762; native source 736 x 496 |
 | Visible divider | Black working rows 251-262 (12 pixels) |
