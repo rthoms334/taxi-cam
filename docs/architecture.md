@@ -246,4 +246,4 @@ Windows startup, settings transport, private camera integration and GPU capture 
 
 The 768 x 763 GPU buffer is a common working canvas; final placement comes from each profile. A350 presentation covers the inner PFD area of each combined EFIS texture, preserving the central grey separator, its edge padding and the neighbouring ND.
 
-Exact settings, dimensions, timeouts and IPC fields are in the [runtime reference](runtime-reference.md). Build and publication behaviour is in [Releases](releases.md).
+Exact settings, dimensions, timeouts and IPC fields are in the [runtime reference](runtime-reference.md). A static [performance audit](performance-audit.md) ranks observer, hook, capture and composition costs; it is not a live simulator measurement. Build and publication behaviour is in [Releases](releases.md).

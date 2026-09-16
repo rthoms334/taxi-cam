@@ -109,6 +109,7 @@ You can also [open a bug report on GitHub](https://github.com/rthoms334/taxi-cam
 Taxi Cam asks MSFS to render two extra camera views and combines them on the GPU for the cockpit display. A Windows tray app manages the settings, and a graphics bridge runs inside the simulator. This relies on undocumented simulator interfaces; it does not change your simulator graphics settings.
 
 - [How it works](docs/architecture.md)
+- [Performance audit](docs/performance-audit.md)
 - [Settings, graphics requirements and diagnostics](docs/runtime-reference.md)
 - [Aircraft profiles and calibration](docs/aircraft-profiles.md)
 - [Builds and releases](docs/releases.md)
