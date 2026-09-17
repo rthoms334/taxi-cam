@@ -38,7 +38,7 @@ Night-boost migration to 8 EV is a preference change, not a frame-time change.
 
 `local_memory` sources match 0.9.8. A Windows rerun of those tests can only show machine noise. The hook cache and idle-bypass work is not exercised by that suite.
 
-This host is Linux and cannot compile the pinned Windows toolchain. Isolated timings were not run. On a Windows checkout with `bootstrap.ps1` already applied:
+This host is Linux and cannot compile the pinned Windows toolchain. Isolated timings were not run. A connected Windows worker (`taxi-cam-pc`) is the intended host for those timings and for a parked TAXI-on `bridge.log` sample; this Linux run could not attach a subagent to that worker. On a Windows checkout with `bootstrap.ps1` already applied:
 
 ```powershell
 ./tools/benchmark/Compare-TaxiCamVersions.ps1 -BaselineRef v0.9.8-build.38 -CandidateRef origin/feature/performance-improvements -RunIsolated
