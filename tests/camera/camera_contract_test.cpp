@@ -283,6 +283,13 @@ void refusals() {
     const auto result = fixture.run();
     refused(result, "Invalid or changing headers/instructions/pdata/relocations published addresses");
     require(result.error.starts_with(stages[scenario]), "Failure did not reach its intended validation stage");
+    if (scenario == 1 || scenario == 7) {
+      require(result.error.find("[image timestamp=") != std::string::npos &&
+                  result.error.find(" size=") != std::string::npos &&
+                  result.error.find(" checksum=") != std::string::npos &&
+                  result.error.find(" sections=") != std::string::npos,
+              "Instruction-discovery refusal omitted loaded-image PE identity");
+    }
     if (fixture.change_at != UINT32_MAX)
       require(fixture.reads[fixture.change_at] >= fixture.change_after, "The intended evidence mutation was never exercised");
   }

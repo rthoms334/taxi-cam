@@ -34,6 +34,10 @@ Simulator acceptance applies to the exact tested binaries, aircraft and AA/overl
 
 The generated model is checked into source. `tools/diagnostics/generate_camera_contract.ps1` rebuilds it from reviewed captures and decoded evidence; its input receipts and raw captures belong under ignored `build/` directories. The generator and disassembler are development tools, not runtime dependencies. Captured-byte replays and synthetic image tests establish the discovery checks; successful read-only discovery or scene inspection does not establish rendered camera behaviour.
 
+The production templates currently in `src/camera/camera_contract_model.cpp` were generated from **MSFS 2024 1.8.16.0** reviewed captures (PE timestamp `1787653788`, `SizeOfImage` `235963904`). Discovery accepts relocated copies of those reviewed instructions; it does **not** invent a contract for an unobserved build. A newer simulator update that changes the reviewed instruction bytes—such as **MSFS 2024 SU7 beta (for example 1.9.10)**—refuses with `template_not_found` naming the missing semantic templates and annotating the loaded image's PE timestamp, size, checksum and section count. That refusal is expected until a complete capture set from that exact build is reviewed and the model is regenerated. Bridge connection, PFD detection and aircraft profiles can still succeed while discovery refuses.
+
+Capturing a beta or other unreviewed build does **not** require the original maintainer's machine. Any developer with that exact simulator build can collect the reviewed diagnostic archives (image capture, store/motion evidence and static identity), run the generator below into an ignored review path, and open a PR with the receipt plus proposed `camera_contract_model.cpp` replacement. Keep aircraft Lvar and material identifiers exact; do not rewrite historical release receipts.
+
 Regeneration requires explicit paths to all reviewed inputs; a normal build uses the checked-in model and needs none of the local capture archives. Generate into an ignored review location first:
 
 ```powershell

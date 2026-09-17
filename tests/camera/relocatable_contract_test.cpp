@@ -137,6 +137,13 @@ void relocation_and_edges() {
   Fixture leaf;
   leaf.bytes[leaf.locations[Fixture::Leaf] + 2] ^= 1;
   refused(leaf.resolve(), "Changed inferred short setter was accepted");
+  Fixture absent;
+  std::fill_n(absent.bytes.begin() + absent.locations[Fixture::Root], absent.model.code[0].bytes.size(),
+              static_cast<std::uint8_t>(0xcc));
+  const auto missing = absent.resolve();
+  refused(missing, "Missing discoverable template was accepted");
+  require(missing.error.rfind("template_not_found:", 0) == 0 && missing.error.find("root") != std::string::npos,
+          "Missing template omitted its semantic name");
 }
 void ambiguity_and_constants() {
   Fixture duplicate;
@@ -464,7 +471,7 @@ void pointer_relations() {
     }
     refused(invalid.resolve(), "Invalid pointer relation or target was accepted");
   }
-  for (const auto base : {0ull, 0x140000001ull, UINT64_MAX - 7}) {
+  for (const std::uint64_t base : {std::uint64_t{0}, std::uint64_t{0x140000001ull}, UINT64_MAX - 7}) {
     PointerFixture invalid;
     const auto result = resolve_contract(invalid, invalid.image, invalid.model, {}, base);
     refused(result, "Invalid actual image base was accepted for a pointer relation");

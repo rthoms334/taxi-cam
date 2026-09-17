@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -415,10 +416,27 @@ class Resolver {
         offset += count;
       }
     }
-    for (const auto& state : states_)
-      if (state.discoverable && state.candidates.empty())
-        return fail("template_not_found");
-    return true;
+    // Name every missing discoverable template. Opaque "template_not_found"
+    // alone cannot distinguish an unreviewed simulator build from a partial
+    // scan failure; semantic names plus the caller's PE identity do.
+    std::string missing;
+    std::uint32_t absent = 0;
+    for (std::size_t i = 0; i < states_.size(); ++i) {
+      if (!states_[i].discoverable || !states_[i].candidates.empty())
+        continue;
+      if (absent < 8) {
+        if (!missing.empty())
+          missing += ", ";
+        missing += model_.symbols[model_.code[i].symbol].name;
+      }
+      ++absent;
+    }
+    if (!absent)
+      return true;
+    if (absent > 8)
+      missing += " (+" + std::to_string(absent - 8) + " more)";
+    result_.error = "template_not_found: " + missing;
+    return false;
   }
 
   bool infer_short_templates() {
@@ -441,10 +459,24 @@ class Resolver {
           }
       }
       if (result_.candidate_count == before) {
-        for (const auto& state : states_)
-          if (state.candidates.empty())
-            return fail("unresolved_dependent_template");
-        return true;
+        std::string missing;
+        std::uint32_t absent = 0;
+        for (std::size_t i = 0; i < states_.size(); ++i) {
+          if (!states_[i].candidates.empty())
+            continue;
+          if (absent < 8) {
+            if (!missing.empty())
+              missing += ", ";
+            missing += model_.symbols[model_.code[i].symbol].name;
+          }
+          ++absent;
+        }
+        if (!absent)
+          return true;
+        if (absent > 8)
+          missing += " (+" + std::to_string(absent - 8) + " more)";
+        result_.error = "unresolved_dependent_template: " + missing;
+        return false;
       }
     }
     return fail("inference_iteration_limit");

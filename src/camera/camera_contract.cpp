@@ -9,6 +9,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <utility>
 
 namespace taxi_camera::native_camera {
@@ -221,8 +222,14 @@ CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
   const auto& model = camera_contract_model::model();
   const auto resolved = relocatable::resolve_contract(reader, image, model, {}, loaded_image_base);
   result.scanned_bytes = resolved.scanned_bytes;
-  if (!resolved.valid)
-    return fail("Instruction discovery refused: " + resolved.error);
+  if (!resolved.valid) {
+    // PE fields annotate the refusal only. They are not an allowlist; a later
+    // build may still match if reviewed instruction templates survive.
+    return fail("Instruction discovery refused: " + resolved.error + " [image timestamp=" +
+                std::to_string(image.timestamp) + " size=" + std::to_string(image.image_size) +
+                " checksum=" + std::to_string(image.checksum) + " sections=" +
+                std::to_string(image.section_count) + "]");
+  }
   CameraContract contract;
   if (!camera_contract_model::bind(resolved.symbols, contract.functions, contract.layout))
     return fail("The resolved camera contract is incomplete.");

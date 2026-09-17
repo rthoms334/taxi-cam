@@ -84,6 +84,7 @@ Assignments apply immediately and belong to the current flight; texture IDs can 
 - **Night lighting:** Runway and taxiway lights can look very faint or be difficult to see. Improving their visibility is on the roadmap.
 - **DLSS camera movement:** Slight aircraft movement can remain in the A350 lower view while taxiing with DLSS. TAA does not exhibit this movement. If the cameras do not recover after changing graphics settings and Taxi Cam asks for a restart, restart MSFS.
 - **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. Try a lower camera frame rate if needed.
+- **Unreviewed simulator builds:** Native cameras need a reviewed instruction contract for the loaded `FlightSimulator2024.exe`. Builds that change those instructions (for example MSFS 2024 SU7 beta) refuse with `Camera compatibility check failed: Instruction discovery refused: template_not_found…` even when the bridge is connected and PFDs are detected. Retail builds matching the reviewed contract remain the expected path until a new capture is reviewed.
 
 Please report unexpected behaviour using **Report a bug**.
 

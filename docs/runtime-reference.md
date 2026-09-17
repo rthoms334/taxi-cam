@@ -269,7 +269,7 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 | --- | --- |
 | No bridge status | Companion connection, executable path/structure and bridge startup |
 | Empty PFD texture list after starting Taxi Cam inside a loaded flight | The bridge may have missed existing texture/RTV creation. Reload the aircraft or flight with Taxi Cam running so the display resources are recreated; a panel redraw alone does not recover them. If the list stays empty after recreation, investigate display dimensions and formats. |
-| Camera compatibility check failed | Reported instruction-discovery, function-boundary, object-identity or activation-data failure; include the launcher and bridge logs in the support report |
+| Camera compatibility check failed | Reported instruction-discovery, function-boundary, object-identity or activation-data failure; include the launcher and bridge logs in the support report. `template_not_found: … [image timestamp=… size=… checksum=… sections=…]` means reviewed instruction templates were absent in the loaded executable (often an unreviewed simulator build such as SU7 beta). PE fields annotate the refusal only; they are not an allowlist. A new reviewed capture set is required before native cameras can work on that build. |
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |
 | Captures increase, no compositions | Both feeds, current scene identity and GPU completion |

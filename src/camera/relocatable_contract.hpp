@@ -68,7 +68,9 @@ struct ContractResolution {
 // Shorter templates require caller roots or another template's address operands.
 // All declared symbols must resolve.
 // Ambiguity, incomplete reads, invalid bounds and resource limits refuse the
-// entire result. Accepted code and constants are read again before publication.
+// entire result. A discoverable template with no candidates refuses as
+// template_not_found: <semantic names>. Accepted code and constants are read
+// again before publication.
 //
 // Limits: 64 templates, 4096 symbols, 16 KiB per template, 256 KiB template bytes,
 // 64 candidates per template, 65536 read calls, 512 MiB requested bytes. Constants
