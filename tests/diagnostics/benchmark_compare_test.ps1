@@ -45,14 +45,19 @@ $cached = @($isolated.metrics | Where-Object { $_.name -eq 'cached_stage_ms' })[
 Require-Benchmark ($cached.pct -lt 0) 'Isolated comparison did not treat a lower cached stage as an improvement'
 
 $identity = Get-TaxiSourceHotPathIdentity -Repository $repoRoot -Baseline 'v0.9.8-build.38' -Candidate 'HEAD'
-Require-Benchmark $identity.establishedFrameHotPathsUnchanged '0.9.8 and this tree unexpectedly differ on established-frame hot paths'
-Require-Benchmark (-not $identity.performanceOrientedRuntimeChanges) '0.9.8 comparison marked a memory/hook/capture change that is not in the tree'
+Require-Benchmark $identity.performanceOrientedRuntimeChanges 'performance-improvements should differ on hook/capture/composition paths versus 0.9.8'
+Require-Benchmark (-not $identity.establishedFrameHotPathsUnchanged) 'Idle-bypass and list-cache files should count as established-frame hot-path changes'
 $changed = @($identity.changed | ForEach-Object { $_.path })
-Require-Benchmark ($changed -contains 'src/camera/probe.cpp' -and $changed -contains 'src/bridge/bridge_main.cpp') 'Expected AA-restore files missing from the identity diff'
-Require-Benchmark ($changed.Count -eq 2) 'Unexpected extra hot-path file versus 0.9.8'
+$unchanged = @($identity.unchanged | ForEach-Object { $_.path })
+foreach ($path in @('src/bridge/d3d12_bridge.cpp', 'src/bridge/bridge_main.cpp', 'src/graphics/scene_capture_manager.cpp', 'src/graphics/scene_runtime.cpp', 'src/app/companion.cpp')) {
+    Require-Benchmark ($changed -contains $path) "Expected performance file missing from the 0.9.8 identity diff: $path"
+}
+foreach ($path in @('src/camera/local_memory.cpp', 'src/camera/body_pose_provider.cpp', 'src/graphics/scene_capture_d3d12.cpp', 'src/graphics/pfd_stamp_d3d12.cpp')) {
+    Require-Benchmark ($unchanged -contains $path) "Unrelated hot path unexpectedly changed versus 0.9.8: $path"
+}
 
 $report = New-TaxiVersionBenchmarkReport -Repository $repoRoot -BaselineRef 'v0.9.8-build.38' -CandidateRef 'HEAD'
-Require-Benchmark ($report.verdict.localBenefit -eq 'none-expected') 'Source-identity verdict should be none-expected versus 0.9.8'
+Require-Benchmark ($report.verdict.localBenefit -eq 'source-delta-present') 'Source-identity verdict should be source-delta-present versus 0.9.8'
 Require-Benchmark ($report.verdict.liveSimulator -eq 'unmeasured') 'Report claimed a live simulator measurement'
 $head = (& git -C $repoRoot rev-parse HEAD).Trim()
 Require-Benchmark ($report.baseline.commit.StartsWith('f84be75bfb6a625ae11547beef2caf3b45ec2d59') -and $report.candidate.commit -eq $head) 'Resolved 0.9.8 or HEAD commit changed'

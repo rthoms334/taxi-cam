@@ -1,56 +1,58 @@
-# 0.9.8 versus `feature/render-performance`
+# 0.9.8 versus `feature/performance-improvements`
 
-Comparison of published **Taxi Cam 0.9.8** (`v0.9.8-build.38`, `f84be75`) with this tree (`feature/render-performance`, `ad29ab7`). The helper is `tools/benchmark/Compare-TaxiCamVersions.ps1`. It does not install binaries, stop MSFS, or write calibration.
+Comparison of published **Taxi Cam 0.9.8** (`v0.9.8-build.38`, `f84be75`) with `feature/performance-improvements` (`a7d6c26`). The helper is `tools/benchmark/Compare-TaxiCamVersions.ps1`. It does not install binaries, stop MSFS, or write calibration.
 
-This is not a live simulator frame-time measurement. Extra camera views remain the dominant intended cost.
+This is not a live simulator frame-time measurement. Extra camera views remain the dominant intended cost when TAXI is on.
 
 ## Verdict
 
-**No expected performance benefit versus 0.9.8.**
+**Source changes that can reduce standing overhead exist. A live FPS win versus 0.9.8 is unmeasured.**
 
-The established-frame hot paths are byte-identical. The only runtime files that differ are the AA / graphics-size restore path. That fix keeps the owned pair after Off / TAA / DLSS; it does not change per-frame memory queries, hooks, capture, or composition when the pair is already live.
+This is the performance-work branch (`a7d6c26`: reduce camera overhead and migrate night exposure). It is not the AA restore branch and not the documentation-only audit.
 
-Live MSFS FPS, render-thread time, and GPU occupancy were not measured here. Local GPU and UI validation would not establish those numbers either.
+Expected benefit, if any, is largest when cameras are parked after warmup: PFD-only hook work is skipped, command-list lookups can hit a thread-local cache, and companion candidate rows refresh once per second. When TAXI is on at the default 15, MSFS still renders the two extra views. That cost is unchanged. Lowering the rate to 5 or 10 can cut activation work; it is a setting, not an automatic gain.
 
-0.9.8 already contains the earlier “reduce main-thread memory overhead” work (`dc49446`). Measuring *that* change requires 0.9.5 versus 0.9.8, not this branch versus 0.9.8.
+Optional `TAXI_CAM_GPU_TIMING=1` and `TAXI_CAM_GRAPHICS_DIAGNOSTICS=1` add instrumentation. Keep those off for an A/B against 0.9.8.
 
-## What actually changed
+Night-boost migration to 8 EV is a preference change, not a frame-time change.
 
-| Area | Versus 0.9.8 | Effect on a steady TAXI-on session |
+## What actually changed versus 0.9.8
+
+| Area | Change | Likely effect |
 | --- | --- | --- |
-| `src/camera/local_memory.cpp` | Unchanged | None |
-| `src/graphics/metadata_batch_cache.hpp` | Unchanged | None |
-| `src/bridge/d3d12_bridge.cpp` | Unchanged | None |
-| `src/graphics/scene_runtime.cpp` | Unchanged | None |
-| `src/graphics/scene_capture_*.cpp` | Unchanged | None |
-| `src/camera/body_pose_provider.cpp` | Unchanged | None |
-| `src/camera/probe.cpp` | Restore after a verified size / AA change | Work only on that recovery; idle and established pulses unchanged |
-| `src/bridge/bridge_main.cpp` | Re-arm `CaptureProgress` on `stop_sequence`; log formatting | Same 25 ms loop; no new GPU work |
+| `src/bridge/d3d12_bridge.cpp` | Idle observation generation; skip PFD-only setters/draws; thread-local list cache | Lower render-thread lock traffic when OFF after warmup |
+| `src/bridge/bridge_main.cpp` | Demand-gate graphics observation; PFD inventory at 1 Hz | Less registry work on the 25 ms loop when idle |
+| `src/graphics/scene_capture_manager.cpp` | Combined source-draw observe; capture enable; optional GPU timestamps | Fewer manager lookups per draw; timestamps off by default |
+| `src/graphics/scene_runtime.cpp` / `scene_frame_output.cpp` | Optional private-list GPU timing | Measurement only unless `TAXI_CAM_GPU_TIMING=1` |
+| `src/camera/render_schedule.hpp` | Rate floor 5 instead of 15 | User can cut activation pulses |
+| `src/app/companion.cpp` | Rate UI 5–60 | Same |
+| `src/camera/local_memory.cpp` | Unchanged | No observer-memory change |
+| `src/camera/body_pose_provider.cpp` | Unchanged | Parked SimConnect cadence unchanged |
+| `src/graphics/scene_capture_d3d12.cpp` | Unchanged | Application-list copy path unchanged |
+| Night boost default / migration | 4 → 8 EV once | Display preference only |
 
-`main` also has release-gating commits after 0.9.8. Those do not ship in the EXE or DLL.
+`main` after 0.9.8 also has release-gating commits. Those do not ship in the EXE or DLL.
 
 ## Isolated timings
 
-The memory-query and metadata-batch tests print diagnostic wall times. Those sources are identical to 0.9.8, so a Windows rerun can only show machine noise.
+`local_memory` sources match 0.9.8. A Windows rerun of those tests can only show machine noise. The hook cache and idle-bypass work is not exercised by that suite.
 
 This host is Linux and cannot compile the pinned Windows toolchain. Isolated timings were not run. On a Windows checkout with `bootstrap.ps1` already applied:
 
 ```powershell
-./tools/benchmark/Compare-TaxiCamVersions.ps1 -BaselineRef v0.9.8-build.38 -RunIsolated
+./tools/benchmark/Compare-TaxiCamVersions.ps1 -BaselineRef v0.9.8-build.38 -CandidateRef origin/feature/performance-improvements -RunIsolated
 ```
 
-Worktrees and stdout stay under ignored `build/benchmark/`. The installed `%LOCALAPPDATA%\Taxi Cam\app` copies are not touched.
+Worktrees stay under ignored `build/benchmark/`. Installed `%LOCALAPPDATA%\Taxi Cam\app` copies are not touched.
 
-Query-count contracts (196 → 2 VirtualQuery calls, batched metadata lookups) are the regression. Printed milliseconds are not an FPS claim.
+## Live measurement
 
-## Live Diagnostics
-
-Use two already-running sessions. Do not replace the installed DLL while MSFS holds it.
+Use two already-running sessions. Do not replace the installed DLL while MSFS holds it. Leave GPU timing and graphics diagnostics unset.
 
 1. Park on the ground, TAA, one supported aircraft, camera rate 15.
-2. Copy `%LOCALAPPDATA%\Taxi Cam\bridge.log` after 30 s TAXI off and 30 s TAXI on for 0.9.8.
-3. Repeat with this build after a later install (MSFS closed).
-4. Compare:
+2. Capture 30 s TAXI off and 30 s TAXI on with 0.9.8, then with this build after a later install (MSFS closed).
+3. Repeat at rate 5 if you want the new lower-rate path.
+4. Compare `bridge.log` snapshots:
 
 ```powershell
 ./tools/benchmark/Compare-TaxiCamVersions.ps1 `
@@ -58,15 +60,15 @@ Use two already-running sessions. Do not replace the installed DLL while MSFS ho
   -CandidateLog path\to\this-build-bridge.log
 ```
 
-Useful fields: `probe_ms` (last observer callback), `query_ms` / `read_ms` / `aa_ms`, `captured` / `composed` / `stamps` slopes. If `composed` rises and `stamps` does not, delivery admission is the limiter, not capture. Displayed FPS still has to be read from the simulator; these counters exclude MSFS scene GPU time.
+The branch also ships `tools/performance/capture.ps1` for PID-explicit CPU/IPC samples. Use that for process CPU ms/s; use `bridge.log` for `probe_ms` and capture/compose/stamp slopes. Displayed FPS still has to come from the simulator or an attached PresentMon CSV. Neither helper proves GPU occupancy of the extra views.
 
-The parser fixtures under `tests/diagnostics/fixtures/` (`*.txt`, not live `bridge.log` files) are synthetic. They prove field extraction, not a live improvement.
+Useful `bridge.log` fields: `probe_ms`, `query_ms`, `read_ms`, `aa_ms`, `captured` / `composed` / `stamps`. If `composed` rises and `stamps` does not, delivery admission is the limiter. Parser fixtures under `tests/diagnostics/fixtures/` are synthetic.
 
 ## Command
 
 ```powershell
 ./tests/diagnostics/benchmark_compare_test.ps1
-./tools/benchmark/Compare-TaxiCamVersions.ps1 -BaselineRef v0.9.8-build.38
+./tools/benchmark/Compare-TaxiCamVersions.ps1 -BaselineRef v0.9.8-build.38 -CandidateRef origin/feature/performance-improvements
 ```
 
 Default baseline is `v0.9.8-build.38`; default candidate is `HEAD`.
