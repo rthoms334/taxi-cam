@@ -14,7 +14,6 @@ function Get-TaxiBenchmarkHotPaths {
         [ordered]@{ Path = 'src/camera/probe.cpp'; Band = 'observer' }
         [ordered]@{ Path = 'src/camera/probe.hpp'; Band = 'observer' }
         [ordered]@{ Path = 'src/camera/render_schedule.hpp'; Band = 'observer' }
-        [ordered]@{ Path = 'src/camera/still_frame_hold.hpp'; Band = 'observer' }
         [ordered]@{ Path = 'src/camera/body_pose_provider.cpp'; Band = 'telemetry' }
         [ordered]@{ Path = 'src/app/companion.cpp'; Band = 'companion' }
         [ordered]@{ Path = 'src/bridge/bridge_main.cpp'; Band = 'bridge-loop' }

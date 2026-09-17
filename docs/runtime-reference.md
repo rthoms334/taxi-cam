@@ -134,7 +134,7 @@ The **Reference guides** page edits `nose_dot`, `tail_upper`, `tail_corner` and 
 
 A380 nose markers are filled 14-by-14-pixel magenta squares in the working image. A350 nose dots are amber circles with a 6-pixel radius (12-pixel diameter). Saved centres are retained. Tail brackets use a two-pixel distance threshold. Their positions should be calibrated against the visible tyres at the chosen camera framing before being promoted to shipped defaults.
 
-The GS box uses thin antialiased lettering with two character spaces between the white `GS` label and the coloured speed value. Ground speed is truncated to whole knots (for example, 12.9 displays as 12). Invalid, stale or overflowing values display `--`. The existing 60-knot automatic cutoff controls camera activation independently. A separate parked still-frame hold closes both extra-view gates below 0.5 kt after the first successful pair and resumes at 1.0 kt; see [Architecture](architecture.md#3-position-and-render-the-two-cameras).
+The GS box uses thin antialiased lettering with two character spaces between the white `GS` label and the coloured speed value. Ground speed is truncated to whole knots (for example, 12.9 displays as 12). Invalid, stale or overflowing values display `--`. The existing 60-knot automatic cutoff controls camera activation independently.
 
 Source: [compositor and guides](../src/graphics/camera_compositor_d3d12.hpp), [output buffer](../src/graphics/scene_frame_output.hpp).
 
@@ -220,7 +220,7 @@ Capture recovery requires at least two seconds without composition progress, con
 
 The above-60-knots cutoff remains inhibited while an OFF acknowledgement is pending. An accepted push event is not repeated while waiting for that acknowledgement.
 
-Source: [IPC](../src/shared/protocol.hpp), [control loop](../src/bridge/bridge_main.cpp), [recovery policy](../src/camera/scene_recovery.hpp), [speed cutoff](../src/camera/taxi_speed_cutoff.hpp), [still-frame hold](../src/camera/still_frame_hold.hpp).
+Source: [IPC](../src/shared/protocol.hpp), [control loop](../src/bridge/bridge_main.cpp), [recovery policy](../src/camera/scene_recovery.hpp), [speed cutoff](../src/camera/taxi_speed_cutoff.hpp).
 
 ## Diagnostics
 
@@ -256,11 +256,7 @@ Private-code mismatch diagnostics identify the failed discovery or validation st
 
 A counter measures work at its stage, not frames visibly presented. For example, increasing compositions with zero stamps points to display routing or PFD draw eligibility.
 
-The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. At low simulator update rates, opening and closing can therefore require work on every manager update even at the default 15 setting. The 5 and 10 settings can reduce that workload further, with less frequent camera updates. Settings do not guarantee completed image FPS.
-
-With TAXI on at the default 15, a parked aircraft (fresh ground speed below 0.5 kt) holds both gates closed after the first successful pair. Status reports `Still-frame hold: gates closed; last captured pair retained.` Motion at or above 1.0 kt, a stale/invalid speed sample, TAXI OFF, or mount/recovery/warmup work resumes pulsing. This is intended to drop the two extra MSFS views while parked; it does not change the taxiing 15-fps budget and does not by itself prove a live FPS gain.
-
-Compare render-thread, presented-frame and GPU timings with TAXI off/on at the same cockpit view when investigating stutter; loaded hooks retain essential tracking while OFF, so binary comparisons are also needed to measure changes in their standing overhead.
+The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. At low simulator update rates, opening and closing can therefore require work on every manager update even at the default 15 setting. The 5 and 10 settings can reduce that workload further, with less frequent camera updates. Settings do not guarantee completed image FPS. Compare render-thread, presented-frame and GPU timings with TAXI off/on at the same cockpit view when investigating stutter; loaded hooks retain essential tracking while OFF, so binary comparisons are also needed to measure changes in their standing overhead.
 
 `probe_ms`, `query_ms` and `read_ms` describe the last serviced inspection callback, not every simulator frame. `inspections` counts serviced callbacks; its change over a log interval gives their frequency. Skipped callbacks leave the last timings visible. `clear_states` counts observed application graphics-state resets. These measurements exclude MSFS scene rendering and GPU time.
 
