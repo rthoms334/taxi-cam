@@ -126,7 +126,9 @@ Recovery accepts independently bounded primary render and display-size pairs whe
 
 The rate setting limits activation opportunities to **5–60 per camera per second**, with a default of **15**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images. At lower simulator update rates, two settings can reach the same scheduling limit; the 5 and 10 settings provide lower budgets while retaining mandatory closing intervals and avoiding catch-up bursts.
 
-Source: [camera integration](../src/camera/probe.cpp), [pose conversion](../src/camera/body_pose_math.hpp), [mounts](../src/camera/aircraft_mounts.hpp), [schedule](../src/camera/render_schedule.hpp).
+After both selected feeds have activated and the views are ready, a fresh SimConnect ground-speed sample below **0.5 kt** holds both render gates closed so MSFS can drop the extra views. The last composed pair remains stampable; the GS overlay stays at the last captured value while parked. Rendering resumes at **1.0 kt**, when the speed sample is missing or older than 500 ms, or when a mount change, recovery or warmup forces a fresh pair. Ground speed is only that refresh signal; it is never a pose or mount input. TAXI OFF still resets the hold so the next ON captures a new pair before it can hold again. Live occupancy of the extra views remains a simulator observation.
+
+Source: [camera integration](../src/camera/probe.cpp), [pose conversion](../src/camera/body_pose_math.hpp), [mounts](../src/camera/aircraft_mounts.hpp), [schedule](../src/camera/render_schedule.hpp), [still-frame hold](../src/camera/still_frame_hold.hpp).
 
 ## 4. Capture rendered images from the GPU
 

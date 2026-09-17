@@ -16,6 +16,7 @@
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
 #include "source_view.hpp"
+#include "still_frame_hold.hpp"
 #include "view_aa.hpp"
 #include "view_readiness_wait.hpp"
 #include "view_resize.hpp"
@@ -73,6 +74,7 @@ struct Runtime {
   double observer_max_ms = 0;
   ProbePerformance performance;
   RenderSchedule schedule;
+  StillFrameHold still_hold;
   ProbeInspectionGate inspection_gate;
   std::array<ec::EntryId, 2> scheduled_ids{};
   std::array<bool, 2> gates{};
@@ -545,6 +547,7 @@ void apply_gates(Runtime& runtime,
     if (desired[i] && (initialize_gates || !runtime.gates[i] || !observed_active)) {
       activate(reinterpret_cast<void*>(runtime.manager), ids[i], true);
       ++runtime.activation_counts[i];
+      runtime.still_hold.note_activation(i);
     }
   }
   runtime.gates = desired;
@@ -638,6 +641,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
       runtime.retained_restart_requested = false;
       runtime.scene_session_epoch = resume_epoch;
       runtime.schedule.reset();
+      runtime.still_hold.reset();
       scene_handoff().begin_scene();
     }
   }
@@ -857,6 +861,23 @@ bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
   }
   return true;
 }
+
+bool still_frame_suspend(Runtime& runtime,
+                         std::uint64_t now,
+                         unsigned feeds,
+                         bool views_ready,
+                         bool scheduled_pair,
+                         bool suspended,
+                         bool force_resume) noexcept {
+  if (suspended || !scheduled_pair) {
+    runtime.still_hold.reset();
+    return false;
+  }
+  const auto speed = get_ground_speed();
+  runtime.still_hold.update(now, speed.valid, speed.knots, speed.sample_ms, feeds, views_ready, force_resume);
+  return runtime.still_hold.holding();
+}
+
 void observer(void* manager) noexcept {
   auto& runtime = state();
   if (!runtime.enabled.load(std::memory_order_acquire) || runtime.observing.test_and_set(std::memory_order_acquire))
@@ -915,13 +936,18 @@ void observer(void* manager) noexcept {
     std::array<bool, 2> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load();
+    const bool force_resume =
+        mount_changed || recovery_pending || profile_hold || runtime.resize_warmup.pending() || runtime.resize_recovery.pending();
+    const unsigned feeds = next_schedule.feeds();
+    const bool views_ready = runtime.published.ready[0] && (feeds < 2 || runtime.published.ready[1]);
+    const bool still = still_frame_suspend(runtime, now, feeds, views_ready, scheduled_pair, suspended, force_resume);
     if (scheduled_pair)
-      desired = next_schedule.tick(now, suspended);
+      desired = next_schedule.tick(now, suspended || still);
     const bool gate_change = scheduled_pair && desired != runtime.gates;
     const ProbeInspectionState inspection_state{scheduled_pair && before.owner.valid() && before.owned_ids[0] && before.owned_ids[1] &&
                                                     before.owned_ids[0] != before.owned_ids[1] && runtime.resized_ids == before.owned_ids &&
                                                     before.failure == ec::Failure::none && before.blocked == ec::Blocked::none,
-                                                suspended,
+                                                suspended || still,
                                                 !runtime.gates[0] && !runtime.gates[1],
                                                 pair_ready,
                                                 before.request_pending || before.creation_pending,
@@ -934,6 +960,11 @@ void observer(void* manager) noexcept {
       // No native pointer is used while idle. The first resume/lifecycle/mount
       // update bypasses the periodic throttle and repeats the complete guard.
       runtime.schedule = next_schedule;
+      if (still) {
+        const std::lock_guard lock(runtime.mutex);
+        runtime.published.gates = {};
+        runtime.published.message = "Still-frame hold: gates closed; last captured pair retained.";
+      }
       return;
     }
     if (inspection != ProbeInspectionDecision::required && !before.request_pending && !gate_change && !runtime.resize_warmup.pending() &&
@@ -1210,6 +1241,7 @@ void observer(void* manager) noexcept {
               // on the next observer, never this pre-restoration snapshot.
               scene_handoff().begin_scene();
               runtime.schedule.reset();
+              runtime.still_hold.reset();
               const std::lock_guard lock(runtime.mutex);
               runtime.recovery.resumed_retained_resolution();
               runtime.stop_detail.clear();
@@ -1237,8 +1269,14 @@ void observer(void* manager) noexcept {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
             next_schedule.reset();
+            runtime.still_hold.reset();
           }
-          desired = next_schedule.tick(GetTickCount64(), runtime.suspended.load());
+          const auto pulse_now = GetTickCount64();
+          const bool pulse_views_ready = report.ready[0] && (next_schedule.feeds() < 2 || report.ready[1]);
+          const bool pulse_still =
+              still_frame_suspend(runtime, pulse_now, next_schedule.feeds(), pulse_views_ready, !new_pair, runtime.suspended.load(),
+                                  force_resume);
+          desired = next_schedule.tick(pulse_now, runtime.suspended.load() || pulse_still);
           const bool needs_pose = desired[0] || desired[1];
           const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
           bool aa_ready = true;
@@ -1334,6 +1372,7 @@ void observer(void* manager) noexcept {
         runtime.retirement.clear();
         runtime.gates = {};
         runtime.schedule.reset();
+        runtime.still_hold.reset();
       }
       report.pair = pair;
       if (pair.state != ec::State::active) {
@@ -1351,6 +1390,8 @@ void observer(void* manager) noexcept {
         report.message = "Owned view inspection unavailable; camera IDs retained while waiting for fresh validation.";
       else if (pair.state == ec::State::active && runtime.resize_warmup.pending())
         report.message = "New scene views are closed for their initial engine update; final resizing is pending.";
+      else if (pair.state == ec::State::active && runtime.still_hold.holding())
+        report.message = "Still-frame hold: gates closed; last captured pair retained.";
       else if (pair.state == ec::State::active)
         report.message = "Nose and tail scene views use separate aircraft mounts and refresh before alternating activation pulses.";
       else if (pair.state == ec::State::cleanup_pending)

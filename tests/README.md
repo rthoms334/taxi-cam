@@ -24,6 +24,8 @@ The dynamic compatibility checks cover relocated instruction templates, cross-re
 
 `tests/camera/render_schedule_test.cpp` covers 5–60 activation budgets, simulator cadence limits, uneven update intervals, live rate/feed changes and mandatory closing intervals. Settings, IPC, saved calibration and hidden UI checks include 5 and 10 while preserving the default of 15. Existing scene-demand tests retain bounded startup warmup and repeated OFF/ON ownership checks.
 
+`tests/camera/still_frame_hold_test.cpp` covers the parked TAXI-on hold: both feeds must pulse once before gates stay closed, 0.5/1.0 kt hysteresis, stale or invalid ground speed resumes, mount/recovery force-resume requires a fresh pair, and the default 15 schedule does not catch up after a hold. This does not prove live MSFS occupancy of the extra views.
+
 `tests/graphics/metadata_batch_bridge_test.cpp` exercises production lookup caching, idle forwarding, fresh PFD recording requirements, lifetime/address reuse and descriptor discovery. Its isolated CPU timing comparison does not establish simulator FPS. `tests/graphics/source_observation_test.cpp` checks combined draw tracking and idle capture suppression while retaining source-state evidence, recorded consumers and source leases. Frame-output and queue-tail tests cover optional GPU timestamps, completion-fence readback, unsubmitted discard and disabling diagnostics with a measurement pending.
 
 The on-demand [performance sampler](../tools/performance/README.md) has separate isolated checks and does not become part of the installed runtime. Live simulator measurements remain a separate acceptance step.

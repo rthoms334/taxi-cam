@@ -10,7 +10,7 @@ This is not a live simulator frame-time measurement. Extra camera views remain t
 
 This is the performance-work branch (`a7d6c26`: reduce camera overhead and migrate night exposure). It is not the AA restore branch and not the documentation-only audit.
 
-Expected benefit, if any, is largest when cameras are parked after warmup: PFD-only hook work is skipped, command-list lookups can hit a thread-local cache, and companion candidate rows refresh once per second. When TAXI is on at the default 15, MSFS still renders the two extra views. That cost is unchanged. Lowering the rate to 5 or 10 can cut activation work; it is a setting, not an automatic gain.
+Expected benefit, if any, is largest when cameras are parked. After warmup, PFD-only hook work is skipped, command-list lookups can hit a thread-local cache, and companion candidate rows refresh once per second. With TAXI on at the default 15, a fresh ground-speed sample below 0.5 kt now holds both extra-view gates closed after the first successful pair; rendering resumes at 1.0 kt. That is the intended ON-path cut. While taxiing above that resume threshold, MSFS still renders the two extra views at the selected rate. Lowering the rate to 5 or 10 can cut that moving-activation work; it is a setting, not an automatic gain. Live occupancy of the extra views remains unmeasured on this host.
 
 Optional `TAXI_CAM_GPU_TIMING=1` and `TAXI_CAM_GRAPHICS_DIAGNOSTICS=1` add instrumentation. Keep those off for an A/B against 0.9.8.
 
@@ -25,6 +25,7 @@ Night-boost migration to 8 EV is a preference change, not a frame-time change.
 | `src/graphics/scene_capture_manager.cpp` | Combined source-draw observe; capture enable; optional GPU timestamps | Fewer manager lookups per draw; timestamps off by default |
 | `src/graphics/scene_runtime.cpp` / `scene_frame_output.cpp` | Optional private-list GPU timing | Measurement only unless `TAXI_CAM_GPU_TIMING=1` |
 | `src/camera/render_schedule.hpp` | Rate floor 5 instead of 15 | User can cut activation pulses |
+| `src/camera/still_frame_hold.hpp` / `probe.cpp` | Parked TAXI-on hold after first pair | Extra MSFS views can drop while GS < 0.5 kt |
 | `src/app/companion.cpp` | Rate UI 5–60 | Same |
 | `src/camera/local_memory.cpp` | Unchanged | No observer-memory change |
 | `src/camera/body_pose_provider.cpp` | Unchanged | Parked SimConnect cadence unchanged |

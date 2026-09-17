@@ -50,6 +50,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Control policy test failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Render schedule test compilation failed.' }
 & $scheduleTest
 if ($LASTEXITCODE -ne 0) { throw 'Render schedule test failed.' }
+$stillHoldTest = Join-Path $outputDirectory 'still-frame-hold-test.exe'
+& $compiler @common (Join-Path $repoRoot 'tests/camera/still_frame_hold_test.cpp') '-o' $stillHoldTest
+if ($LASTEXITCODE -ne 0) { throw 'Still-frame hold test compilation failed.' }
+& $stillHoldTest
+if ($LASTEXITCODE -ne 0) { throw 'Still-frame hold test failed.' }
 $idleTest = Join-Path $outputDirectory 'probe-inspection-gate-test.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'probe_inspection_gate_test.cpp') '-o' $idleTest
 if ($LASTEXITCODE -ne 0) { throw 'Probe idle inspection gate compilation failed.' }
