@@ -487,6 +487,7 @@ DWORD run_impl() {
     if (now >= next_inventory) {
       inventory = win::pfd_inventory();
       next_inventory = now + 1000;
+      win::service_live_backfill(now, inventory.size());
     }
     status.candidate_count = static_cast<UINT>(std::min<size_t>(inventory.size(), 16));
     for (UINT i = 0; i < status.candidate_count; ++i)
@@ -504,7 +505,10 @@ DWORD run_impl() {
       std::snprintf(aircraft_message, sizeof(aircraft_message), "%s Aircraft type: %.96s.",
                     identity.fresh ? "The loaded aircraft is not supported by the selected profile." : "Waiting for aircraft identity.",
                     identity.type[0] ? identity.type.data() : "unavailable");
-    const char* target_message = "Detecting display textures for the selected aircraft profile.";
+    const char* target_message = graphics.ready && inventory.empty()
+                                     ? "Waiting for cockpit displays to be drawn. They are learned on first use; Restart Flight if the "
+                                       "list stays empty."
+                                     : "Detecting display textures for the selected aircraft profile.";
     if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
       target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."

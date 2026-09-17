@@ -268,7 +268,7 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 | Symptom | Inspect |
 | --- | --- |
 | No bridge status | Companion connection, executable path/structure and bridge startup |
-| Empty PFD texture list after starting Taxi Cam inside a loaded flight | The bridge may have missed existing texture/RTV creation. Reload the aircraft or flight with Taxi Cam running so the display resources are recreated; a panel redraw alone does not recover them. If the list stays empty after recreation, investigate display dimensions and formats. |
+| Empty PFD texture list after starting Taxi Cam inside a loaded flight | Late attach can miss Create*/CreateRTV. The bridge now learns display textures on first barrier/copy use and can recover a unique OM RTV during a short backfill window. Wait for the next cockpit draw, then Refresh. If the list stays empty after that window (about three seconds, or once two candidates exist), use **Restart Flight**. A panel redraw after the window has closed does not resume enumeration. If the list stays empty after recreation, investigate display dimensions and formats. |
 | Camera compatibility check failed | Reported instruction-discovery, function-boundary, object-identity or activation-data failure; include the launcher and bridge logs in the support report |
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |

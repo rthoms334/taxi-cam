@@ -929,12 +929,39 @@ void native_case(bool warp,
   check(device->CreateCommandAllocator(qd.Type, IID_PPV_ARGS(allocator.put())), "Pre-existing allocator");
   check(device->CreateCommandList(0, qd.Type, allocator.get(), nullptr, IID_PPV_ARGS(list.put())), "Pre-existing list");
   check(list->Close(), "Close pre-existing list");
+  // Display textures and views exist before late companion attach.
+  std::array<Reference<ID3D12Resource>, 4> textures;
+  D3D12_DESCRIPTOR_HEAP_DESC hd{};
+  hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  hd.NumDescriptors = 8;
+  Reference<ID3D12DescriptorHeap> heap;
+  check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(heap.put())), "RTV heap");
+  const auto stride = device->GetDescriptorHandleIncrementSize(hd.Type);
+  const auto base = heap->GetCPUDescriptorHandleForHeapStart();
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> rtvs;
+  for (UINT i = 2; i < 4; ++i) {
+    auto d = texture_description(display_width, 1024, DXGI_FORMAT_R8G8B8A8_UNORM);
+    d.MipLevels = profile.mips ? profile.mips : 1;
+    create_texture(device.get(), d, textures[i].put());
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    rtvs[i] = {base.ptr + SIZE_T{i} * stride};
+    device->CreateRenderTargetView(textures[i].get(), &view, rtvs[i]);
+  }
   require(win::initialize_graphics(device.get()), win::graphics_status().error);
   require(win::graphics_status().device == reinterpret_cast<std::uint64_t>(native_device.get()), "Bridge owns the resolved device");
   require(win::initialize_graphics(native_device.get()) && win::initialize_graphics(device.get()),
           "Repeated initialization shares one native registry through either interface");
   win::set_aircraft_profile(profile.id);
   check(list->Reset(allocator.get(), nullptr), "Observe first actual Reset of pre-existing list");
+  require(win::pfd_inventory().empty(), "Late attach starts with no pre-existing inventory");
+  for (UINT i = 2; i < 4; ++i) {
+    transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &rtvs[i], FALSE, nullptr);
+  }
+  require(win::pfd_inventory().size() == 2, "Learn-on-use admits pre-existing display textures");
   const auto key = win::graphics_status().device;
   const auto successful_copies = [] {
     const auto s = win::graphics_status();
@@ -944,33 +971,17 @@ void native_case(bool warp,
   runtime::set_composition(key, profile.composition);
   runtime::manager().begin_source_tracking();
   runtime::manager().set_source_rate(60);
-  std::array<Reference<ID3D12Resource>, 4> textures;
-  for (UINT i = 0; i < 4; ++i) {
-    auto d = texture_description(i < 2 ? pane_width : display_width,
-                                 i == 0   ? nose_height
-                                 : i == 1 ? tail_height
-                                          : 1024,
-                                 DXGI_FORMAT_R8G8B8A8_UNORM);
-    if (i > 1)
-      d.MipLevels = profile.mips ? profile.mips : 1;
-    create_texture(device.get(), d, textures[i].put());
-  }
-  D3D12_DESCRIPTOR_HEAP_DESC hd{};
-  hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  hd.NumDescriptors = 8;
-  Reference<ID3D12DescriptorHeap> heap;
-  check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(heap.put())), "RTV heap");
-  const auto stride = device->GetDescriptorHandleIncrementSize(hd.Type);
-  const auto base = heap->GetCPUDescriptorHandleForHeapStart();
-  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> rtvs;
-  for (UINT i = 0; i < 4; ++i) {
-    D3D12_RENDER_TARGET_VIEW_DESC d{};
-    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    d.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+  for (UINT i = 0; i < 2; ++i) {
+    create_texture(device.get(), texture_description(pane_width, i ? tail_height : nose_height, DXGI_FORMAT_R8G8B8A8_UNORM),
+                   textures[i].put());
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     rtvs[i] = {base.ptr + SIZE_T{i} * stride};
-    device->CreateRenderTargetView(textures[i].get(), &d, rtvs[i]);
+    device->CreateRenderTargetView(textures[i].get(), &view, rtvs[i]);
   }
-  // Exercise the two public descriptor copy routes, not just creation.
+  // Exercise the two public descriptor copy routes after learn-on-use mapped the
+  // pre-existing display handles. Copied descriptors must keep that association.
   device->CopyDescriptorsSimple(1, {base.ptr + 4 * stride}, rtvs[2], hd.Type);
   const D3D12_CPU_DESCRIPTOR_HANDLE dest{base.ptr + 5 * stride};
   device->CopyDescriptors(1, &dest, nullptr, 1, &rtvs[3], nullptr, hd.Type);

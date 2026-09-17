@@ -1,6 +1,8 @@
 #include "d3d12_bridge.hpp"
 #include <dxgi1_6.h>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -158,6 +160,69 @@ struct Registry {
   std::atomic<std::uint64_t> dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{};
   std::atomic<std::uint64_t> sample_position_calls{};
   WriteBudget calibration_budget;
+  // Late-attach learn-on-use. After this is false, barrier/copy/OM extra work is
+  // one relaxed load. Never allocate or lock unless this flag is still set.
+  std::atomic<bool> live_backfill{};
+  std::uint64_t backfill_started_ms{};
+  struct SeenResources {
+    static constexpr unsigned Capacity = 1024;
+    static constexpr unsigned Probes = 8;
+    std::array<std::atomic<ID3D12Resource*>, Capacity> slots{};
+    static unsigned hash(ID3D12Resource* p) noexcept {
+      auto x = reinterpret_cast<std::uintptr_t>(p);
+      x ^= x >> 30;
+      x *= static_cast<std::uintptr_t>(0xbf58476d1ce4e5b9ULL);
+      return static_cast<unsigned>(x) & (Capacity - 1);
+    }
+    bool contains(ID3D12Resource* p) const noexcept {
+      auto i = hash(p);
+      for (unsigned n = 0; n < Probes; ++n) {
+        const auto value = slots[i].load(std::memory_order_relaxed);
+        if (value == p)
+          return true;
+        if (!value)
+          return false;
+        i = (i + 1) & (Capacity - 1);
+      }
+      return false;
+    }
+    void remember(ID3D12Resource* p) noexcept {
+      auto i = hash(p);
+      for (unsigned n = 0; n < Probes; ++n) {
+        ID3D12Resource* expected = nullptr;
+        if (slots[i].compare_exchange_strong(expected, p, std::memory_order_relaxed) || expected == p)
+          return;
+        i = (i + 1) & (Capacity - 1);
+      }
+    }
+  } seen_resources;
+  struct LiveBindHint {
+    std::atomic<ID3D12GraphicsCommandList*> list{};
+    std::atomic<ID3D12Resource*> resource{};
+    std::atomic<unsigned> entries{};
+    void note(ID3D12GraphicsCommandList* native, ID3D12Resource* p) noexcept {
+      if (!native || !p)
+        return;
+      if (list.load(std::memory_order_relaxed) != native) {
+        list.store(native, std::memory_order_relaxed);
+        resource.store(p, std::memory_order_relaxed);
+        entries.store(1, std::memory_order_relaxed);
+        return;
+      }
+      if (resource.load(std::memory_order_relaxed) == p)
+        return;
+      resource.store(p, std::memory_order_relaxed);
+      entries.fetch_add(1, std::memory_order_relaxed);
+    }
+    ID3D12Resource* take(ID3D12GraphicsCommandList* native) noexcept {
+      if (!native || list.load(std::memory_order_relaxed) != native || entries.load(std::memory_order_relaxed) != 1)
+        return nullptr;
+      entries.store(0, std::memory_order_relaxed);
+      return resource.load(std::memory_order_relaxed);
+    }
+    void clear() noexcept { entries.store(0, std::memory_order_relaxed); }
+  } live_bind;
+  std::array<std::atomic<ID3D12Resource*>, 8> backfill_displays{};
 };
 Registry& registry() {
   static auto* r = new Registry;
@@ -304,6 +369,108 @@ bool same_device(ID3D12Device* device) noexcept {
     b->Release();
   return equal;
 }
+constexpr unsigned LiveBackfillNeeded = 2;
+bool display_item(const Registry& r, const Resource& item) noexcept {
+  return item.alive && profiles::matches_display(*r.profile, static_cast<UINT>(item.desc.Width), item.desc.Height, item.desc.MipLevels,
+                                                static_cast<UINT>(item.desc.Format));
+}
+unsigned live_display_resources(const Registry& r) noexcept {
+  unsigned n = 0;
+  for (const auto& [_, item] : r.resources) {
+    (void)_;
+    if (item && display_item(r, *item))
+      ++n;
+  }
+  return n;
+}
+unsigned live_display_rtvs(const Registry& r) noexcept {
+  unsigned n = 0;
+  for (const auto& [_, view] : r.rtvs) {
+    (void)_;
+    if (view.resource && display_item(r, *view.resource))
+      ++n;
+  }
+  return n;
+}
+void maybe_stop_live_backfill(Registry& r) noexcept {
+  if (live_display_resources(r) >= LiveBackfillNeeded && live_display_rtvs(r) >= LiveBackfillNeeded)
+    r.live_backfill.store(false, std::memory_order_relaxed);
+}
+void remember_backfill_display(Registry& r, ID3D12Resource* native) noexcept {
+  for (auto& slot : r.backfill_displays) {
+    ID3D12Resource* expected = nullptr;
+    if (slot.compare_exchange_strong(expected, native, std::memory_order_relaxed) || expected == native)
+      return;
+  }
+}
+bool is_backfill_display(const Registry& r, ID3D12Resource* native) noexcept {
+  for (const auto& slot : r.backfill_displays)
+    if (slot.load(std::memory_order_relaxed) == native)
+      return true;
+  return false;
+}
+bool committed_readable(const void* p) noexcept {
+  MEMORY_BASIC_INFORMATION memory{};
+  if (!p || VirtualQuery(p, &memory, sizeof(memory)) != sizeof(memory) || memory.State != MEM_COMMIT ||
+      (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+    return false;
+  const DWORD access = memory.Protect & 255;
+  return access == PAGE_READONLY || access == PAGE_READWRITE || access == PAGE_WRITECOPY || access == PAGE_EXECUTE_READ ||
+         access == PAGE_EXECUTE_READWRITE || access == PAGE_EXECUTE_WRITECOPY;
+}
+bool plausible_resource(ID3D12Resource* native) noexcept {
+  if (!committed_readable(native))
+    return false;
+  void** table{};
+  std::memcpy(&table, native, sizeof(table));
+  if (!committed_readable(table))
+    return false;
+  void* query{};
+  std::memcpy(&query, table, sizeof(query));
+  return image_region(query, true);
+}
+void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial);
+void admit_live_resource(ID3D12Resource* native, source_state::Model initial) {
+  const OwnedWork guard;
+  auto& r = registry();
+  if (!same_native_device(native, r.device))
+    return;
+  observe_resource(r.device, native, initial);
+}
+void consider_live_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* native, source_state::Model initial) {
+  auto& r = registry();
+  if (!native)
+    return;
+  if (!r.seen_resources.contains(native)) {
+    r.seen_resources.remember(native);
+    if (plausible_resource(native))
+      observe_safely([&] { admit_live_resource(native, initial); });
+  }
+  if (is_backfill_display(r, native))
+    r.live_bind.note(list, native);
+}
+void consider_live_copy(ID3D12Resource* native) {
+  auto& r = registry();
+  if (!native || r.seen_resources.contains(native))
+    return;
+  r.seen_resources.remember(native);
+  if (plausible_resource(native))
+    observe_safely([&] { admit_live_resource(native, source_state::Model::unknown); });
+}
+bool bind_live_rtv(Registry& r, List& l, SIZE_T handle) {
+  auto* native = r.live_bind.take(l.native);
+  if (!native)
+    return false;
+  const auto found = r.resources.find(native);
+  if (found == r.resources.end() || !found->second->alive)
+    return false;
+  View view{found->second, found->second->desc.Format, 0, handle};
+  replace_view(r, handle, view);
+  l.targets[0] = view;
+  l.targets[0].rtv = handle;
+  maybe_stop_live_backfill(r);
+  return r.routes.matches(found->second->id, r.active_mask | r.calibration_mask);
+}
 void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial) {
   auto& r = registry();
   if (!r.ready || !object || !same_device(device))
@@ -328,6 +495,9 @@ void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         item->desc = desc;
         item->id = ++r.next_id;
         r.resources[native] = item;
+        if (display_item(r, *item))
+          remember_backfill_display(r, native);
+        maybe_stop_live_backfill(r);
       } else
         r.pfd_inventory_complete = false;
     }
@@ -475,6 +645,12 @@ void observe_legacy(void*,
                     std::uint64_t id,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
+  if (registry().live_backfill.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
+      (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET ||
+       b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
+    consider_live_resource(list, b.Transition.pResource,
+                           b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ? source_state::Model::legacy_rt
+                                                                                         : source_state::Model::unknown);
   if (idle_callback()) {
     // The source layout model must remain continuous even when no capture is
     // requested: persistent born-RT sources may never emit another RT entry.
@@ -518,6 +694,11 @@ void observe_enhanced(void*,
                       std::uint64_t id,
                       const D3D12_TEXTURE_BARRIER& b,
                       std::uint32_t scope) noexcept {
+  if (registry().live_backfill.load(std::memory_order_relaxed) &&
+      (b.LayoutBefore == D3D12_BARRIER_LAYOUT_RENDER_TARGET || b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET))
+    consider_live_resource(list, b.pResource,
+                           b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET ? source_state::Model::enhanced_rt
+                                                                              : source_state::Model::unknown);
   if (idle_callback()) {
     runtime::manager().observe_source_enhanced(list, id, b);
     return;
@@ -560,6 +741,10 @@ void copy_resource(void*,
                    ID3D12Resource* dest,
                    ID3D12Resource* src,
                    bool allowed) noexcept {
+  if (registry().live_backfill.load(std::memory_order_relaxed)) {
+    consider_live_copy(dest);
+    consider_live_copy(src);
+  }
   if (idle_callback())
     return;
   const OwnedWork guard;
@@ -575,6 +760,10 @@ void copy_texture(void*,
                   const D3D12_TEXTURE_COPY_LOCATION* src,
                   const D3D12_BOX* box,
                   bool allowed) noexcept {
+  if (registry().live_backfill.load(std::memory_order_relaxed)) {
+    consider_live_copy(dest ? dest->pResource : nullptr);
+    consider_live_copy(src ? src->pResource : nullptr);
+  }
   if (idle_callback())
     return;
   const OwnedWork guard;
@@ -1055,6 +1244,7 @@ void STDMETHODCALLTYPE rtv_create(ID3D12Device* device,
     }
     const std::lock_guard lock(r.mutex);
     replace_view(r, handle.ptr, view);
+    maybe_stop_live_backfill(r);
   });
 }
 void STDMETHODCALLTYPE dsv_create(ID3D12Device* device,
@@ -1269,9 +1459,11 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->raw_om_known = item->ready;
     if (item->ready) {
       item->closing = false;
-      item->graphics.reset(++item->recording, true);
-      item->graphics.bind_pipeline(pso);
-      boundary::successful_reset(native, item->id);
+    item->graphics.reset(++item->recording, true);
+    item->graphics.bind_pipeline(pso);
+    if (registry().live_backfill.load(std::memory_order_relaxed))
+      registry().live_bind.clear();
+    boundary::successful_reset(native, item->id);
       runtime::manager().successful_reset(native, item->id);
     } else {
       item->graphics.invalidate("native_reset_failed");
@@ -1308,6 +1500,8 @@ struct ClearState {
     l.depth_known = true;
     l.graphics.reset(l.recording, l.ready);
     l.graphics.bind_pipeline(p);
+    if (registry().live_backfill.load(std::memory_order_relaxed))
+      registry().live_bind.clear();
     // This is still the same recording. Keep boundary/capture invalidations,
     // render-pass scope and readiness; only an actual Reset can renew them.
   }
@@ -1405,6 +1599,12 @@ struct Targets {
         if (it->second.resource && r.routes.matches(it->second.resource->id, r.active_mask | r.calibration_mask))
           relevant = true;
       }
+    }
+    if (r.live_backfill.load(std::memory_order_relaxed)) {
+      if (count == 1 && !l.targets[0].resource && input[0].ptr)
+        relevant |= bind_live_rtv(r, l, input[0].ptr);
+      else if (count != 1)
+        r.live_bind.clear();
     }
     if (!snapshots || !relevant || !recording_observed(l))
       return;
@@ -1744,7 +1944,10 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   ok &= create_list1.install(device, 51, reinterpret_cast<void*>(&list_create1));
   r.ready = ok;
   r.error = ok ? "native_graphics_ready" : "native_hook_installation_failed";
-  if (!ok)
+  if (ok) {
+    r.backfill_started_ms = 0;
+    r.live_backfill.store(true, std::memory_order_relaxed);
+  } else
     ++r.failures;
   return ok;
 }
@@ -1854,6 +2057,23 @@ std::vector<PfdTargetObservation> pfd_inventory() {
   // the registry lock. Never truncate the inventory used by autodetection.
   std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.draws > b.draws; });
   return result;
+}
+void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexcept {
+  auto& r = registry();
+  if (!r.live_backfill.load(std::memory_order_relaxed))
+    return;
+  if (inventory_count >= LiveBackfillNeeded) {
+    const std::lock_guard lock(r.mutex);
+    maybe_stop_live_backfill(r);
+    if (!r.live_backfill.load(std::memory_order_relaxed))
+      return;
+  }
+  if (!r.backfill_started_ms) {
+    r.backfill_started_ms = now ? now : 1;
+    return;
+  }
+  if (now - r.backfill_started_ms >= 3000)
+    r.live_backfill.store(false, std::memory_order_relaxed);
 }
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
   auto& r = registry();
