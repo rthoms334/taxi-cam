@@ -278,6 +278,8 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 
 Status also contains the active side mask, target IDs, hook failures, applied exposure and GS. A status GS of −1 means unavailable. The candidate list contains up to 16 IDs, cumulative draw counts, dimensions, mip counts and formats for the selected profile.
 
+A checked-in comparison of this tree against published 0.9.8 is in [version benchmark](version-benchmark.md). It uses these log fields and does not establish displayed FPS.
+
 `probe_cpu_ms` and `probe_max_ms` record elapsed camera-observer callback time, not OS thread-CPU or GPU time. The ten IPC `stage_ms` values remain manager, pool, lifecycle, entries, view 1, view 2, handoff, pose, activation and publication. The separate log field `aa_ms` records recurring AA preparation, including its verification work; initial AA setup remains within lifecycle timing. It does not add an eleventh IPC stage or change the shared-memory layout. Memory-query/read timings overlap the stage that performs them, so these values must not be added as independent costs.
 
 Two developer diagnostics can be enabled in the environment inherited by MSFS before the bridge starts. Both are disabled by default and leave the shared-memory layout unchanged:

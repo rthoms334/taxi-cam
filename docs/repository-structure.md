@@ -18,6 +18,7 @@ Supporting files are kept separate:
 | --- | --- |
 | `tests/` | App, camera, graphics, hook, installer and diagnostic tests; shared fixtures are in `tests/support/` |
 | `tools/diagnostics/` | Optional interface-inventory, pose, material and telemetry tools for development |
+| `tools/benchmark/` | Offline 0.9.8 versus current-tree comparison: source identity, optional isolated timings, bridge-log parser |
 | `installer/` | Inno Setup definition, package/build/bootstrap scripts and embedded install/uninstall helpers |
 | `ci/` | Semantic version calculation, pinned toolchain helpers and release publication |
 | `.github/workflows/` | GitHub Actions build and release workflow |

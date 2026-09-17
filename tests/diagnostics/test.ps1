@@ -1,6 +1,7 @@
 param()
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+& (Join-Path $PSScriptRoot 'benchmark_compare_test.ps1')
 . (Join-Path $repoRoot 'ci/toolchain.ps1')
 $discoveryRoot = $PSScriptRoot
 $nativeRoot = $repoRoot
