@@ -623,12 +623,50 @@ void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList*
   if (source_stage.owner == this && source_stage.list == native)
     source_stage = {};
   const std::lock_guard lock(mutex_);
-  if (auto* item = list(native); item && item->object_generation == generation) {
-    stats_.last_invalidation_reasons = reasons;
-    item->source_effects.invalidate();
-    if (global)
-      touch_sources(*item);
+  auto* item = list(native);
+  if (!item || item->object_generation != generation)
+    return;
+  // Suspended and malformed passes report PassState on lists that never named a
+  // published camera source. Applying that invalid recording wipes every tracked
+  // source. Ignore it there. A list that did name a published source loses only
+  // that source's RT evidence; unknown state is never stored as a render target.
+  // Barrier, alias, unobserved-work and reset failures still discard the recording.
+  using namespace engine_hook::render_boundary;
+  constexpr std::uint32_t pass_companions =
+      static_cast<std::uint32_t>(InvalidationPassBegin) | static_cast<std::uint32_t>(InvalidationSplitBarrier) |
+      static_cast<std::uint32_t>(InvalidationAliasOrDiscard) | static_cast<std::uint32_t>(InvalidationPassState);
+  const bool pass_state_only = (reasons & InvalidationPassState) != 0 && (reasons & ~pass_companions) == 0;
+  if (pass_state_only) {
+    const auto& recording = item->source_effects;
+    // A truncated count is not evidence that the published sources were absent.
+    if (recording.count <= recording.effects.size()) {
+      std::array<source_state::Key, source_state::Recording::capacity> published{};
+      std::size_t published_count = 0;
+      for (std::size_t index = 0; index < recording.count; ++index) {
+        const auto key = recording.effects[index].key;
+        if (handoff_.observed_feed(key.handle) < 0)
+          continue;
+        bool seen = false;
+        for (std::size_t found = 0; found < published_count; ++found)
+          seen |= published[found] == key;
+        if (!seen)
+          published[published_count++] = key;
+      }
+      if (!published_count)
+        return;
+      if (!recording.invalid) {
+        for (std::size_t index = 0; index < published_count; ++index)
+          item->source_effects.append({published[index], source_state::Effect::Kind::other});
+        touch_sources(*item);
+      }
+      stats_.last_invalidation_reasons = reasons;
+      return;
+    }
   }
+  stats_.last_invalidation_reasons = reasons;
+  item->source_effects.invalidate();
+  if (global)
+    touch_sources(*item);
 }
 void SceneCaptureManager::invalidate_source_targets(ID3D12GraphicsCommandList* native,
                                                     std::uint64_t generation,

@@ -532,6 +532,46 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   manager->begin_source_tracking();
   require(manager->statistics().capture_copy_gpu.samples == 0, "GPU capture timing default inactive");
   manager->set_gpu_timing_enabled(true);
+  {
+    const auto model = [&](unsigned feed) {
+      return manager->device(DeviceKey)->source_states.state({reinterpret_cast<std::uint64_t>(sources[feed].p), ids[feed]}).model;
+    };
+    const auto before_left = model(0);
+    const auto before_right = model(1);
+    require(before_left != taxi_camera::source_state::Model::unknown && before_right != taxi_camera::source_state::Model::unknown,
+            "Camera sources had no RT evidence before the PassState check");
+    Commands bystander;
+    bystander.initialize(device.p);
+    constexpr std::uint64_t BystanderGeneration = Generation + 9;
+    require(manager->register_command_list(bystander.list.p, DeviceKey, BystanderGeneration),
+            "Register list that never observed published camera sources");
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationPassState);
+    auto* untouched = manager->list(bystander.list.p);
+    require(untouched && !untouched->source_effects.invalid && !untouched->source_touched,
+            "PassState on a list that never observed published camera sources prepared a global wipe");
+    ID3D12CommandList* batch = bystander.list.p;
+    require(manager->before_submission(bystander.queue.p, 1, &batch) == 0, "Untouched PassState list was admitted as source work");
+    require(model(0) == before_left && model(1) == before_right, "PassState on an untouched list wiped published camera RT evidence");
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationBarrierBatch);
+    require(untouched->source_effects.invalid && untouched->source_touched,
+            "Barrier invalidation no longer discards an uncertain recording");
+    manager->successful_reset(bystander.list.p, BystanderGeneration);
+    require(untouched->source_effects.append(
+                {{reinterpret_cast<std::uint64_t>(sources[0].p), ids[0]}, taxi_camera::source_state::Effect::Kind::legacy_rt}),
+            "Record one published camera source on the bystander");
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationPassState);
+    require(!untouched->source_effects.invalid, "PassState globally invalidated a recording that named one published camera source");
+    require(untouched->source_touched, "PassState dropped the published camera source this list observed");
+    bool retired = false;
+    for (std::size_t index = 0; index < untouched->source_effects.count; ++index) {
+      const auto& effect = untouched->source_effects.effects[index];
+      retired |= effect.key.handle == reinterpret_cast<std::uint64_t>(sources[0].p) &&
+                 effect.kind == taxi_camera::source_state::Effect::Kind::other;
+    }
+    require(retired, "PassState did not retire RT evidence for the observed published camera source");
+    require(model(0) == before_left && model(1) == before_right, "Scoped PassState changed tracker state before submission");
+    manager->successful_reset(bystander.list.p, BystanderGeneration);
+  }
   DrawFixture draw;
   draw.initialize(device.p, DXGI_FORMAT_R11G11B10_FLOAT);
   constexpr float colors[2][2][4] = {{{0.25f, 0.5f, 0.75f, 1}, {2, 4, 0.125f, 1}}, {{1, 0, 0.5f, 1}, {0.125f, 1, 2, 1}}};
