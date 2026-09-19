@@ -287,10 +287,18 @@ void leading_exit_prefix() {
       proof.close(1, true);
       const Proof::Recording batch[]{{&proof, 1}};
       const auto prefix = proof.prefix_candidate(left, 1);
-      require(Proof::batch_allows(batch, 1) && prefix && prefix.key == left && prefix.recording == 1 && prefix.first_before == rt,
+      const bool common_after = after == D3D12_RESOURCE_STATE_COMMON;
+      // COMMON promotes to RT on the first write. A prefix overlay would then
+      // be replaced by the native instrument for that stamp frame.
+      require(Proof::batch_allows(batch, 1) && !proof.candidate(left, 1) && !proof.prefix_candidate(right, 1),
+              "Later GPU work accidentally relaxed existing tail admission");
+      require(static_cast<bool>(prefix) == !common_after &&
+                  (!prefix || (prefix.key == left && prefix.recording == 1 && prefix.first_before == rt)),
               "Leading full RT exit followed by GPU work lost exact prefix restoration state");
-      require(!proof.candidate(left, 1), "Later GPU work accidentally relaxed existing tail admission");
-      require(!proof.prefix_candidate(right, 1), "Leading RT entry became an RT exit prefix");
+      require(static_cast<bool>(proof.activity_candidate(left, 1)) && proof.activity_candidate(left, 1).first_before == rt,
+              "Later overwrite revoked prefix insertion and also lost leading-exit activity");
+      if (common_after)
+        continue;
       const auto indexed = proof.prefix_candidate(1u, 1);
       require(indexed && indexed.key == left && !proof.prefix_candidate(Proof::maximum_resources, 1),
               "Indexed prefix lookup lost identity or exceeded resource bounds");
@@ -422,15 +430,22 @@ void state_disjoint_prefix_work() {
   mixed.state_disjoint_work(53);
   mixed.observe_legacy(left, rt, psr, 0);
   mixed.gpu_work(48);  // Later drawing/clearing does not precede the proved first exit.
+  mixed.close(1, true);
+  const auto sample_only = mixed.prefix_candidate(left, 1);
+  require(sample_only && sample_only.first_before == rt && sample_only.state_after == psr && !mixed.candidate(left, 1),
+          "Later sample-only GPU work revoked a leading RT-exit prefix");
+  mixed.reset(2, true);
+  mixed.state_disjoint_work(53);
+  mixed.observe_legacy(left, rt, psr, 0);
+  mixed.gpu_work(48);
   mixed.observe_legacy(left, psr, rt, 0);
   mixed.observe_legacy(left, rt, D3D12_RESOURCE_STATE_COMMON, 0);
-  mixed.close(1, true);
-  const auto prefix = mixed.prefix_candidate(left, 1);
-  require(prefix && prefix.first_before == rt && prefix.state_after == D3D12_RESOURCE_STATE_COMMON && !mixed.candidate(left, 1),
-          "Later valid work/transition chain changed prefix restoration or enabled a tail");
+  mixed.close(2, true);
+  require(!mixed.prefix_candidate(left, 2) && !mixed.candidate(left, 2) && mixed.activity_candidate(left, 2),
+          "Later writable return to RT kept a prefix overlay that the instrument can overwrite");
   require(mixed.first_gpu_work() == 53 && mixed.prefix_blocker() == 48, "Later RT writer diagnostic was lost");
   mixed.state_disjoint_work(14);
-  require(!mixed.complete(1) && !mixed.prefix_candidate(left, 1) && mixed.refusal() == Proof::Refusal::closed_mutation,
+  require(!mixed.complete(2) && !mixed.prefix_candidate(left, 2) && mixed.refusal() == Proof::Refusal::closed_mutation,
           "State-disjoint work after Close retained immutable recording permission");
   for (unsigned uncertainty = 0; uncertainty < 7; ++uncertainty) {
     Proof proof;
@@ -462,6 +477,105 @@ void state_disjoint_prefix_work() {
               "Ordinary pass entry failed to retain the preceding query and pass blocker separately");
   }
 }
+void later_list_overwrite() {
+  constexpr auto uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  Proof prefix;
+  prefix.reset(1, true);
+  prefix.observe_legacy(left, rt, psr, 0);
+  prefix.gpu_work(48);
+  prefix.close(1, true);
+  require(prefix.prefix_candidate(left, 1) && !prefix.overwrote(left, 1) && !prefix.suffix_candidate(left, 1),
+          "Sample-only work after RT→SRV invented a later overwrite");
+  Proof compute;
+  compute.reset(1, true);
+  compute.observe_legacy(left, psr, uav, 0);
+  compute.compute_work(14);
+  compute.observe_legacy(left, uav, psr, 0);
+  compute.close(1, true);
+  require(!compute.prefix_candidate(left, 1) && compute.overwrote(left, 1) && compute.suffix_candidate(left, 1).state_after == psr,
+          "UAV TAA write failed to become a suffix overlay site");
+  const Proof::Recording batch[]{{&prefix, 1}, {&compute, 1}};
+  const auto overlay = Proof::batch_overlay(batch, 2, left);
+  require(overlay && !overlay.before && overlay.list == 1 && overlay.candidate.state_after == psr,
+          "Prefix overlay was kept in front of a later UAV write of the same display");
+  require(static_cast<bool>(prefix.prefix_candidate(left, 1)), "Later-list scan mutated the earlier prefix recording");
+  Proof only_prefix = prefix;
+  const Proof::Recording prefix_only[]{{&only_prefix, 1}};
+  const auto kept = Proof::batch_overlay(prefix_only, 1, left);
+  require(kept && kept.before && kept.list == 0, "Single-list prefix overlay was lost");
+  Proof same;
+  same.reset(1, true);
+  same.observe_legacy(left, rt, psr, 0);
+  same.observe_legacy(left, psr, uav, 0);
+  same.observe_legacy(left, uav, psr, 0);
+  same.close(1, true);
+  require(!same.prefix_candidate(left, 1) && same.suffix_candidate(left, 1).state_after == psr && same.activity_candidate(left, 1),
+          "Same-list UAV return kept a prefix stamp or lost leading-exit activity");
+  Proof dispatch_uav;
+  dispatch_uav.reset(1, true);
+  dispatch_uav.observe_legacy(left, rt, uav, 0);
+  dispatch_uav.compute_work(14);
+  dispatch_uav.close(1, true);
+  require(!dispatch_uav.prefix_candidate(left, 1) && dispatch_uav.suffix_candidate(left, 1).state_after == uav &&
+              dispatch_uav.prefix_blocker() == 14,
+          "Dispatch on an explicit UAV display kept a prefix overlay");
+  Proof dispatch_before;
+  dispatch_before.reset(1, true);
+  dispatch_before.compute_work(14);
+  dispatch_before.observe_legacy(left, rt, psr, 0);
+  dispatch_before.close(1, true);
+  require(dispatch_before.prefix_candidate(left, 1) && dispatch_before.prefix_blocker() == UINT_MAX,
+          "Dispatch before the first RT exit blocked a still-valid prefix");
+  Proof common_write;
+  common_write.reset(1, true);
+  common_write.observe_legacy(left, rt, D3D12_RESOURCE_STATE_COMMON, 0);
+  common_write.gpu_work(48);
+  common_write.close(1, true);
+  require(!common_write.prefix_candidate(left, 1) && !common_write.suffix_candidate(left, 1),
+          "COMMON plus later GPU work invented an after-state copy");
+  const Proof::Recording flashed[]{{&prefix, 1}, {&common_write, 1}};
+  require(!Proof::batch_overlay(flashed, 2, left), "Prefix overlay was kept when a later list overwrote without an insertable after-state");
+  Proof enter;
+  enter.reset(1, true);
+  enter.observe_legacy(left, psr, rt, 0);
+  enter.close(1, true);
+  Proof leave;
+  leave.reset(1, true);
+  leave.observe_legacy(left, rt, psr, 0);
+  leave.close(1, true);
+  require(enter.overwrote(left, 1) && !enter.suffix_candidate(left, 1) && leave.candidate(left, 1),
+          "Barrier-only RT entry became a suffix site or lost the later tail exit");
+  const Proof::Recording split[]{{&enter, 1}, {&leave, 1}};
+  const auto tail = Proof::batch_overlay(split, 2, left);
+  require(tail && !tail.before && tail.list == 1 && tail.candidate.state_after == psr,
+          "Split RT entry/exit placed the overlay on the entry list instead of after the exit");
+  Proof carried;
+  carried.reset(1, true);
+  carried.note_render_target_write(left, 48);
+  carried.close(1, true);
+  require(carried.suffix_candidate(left, 1).state_after == rt && !carried.prefix_candidate(left, 1),
+          "Carried RT clear or draw did not become a suffix after that write");
+  const Proof::Recording flashed_white[]{{&prefix, 1}, {&carried, 1}};
+  const auto after_clear = Proof::batch_overlay(flashed_white, 2, left);
+  require(after_clear && !after_clear.before && after_clear.list == 1 && after_clear.candidate.state_after == rt,
+          "Queue copy stayed in front of a later RT clear that has no new barrier");
+  const Proof::Recording after_uav[]{{&compute, 1}, {&carried, 1}};
+  const auto cover_clear = Proof::batch_overlay(after_uav, 2, left);
+  require(cover_clear && !cover_clear.before && cover_clear.list == 1, "UAV suffix stayed in front of a later carried RT write");
+  Proof contradicted;
+  contradicted.reset(1, true);
+  contradicted.observe_legacy(left, rt, psr, 0);
+  contradicted.note_render_target_write(left, 12);
+  contradicted.close(1, true);
+  require(contradicted.prefix_candidate(left, 1) && !contradicted.suffix_candidate(left, 1),
+          "A draw after an RT exit invented an RT suffix or dropped the leading prefix");
+  Proof uav_clear;
+  uav_clear.reset(1, true);
+  uav_clear.note_unordered_access_write(left, 50);
+  uav_clear.close(1, true);
+  require(uav_clear.suffix_candidate(left, 1).state_after == uav && !uav_clear.prefix_candidate(left, 1),
+          "Carried UAV clear did not become a suffix");
+}
 }  // namespace
 
 int main() {
@@ -473,6 +587,7 @@ int main() {
     bounds_and_unknown_lists();
     leading_exit_prefix();
     state_disjoint_prefix_work();
+    later_list_overwrite();
     std::printf("PASS PFD submission proof: %u lifecycle, final-state, GPU-work, whole-batch pass and bound checks.\n", checks);
     return 0;
   } catch (const std::exception& error) {

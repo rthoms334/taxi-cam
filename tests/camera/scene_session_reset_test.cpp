@@ -221,6 +221,20 @@ void empty_and_pending_requests() {
 
 void exact_epoch_admission() {
   using Reset = nc::SceneSessionReset;
+  require(!Reset::observer_can_retire(false, false), "Uninstalled hook was treated as an observer that can retire views");
+  require(!Reset::observer_can_retire(false, true), "Enabled-without-hook was treated as an observer that can retire views");
+  require(!Reset::observer_can_retire(true, false),
+          "Hooked-but-never-enabled observer was treated as able to retire; empty reset would wait forever");
+  require(Reset::observer_can_retire(true, true), "Installed enabled observer lost retirement permission");
+  {
+    Reset reset;
+    reset.begin(2);
+    ec::Snapshot snapshot;
+    require(!reset.ready(true, snapshot), "Reset without empty acknowledgement was already ready");
+    if (!Reset::observer_can_retire(true, false))
+      reset.observe_empty(ec::EmptyPairCancel::cancelled, snapshot);
+    require(reset.ready(true, snapshot), "Refused first request that installed the hook deadlocked the next empty session reset");
+  }
   require(Reset::work_allowed(false, 0, 0, true), "Loaded-flight Connect with fresh epoch-zero telemetry was refused");
   require(!Reset::work_allowed(false, 0, 0, false), "Epoch-zero readiness was inferred without fresh telemetry");
   require(Reset::work_allowed(false, 8, 8, true), "Fresh authorized flight refused camera work");

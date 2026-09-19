@@ -1082,6 +1082,9 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
     const auto& target = list->targets[i];
     if (target.resource && target.resource->alive && !target.mip) {
       target.resource->draws.fetch_add(1, std::memory_order_relaxed);
+      if (maybe_selected(target.resource->native))
+        list->submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id},
+                                                        12);
       if (observed) {
         if (allowed)
           list->copy_proof.after_draw({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id});
@@ -1101,7 +1104,10 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
     return;
   // Mark damage only. Compositing between individual HTML/glyph draws both
   // multiplies fill cost and unnecessarily disturbs the application's state.
-  list->pfd_dirty = allowed && list->count == 1 && list->depth_known;
+  // TAA/DLSS resolve often binds the PFD as one of several RTs; those draws
+  // must still schedule a later overlay so an earlier stamp cannot lose to a
+  // temporal mix of the native instrument.
+  list->pfd_dirty = allowed && list->depth_known && list->count >= 1;
   list->pfd_transition = false;
 }
 // Stage only actual typed RTVs established by a nonzero native draw.
@@ -1112,18 +1118,20 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   if (!registry().ready || !list || list->id != id || !list->ready || !list->pfd_dirty || !recording_observed(*list))
     return;
   list->pfd_dirty = false;
-  if (list->count != 1 || !list->depth_known)
+  if (!list->depth_known || !list->count || list->count > 8)
     return;
   auto& r = registry();
-  const auto& view = list->targets[0];
-  if (!view.resource || !view.resource->alive || view.mip)
-    return;
   const std::lock_guard lock(r.mutex);
-  if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
-                                 view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
-    return;
-  for (unsigned side = 0; side < 2; ++side)
-    if (r.routes.targets[side] == view.resource->id && ((r.active_mask | r.calibration_mask) & (1u << side))) {
+  for (UINT slot = 0; slot < list->count; ++slot) {
+    const auto& view = list->targets[slot];
+    if (!view.resource || !view.resource->alive || view.mip)
+      continue;
+    if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                                   view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
+      continue;
+    for (unsigned side = 0; side < 2; ++side) {
+      if (r.routes.targets[side] != view.resource->id || !((r.active_mask | r.calibration_mask) & (1u << side)))
+        continue;
       list->pending_pfds[side] = view;
       list->pending_rt[side] = !list->pfd_transition && list->raw_om_known && list->snapshot_rtvs;
       if (view.recovered && list->copy_proof.mode({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}) ==
@@ -1149,7 +1157,7 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
           const OwnedWork owned;
           r.device->CreateRenderTargetView(view.resource->native, &desc, retained);
         } else
-          r.device->CopyDescriptorsSimple(1, retained, list->raw_rtvs[0], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+          r.device->CopyDescriptorsSimple(1, retained, list->raw_rtvs[slot], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
       }
       // A nonzero native draw established this bound RTV as render-target data.
       // Clear-only calibration needs no guessed legacy/enhanced transition and
@@ -1166,6 +1174,7 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
           ++r.calibration_clears;
       }
     }
+  }
 }
 void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool recording_end = false) noexcept {
   if (!observation_enabled())
@@ -1541,11 +1550,8 @@ void plan_display_submission(void*,
   for (UINT i = 0; i < count; ++i) {
     for (std::size_t slot = 0; slot < PfdSubmissionProof::maximum_resources; ++slot) {
       auto exit = batch[i].proof->candidate(slot, batch[i].generation);
-      bool before = false;
-      if (!exit) {
+      if (!exit)
         exit = batch[i].proof->prefix_candidate(slot, batch[i].generation);
-        before = bool(exit);
-      }
       if (!exit) {
         const auto refusal = batch[i].proof->prefix_refusal(slot, batch[i].generation);
         if (refusal.operation < r.queue_prefix_blockers.size()) {
@@ -1553,8 +1559,12 @@ void plan_display_submission(void*,
           if (target != r.resources.end() && target->second->id == refusal.key.generation && display_item(r, *target->second))
             r.queue_prefix_blockers[refusal.operation].fetch_add(1, std::memory_order_relaxed);
         }
-        continue;
+        exit = batch[i].proof->activity_candidate(slot, batch[i].generation);
       }
+      if (!exit)
+        exit = batch[i].proof->suffix_candidate(slot, batch[i].generation);
+      if (!exit)
+        continue;
       auto* native = reinterpret_cast<ID3D12Resource*>(exit.key.resource);
       const auto found = r.resources.find(native);
       if (found == r.resources.end() || !found->second->alive || found->second->id != exit.key.generation ||
@@ -1564,12 +1574,18 @@ void plan_display_submission(void*,
       // A submitted, identity-qualified RT completion is independent of camera
       // demand. Keep this distinct from actual draws and preserve side ordering.
       found->second->submission_activity.fetch_add(1, std::memory_order_relaxed);
-      for (unsigned side = 0; side < 2; ++side)
-        if (patches.ready_mask & (1u << side))
-          if (r.selected_resources[side] == found->second) {
-            positions[side] = i * 2 + (before ? 0u : 1u);
-            selected[side] = exit;
-          }
+    }
+  }
+  for (unsigned side = 0; side < 2; ++side) {
+    if (!(patches.ready_mask & (1u << side)))
+      continue;
+    const auto& target = r.selected_resources[side];
+    if (!target || !target->alive || !display_item(r, *target))
+      continue;
+    const PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(target->native), target->id};
+    if (const auto overlay = PfdSubmissionProof::batch_overlay(batch.data(), count, key)) {
+      positions[side] = static_cast<UINT>(overlay.list * 2 + (overlay.before ? 0u : 1u));
+      selected[side] = overlay.candidate;
     }
   }
   if (!candidates) {
@@ -2152,6 +2168,18 @@ void pass_targets(void*,
   item->queries.invalidate();
   item->pending_rt = {};
   Targets::record(*item, count, handles.data(), FALSE, depth ? &depth->cpuDescriptor : nullptr, false);
+  // A pass can clear or discard the selected display without a draw and without
+  // a new barrier. The queue copy would stay on the previous list, then this
+  // pass replaces it with the clear colour. Record the write so the copy follows.
+  for (UINT i = 0; i < count && i < item->count; ++i) {
+    const auto access = targets[i].BeginningAccess.Type;
+    if (access != D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR && access != D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD)
+      continue;
+    const auto& view = item->targets[i];
+    if (view.rtv != handles[i].ptr || view.mip || !view.resource || !view.resource->alive || !maybe_selected(view.resource->native))
+      continue;
+    item->submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}, 68);
+  }
 }
 struct SamplePositions {
   static void apply(List& l, UINT samples, UINT pixels, D3D12_SAMPLE_POSITION* positions) {
@@ -2192,7 +2220,54 @@ struct GpuWork {
     l.submission_proof.gpu_work();
   }
 };
+struct ClearRenderTarget {
+  static void note(List& l, const View& view) {
+    if (view.mip || !view.resource || !view.resource->alive || !maybe_selected(view.resource->native))
+      return;
+    l.submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}, 48);
+  }
+  // ClearRenderTargetView does not require the target to be bound. A clear of
+  // a selected display whose descriptor is only in the RTV map still runs after
+  // a queue copy placed on the previous list, and the frame is the clear colour.
+  static void apply(List& l, D3D12_CPU_DESCRIPTOR_HANDLE handle, const FLOAT*, UINT, const D3D12_RECT*) {
+    l.submission_proof.gpu_work(48);
+    if (!handle.ptr)
+      return;
+    for (UINT i = 0; i < l.count; ++i) {
+      if (l.targets[i].rtv != handle.ptr)
+        continue;
+      note(l, l.targets[i]);
+      return;
+    }
+    View view{};
+    {
+      auto& r = registry();
+      const std::lock_guard lock(r.mutex);
+      const auto it = r.rtvs.find(handle.ptr);
+      if (it == r.rtvs.end())
+        return;
+      view = it->second;
+    }
+    note(l, view);
+  }
+};
+// ClearUAV names the resource. A clear that keeps UAV from an earlier list
+// has no barrier here; without this the queue copy stays in front of it.
+template <UINT Operation>
+struct ClearUnorderedAccess {
+  static void
+  apply(List& l, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, ID3D12Resource* target, const void*, UINT, const D3D12_RECT*) {
+    l.submission_proof.compute_work(Operation);
+    if (!target || !maybe_selected(target))
+      return;
+    const auto item = resource(target);
+    if (!item || !(item->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+      return;
+    l.submission_proof.note_unordered_access_write({reinterpret_cast<std::uint64_t>(item->native), item->id}, Operation);
+  }
+};
 struct StateDisjointGpuWork {};
+struct ComputeGpuWork {};
 struct Unsupported {
   template <class... Args>
   static void apply(List& l, Args...) {
@@ -2233,9 +2308,10 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
     // clear those bindings. Other state can be omitted only because an epoch
     // mismatch forbids injection until a real, fully observed native Reset.
     if constexpr (!std::is_same_v<Action, Targets> && !std::is_same_v<Action, ClearState> && !std::is_same_v<Action, Unsupported> &&
-                  !std::is_same_v<Action, Predication> && !std::is_same_v<Action, GpuWork> &&
-                  !std::is_same_v<Action, StateDisjointGpuWork> && !std::is_same_v<Action, QueryBegin> &&
-                  !std::is_same_v<Action, QueryEnd>) {
+                  !std::is_same_v<Action, Predication> && !std::is_same_v<Action, GpuWork> && !std::is_same_v<Action, ClearRenderTarget> &&
+                  !std::is_same_v<Action, ClearUnorderedAccess<49>> && !std::is_same_v<Action, ClearUnorderedAccess<50>> &&
+                  !std::is_same_v<Action, StateDisjointGpuWork> && !std::is_same_v<Action, ComputeGpuWork> &&
+                  !std::is_same_v<Action, QueryBegin> && !std::is_same_v<Action, QueryEnd>) {
       if (!observation_enabled()) {
         auto& r = registry();
         if (r.diagnostics_enabled.load(std::memory_order_relaxed))
@@ -2262,6 +2338,8 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
       if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native))) {
         if constexpr (std::is_same_v<Action, StateDisjointGpuWork>)
           item->submission_proof.state_disjoint_work(Slot);
+        else if constexpr (std::is_same_v<Action, ComputeGpuWork>)
+          item->submission_proof.compute_work(Slot);
         else if constexpr (std::is_same_v<Action, GpuWork>)
           item->submission_proof.gpu_work(Slot);
         else
@@ -2321,14 +2399,14 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   // active-pass implementations for these optional newer setters untouched.
   if (active)
     return ok;
-  ok &= STATE(14, Dispatch, StateDisjointGpuWork)::install(list);
+  ok &= STATE(14, Dispatch, ComputeGpuWork)::install(list);
   ok &= STATE(15, CopyBufferRegion, StateDisjointGpuWork)::install(list);
   ok &= STATE(18, CopyTiles, StateDisjointGpuWork)::install(list);
   ok &= STATE(19, ResolveSubresource, StateDisjointGpuWork)::install(list);
   ok &= STATE(47, ClearDepthStencilView, StateDisjointGpuWork)::install(list);
-  ok &= STATE(48, ClearRenderTargetView, GpuWork)::install(list);
-  ok &= STATE(49, ClearUnorderedAccessViewUint, StateDisjointGpuWork)::install(list);
-  ok &= STATE(50, ClearUnorderedAccessViewFloat, StateDisjointGpuWork)::install(list);
+  ok &= STATE(48, ClearRenderTargetView, ClearRenderTarget)::install(list);
+  ok &= STATE(49, ClearUnorderedAccessViewUint, ClearUnorderedAccess<49>)::install(list);
+  ok &= STATE(50, ClearUnorderedAccessViewFloat, ClearUnorderedAccess<50>)::install(list);
   ok &= STATE(54, ResolveQueryData, StateDisjointGpuWork)::install(list);
   ID3D12GraphicsCommandList1* sample_list{};
   const auto sample_interface = list->QueryInterface(IID_PPV_ARGS(&sample_list));
@@ -2368,7 +2446,7 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
       ok &= StateHook<73, decltype(&ID3D12GraphicsCommandList4::EmitRaytracingAccelerationStructurePostbuildInfo),
                       StateDisjointGpuWork>::install(list);
       ok &= StateHook<74, decltype(&ID3D12GraphicsCommandList4::CopyRaytracingAccelerationStructure), StateDisjointGpuWork>::install(list);
-      ok &= StateHook<76, decltype(&ID3D12GraphicsCommandList4::DispatchRays), StateDisjointGpuWork>::install(list);
+      ok &= StateHook<76, decltype(&ID3D12GraphicsCommandList4::DispatchRays), ComputeGpuWork>::install(list);
     }
   }
   if (state_object_list)

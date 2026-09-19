@@ -14,6 +14,10 @@ class SceneSessionReset {
   static bool work_allowed(bool reset_requested, std::uint64_t authorized_epoch, std::uint64_t public_epoch, bool public_ready) noexcept {
     return !reset_requested && authorized_epoch == public_epoch && public_ready;
   }
+  // The update hook can be installed by a refused first request (readiness
+  // lost during image parse / VirtualProtect). observer() returns immediately
+  // while enabled is still false, so a later flight reset cannot wait for it.
+  static bool observer_can_retire(bool hooked, bool enabled) noexcept { return hooked && enabled; }
   void begin(std::uint32_t profile) noexcept {
     profile_ = profile;
     retired_ = false;

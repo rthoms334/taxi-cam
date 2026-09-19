@@ -96,19 +96,21 @@ bool Pool::valid_copy(const Copy& copy) const noexcept {
       copy.height > 16384 || !same_native_device(copy.target, device_) || !same_native_device(copy.source, device_))
     return false;
   constexpr auto allowed = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-  if (copy.state != D3D12_RESOURCE_STATE_RENDER_TARGET && (static_cast<unsigned>(copy.state) & ~static_cast<unsigned>(allowed)) != 0)
+  if (copy.state != D3D12_RESOURCE_STATE_RENDER_TARGET && copy.state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS &&
+      (static_cast<unsigned>(copy.state) & ~static_cast<unsigned>(allowed)) != 0)
     return false;
   const auto target = copy.target->GetDesc();
   const auto source = copy.source->GetDesc();
   const auto& footprint = copy.footprint.Footprint;
   if (target.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || target.Width > 16384 || target.Height > 16384 || !target.MipLevels ||
       target.DepthOrArraySize != 1 || target.SampleDesc.Count != 1 || target.SampleDesc.Quality != 0 ||
-      !(target.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || (target.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) ||
-      source.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || !typed_format(footprint.Format) ||
-      format_family(target.Format) != format_family(footprint.Format) || footprint.Width != copy.width || footprint.Height != copy.height ||
-      footprint.Depth != 1 || footprint.RowPitch < copy.width * 4 || footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 ||
-      copy.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 || copy.x > target.Width || copy.width > target.Width - copy.x ||
-      copy.y > target.Height || copy.height > target.Height - copy.y)
+      !(target.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ||
+      (copy.state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && !(target.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) ||
+      (target.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) || source.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+      !typed_format(footprint.Format) || format_family(target.Format) != format_family(footprint.Format) || footprint.Width != copy.width ||
+      footprint.Height != copy.height || footprint.Depth != 1 || footprint.RowPitch < copy.width * 4 ||
+      footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 || copy.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 ||
+      copy.x > target.Width || copy.width > target.Width - copy.x || copy.y > target.Height || copy.height > target.Height - copy.y)
     return false;
   const std::uint64_t bytes = std::uint64_t{copy.height - 1} * footprint.RowPitch + std::uint64_t{copy.width} * 4;
   return copy.footprint.Offset <= source.Width && bytes <= source.Width - copy.footprint.Offset;

@@ -139,6 +139,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     p.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
     p.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
     auto& blend = p.BlendState.RenderTarget[0];
+    blend.BlendEnable = FALSE;
     blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
     blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
     blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;

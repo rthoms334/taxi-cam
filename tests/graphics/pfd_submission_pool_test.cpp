@@ -335,6 +335,9 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
   invalid.state = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
   refused(invalid);
   invalid = valid;
+  invalid.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  refused(invalid);
+  invalid = valid;
   invalid.state = static_cast<D3D12_RESOURCE_STATES>(~UINT{0});
   refused(invalid);
   invalid = valid;
