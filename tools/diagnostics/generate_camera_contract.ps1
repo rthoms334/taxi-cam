@@ -165,7 +165,9 @@ foreach ($range in $ranges) {
     if ($source.Count -ne 1 -or [Convert]::ToHexString($bytes) -cne $source[0].hex.Substring(0, 2 * $bytes.Length).ToUpperInvariant()) {
         throw 'Selected binary differs from its verified capture.'
     }
-    $code.Add([pscustomobject]@{ symbol = $id; range = $range; bytes = $bytes; decoded = $decoded.instructions; store = $normal; cross_build=$crossBuild; operands = [Collections.Generic.List[object]]::new(); minimum_seed = $(if ($name -eq 'aircraft_controller_method') { 7 } else { 8 }) })
+    # The seven-byte aircraft_controller_method is not an independent seed.
+    # Vtable and caller relations select that copy, so regeneration keeps 8.
+    $code.Add([pscustomobject]@{ symbol = $id; range = $range; bytes = $bytes; decoded = $decoded.instructions; store = $normal; cross_build=$crossBuild; operands = [Collections.Generic.List[object]]::new(); minimum_seed = 8 })
 }
 # Bind every reference into another reviewed range to that range's symbol plus
 # an addend. An independently named alias must not weaken this relationship.
@@ -381,6 +383,7 @@ $cpp = [Text.StringBuilder]::new()
 [void]$cpp.AppendLine('static const relocatable::ContractModel value = [] { relocatable::ContractModel out;')
 foreach ($s in $symbols) { [void]$cpp.AppendLine(('out.symbols.push_back({{"{0}",relocatable::SectionKind::{1},{2}}});' -f $s.name, $s.kind, $s.extent)) }
 foreach ($c in $code) {
+    if ($c.minimum_seed -ne 8) { throw "Generated template $($symbols[$c.symbol].name) must keep minimum_seed 8." }
     [void]$cpp.AppendLine(('out.code.push_back({{{0},{1},{{' -f $c.symbol, (Bytes-Literal $c.bytes)))
     foreach ($o in $c.operands) { [void]$cpp.AppendLine(('{{{0},{1},{2},relocatable::AddressKind::{3},{4},{5}}},' -f $o.offset, $o.width, $o.pc_offset, $o.kind, $o.target_symbol, $o.addend)) }
     [void]$cpp.AppendLine(('}},{0}}});' -f $c.minimum_seed))
