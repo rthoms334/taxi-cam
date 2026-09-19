@@ -58,6 +58,16 @@ struct SourceViewSnapshot {
 // pointers keep their eight-byte alignment guard. This admission by itself
 // does not establish a valid live handle or a tagged-pointer interpretation.
 SourceViewSnapshot inspect_source_view(engine_camera::MemoryReader& reader, const engine_camera::ViewPoolSnapshot& pool) noexcept;
+// Same eight-slot budget as inspect_source_view. A null predicate accepts the
+// first usable camera. A predicate may skip a usable camera, including the
+// aircraft-object camera, without ending the scan or publishing its address.
+// validated_position is cleared first and set only for the accepted camera.
+using SourceViewPredicate = bool (*)(const std::array<double, 3>& translation, float fov, void* context);
+SourceViewSnapshot select_source_view(engine_camera::MemoryReader& reader,
+                                      const engine_camera::ViewPoolSnapshot& pool,
+                                      SourceViewPredicate accept,
+                                      void* context,
+                                      std::array<double, 3>* validated_position = nullptr) noexcept;
 
 // Same validation for one independently verified source object with its Node
 // handle at +104. Does not read a pool or infer the source object's identity.

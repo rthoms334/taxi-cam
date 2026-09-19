@@ -50,6 +50,9 @@ struct ProbePerformance {
 struct ProbeSnapshot {
   bool hook_installed = false;
   bool accepting_requests = false;
+  // The start was not queued because public flight readiness moved. The caller
+  // may retry. A contract, hook, or other hard refusal leaves this false.
+  bool readiness_deferred = false;
   bool pose_captured = false;
   std::uint64_t profile_transition_token = 0;
   std::uint32_t profile_transition_id = 0;

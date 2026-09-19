@@ -144,15 +144,18 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
   const auto cancelled = runtime.pair.cancel_uncreated_request();
   // Only the observer can acknowledge renderer retirement. An empty mailbox
   // snapshot does not establish that either native release queue has drained.
-  // Before an observer has ever been installed, no native camera allocation
-  // could have run; preserve the empty initial setup path without a deadlock.
-  if (!runtime.hooked.load(std::memory_order_acquire))
+  // Before an observer has ever been enabled, no native camera allocation
+  // could have run. A refused start may already have installed the hook;
+  // waiting for that disabled observer deadlocks the next flight reset.
+  if (SceneSessionReset::acknowledge_empty_without_observer(runtime.hooked.load(std::memory_order_acquire),
+                                                           runtime.enabled.load(std::memory_order_acquire)))
     runtime.session_reset.observe_empty(cancelled, runtime.pair.snapshot());
   if (runtime.profile_transition_token != UINT64_MAX)
     ++runtime.profile_transition_token;
   else
     runtime.session_reset_failed = true;
   runtime.published.accepting_requests = false;
+  runtime.published.readiness_deferred = false;
   runtime.published.outputs_matched = false;
   runtime.published.message = "Flight session reset pending; camera creation is disabled until retirement and load readiness.";
 }
@@ -275,6 +278,9 @@ bool manager_context(Runtime& runtime,
   return true;
 }
 
+bool accept_public_camera_source(const std::array<double, 3>& translation, float fov, void*) noexcept {
+  return public_camera_matches(translation, fov, GetTickCount64());
+}
 bool capture_pose(Runtime& runtime) {
   runtime.pose_captured = false;
   runtime.pose_busy = false;
@@ -321,17 +327,40 @@ bool capture_pose(Runtime& runtime) {
                                                       runtime.contract.layout);
         },
         &memory_detail);
-    if (!aircraft.valid || !aircraft.available || !source) {
-      runtime.message = "Aircraft body calibration is waiting for a stable loaded source: " + aircraft.stage + ". " + aircraft.error;
-      if (!memory_detail.empty())
-        runtime.message += " " + memory_detail;
-      return false;
-    }
-    objects.reset_budget();
+    // The aircraft payload camera is not always CameraGet's current view.
+    // FlyByWire A380 keeps another camera on that object. A rejected candidate
+    // must not enter calibrate_body_pose: that call clears the three-sample latch.
     Vector3 position{};
-    const auto camera = inspected(runtime, [&] { return inspect_source_pose(objects, source, &position); }, &memory_detail);
-    if (!camera.complete || !calibrate_body_pose(position, camera.fov, GetTickCount64())) {
-      runtime.message = "Aircraft body calibration is waiting for matching fresh public and private camera coordinates.";
+    float matched_fov = 0;
+    bool matched = false;
+    if (aircraft.valid && aircraft.available && source) {
+      objects.reset_budget();
+      const auto camera = inspected(runtime, [&] { return inspect_source_pose(objects, source, &position); }, &memory_detail);
+      if (camera.complete && public_camera_matches(position, camera.fov, GetTickCount64())) {
+        matched = true;
+        matched_fov = camera.fov;
+      }
+    }
+    if (!matched && runtime.renderer) {
+      LocalMemoryReader views;
+      const auto pool = inspected(runtime, [&] { return ec::inspect_view_pool(views, runtime.renderer); }, &memory_detail);
+      if (pool.valid) {
+        views.reset_budget();
+        std::array<double, 3> translation{};
+        const auto chosen = inspected(
+            runtime, [&] { return select_source_view(views, pool, accept_public_camera_source, nullptr, &translation); }, &memory_detail);
+        if (chosen.complete) {
+          position = translation;
+          matched_fov = chosen.fov;
+          matched = true;
+        }
+      }
+    }
+    if (!matched || !calibrate_body_pose(position, matched_fov, GetTickCount64())) {
+      if (!aircraft.valid || !aircraft.available || !source)
+        runtime.message = "Aircraft body calibration is waiting for a stable loaded source: " + aircraft.stage + ". " + aircraft.error;
+      else
+        runtime.message = "Aircraft body calibration is waiting for matching fresh public and private camera coordinates.";
       if (!memory_detail.empty())
         runtime.message += " " + memory_detail;
       return false;
@@ -1603,8 +1632,10 @@ void observer(void* manager) noexcept {
         report.message = "Camera start remains pending until native pooled-view retirement completes.";
       } else if (resolution_pause)
         report.message = runtime.message;
-      else if (body_pose_failed || waiting_for_body)
+      else if (body_pose_failed || waiting_for_body) {
+        report.pose_waiting = true;
         report.message = runtime.message.empty() ? runtime.stage_error : runtime.message;
+      }
       else if (report.view_waiting)
         report.message = "Owned view inspection unavailable; camera IDs retained while waiting for fresh validation.";
       else if (pair.state == ec::State::active && runtime.resize_warmup.pending())
@@ -1708,6 +1739,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
   {
     const std::lock_guard lock(runtime.mutex);
     runtime.published.accepting_requests = false;
+    runtime.published.readiness_deferred = false;
   }
   try {
     if (!runtime.hooked.load(std::memory_order_acquire)) {
@@ -1779,6 +1811,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
       const auto readiness = get_aircraft_session_readiness();
       if (!readiness.ready || runtime.session_reset_failed ||
           (runtime.session_reset.holding() && !runtime.session_reset.ready(readiness.ready, pair))) {
+        runtime.published.readiness_deferred = true;
         runtime.published.message = "Camera startup waits for flight load readiness and confirmed retirement of the prior session.";
         return;
       }
@@ -1790,9 +1823,11 @@ void request_scene_test(bool reuse_calibration) noexcept {
     const auto readiness = get_aircraft_session_readiness();
     if (!readiness.ready || runtime.session_reset_failed ||
         (runtime.session_reset.holding() && !runtime.session_reset.consume(readiness.ready, pair))) {
+      runtime.published.readiness_deferred = true;
       runtime.published.message = "Flight load readiness changed during camera startup; no camera creation requested.";
       return;
     }
+    runtime.published.readiness_deferred = false;
     runtime.reset_requested.store(false, std::memory_order_release);
     const bool retained = runtime.profile_transition.can_resume(pair);
     if (runtime.profile_transition.holding() && (pair.owned_ids[0] || pair.owned_ids[1]) && !retained) {

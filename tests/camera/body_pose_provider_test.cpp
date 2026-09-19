@@ -277,6 +277,19 @@ void session_readiness_regressions(Check check) {
   check(!status.loading && status.ready && status.epoch == ended_epoch + 1);
   check(!testing::accept_session_packet(flow.data(), flow.size()));
   check(select_aircraft_profile(1));
+  const auto parked = body_math::ecef(cv[0], cv[1], cv[2]);
+  bool accepted = false;
+  for (unsigned sample = 0; sample < 3; ++sample) {
+    now = GetTickCount64() + sample + 1;
+    supply();
+    check(testing::session_readiness_at(now).ready);
+    check(public_camera_matches(parked, static_cast<float>(fov), now));
+    check(!public_camera_matches(body_math::ecef(0, 0, 0), static_cast<float>(fov), now));
+    accepted = calibrate_body_pose(parked, static_cast<float>(fov), now);
+    check(sample < 2 ? !accepted : accepted);
+  }
+  reset_body_pose_calibration();
+  check(!sample_body_pose(now).valid);
 }
 int offline_tests() {
   unsigned checks = 0;

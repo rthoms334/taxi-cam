@@ -937,6 +937,27 @@ void reset_body_pose_calibration() noexcept {
   state.calibration_camera_ms = 0;
   ReleaseSRWLockExclusive(&state.lock);
 }
+bool camera_sample_matches_locked(const Vector3& lla, float fov, std::uint64_t now) noexcept {
+  const auto locked_now = GetTickCount64();
+  if (now < locked_now)
+    now = locked_now;
+  if (!readiness_locked(now).ready || !fresh(state.camera_ms, now) || !fresh(state.aircraft_ms, now) || now - state.camera_ms > 100 ||
+      now - state.aircraft_ms > 100 || std::abs(state.camera.fov - fov) > 0.0001)
+    return false;
+  const auto camera_surface = body_math::ecef(state.camera.position[0], state.camera.position[1], 0);
+  const auto private_surface = body_math::ecef(lla[0], lla[1], 0);
+  const double delta = lla[2] - state.camera.position[2];
+  return body_math::distance(camera_surface, private_surface) <= 0.5 && std::isfinite(delta) && std::abs(delta) <= 150;
+}
+bool public_camera_matches(const Vector3& position, float fov, std::uint64_t now) noexcept {
+  Vector3 lla{};
+  if (!body_math::geodetic(position, lla) || !std::isfinite(fov))
+    return false;
+  AcquireSRWLockShared(&state.lock);
+  const bool good = camera_sample_matches_locked(lla, fov, now);
+  ReleaseSRWLockShared(&state.lock);
+  return good;
+}
 bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now) noexcept {
   Vector3 lla{};
   if (!body_math::geodetic(position, lla) || !std::isfinite(fov))
@@ -944,15 +965,8 @@ bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now) 
   AcquireSRWLockExclusive(&state.lock);
   // The worker may publish after the caller sampled its clock but before this
   // lock. Judge freshness at the locked read, retaining future test deadlines.
-  const auto locked_now = GetTickCount64();
-  if (now < locked_now)
-    now = locked_now;
-  bool good = readiness_locked(now).ready && fresh(state.camera_ms, now) && fresh(state.aircraft_ms, now) && now - state.camera_ms <= 100 &&
-              now - state.aircraft_ms <= 100 && std::abs(state.camera.fov - fov) <= 0.0001;
-  const auto camera_surface = body_math::ecef(state.camera.position[0], state.camera.position[1], 0);
-  const auto private_surface = body_math::ecef(lla[0], lla[1], 0);
+  const bool good = camera_sample_matches_locked(lla, fov, now);
   const double delta = lla[2] - state.camera.position[2];
-  good = good && body_math::distance(camera_surface, private_surface) <= 0.5 && std::isfinite(delta) && std::abs(delta) <= 150;
   bool accepted = false;
   if (!good)
     state.calibration_samples = 0;

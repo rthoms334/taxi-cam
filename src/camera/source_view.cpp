@@ -227,13 +227,20 @@ void publish(SourceViewSnapshot& result, std::uint64_t address, const Candidate&
 
 }  // namespace
 
-SourceViewSnapshot inspect_source_view(engine_camera::MemoryReader& reader, const engine_camera::ViewPoolSnapshot& pool) noexcept {
+SourceViewSnapshot select_source_view(engine_camera::MemoryReader& reader,
+                                      const engine_camera::ViewPoolSnapshot& pool,
+                                      SourceViewPredicate accept,
+                                      void* context,
+                                      std::array<double, 3>* validated_position) noexcept {
+  if (validated_position)
+    *validated_position = {};
   SourceViewSnapshot result;
   if (!valid_pool(pool)) {
     fail(result, SourceViewStatus::invalid_pool, "Source selection requires a complete pool of eight distinct classified views.");
     return result;
   }
   BoundedReader source(reader, result);
+  bool saw_usable = false;
   for (const auto& slot : pool.slots) {
     if (!slot.association_valid)
       continue;
@@ -250,15 +257,25 @@ SourceViewSnapshot inspect_source_view(engine_camera::MemoryReader& reader, cons
       return result;
     if (!candidate.usable)
       continue;
+    saw_usable = true;
+    if (accept && !accept(candidate.translation, candidate.fov, context))
+      continue;
     if (!source.recheck())
       return result;
     publish(result, view, candidate);
     result.view_index = static_cast<std::int32_t>(slot.index);
+    if (validated_position)
+      *validated_position = candidate.translation;
     return result;
   }
   if (source.recheck())
-    fail(result, SourceViewStatus::no_source, "No occupied view has the required generation-valid Camera and finite orthonormal pose.");
+    fail(result, SourceViewStatus::no_source,
+         saw_usable ? "No occupied view camera matches the current public WORLD sample."
+                    : "No occupied view has the required generation-valid Camera and finite orthonormal pose.");
   return result;
+}
+SourceViewSnapshot inspect_source_view(engine_camera::MemoryReader& reader, const engine_camera::ViewPoolSnapshot& pool) noexcept {
+  return select_source_view(reader, pool, nullptr, nullptr, nullptr);
 }
 
 SourceViewSnapshot inspect_source_pose(engine_camera::MemoryReader& reader,

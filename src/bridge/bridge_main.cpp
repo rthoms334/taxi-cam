@@ -48,7 +48,7 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
 }
 struct StartupTiming {
   unsigned intent_mask{}, attempts{};
-  bool observed{}, target_ready{}, output_ready{}, stamped{};
+  bool observed{}, target_ready{}, output_ready{}, stamped{}, waiting_logged{};
   std::uint64_t intent_ms{}, target_ms{}, prepare_begin_ms{}, prepare_end_ms{}, request_begin_ms{}, request_end_ms{};
   std::uint64_t output_ms{}, stamp_ms{}, baseline_stamps{};
 };
@@ -107,6 +107,7 @@ DWORD run_impl() {
   CaptureProgress progress;
   StartupTiming startup, warmup_startup;
   win::ScenePrewarm prewarm;
+  std::uint64_t next_background_start = 0;
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
@@ -293,6 +294,7 @@ DWORD run_impl() {
       intent = {};
       progress = {};
       startup = {};
+      next_background_start = 0;
       exposure = {};
       next_telemetry = next_discovery = 0;
       next_inventory = 0;
@@ -442,7 +444,7 @@ DWORD run_impl() {
     composition.tail_upper = settings.tail_upper;
     composition.tail_corner = settings.tail_corner;
     composition.tail_inner = settings.tail_inner;
-    if (demand.start) {
+    if (demand.start && !(background_warmup && GetTickCount64() < next_background_start)) {
       auto& start_timing = background_warmup ? warmup_startup : startup;
       if (background_warmup) {
         start_timing.observed = true;
@@ -482,11 +484,31 @@ DWORD run_impl() {
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
-        requested = native_camera::scene_snapshot().accepting_requests;
+        const auto shot = native_camera::scene_snapshot();
+        requested = shot.accepting_requests;
+        const bool retain = win::retain_background_prewarm(background_warmup, requested, shot.readiness_deferred);
         start_timing.request_end_ms = GetTickCount64();
-        log_startup(status, start_timing, requested ? "request_accepted" : "request_refused");
-      }
-      failed = win::finish_scene_start(prewarm, background_warmup, requested);
+        if (retain) {
+          // The contract scan can outlast fresh telemetry. Do not park the only
+          // background attempt; the same start is retried once readiness returns.
+          next_background_start = start_timing.request_end_ms + 500;
+          if (!start_timing.waiting_logged) {
+            start_timing.waiting_logged = true;
+            char phase[320];
+            std::snprintf(phase, sizeof(phase), "request_waiting %.200s", shot.message.c_str());
+            log_startup(status, start_timing, phase);
+          }
+        } else {
+          next_background_start = 0;
+          char phase[320];
+          std::snprintf(phase, sizeof(phase), "%s %.200s", requested ? "request_accepted" : "request_refused",
+                        requested ? "" : shot.message.c_str());
+          log_startup(status, start_timing, phase);
+        }
+        if (!retain)
+          failed = win::finish_scene_start(prewarm, background_warmup, requested);
+      } else
+        failed = win::finish_scene_start(prewarm, background_warmup, requested);
       if (!requested) {
         active = 0;
         win::set_target_mask(0);
@@ -619,7 +641,8 @@ DWORD run_impl() {
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : !aircraft_matches             ? aircraft_message
         : cutoff.inhibited ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
-        : failed           ? scene.message.c_str()
+        : failed                                         ? scene.message.c_str()
+        : scene.pose_waiting && requested               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
@@ -693,7 +716,9 @@ DWORD run_impl() {
                     scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
                     static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
                     static_cast<unsigned long long>(graphics.clear_states),
-                    scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
+                    scene.stop_reason != native_camera::SceneStopReason::none ? scene.stop_detail.c_str()
+                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]      ? scene.message.c_str()
+                                                                                : "");
       log_status(status, detail);
       char selection_detail[256];
       std::snprintf(selection_detail, sizeof(selection_detail),

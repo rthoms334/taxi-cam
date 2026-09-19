@@ -135,6 +135,22 @@ void success_and_selection() {
   require(result.complete && result.source_address == kSource && result.node_address == kNode && result.camera_address == kCamera &&
               result.view_index == 0 && result.candidates_examined == 1 && result.fov == 1.5f && result.read_bytes == 308,
           "First occupied source was not verified exactly");
+  Fixture skipped_aircraft_camera;
+  skipped_aircraft_camera.reader.vector(kMatrix + 96, {1, 2, 3});
+  skipped_aircraft_camera.reader.reads.clear();
+  std::array<double, 3> selected{};
+  const auto matched = native_camera::select_source_view(
+      skipped_aircraft_camera.reader, skipped_aircraft_camera.pool,
+      [](const std::array<double, 3>& translation, float, void*) noexcept { return translation[0] == 12; }, nullptr, &selected);
+  require(matched.complete && matched.view_index == 1 && matched.candidates_examined == 2 && selected[0] == 12 && selected[1] == -1234,
+          "A rejected first camera did not yield the later public-view camera");
+  selected = {9, 9, 9};
+  const auto none = native_camera::select_source_view(
+      skipped_aircraft_camera.reader, skipped_aircraft_camera.pool,
+      [](const std::array<double, 3>&, float, void*) noexcept { return false; }, nullptr, &selected);
+  require(!none.complete && none.status == native_camera::SourceViewStatus::no_source && selected == std::array<double, 3>{} &&
+              none.candidates_examined == 8,
+          "Rejected cameras published a position or stopped the scan");
   result = full.run(true);
   require(result.complete && result.view_index == -1 && result.read_bytes == 292 && result.source_address == kSource,
           "Explicit source did not use the same bounded pose validation");

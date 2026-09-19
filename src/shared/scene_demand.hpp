@@ -131,4 +131,11 @@ inline bool finish_scene_start(ScenePrewarm& prewarm, bool background, bool acce
     prewarm.finish_start(accepted);
   return !background && !accepted;
 }
+// Contract resolution can outlast the 500 ms telemetry window. That refusal is
+// not a failed camera. Keep the same background attempt for every profile,
+// including FlyByWire A380, both iniBuilds A350s, and the manual-only iniBuilds
+// A380. A hard refusal still consumes the one attempt.
+inline bool retain_background_prewarm(bool background, bool accepted, bool readiness_deferred) noexcept {
+  return background && !accepted && readiness_deferred;
+}
 }  // namespace taxi_camera::standalone

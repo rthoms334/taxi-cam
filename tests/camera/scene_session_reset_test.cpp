@@ -209,6 +209,12 @@ void empty_and_pending_requests() {
   require(!reset.ready(true, snapshot), "Unpublished empty snapshot bypassed cancellation exclusion");
   reset.observe_empty(ec::EmptyPairCancel::cancelled, snapshot);
   require(reset.ready(true, snapshot), "Cancelled empty snapshot was not accepted");
+  require(nc::SceneSessionReset::acknowledge_empty_without_observer(false, false),
+          "Unhooked empty reset still required an observer");
+  require(nc::SceneSessionReset::acknowledge_empty_without_observer(true, false),
+          "A hook installed before the observer was enabled deadlocked the next flight reset");
+  require(!nc::SceneSessionReset::acknowledge_empty_without_observer(true, true),
+          "An enabled observer skipped native retirement");
   snapshot.owner = {42, 7};
   require(!reset.ready(true, snapshot), "Unexpected owner reused an old empty acknowledgement");
   snapshot = {};

@@ -283,6 +283,16 @@ void prewarm_unqueued_failure_then_taxi() {
   const bool failed = win::finish_scene_start(explicit_failure, false, false);
   const auto latched = win::scene_demand(1, false, 1, false, failed);
   require(failed && !latched.start && latched.suspend && !latched.stamp_mask, "Foreground failure lost its no-retry latch");
+  require(win::retain_background_prewarm(true, false, true),
+          "Readiness lost during contract resolution parked the only background start");
+  require(!win::retain_background_prewarm(true, false, false), "A hard background refusal was retried");
+  require(!win::retain_background_prewarm(true, true, true), "An accepted start stayed deferred");
+  require(!win::retain_background_prewarm(false, false, true), "Foreground readiness loss bypassed its failure latch");
+  win::ScenePrewarm retained_wait;
+  require(retained_wait.observe(1000, true, false, {}, false), "Deferred background start did not begin");
+  require(retained_wait.phase() == win::ScenePrewarm::Phase::preparing, "Deferred background start left preparing");
+  require(retained_wait.observe(1500, true, false, {}, false) && retained_wait.phase() == win::ScenePrewarm::Phase::preparing,
+          "The same background attempt was not kept for a later readiness sample");
 }
 }  // namespace
 int main() {

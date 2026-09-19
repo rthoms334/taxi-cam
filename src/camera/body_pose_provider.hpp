@@ -80,6 +80,9 @@ void reset_body_pose_calibration() noexcept;
 // Matches public CameraGet WORLD before accepting a local vertical correction.
 // No simulator/API calls occur here or in sample_body_pose.
 bool calibrate_body_pose(const Vector3& private_camera_ecef, float private_fov, std::uint64_t now_ms) noexcept;
+// Same WORLD/FOV match as calibration, without changing the three-sample latch.
+// A rejected aircraft-object camera must use this before trying another view.
+bool public_camera_matches(const Vector3& private_camera_ecef, float private_fov, std::uint64_t now_ms) noexcept;
 BodyPoseSnapshot sample_body_pose(std::uint64_t now_ms) noexcept;
 // Receipt timing only, not a claim of simulation timestamp or prediction.
 // Counter is monotonic across worker restarts; no additional simulator reads.

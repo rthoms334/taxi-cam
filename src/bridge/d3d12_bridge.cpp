@@ -481,9 +481,6 @@ bool same_device(ID3D12Device* device) noexcept {
 constexpr std::uint64_t LiveBackfillAdmitMs = 3000;
 constexpr std::uint64_t LiveBackfillAssociateMs = 10000;
 static_assert(LiveBackfillAdmitMs < LiveBackfillAssociateMs);
-unsigned live_backfill_needed(const Registry& r) noexcept {
-  return r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group ? 8u : 2u;
-}
 std::array<std::uint64_t, 2> dominant_activity_pair(const profiles::AircraftProfile& profile,
                                                     const std::vector<PfdTargetObservation>& inventory) noexcept {
   if (inventory.size() != 2 || !inventory[0].id || !inventory[1].id || inventory[0].id == inventory[1].id)
@@ -534,23 +531,29 @@ unsigned live_display_resources(const Registry& r) noexcept {
   }
   return n;
 }
-// A350 submission ranking ignores five-mip UNORM auxiliaries. Two of those can
-// fill a generic pair while the one-mip typeless EFIS group is still absent.
-bool a350_typeless_group_ready(const Registry& r) noexcept {
-  unsigned typeless = 0;
+bool display_set_ready(const Registry& r, unsigned need, DXGI_FORMAT format, UINT mips) noexcept {
+  unsigned n = 0;
   for (const auto& [native, item] : r.resources) {
     (void)native;
     if (!item || !display_item(r, *item))
       continue;
-    if (item->desc.MipLevels == 1 && item->desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS && ++typeless == 3)
+    if (item->desc.MipLevels == mips && item->desc.Format == format && ++n == need)
       return true;
   }
   return false;
 }
+// The detector can assign only this set. A generic pair, or another mip/format
+// that still matches the profile size, must not end discovery.
 bool backfill_resources_ready(const Registry& r) noexcept {
+  if (!r.profile)
+    return false;
   if (r.profile->id == profiles::A359.id || r.profile->id == profiles::A35K.id)
-    return a350_typeless_group_ready(r);
-  return live_display_resources(r) >= live_backfill_needed(r);
+    return display_set_ready(r, 3, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
+  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group)
+    return display_set_ready(r, 8, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
+  if (r.profile->id == profiles::A380.id)
+    return display_set_ready(r, 2, static_cast<DXGI_FORMAT>(r.profile->formats[0]), r.profile->mips);
+  return false;
 }
 unsigned live_display_rtvs(const Registry& r) noexcept {
   unsigned n = 0;
@@ -628,22 +631,35 @@ bool plausible_resource(ID3D12Resource* native) noexcept {
   std::memcpy(&query, static_cast<const void*>(table), sizeof(query));
   return image_region(query, true);
 }
-void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial);
-void admit_live_resource(ID3D12Resource* native, source_state::Model initial) {
+bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial);
+bool admit_live_resource(ID3D12Resource* native, source_state::Model initial) {
   const OwnedWork guard;
   auto& r = registry();
   if (!same_native_device(native, r.device))
-    return;
-  observe_resource(r.device, native, initial);
+    return false;
+  return observe_resource(r.device, native, initial);
+}
+bool can_classify_live_resource(ID3D12Resource* native) noexcept {
+  auto& r = registry();
+  // Remembering a pointer before GetDesc succeeds hides it from every profile.
+  // Cockpit textures are often named in a barrier before that description is valid.
+  return native && r.ready && plausible_resource(native) && same_native_device(native, r.device);
 }
 void consider_live_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* native, source_state::Model initial) {
   auto& r = registry();
   if (!native)
     return;
   if (!r.seen_resources.contains(native)) {
+    if (!can_classify_live_resource(native)) {
+      if (initial == source_state::Model::unknown)
+        r.live_bind.clear(list);
+      return;
+    }
+    bool classified = false;
+    observe_safely([&] { classified = admit_live_resource(native, initial); });
+    if (!classified)
+      return;
     r.seen_resources.remember(native);
-    if (plausible_resource(native))
-      observe_safely([&] { admit_live_resource(native, initial); });
   }
   if (initial == source_state::Model::unknown) {
     r.live_bind.clear(list);
@@ -658,11 +674,12 @@ void consider_live_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* nat
 }
 void consider_live_copy(ID3D12Resource* native) {
   auto& r = registry();
-  if (!native || r.seen_resources.contains(native))
+  if (!native || r.seen_resources.contains(native) || !can_classify_live_resource(native))
     return;
-  r.seen_resources.remember(native);
-  if (plausible_resource(native))
-    observe_safely([&] { admit_live_resource(native, source_state::Model::unknown); });
+  bool classified = false;
+  observe_safely([&] { classified = admit_live_resource(native, source_state::Model::unknown); });
+  if (classified)
+    r.seen_resources.remember(native);
 }
 bool bind_live_rtv(Registry& r, List& l, SIZE_T handle) {
   std::uint64_t generation{};
@@ -679,13 +696,13 @@ bool bind_live_rtv(Registry& r, List& l, SIZE_T handle) {
   maybe_stop_live_backfill(r);
   return r.routes.matches(found->second->id, r.active_mask | r.calibration_mask);
 }
-void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial) {
+bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial) {
   auto& r = registry();
   if (!r.ready || !object || !same_device(device))
-    return;
+    return false;
   ID3D12Resource* native{};
   if (FAILED(object->QueryInterface(IID_PPV_ARGS(&native))))
-    return;
+    return false;
   const auto desc = native->GetDesc();
   if (relevant(desc)) {
     std::shared_ptr<Resource> item;
@@ -694,7 +711,7 @@ void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
       auto found = r.resources.find(native);
       if (found != r.resources.end() && found->second->alive) {
         native->Release();
-        return;
+        return true;
       }
       if (r.resources.size() < 16384 && r.next_id != UINT64_MAX) {
         item = std::make_shared<Resource>();
@@ -728,6 +745,7 @@ void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
     }
   }
   native->Release();
+  return true;
 }
 std::shared_ptr<Resource> resource(ID3D12Resource* p) {
   auto& r = registry();

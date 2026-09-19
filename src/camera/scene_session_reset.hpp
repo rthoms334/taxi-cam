@@ -36,6 +36,14 @@ class SceneSessionReset {
   }
   bool holding() const noexcept { return profile_ != 0; }
   std::uint32_t profile() const noexcept { return profile_; }
+  // The update observer is the only thread that can prove native retirement.
+  // Installing that hook and then refusing the start leaves it disabled, so a
+  // later flight reset would wait forever. Until the observer has run, an
+  // empty pair has no native cameras to drain. This is independent of which
+  // aircraft profile owns the reset.
+  static bool acknowledge_empty_without_observer(bool hooked, bool observer_enabled) noexcept {
+    return !hooked || !observer_enabled;
+  }
   static bool empty(const engine_camera::Snapshot& pair) noexcept {
     return !pair.owner.valid() && !pair.owned_ids[0] && !pair.owned_ids[1] && !pair.request_pending && !pair.creation_pending;
   }
