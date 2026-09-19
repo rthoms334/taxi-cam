@@ -8,7 +8,7 @@ $outputDirectory = Join-Path $repoRoot 'build/tests/camera'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $common = @('-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-DNOMINMAX', '-D_WIN32_WINNT=0x0A00',
             '-mno-avx', '-mno-avx2', '-mno-avx512f', '-static')
-foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activation_mask', 'view_resize', 'view_aa')) {
+foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activation_mask', 'view_resize', 'view_aa', 'add_diffuse_slot')) {
     $output = Join-Path $outputDirectory ($component + '-test.exe')
     $testSource = $component + '_test.cpp'
     $componentSources = @((Join-Path $repoRoot ('src/camera/' + $component + '.cpp')))
@@ -119,7 +119,10 @@ $runtimeSources = @(
     'src/camera/entry_pair.cpp',
     'src/camera/owned_entry_inventory.cpp',
     'src/camera/owned_view.cpp',
-    'src/camera/view_pool.cpp'
+    'src/camera/view_pool.cpp',
+    'src/camera/add_diffuse_slot.cpp',
+    'src/camera/add_diffuse_observe.cpp',
+    'src/graphics/add_diffuse_interest.cpp'
 ) | ForEach-Object { Join-Path $repoRoot $_ }
 $runtimeTest = Join-Path $outputDirectory 'runtime-test.exe'
 & $compiler @common (Join-Path $repoRoot 'tests/camera/runtime_test.cpp') @runtimeSources `

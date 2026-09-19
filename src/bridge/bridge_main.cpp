@@ -4,6 +4,7 @@
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
+#include "../graphics/add_diffuse_capture.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
@@ -116,6 +117,7 @@ DWORD run_impl() {
     const auto begin = GetTickCount64();
     win::service_display_patches();
     scene_runtime::service();
+    add_diffuse::poll();
     service_max_ms = std::max(service_max_ms, GetTickCount64() - begin);
   };
   std::vector<PfdTargetObservation> inventory;

@@ -7,7 +7,9 @@
 
 namespace taxi_camera::engine_hook::render_boundary {
 // Linear metadata inspection, without allocations or resource dereferences.
-// Generic insertion is capped at 256; larger complete batches admit only the two explicitly selected PFD identities.
+// Generic insertion is capped at 256. Larger complete batches admit the two
+// explicitly selected PFD identities plus up to three optional diagnostic
+// targets. Those diagnostic targets are not taxi-camera feeds.
 inline constexpr UINT maximum_legacy_metadata_barriers = 1u << 20;
 enum ScopeFlags : std::uint32_t {
   ScopeEnabled = 1,
@@ -132,6 +134,11 @@ struct Callbacks {
   // including buffer/global-only, empty and malformed calls. No resource model
   // is implied; consumers without a complete enhanced model must invalidate.
   void (*enhanced_call)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
+  // Optional identities for complete legacy batches above 256, after the two
+  // PFD selections. Capacity is three. Return distinct nonnull pointers only.
+  // No dereference, AddRef or GPU command. A null callback keeps the previous
+  // large-batch behaviour. Delivery still uses the before_legacy RT-exit proof.
+  UINT (*diagnostic_legacy_targets)(void*, ID3D12Resource** targets, UINT capacity) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;

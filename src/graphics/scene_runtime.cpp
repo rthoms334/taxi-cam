@@ -1,6 +1,7 @@
 #include "scene_runtime.hpp"
 #include "../bridge/native_hooks.hpp"
 #include "../hooks/render_boundary_observer.hpp"
+#include "add_diffuse_capture.hpp"
 #include "scene_frame_output.hpp"
 
 #include <algorithm>
@@ -204,15 +205,22 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
   auto callbacks = manager().callbacks();
   callbacks.before = [](void*, ID3D12CommandQueue* q, UINT n, ID3D12CommandList* const* lists) noexcept {
     const standalone::OwnedWork guard;
-    return manager().before_submission(q, n, lists);
+    const auto receipt = manager().before_submission(q, n, lists);
+    // Primary-view lists have no taxi packet. A recorded slot 9 copy still needs
+    // after() so the producer fence is signaled. Receipt 1 is synthetic.
+    if (add_diffuse::arm_submission(q, n, lists) && receipt == 0)
+      return static_cast<std::uint64_t>(1);
+    return receipt;
   };
   callbacks.after = [](void*, ID3D12CommandQueue* q, std::uint64_t receipt) noexcept {
     const standalone::OwnedWork guard;
     manager().after_submission(q, receipt);
+    add_diffuse::after_submission(q);
   };
   callbacks.refused = [](void*, ID3D12CommandQueue* q, engine_hook::queue_submit::Refusal reason) noexcept {
     const standalone::OwnedWork guard;
     manager().submission_refused(q, reason);
+    add_diffuse::submission_refused(q);
   };
   const auto result = engine_hook::queue_submit::register_queue(queue, callbacks);
   const bool ready = result.protection_restored && (result.status == engine_hook::queue_submit::Status::registered ||

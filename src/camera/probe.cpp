@@ -4,6 +4,7 @@
 #include "../hooks/observer_hook.hpp"
 #include "../shared/camera_rate.hpp"
 #include "activation_mask.hpp"
+#include "add_diffuse_observe.hpp"
 #include "aircraft_inventory.hpp"
 #include "aircraft_scene_pose.hpp"
 #include "body_pose_provider.hpp"
@@ -708,6 +709,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
     validated = transition.ready();
     if (validated)
       runtime.gates = {};
+    stage_add_diffuse_owned(views[0].view_address, views[1].view_address);
   }
   // A prior ready acknowledgement never authorizes resume after a failed fresh
   // manager inspection. Missing telemetry/calibration keeps this hold active.
@@ -1162,6 +1164,10 @@ void observer(void* manager) noexcept {
     }
     runtime.last_inspection = now;
     serviced = true;
+    struct AddDiffuseFlush {
+      Runtime& runtime;
+      ~AddDiffuseFlush() { flush_add_diffuse(runtime.renderer); }
+    } add_diffuse_flush{runtime};
     ++runtime.inspection_count;
     if (!runtime.counter_frequency.QuadPart)
       QueryPerformanceFrequency(&runtime.counter_frequency);
@@ -1201,6 +1207,7 @@ void observer(void* manager) noexcept {
         if (manager_valid && stable) {
           prepared_pair = runtime.token == before.owner;
           prepared_free_views = report.free_views;
+          stage_add_diffuse_owned(prepared_views[0].view_address, prepared_views[1].view_address);
           return true;
         }
         // Never consume a provisional identity after failed endpoint validation.
@@ -1400,6 +1407,7 @@ void observer(void* manager) noexcept {
               });
           } else {
             inspect_pair(runtime, pair.owned_ids, report, views);
+            stage_add_diffuse_owned(views[0].view_address, views[1].view_address);
           }
         }
         const bool wait_for_views = runtime.view_wait.observe(now, pair,
@@ -1471,6 +1479,7 @@ void observer(void* manager) noexcept {
                 }
                 runtime.message = "Camera dimensions restored without replacing entries or output textures; waiting for fresh frames.";
                 inspect_pair(runtime, pair.owned_ids, report, views);
+                stage_add_diffuse_owned(views[0].view_address, views[1].view_address);
                 restored_now = report.ready[0] && report.ready[1];
               } else {
                 runtime.resize_recovery.mark_failed();

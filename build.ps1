@@ -38,6 +38,7 @@ $graphics = @(
  'src/bridge/d3d12_bridge.cpp',
  'src/graphics/scene_handoff.cpp','src/graphics/scene_capture_d3d12.cpp','src/graphics/scene_capture_manager.cpp','src/graphics/scene_source_state.cpp',
  'src/graphics/scene_frame_output.cpp','src/graphics/scene_runtime.cpp','src/graphics/pfd_submission_pool.cpp','src/graphics/pfd_stamp_state.cpp','src/graphics/pfd_stamp_d3d12.cpp',
+ 'src/graphics/add_diffuse_interest.cpp','src/graphics/add_diffuse_capture.cpp',
  'src/hooks/queue_submit_observer.cpp','src/hooks/pfd_state_observer.cpp','src/hooks/render_boundary_observer.cpp'
 )
 $engine = @(
@@ -46,6 +47,7 @@ $engine = @(
  'src/camera/view_resize.cpp','src/camera/view_aa.cpp','src/camera/source_view.cpp','src/camera/body_pose_provider.cpp','src/camera/mount_config.cpp',
  'src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp',
  'src/camera/owned_entry_inventory.cpp','src/camera/owned_view.cpp','src/camera/view_pool.cpp',
+ 'src/camera/add_diffuse_slot.cpp','src/camera/add_diffuse_observe.cpp',
  'src/hooks/observer_hook.cpp','src/hooks/observer_thunk.S','tools/diagnostics/image_inventory.cpp'
 )
 $libs = @('-ld3d12','-ldxgi','-ldxguid','-ld3dcompiler')

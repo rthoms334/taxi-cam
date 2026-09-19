@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "../graphics/add_diffuse_capture.hpp"
 #include "../graphics/calibration_d3d12.hpp"
 #include "../graphics/d3d12_command_list9.hpp"
 #include "../graphics/metadata_batch_cache.hpp"
@@ -824,6 +825,7 @@ void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, con
   if (idle_callback())
     return;
   const OwnedWork guard;
+  add_diffuse::note_legacy_exit(list, id, b.pResource);
   copy_pending_pfd(list, id, b.pResource);
   runtime::manager().record_render_target_before_transition(list, b.pResource, true, id);
 }
@@ -831,6 +833,7 @@ void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, 
   if (idle_callback())
     return;
   const OwnedWork guard;
+  add_diffuse::note_enhanced_exit(list, id, b.pResource);
   copy_pending_pfd(list, id, b.pResource, list);
   runtime::manager().record_render_target_before_enhanced_transition(list, b.pResource, true, id);
 }
@@ -1404,6 +1407,9 @@ void submission_enhanced(void*, ID3D12GraphicsCommandList* native, std::uint64_t
   if (auto item = find_list(native); item && item->id == id)
     item->submission_proof.invalidate(PfdSubmissionProof::Refusal::enhanced_barrier);
 }
+UINT diagnostic_legacy_targets(void*, ID3D12Resource** targets, UINT capacity) noexcept {
+  return add_diffuse::diagnostic_targets(targets, capacity);
+}
 const boundary::Callbacks Boundaries{nullptr,
                                      before_legacy,
                                      before_enhanced,
@@ -1419,7 +1425,8 @@ const boundary::Callbacks Boundaries{nullptr,
                                      metadata_begin,
                                      metadata_end,
                                      submission_pass_began,
-                                     submission_enhanced};
+                                     submission_enhanced,
+                                     diagnostic_legacy_targets};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -1459,6 +1466,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     boundary::successful_reset(native, item->id);
   else
     boundary::reset_failed(native, item->id);
+  add_diffuse::note_list_reset(native);
   return item;
 }
 void unknown_list(void*, ID3D12GraphicsCommandList* list, std::uint64_t) noexcept {
@@ -1948,10 +1956,12 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
         registry().live_bind.clear(native);
       boundary::successful_reset(native, item->id);
       runtime::manager().successful_reset(native, item->id);
+      add_diffuse::note_list_reset(native);
     } else {
       item->submission_proof.invalidate();
       item->graphics.invalidate("native_reset_failed");
       boundary::reset_failed(native, item->id);
+      add_diffuse::note_list_reset(native);
     }
   }
   return hr;
