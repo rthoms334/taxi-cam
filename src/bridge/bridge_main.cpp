@@ -665,6 +665,8 @@ DWORD run_impl() {
         : !active && !settings.follow_taxi     ? "Manual control selected. Enable a preview or TAXI buttons on Overview."
         : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
         : !requested || failed                 ? scene.message.c_str()
+        : settings.single_camera && !output.output
+            ? "First camera only is on (Diagnostics): the display needs both cameras. Turn it off and save."
         : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
         : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
                                                : output.message;

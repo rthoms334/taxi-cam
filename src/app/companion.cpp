@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <uxtheme.h>
+#include <algorithm>
 #include <atomic>
 #include <cwchar>
 #include <mutex>
@@ -13,6 +14,7 @@
 #include "launcher.hpp"
 #include "launcher_log.hpp"
 #include "connection_recoverability.hpp"
+#include "simulator_graphics.hpp"
 #include "../shared/protocol.hpp"
 #include "settings_store.hpp"
 #include "startup_state.hpp"
@@ -55,6 +57,15 @@ HANDLE worker{}, show_event{}, singleton{};
 bool dirty = false, refreshing = false, background_start = false, preview_ui = false;
 std::atomic<bool> auto_connect{true};
 std::atomic<bool> connection_requested{}, connection_disconnected{};
+// MSFS runs elevated while this companion does not; only a restart with the
+// same rights can attach. Cleared whenever the simulator session changes.
+std::atomic<bool> elevation_required{};
+DWORD wait_for_exit_pid{};
+// Simulator graphics guards. Frame generation freezes this machine's simulator
+// once the cameras open, so the cameras stay off while it is on unless the
+// user allows it on Diagnostics; a graphics hook beside MSFS (ReShade) is
+// named because capture silently stays at zero with it loaded.
+std::atomic<bool> allow_frame_generation{}, frame_generation_blocked{}, graphics_hook_detected{};
 win::ConnectCommandQueue connect_commands;
 win::CameraHotkeys hotkey_draft = win::DefaultCameraHotkeys, hotkey_saved = win::DefaultCameraHotkeys;
 win::CameraHotkeyRegistration hotkey_registration;
@@ -176,6 +187,18 @@ void publish(const win::Settings& value) {
 }
 void refresh_connection_button() {
   SetDlgItemTextW(window, 241, win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
+}
+// The administrator restart control exists only while the rights mismatch
+// does. It is added or removed on its own so unsaved edits on the page survive.
+void sync_elevation_button() {
+  const bool wanted = page == 0 && elevation_required.load(std::memory_order_acquire);
+  const HWND existing = GetDlgItem(window, 242);
+  if (wanted && !existing)
+    button(L"Restart as administrator", 242, 430, 236, 250, 34);
+  else if (!wanted && existing) {
+    DestroyWindow(existing);
+    controls.erase(std::remove(controls.begin(), controls.end(), existing), controls.end());
+  }
 }
 void request_connection(win::ConnectCommand command) {
   {
@@ -703,6 +726,8 @@ void build_controls() {
     toggle(L"Auto aircraft", 230, s.auto_profile, 707, 318, 140);
     toggle(L"Auto-connect", 240, auto_connect.load(std::memory_order_acquire), 707, 236, 155);
     button(win::connection_button_label(connection_requested.load(std::memory_order_acquire)), 241, 260, 236, 155, 34);
+    if (elevation_required.load(std::memory_order_acquire))
+      button(L"Restart as administrator", 242, 430, 236, 250, 34);
     const auto* profile = profiles::find(s.profile);
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     toggle(L"TAXI buttons", 221, s.follow_taxi && !manual, 800, 412, 180);
@@ -738,6 +763,7 @@ void build_controls() {
   } else if (page == 4) {
     toggle(L"Scene test", 229, s.scene_test, 260, 449, 200);
     toggle(L"First camera only", 228, s.single_camera, 505, 449, 200);
+    toggle(L"Allow Frame Generation (freeze risk)", 247, allow_frame_generation.load(std::memory_order_acquire), 260, 500, 300);
     edit(s.calibration_budget, 203, 840, 548, 120);
     button(L"Open log folder", 510, 260, 591, 210);
     button(L"Stop camera tests", 511, 500, 591, 210);
@@ -829,11 +855,18 @@ void draw_page(HDC dc) {
                                                                  : L"Native bridge connected — waiting for cockpit displays",
          266, 153, 500, 30, heading, sample.graphics_ready && has_displays ? Accent : Text);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays;
-    const auto line = late_empty_pfds    ? std::wstring(
-                                               L"Waiting for cockpit displays to be drawn. "
-                                               L"Restart Flight only if the list stays empty.")
-                      : sample.heartbeat ? widen(sample.message)
-                                         : live;
+    auto line = late_empty_pfds    ? std::wstring(
+                                         L"Waiting for cockpit displays to be drawn. "
+                                         L"Restart Flight only if the list stays empty.")
+                : sample.heartbeat ? widen(sample.message)
+                                   : live;
+    if (frame_generation_blocked.load(std::memory_order_acquire) && !connection_disconnected.load(std::memory_order_acquire))
+      line = win::FrameGenerationBlockedMessage;
+    else if (graphics_hook_detected.load(std::memory_order_acquire) && sample.heartbeat && !sample.captures)
+      line =
+          L"A graphics hook (dxgi.dll/d3d12.dll, e.g. ReShade) is installed beside MSFS: camera capture stays at 0 while it is "
+          L"loaded. Rename it and restart MSFS. " +
+          line;
     text(dc, line.c_str(), 266, 188, 715, 36, normal, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 295, 766, 93);
     text(dc, L"Aircraft profile", 260, 298, 350, 22, small, Muted);
@@ -987,6 +1020,8 @@ DWORD WINAPI connection_worker(void*) {
   std::uint64_t ignore_heartbeat_through = 0;
   win::LaunchRetry startup_retry;
   HANDLE process{};
+  win::SimulatorGraphicsMonitor graphics_monitor;
+  bool fg_notice_shown = false;
   while (running.load()) {
     if (preview_ui) {
       Sleep(100);
@@ -1022,6 +1057,11 @@ DWORD WINAPI connection_worker(void*) {
     }
     const auto attach = win::find_simulator_attach(expected_simulator);
     const DWORD pid = attach.pid;
+    const auto& graphics_sample = graphics_monitor.sample(attach.path.empty() ? expected_simulator : attach.path, GetTickCount64());
+    const bool fg_blocked =
+        graphics_sample.frame_generation == win::FrameGeneration::on && !allow_frame_generation.load(std::memory_order_acquire);
+    frame_generation_blocked.store(fg_blocked, std::memory_order_release);
+    graphics_hook_detected.store(graphics_sample.graphics_hook, std::memory_order_release);
     if (attached && (pid != attached || (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0))) {
       mailbox.close();
       if (process)
@@ -1035,6 +1075,7 @@ DWORD WINAPI connection_worker(void*) {
       ignore_heartbeat_through = 0;
       startup_retry.reset();
       simulator_pid = 0;
+      elevation_required.store(false, std::memory_order_release);
       {
         const std::lock_guard lock(app_mutex);
         status = {};
@@ -1057,6 +1098,7 @@ DWORD WINAPI connection_worker(void*) {
       manual_armed = manual_armed || command == win::ConnectCommand::connect || command == win::ConnectCommand::reset;
       ignore_heartbeat_through = 0;
       startup_retry = {};
+      elevation_required.store(false, std::memory_order_release);
       process = OpenProcess(SYNCHRONIZE, FALSE, pid);
       if (!auto_on && !manual_armed) {
         {
@@ -1066,8 +1108,41 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       }
     }
-    const bool want_connect =
-        win::should_attempt_connect(auto_on, attempted, command, manual_armed, connection_disconnected.load(std::memory_order_acquire));
+    if (attached && fg_blocked && !connection_disconnected.load(std::memory_order_acquire)) {
+      if (connection_requested.load(std::memory_order_acquire)) {
+        // Frame generation was enabled while the cameras were on: stop them
+        // the same way Disconnect does, but keep Auto-connect armed so the
+        // cameras resume by themselves once the option is off again.
+        {
+          const std::lock_guard lock(app_mutex);
+          win::apply_connection_command(current, win::ConnectCommand::disconnect);
+          connection_requested.store(false, std::memory_order_release);
+          status = {};
+        }
+        exchange_control(mailbox);
+        mailbox.close();
+        attempted = bridge_ok = manual_armed = false;
+        ignore_heartbeat_through = 0;
+        startup_retry.reset();
+      }
+      if (!fg_notice_shown) {
+        const std::lock_guard lock(app_mutex);
+        connection = win::FrameGenerationBlockedMessage;
+        fg_notice_shown = true;
+      }
+      PostMessageW(window, StatusMessage, 0, 0);
+    } else if (!fg_blocked && fg_notice_shown) {
+      fg_notice_shown = false;
+      attempted = false;  // let Auto-connect resume now that frame generation is off
+      {
+        const std::lock_guard lock(app_mutex);
+        if (!connection_disconnected.load(std::memory_order_acquire))
+          connection = L"Frame Generation is off again. Reconnecting the cameras.";
+      }
+      PostMessageW(window, StatusMessage, 0, 0);
+    }
+    const bool want_connect = !fg_blocked && win::should_attempt_connect(auto_on, attempted, command, manual_armed,
+                                                                         connection_disconnected.load(std::memory_order_acquire));
     if (attached && want_connect && startup_retry.ready(GetTickCount64())) {
       {
         const std::lock_guard lock(app_mutex);
@@ -1122,6 +1197,7 @@ DWORD WINAPI connection_worker(void*) {
           if (!retrying)
             manual_armed = false;
         }
+        elevation_required.store(!loaded.ok && loaded.elevation_required, std::memory_order_release);
         {
           const std::lock_guard lock(app_mutex);
           if (!connection_disconnected.load(std::memory_order_acquire)) {
@@ -1134,7 +1210,7 @@ DWORD WINAPI connection_worker(void*) {
               connection += L" Retrying startup preflight.";
             else if (loaded.retry_before_load && !loaded.ok)
               connection += L" Automatic retries paused; choose Disconnect, then Connect to retry.";
-            else if (!loaded.ok)
+            else if (!loaded.ok && !loaded.elevation_required)
               connection += L" Choose Disconnect, then Connect to try again.";
           }
         }
@@ -1207,6 +1283,31 @@ void stop_service() {
     }
   }
 }
+// Starts an elevated copy through UAC, then exits so it can take the single-
+// instance mutex and attach to the elevated simulator. A refused consent
+// prompt leaves this instance running unchanged.
+void restart_as_administrator() {
+  if (dirty) {
+    const int choice = MessageBoxW(window,
+                                   L"Save your unsaved settings before restarting?\n\nYes: save and restart.\nNo: discard "
+                                   L"changes.\nCancel: keep the app open.",
+                                   L"Unsaved settings", MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (choice == IDCANCEL || (choice == IDYES && !apply()))
+      return;
+  }
+  auto arguments = win::relaunch_arguments(GetCurrentProcessId());
+  if (!expected_simulator.empty())
+    arguments += L" --simulator \"" + expected_simulator + L"\"";
+  DWORD error{};
+  if (win::relaunch_elevated(installation + L"\\taxi-cam.exe", arguments, error)) {
+    stop_service();
+    DestroyWindow(window);
+    return;
+  }
+  notice = error == ERROR_CANCELLED ? L"Administrator restart cancelled. MSFS still runs as administrator, so Taxi Cam cannot attach."
+                                    : L"Could not restart as administrator (Windows " + std::to_wstring(error) + L").";
+  InvalidateRect(window, nullptr, FALSE);
+}
 void check_updates(bool manual) {
   if (preview_ui || update_prompt)
     return;
@@ -1275,6 +1376,8 @@ bool is_on(int id, const win::Settings& s) {
       return connection_requested.load(std::memory_order_acquire);
     case 240:
       return auto_connect.load(std::memory_order_acquire);
+    case 247:
+      return allow_frame_generation.load(std::memory_order_acquire);
     case 221:
       return s.follow_taxi;
     case 222:
@@ -1443,6 +1546,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       refresh_connection_button();
       sync_aircraft_session();
       auto_profile();
+      sync_elevation_button();
       if (page == 3)
         target_combos(draft());
       if (IsWindowVisible(hwnd))
@@ -1457,6 +1561,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         AppendMenuW(menu, MF_STRING, 600, L"Settings");
         AppendMenuW(menu, MF_STRING | (preview_ui ? MF_GRAYED : 0), 604,
                     win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
+        if (elevation_required.load(std::memory_order_acquire))
+          AppendMenuW(menu, MF_STRING | (preview_ui ? MF_GRAYED : 0), 605, L"Restart as administrator");
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
         AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
@@ -1472,6 +1578,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (selected == 604) {
           toggle_connection();
         }
+        if (selected == 605)
+          restart_as_administrator();
         if (selected == 603)
           check_updates(true);
         if (selected == 512)
@@ -1605,8 +1713,23 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         build_controls();
         return 0;
       }
+      if (id == 247) {
+        const bool next = !allow_frame_generation.load(std::memory_order_acquire);
+        allow_frame_generation.store(next, std::memory_order_release);
+        if (!win::save_allow_frame_generation(win::settings_directory(), next))
+          notice = L"Could not save the Frame Generation preference.";
+        else
+          notice = next ? L"Frame Generation allowed. The simulator may freeze when the cameras open."
+                        : L"Frame Generation blocks the cameras again until it is off in MSFS.";
+        build_controls();
+        return 0;
+      }
       if (id == 241) {
         toggle_connection();
+        return 0;
+      }
+      if (id == 242 || id == 605) {
+        restart_as_administrator();
         return 0;
       }
       if (id >= 221 && id <= 229) {
@@ -1771,12 +1894,16 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
       preview_ui = true;
     else if (!std::wcscmp(argv[i], L"--simulator") && i + 1 < argc)
       expected_simulator = argv[++i];
+    else if (!std::wcscmp(argv[i], win::WaitForExitArgument) && i + 1 < argc && win::parse_wait_for_exit(argv[i + 1]))
+      wait_for_exit_pid = win::parse_wait_for_exit(argv[++i]);
     else {
       LocalFree(argv);
       return ERROR_INVALID_PARAMETER;
     }
   }
   LocalFree(argv);
+  // An administrator restart must let its predecessor release the mutex first.
+  win::wait_for_previous_instance(wait_for_exit_pid, 10000);
   // Retain coordination names so an older installed app cannot run alongside this one.
   singleton = CreateMutexW(nullptr, FALSE, preview_ui ? L"Local\\380TaxiCamera.Preview" : L"Local\\380TaxiCamera.Companion");
   const DWORD existing = GetLastError();
@@ -1804,6 +1931,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   // older version must never prevent Connect or Auto-connect from enabling it.
   current.enabled = 0;
   auto_connect.store(win::load_auto_connect(win::settings_directory()), std::memory_order_release);
+  allow_frame_generation.store(win::load_allow_frame_generation(win::settings_directory()), std::memory_order_release);
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
     notice = L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.";
   hotkey_draft = hotkey_saved;

@@ -306,6 +306,8 @@ if ($Validate) {
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
         @{Name='connection-recoverability'; Sources=@('tests/app/connection_recoverability_test.cpp')},
+        @{Name='process-elevation'; Sources=@('tests/app/process_elevation_test.cpp')},
+        @{Name='simulator-graphics'; Sources=@('tests/app/simulator_graphics_test.cpp')},
         @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp')},
         @{Name='profile-selection'; Sources=@('tests/app/profile_selection_test.cpp')},
         @{Name='night-boost-migration'; Sources=@('tests/app/night_boost_migration_test.cpp')},

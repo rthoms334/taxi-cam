@@ -105,6 +105,60 @@ if ($repairedAgain.OuterXml -cne $repaired.OuterXml) { throw 'Opt-in reading cha
 Set-TaxiStartupEntry $repairedAgain 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
 if ($repairedAgain.DocumentElement.SelectNodes('Launch.Addon').Count -ne 3) { throw 'A repaired startup file is not idempotent.' }
 
+# An exe.xml whose only defect is a SimConnect Type attribute (written by some
+# add-on managers) is repaired in place: its own description and filename stay.
+$misnamedRoot = Join-Path $repairRoot 'misnamed'
+New-Item -ItemType Directory -Path $misnamedRoot | Out-Null
+$misnamedPath = Join-Path $misnamedRoot 'exe.xml'
+$misnamedContents = @'
+<?xml version="1.0" encoding="utf-8"?>
+<SimBase.Document Type="SimConnect" version="1,0">
+  <Descr>Auto launch external applications on MSFS start</Descr>
+  <Filename>exe.xml</Filename>
+  <Disabled>False</Disabled>
+  <Launch.Addon>
+    <Disabled>False</Disabled>
+    <ManualLoad>False</ManualLoad>
+    <Name>FSUIPC7</Name>
+    <Path>C:\FSUIPC7\FSUIPC7.exe</Path>
+    <CommandLine>-auto</CommandLine>
+    <NewConsole>False</NewConsole>
+  </Launch.Addon>
+  <Launch.Addon>
+    <Name>IVAO Pilot Client</Name>
+    <Disabled>False</Disabled>
+    <Path>C:\IVAO\pilot_core_msfs.exe</Path>
+    <Commandline />
+  </Launch.Addon>
+</SimBase.Document>
+'@
+[IO.File]::WriteAllText($misnamedPath, $misnamedContents, [Text.UTF8Encoding]::new($true))
+$misnamedHash = (Get-FileHash -LiteralPath $misnamedPath).Hash
+$refused = $false
+try { [void](Read-TaxiLaunchXml $misnamedPath) } catch { $refused = $true }
+if (-not $refused) { throw 'Default startup reading unexpectedly accepted a misnamed exe.xml header.' }
+$misnamedDocument = Read-TaxiLaunchXml $misnamedPath -RepairLaunchHeader
+if ($misnamedDocument.DocumentElement.GetAttribute('Type') -cne 'Launch' -or
+    $misnamedDocument.DocumentElement.SelectSingleNode('Descr').InnerText -cne 'Auto launch external applications on MSFS start' -or
+    $misnamedDocument.DocumentElement.SelectSingleNode('Filename').InnerText -cne 'exe.xml' -or
+    $misnamedDocument.DocumentElement.SelectSingleNode('Disabled').InnerText -cne 'False') { throw 'Misnamed exe.xml repair changed more than the Type attribute.' }
+if ((Get-FileHash -LiteralPath $misnamedPath).Hash -ne $misnamedHash) { throw 'Reading a misnamed exe.xml header changed the file before commit.' }
+$originalMisnamed = [Xml.XmlDocument]::new()
+$originalMisnamed.PreserveWhitespace = $true
+$originalMisnamed.LoadXml($misnamedContents)
+$originalMisnamedAddons = @($originalMisnamed.DocumentElement.SelectNodes('Launch.Addon') | ForEach-Object { $_.OuterXml })
+Set-TaxiStartupEntry $misnamedDocument 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+$writtenHash = ''
+$misnamedBackup = Save-TaxiLaunchXml $misnamedDocument $misnamedPath $misnamedHash ([ref]$writtenHash)
+if (-not $misnamedBackup -or (Get-FileHash -LiteralPath $misnamedBackup).Hash -ne $misnamedHash) { throw 'Misnamed exe.xml repair did not back up the exact original bytes.' }
+$misnamedRepaired = Read-TaxiLaunchXml $misnamedPath
+if ($misnamedRepaired.DocumentElement.SelectNodes('Launch.Addon').Count -ne 3 -or
+    $misnamedRepaired.DocumentElement.SelectNodes('Launch.Addon[Name="Taxi Cam"]').Count -ne 1) { throw 'Misnamed exe.xml repair lost an add-on or duplicated Taxi Cam.' }
+for ($index = 0; $index -lt $originalMisnamedAddons.Count; ++$index) {
+    if ($misnamedRepaired.DocumentElement.SelectNodes('Launch.Addon')[$index].OuterXml -cne $originalMisnamedAddons[$index]) { throw 'Misnamed exe.xml repair changed an unrelated add-on.' }
+}
+Write-Output 'PASS exe.xml misnamed SimConnect header: repaired to Launch in place, description and filename kept, add-ons preserved.'
+
 $launchChild = '<Launch.Addon><Name>Keep Me</Name><Path>C:\Other.exe</Path></Launch.Addon>'
 $launchHeaders = '<Descr>SimConnect</Descr><Filename>SimConnect.xml</Filename><Disabled>False</Disabled><Launch.ManualLoad>False</Launch.ManualLoad>'
 $refusalCases = [ordered]@{
@@ -119,6 +173,7 @@ $refusalCases = [ordered]@{
     'missing-filename' = '<SimBase.Document Type="SimConnect"><Descr>SimConnect</Descr>' + $launchChild + '</SimBase.Document>'
     'different-filename' = '<SimBase.Document Type="SimConnect"><Filename>Other.xml</Filename>' + $launchChild + '</SimBase.Document>'
     'nonexact-filename' = '<SimBase.Document Type="SimConnect"><Filename>SimConnect.xml </Filename>' + $launchChild + '</SimBase.Document>'
+    'nonexact-exe-filename' = '<SimBase.Document Type="SimConnect"><Filename>Exe.xml</Filename>' + $launchChild + '</SimBase.Document>'
     'nested-filename-content' = '<SimBase.Document Type="SimConnect"><Filename><Value>SimConnect.xml</Value></Filename>' + $launchChild + '</SimBase.Document>'
     'filename-comment' = '<SimBase.Document Type="SimConnect"><Filename><!-- Preserve me -->SimConnect.xml</Filename>' + $launchChild + '</SimBase.Document>'
     'nested-description-content' = '<SimBase.Document Type="SimConnect"><Descr><Value>SimConnect</Value></Descr><Filename>SimConnect.xml</Filename>' + $launchChild + '</SimBase.Document>'

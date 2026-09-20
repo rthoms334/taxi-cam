@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include "module_inventory.hpp"
+#include "process_elevation.hpp"
 
 namespace taxi_camera::standalone {
 inline bool same_path(const std::wstring& a, const std::wstring& b) {
@@ -349,6 +350,9 @@ struct LaunchResult {
   // Only a preflight read can be retried. Once a remote load/start may have
   // begun, every result remains terminal for this companion session.
   bool retry_before_load = false;
+  // MSFS holds administrator rights this companion lacks. No retry can
+  // succeed until Taxi Cam itself restarts with the same rights.
+  bool elevation_required = false;
 };
 struct LoaderWaitResult {
   DWORD result = WAIT_TIMEOUT, error = ERROR_SUCCESS;
@@ -469,8 +473,12 @@ inline LaunchResult load_bridge(DWORD pid,
   constexpr DWORD rights =
       PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | SYNCHRONIZE;
   HANDLE process = OpenProcess(rights, FALSE, pid);
-  if (!process)
-    return {false, GetLastError(), L"Cannot open MSFS in this Windows session."};
+  if (!process) {
+    const DWORD error = GetLastError();
+    if (elevation_blocks_attach(error, simulator_elevation(pid), own_elevation()))
+      return {false, error, ElevatedSimulatorMessage, false, true};
+    return {false, error, L"Cannot open MSFS in this Windows session."};
+  }
   struct Close {
     HANDLE p;
     ~Close() { CloseHandle(p); }

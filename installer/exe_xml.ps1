@@ -26,15 +26,20 @@ function Read-TaxiLaunchXml([string]$Path, [switch]$RepairLaunchHeader) {
                     [Xml.XmlNodeType]::Whitespace, [Xml.XmlNodeType]::SignificantWhitespace) }
             })
             $filename = $root.SelectSingleNode('Filename')
+            # Either a copied SimConnect.xml header or an exe.xml that only its
+            # Type attribute misnames (some add-on managers write that shape).
             if ($unknown.Count -eq 0 -and $ambiguous.Count -eq 0 -and $complexHeaders.Count -eq 0 -and $root.SelectNodes('Launch.Addon').Count -gt 0 -and
-                $filename -and $filename.InnerText -ceq 'SimConnect.xml') {
+                $filename -and $filename.InnerText -cin @('SimConnect.xml', 'exe.xml')) {
                 $root.SetAttribute('Type','Launch')
-                $filename.InnerText = 'exe.xml'
-                $description = $root.SelectSingleNode('Descr')
-                if (-not $description) { $description = $document.CreateElement('Descr'); [void]$root.PrependChild($description) }
-                $description.InnerText = 'Launch'
-                # Disabled/ManualLoad flags, add-on entries and comments stay as
-                # supplied. Save-TaxiLaunchXml backs up original bytes atomically.
+                if ($filename.InnerText -ceq 'SimConnect.xml') {
+                    $filename.InnerText = 'exe.xml'
+                    $description = $root.SelectSingleNode('Descr')
+                    if (-not $description) { $description = $document.CreateElement('Descr'); [void]$root.PrependChild($description) }
+                    $description.InnerText = 'Launch'
+                }
+                # An exe.xml keeps its own description. Disabled/ManualLoad flags,
+                # add-on entries and comments stay as supplied. Save-TaxiLaunchXml
+                # backs up original bytes atomically.
             }
         }
         if ($document.DocumentElement.Name -ne 'SimBase.Document' -or $document.DocumentElement.GetAttribute('Type') -ne 'Launch') { throw 'Unrecognized exe.xml launch document.' }

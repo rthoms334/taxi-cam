@@ -11,6 +11,8 @@ If you are up for reporting issues then I can try and help out.
 ## Compatibility
 
 - **DLSSG and Reshade mods** - There are a vast number of different configs out there for reshade and unsupported DLSSG mods - if you raise an issue I will endeavour to investigate and see what can be done. A best effort has been made to change the archetecture to move the processing downstream of reshade to avoid conflicts but some may remain due to other mods potentially using the same patterns to transform the output.
+- **Frame Generation** - On some systems (reported with RTX 50-series cards) the simulator freezes once the cameras open while Frame Generation is on. Taxi Cam now reads the simulator's graphics options and keeps the cameras off while Frame Generation is enabled; turn it off in **Options > Graphics** to use the cameras, or allow it on **Diagnostics** to test.
+- **ReShade** - A `dxgi.dll` beside the simulator executable (ReShade) stops camera capture on some systems. Taxi Cam names it on the Overview status line; rename the file (with MSFS closed) to use the cameras, and restore it afterwards.
 - **Sim Update 7** - Make sure you have the stable version of MSFS (SU6 - 1.8.16.0) - SU7 is not supported currently.
 
 ## Important notice
@@ -39,6 +41,8 @@ For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above
 **Keep existing settings** is selected by default. Leave it checked to preserve camera profiles, calibration, reference guides and keyboard shortcuts. This version still writes camera frame rate **10** into existing settings; other saved values stay in place. Clear the checkbox only if you want to start with the bundled defaults. Setup restores your previous settings if installation fails.
 
 If Setup cannot configure automatic startup and can verify the startup file is unchanged, installation completes with a notice explaining how to launch Taxi Cam from the Start menu. Details are saved in `setup-diagnostics.log` in the installation folder. You can rerun Setup to retry automatic startup. See [Automatic startup](docs/runtime-reference.md#automatic-startup) for Steam and Microsoft Store startup file locations and selection behavior.
+
+Start MSFS the usual way rather than **Run as administrator**. If the simulator does hold administrator rights, Taxi Cam cannot attach from a standard launch and reports **MSFS is running as administrator (Windows 5)**; choose **Restart as administrator** in Overview or the tray menu to restart Taxi Cam with the same rights. Automatic startup through `exe.xml` inherits the simulator's rights and needs no action.
 
 For manual launch, start Taxi Cam from the Start menu (or tray) while MSFS is running. You can leave **Auto-connect** on, or turn it off and use **Connect** at the main menu or in a loaded flight. Connect enables camera operation and changes to **Disconnect**, which stops camera output and temporary requests. Choose Connect again to resume or retry an attachment. Disconnect keeps your Auto-connect preference but suspends automatic retries until you choose Connect again. These controls do not stop MSFS or overwrite calibration. After an in-flight connection, wait for the next cockpit draws while the bridge learns existing display bindings. Recovery remains unresolved for already-powered A350 displays whose old views cannot be associated with those draws; a populated texture list alone does not guarantee output. See [startup timing](docs/reshade-compatibility.md#startup-timing).
 
