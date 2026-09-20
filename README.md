@@ -58,6 +58,8 @@ Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles th
 
 Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved separately for each aircraft profile.
 
+Settings opens in English or Simplified Chinese according to your Windows display language. Choose **Menu → Language** to pick another one; the choice is remembered and applies to the next start as well. Aircraft names, logs and bug reports stay English.
+
 ### Camera views
 
 With the aircraft parked and the cameras on, open **Camera views**. Adjust the nose and tail cameras' position, angle and **Lens** (zoom). A smaller lens value gives a closer view; a larger value shows more of the surroundings.

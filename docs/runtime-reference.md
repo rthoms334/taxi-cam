@@ -18,6 +18,8 @@ Setup preserves unrelated add-ons and comments, backs up the original bytes and 
 
 When startup cannot be configured and the original file is verified unchanged, installation can finish with a manual-start notice and `setup-diagnostics.log`. Rerun Setup with automatic startup selected to retry. A concurrent edit or uncertain partial write follows the existing rollback checks. Successful XML configuration does not by itself verify that MSFS launches the companion. Start Taxi Cam before loading a flight; see [startup timing](reshade-compatibility.md#startup-timing).
 
+Setup's own page text is Simplified Chinese when the companion saved `[companion] language=2`, and otherwise follows the Windows display language for `zh-CN`/`zh-SG`. Inno Setup's built-in buttons and messages stay English: the pinned Inno Setup release carries no Simplified-Chinese language file, so a fully translated wizard needs one added to [dependencies.json](../dependencies.json) and a `[Languages]` entry.
+
 ## Settings window controls
 
 | Control | Location and behaviour |
@@ -25,6 +27,7 @@ When startup cannot be configured and the original file is verified unchanged, i
 | **Connect / Disconnect** | One button in **Overview**, also available in the tray menu. Connect attaches and enables camera operation, including profiles saved with the old Service switch off. It changes to Disconnect while connecting or connected. Disconnect stops output, clears temporary preview/calibration/scene and aircraft-button requests, and suspends automatic retries until Connect is chosen again. Connect then retries attachment and enables cameras without stopping MSFS or changing calibration. Prefer the main menu; a late Connect learns display textures on the next cockpit draw. **Restart Flight** only if the list stays empty. |
 | **Auto-connect** | **Overview** connection box; on by default, starts attachment when MSFS is detected. Preference is saved in `%LOCALAPPDATA%\Taxi Cam\settings.ini`. Disconnect leaves this saved preference unchanged; an explicit Connect or turning Auto-connect on resumes attachment. |
 | **Keyboard shortcuts…** | **Overview → Flight-deck control**; configure left, right and both-display toggles. Defaults are Ctrl + Shift + L / R / B. |
+| **Language** | **Menu → Language** (window menu button or tray menu); **Follow Windows**, **English** or **简体中文**. Following Windows selects Simplified Chinese for the `zh-CN` and `zh-SG` display languages and English elsewhere, including Traditional-Chinese locales. The choice is saved as `[companion] language` (`0` follow, `1` English, `2` Simplified Chinese) and applies to the next start as well. Aircraft names, logs, `launcher.log` and generated bug reports stay English. |
 | **TAXI buttons** | Beside the shortcut editor button; follow cockpit TAXI controls where supported. Disabled for the iniBuilds A380, whose buttons are INOP. Shortcuts work with this setting on or off. |
 | **Donate** | Sidebar, above the bug-report icon; opens the PayPal donation page in the default browser. |
 
@@ -42,7 +45,7 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000` and `ini-a380`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000` and `ini-a380`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft. The interface language choice is saved next to the Auto-connect preference in `[companion]` and applies to all aircraft profiles.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 

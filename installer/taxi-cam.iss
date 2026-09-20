@@ -1,4 +1,4 @@
-#ifndef PayloadDir
+﻿#ifndef PayloadDir
   #error PayloadDir is required
 #endif
 #ifndef AppVersion
@@ -87,25 +87,53 @@ var
   PreviousDir, StartupNotice: String;
   DiscoveredSimulator, InheritedXml: String;
   ExplicitXml, XmlEdited, LoadingChoices: Boolean;
+  InterfaceChinese: Boolean;
 
 function Q(Value: String): String;
 begin
   Result := '"' + Value + '"';
 end;
 
+function GetUserDefaultUILanguage: LongWord; external 'GetUserDefaultUILanguage@kernel32.dll stdcall';
+
+procedure DetectInterfaceLanguage;
+var
+  Choice: Integer;
+  LangId: Cardinal;
+begin
+  { Match the companion's saved language first, then the Windows UI language.
+    zh-CN and zh-SG carry Simplified text; Traditional locales keep English. }
+  Choice := StrToIntDef(GetIniString('companion', 'language', '',
+    ExpandConstant('{localappdata}\Taxi Cam\settings.ini')), 0);
+  if Choice = 2 then InterfaceChinese := True
+  else if Choice = 1 then InterfaceChinese := False
+  else begin
+    LangId := GetUserDefaultUILanguage and $FFFF;
+    InterfaceChinese := (LangId = $0804) or (LangId = $1004);
+  end;
+end;
+
+function T(English, Chinese: String): String;
+begin
+  if InterfaceChinese then Result := Chinese else Result := English;
+end;
+
 function InitializeSetup: Boolean;
 var
   Choice: String;
 begin
+  DetectInterfaceLanguage;
   Result := FileExists(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'));
   if not Result then
-    SuppressibleMsgBox('Taxi Cam setup and updates require Windows PowerShell 5.1. Restore the Windows PowerShell component and run setup again.', mbError, MB_OK, IDOK);
+    SuppressibleMsgBox(T('Taxi Cam setup and updates require Windows PowerShell 5.1. Restore the Windows PowerShell component and run setup again.',
+      'Taxi Cam 的安装与更新需要 Windows PowerShell 5.1。请恢复 Windows PowerShell 组件后重新运行安装程序。'), mbError, MB_OK, IDOK);
   if not Result then exit;
   Choice := ExpandConstant('{param:STARTUP|}');
   Result := (Choice = '') or (CompareText(Choice, 'automatic') = 0) or (CompareText(Choice, 'manual') = 0);
   if not Result then begin
     Log('Invalid /STARTUP value: ' + Choice);
-    SuppressibleMsgBox('The /STARTUP option must be automatic or manual.', mbError, MB_OK, IDOK);
+    SuppressibleMsgBox(T('The /STARTUP option must be automatic or manual.',
+      '/STARTUP 选项只能是 automatic 或 manual。'), mbError, MB_OK, IDOK);
   end;
 end;
 
@@ -163,7 +191,8 @@ function ErrorText(State: String): String;
 var
   Text: AnsiString;
 begin
-  Result := 'Installation failed. Close MSFS and the companion and verify the selected paths.';
+  Result := T('Installation failed. Close MSFS and the companion and verify the selected paths.',
+    '安装失败。请关闭 MSFS 与 Taxi Cam 伴随程序，并检查所选路径。');
   if LoadStringFromFile(State + '\error.txt', Text) then Result := UTF8Decode(Text);
 end;
 
@@ -202,23 +231,30 @@ begin
     FileExists(ExpandConstant('{localappdata}\380 Taxi Cam\app\installation.json')) then
     WizardForm.DirEdit.Text := ExpandConstant('{localappdata}\380 Taxi Cam\app');
   SimulatorPage := CreateInputDirPage(wpSelectDir, 'Microsoft Flight Simulator 2024',
-    'Select the simulator Content directory', 'Choose the directory containing FlightSimulator2024.exe.', False, '');
-  SimulatorPage.Add('Simulator Content directory:');
-  StartupPage := CreateInputOptionPage(SimulatorPage.ID, 'Startup preference', 'Choose how to start Taxi Cam',
-    'Automatic startup can be retried by running setup again. If setup cannot safely configure it, Taxi Cam will still be installed for manual launch.', True, False);
-  StartupPage.Add('Configure automatic startup with MSFS');
-  StartupPage.Add('Launch manually; leave existing startup entries unchanged');
+    T('Select the simulator Content directory', '选择模拟器的 Content 目录'),
+    T('Choose the directory containing FlightSimulator2024.exe.', '请选择包含 FlightSimulator2024.exe 的目录。'), False, '');
+  SimulatorPage.Add(T('Simulator Content directory:', '模拟器 Content 目录：'));
+  StartupPage := CreateInputOptionPage(SimulatorPage.ID, T('Startup preference', '启动方式'),
+    T('Choose how to start Taxi Cam', '选择 Taxi Cam 的启动方式'),
+    T('Automatic startup can be retried by running setup again. If setup cannot safely configure it, Taxi Cam will still be installed for manual launch.',
+      '自动启动可以在重新运行安装程序时重试。若安装程序无法安全完成配置，Taxi Cam 仍会正常安装，你可以手动启动。'), True, False);
+  StartupPage.Add(T('Configure automatic startup with MSFS', '配置随 MSFS 自动启动'));
+  StartupPage.Add(T('Launch manually; leave existing startup entries unchanged', '手动启动；不更改现有启动项'));
   StartupPage.SelectedValueIndex := 0;
-  XmlPage := CreateInputFilePage(StartupPage.ID, 'Automatic startup', 'Select the simulator exe.xml',
-    'Setup preserves other startup entries and adds Taxi Cam. A new exe.xml can be created at the selected path.');
-  XmlPage.Add('Simulator launch configuration:', 'XML files|*.xml|All files|*.*', '.xml');
+  XmlPage := CreateInputFilePage(StartupPage.ID, T('Automatic startup', '自动启动'),
+    T('Select the simulator exe.xml', '选择模拟器的 exe.xml'),
+    T('Setup preserves other startup entries and adds Taxi Cam. A new exe.xml can be created at the selected path.',
+      '安装程序会保留其他启动项并添加 Taxi Cam。也可以在所选路径新建 exe.xml。'));
+  XmlPage.Add(T('Simulator launch configuration:', '模拟器启动配置文件：'),
+    T('XML files|*.xml|All files|*.*', 'XML 文件|*.xml|所有文件|*.*'), '.xml');
   XmlPage.Edits[0].OnChange := @XmlChoiceChanged;
   ExplicitXml := ExpandConstant('{param:EXEXML|}') <> '';
-  SettingsPage := CreateInputOptionPage(XmlPage.ID, 'Saved settings',
-    'Keep your settings or start with the defaults',
-    'Keep your camera profiles, calibration, reference guides and keyboard shortcuts. Camera frame rate is set to 10 (minimum 5, range 5–60). Clear this box to reset saved settings to the defaults.',
+  SettingsPage := CreateInputOptionPage(XmlPage.ID, T('Saved settings', '已保存的设置'),
+    T('Keep your settings or start with the defaults', '保留你的设置，或恢复默认设置'),
+    T('Keep your camera profiles, calibration, reference guides and keyboard shortcuts. Camera frame rate is set to 10 (minimum 5, range 5–60). Clear this box to reset saved settings to the defaults.',
+      '保留摄像头机型配置、校准、参考标线与键盘快捷键。摄像头帧率设为 10（最低 5，范围 5–60）。取消勾选可把已保存的设置恢复为默认值。'),
     False, False);
-  SettingsPage.Add('&Keep existing settings (recommended)');
+  SettingsPage.Add(T('&Keep existing settings (recommended)', '保留现有设置（推荐）'));
   SettingsPage.Values[0] := ExpandConstant('{param:RESETSETTINGS|0}') <> '1';
   ExtractTemporaryFile('runtime.ps1');
   ExtractTemporaryFile('settings.ps1');
@@ -229,21 +265,23 @@ begin
   Result := True;
   if (CurPageID = wpSelectDir) and (PreviousDir <> WizardDirValue) then begin
     if not DiscoverChoices then begin
-      MsgBox('Cannot read the previous installation settings. Check installation.json.', mbError, MB_OK);
+      MsgBox(T('Cannot read the previous installation settings. Check installation.json.',
+        '无法读取上一次的安装设置。请检查 installation.json。'), mbError, MB_OK);
       Result := False; exit;
     end;
   end;
   if CurPageID = SimulatorPage.ID then begin
     Result := FileExists(AddBackslash(SimulatorPage.Values[0]) + 'FlightSimulator2024.exe');
     if Result then ClearStaleInheritedXml
-    else MsgBox('Select the Content directory containing FlightSimulator2024.exe.', mbError, MB_OK);
+    else MsgBox(T('Select the Content directory containing FlightSimulator2024.exe.',
+      '请选择包含 FlightSimulator2024.exe 的 Content 目录。'), mbError, MB_OK);
   end;
   if CurPageID = XmlPage.ID then begin
     { Silent setup delegates an empty choice to the installer's existing
       discovery/manual-startup fallback; interactive setup requests a path. }
     if WizardSilent and (XmlPage.Values[0] = '') then exit;
     Result := (CompareText(ExtractFileName(XmlPage.Values[0]), 'exe.xml') = 0) and (ExtractFileDrive(XmlPage.Values[0]) <> '');
-    if not Result then MsgBox('Choose a full path ending in exe.xml.', mbError, MB_OK);
+    if not Result then MsgBox(T('Choose a full path ending in exe.xml.', '请选择以 exe.xml 结尾的完整路径。'), mbError, MB_OK);
   end;
 end;
 
@@ -259,7 +297,8 @@ begin
   Result := '';
   if Prepared then exit;
   if not DiscoverChoices then begin
-    Result := 'Cannot read the previous installation settings. Check installation.json.';
+    Result := T('Cannot read the previous installation settings. Check installation.json.',
+      '无法读取上一次的安装设置。请检查 installation.json。');
     exit;
   end;
   ClearStaleInheritedXml;
@@ -273,14 +312,15 @@ begin
   if LoadStringFromFile(ExpandConstant('{tmp}\state\warning.txt'), Text) then
     StartupNotice := UTF8Decode(Text)
   else if StartupMode = 'Manual' then
-    StartupNotice := 'Launch Taxi Cam from the Start menu before using MSFS. Existing simulator startup entries were left unchanged. You can run setup again to configure automatic startup.';
+    StartupNotice := T('Launch Taxi Cam from the Start menu before using MSFS. Existing simulator startup entries were left unchanged. You can run setup again to configure automatic startup.',
+      '请先从开始菜单启动 Taxi Cam，再使用 MSFS。现有模拟器的启动项未作更改。你可以重新运行安装程序来配置自动启动。');
   if StartupNotice <> '' then Log('Taxi Cam startup notice: ' + StartupNotice);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if (CurPageID = wpFinished) and (StartupNotice <> '') then begin
-    WizardForm.FinishedLabel.Caption := 'Taxi Cam was installed successfully.' + #13#10#13#10 + StartupNotice;
+    WizardForm.FinishedLabel.Caption := T('Taxi Cam was installed successfully.', 'Taxi Cam 已成功安装。') + #13#10#13#10 + StartupNotice;
     WizardForm.FinishedLabel.AutoSize := False;
     WizardForm.FinishedLabel.Height := WizardForm.FinishedPage.ClientHeight - WizardForm.FinishedLabel.Top - ScaleY(16);
   end;
@@ -295,22 +335,29 @@ procedure DeinitializeSetup;
 begin
   if Prepared and not Completed then
     if not RunHelper('Rollback', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state')) then
-      MsgBox('Setup could not restore the previous installation. See ' + ExpandConstant('{tmp}\state\error.txt'), mbError, MB_OK);
+      MsgBox(T('Setup could not restore the previous installation. See ', '安装程序无法恢复之前的安装。请查看 ') +
+        ExpandConstant('{tmp}\state\error.txt'), mbError, MB_OK);
 end;
 
 function InitializeUninstall: Boolean;
 var
   Choice: Integer;
+  Choices: TArrayOfString;
 begin
+  DetectInterfaceLanguage;
   RemoveSavedSettings := ExpandConstant('{param:REMOVESETTINGS|0}') = '1';
   WriteUninstallScripts(ExpandConstant('{tmp}\taxi-uninstall'));
   Result := RunHelper('CheckClosed', ExpandConstant('{tmp}\taxi-uninstall\runtime.ps1'), ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall'));
   if not Result then MsgBox(ErrorText(ExpandConstant('{tmp}\taxi-uninstall')), mbError, MB_OK);
   if Result and not UninstallSilent then begin
-    Choice := TaskDialogMsgBox('Keep your Taxi Cam settings?',
-      'Keep your camera profiles, calibration, reference guides and keyboard shortcuts for a future installation. Logs will be kept either way.',
-      mbConfirmation, MB_YESNOCANCEL, ['&Keep settings (recommended)'#13#10'Uninstall the app and keep saved settings.',
-       '&Remove saved settings'#13#10'Uninstall the app and remove saved settings.', '&Cancel'], 0);
+    SetArrayLength(Choices, 3);
+    Choices[0] := T('&Keep settings (recommended)'#13#10'Uninstall the app and keep saved settings.', '保留设置（推荐）'#13#10'卸载程序，但保留已保存的设置。');
+    Choices[1] := T('&Remove saved settings'#13#10'Uninstall the app and remove saved settings.', '删除已保存的设置'#13#10'卸载程序，并删除已保存的设置。');
+    Choices[2] := T('&Cancel', '取消');
+    Choice := TaskDialogMsgBox(T('Keep your Taxi Cam settings?', '保留 Taxi Cam 的设置？'),
+      T('Keep your camera profiles, calibration, reference guides and keyboard shortcuts for a future installation. Logs will be kept either way.',
+        '为以后的安装保留摄像头机型配置、校准、参考标线与键盘快捷键。两种方式都会保留日志。'),
+      mbConfirmation, MB_YESNOCANCEL, Choices, 0);
     Result := (Choice = IDYES) or (Choice = IDNO);
     RemoveSavedSettings := Choice = IDNO;
   end;
