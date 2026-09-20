@@ -5,6 +5,12 @@
     "sha256": "fa73bf47a4da250d185d07561c2bfda387e5e20db77e4570004cf6a133cc10b1",
     "directory": "inno-setup/6.5.4"
   },
+  "inno-setup-chinese-simplified": {
+    "version": "6.5.0+",
+    "url": "https://raw.githubusercontent.com/jrsoftware/issrc/6ef32198ef1f7b7b375cd4b6b90896c2a58eb4c2/Files/Languages/ChineseSimplified.isl",
+    "sha256": "e0b0b350e2245f3c5e65586dfe43d574f6e7f06f2261149aba284954b3fc9a8d",
+    "file": "ChineseSimplified.isl"
+  },
   "llvm-mingw": {
     "version": "20260908 / LLVM 23.1.1",
     "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip",

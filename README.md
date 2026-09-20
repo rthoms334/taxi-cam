@@ -30,7 +30,7 @@ If you find Taxi Cam useful, please consider donating.
 
 ## Installation
 
-For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above. Keep Windows and your graphics driver up to date. Setup checks required components and explains if anything is missing. [Detailed graphics requirements](docs/runtime-reference.md#graphics-requirements).
+For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above. Keep Windows and your graphics driver up to date. Setup checks required components and explains if anything is missing. [Detailed graphics requirements](docs/runtime-reference.md#graphics-requirements). Setup is offered in English or Simplified Chinese according to your Windows display language.
 
 1. Download the **Windows x64 setup EXE** from [the latest release](https://github.com/rthoms334/taxi-cam/releases/latest).
 2. Close MSFS and exit Taxi Cam if it is already running.
@@ -57,6 +57,8 @@ Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles th
 ## Adjusting the views
 
 Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved separately for each aircraft profile.
+
+Settings opens in English or Simplified Chinese according to your Windows display language. Choose **Menu → Language** to pick another one; the choice is remembered and applies to the next start as well. Aircraft names, logs and bug reports stay English.
 
 ### Camera views
 
