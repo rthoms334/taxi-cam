@@ -40,6 +40,9 @@ MinVersion=10.0
 DisableDirPage=no
 DisableProgramGroupPage=yes
 WizardStyle=modern
+; The wizard follows the Windows display language; /LANG=chinesesimplified or
+; /LANG=english overrides it. No language page is inserted into the flow.
+ShowLanguageDialog=no
 CloseApplications=no
 RestartApplications=no
 SetupMutex=380TaxiCamInstaller
@@ -52,6 +55,12 @@ SetupIconFile={#AppIcon}
 CreateUninstallRegKey=no
 UsePreviousAppDir=no
 #endif
+
+[Languages]
+; The Simplified Chinese message file is pinned in dependencies.json and placed
+; in the compiler's Languages folder by installer/bootstrap.ps1.
+Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Files]
 ; Native binaries only ever enter the live directory through the guarded transaction.
@@ -94,23 +103,11 @@ begin
   Result := '"' + Value + '"';
 end;
 
-function GetUserDefaultUILanguage: LongWord; external 'GetUserDefaultUILanguage@kernel32.dll stdcall';
-
 procedure DetectInterfaceLanguage;
-var
-  Choice: Integer;
-  LangId: Cardinal;
 begin
-  { Match the companion's saved language first, then the Windows UI language.
-    zh-CN and zh-SG carry Simplified text; Traditional locales keep English. }
-  Choice := StrToIntDef(GetIniString('companion', 'language', '',
-    ExpandConstant('{localappdata}\Taxi Cam\settings.ini')), 0);
-  if Choice = 2 then InterfaceChinese := True
-  else if Choice = 1 then InterfaceChinese := False
-  else begin
-    LangId := GetUserDefaultUILanguage and $FFFF;
-    InterfaceChinese := (LangId = $0804) or (LangId = $1004);
-  end;
+  { Inno has already selected the message language from the Windows display
+    language; the script's own text follows it so both halves agree. }
+  InterfaceChinese := CompareText(ExpandConstant('{language}'), 'chinesesimplified') = 0;
 end;
 
 function T(English, Chinese: String): String;
