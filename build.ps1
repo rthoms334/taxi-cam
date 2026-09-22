@@ -313,6 +313,7 @@ if ($Validate) {
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='startup-state'; Sources=@('tests/app/startup_state_test.cpp')},
         @{Name='camera-status'; Sources=@('tests/app/camera_status_test.cpp')},
+        @{Name='overview-status'; Sources=@('tests/app/overview_status_test.cpp')},
         @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
         @{Name='scene-demand'; Sources=@('tests/camera/scene_demand_test.cpp','src/camera/entry_pair.cpp')},
         @{Name='scene-session-reset'; Sources=@('tests/camera/scene_session_reset_test.cpp','src/camera/entry_pair.cpp')},

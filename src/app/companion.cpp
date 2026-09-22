@@ -13,6 +13,7 @@
 #include <vector>
 #include "launcher.hpp"
 #include "launcher_log.hpp"
+#include "overview_status.hpp"
 #include "connection_recoverability.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/protocol.hpp"
@@ -927,13 +928,9 @@ void draw_page(HDC dc) {
          : has_displays                                          ? L"Native bridge connected"
                                                                  : L"Native bridge connected — waiting for cockpit displays",
          266, 153, 500, 30, heading, sample.graphics_ready && has_displays ? Accent : Text);
-    const bool late_empty_pfds = sample.graphics_ready && !has_displays;
-    const auto line = late_empty_pfds    ? std::wstring(
-                                               L"Waiting for cockpit displays to be drawn. "
-                                               L"Restart Flight only if the list stays empty.")
-                      : sample.heartbeat ? widen(sample.message)
-                                         : live;
-    text(dc, line.c_str(), 266, 188, 715, 36, normal, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
+    const auto line =
+        win::overview_status_line(sample.graphics_ready != 0, has_displays, sample.heartbeat != 0, widen(sample.message), live);
+    text(dc, line.text.c_str(), 266, 188, 715, 36, normal, line.highlight ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 295, 766, 93);
     text(dc, L"Aircraft profile", 260, 298, 350, 22, small, Muted);
     panel(dc, 244, 395, 766, 96);
