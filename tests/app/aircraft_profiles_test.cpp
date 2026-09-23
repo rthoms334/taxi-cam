@@ -433,12 +433,13 @@ int main() {
     if (profile->id == profiles::IniA343.id) {
       assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display && profile->display_texture[0] == '\0');
       assert(profile->width == 1560 && profile->height == 2340 && profile->mips == 1 && profile->sides == 3);
-      // 2 x 3 grid of 780 x 780 cells: CAPT PFD (0,0), SD (1,1), F/O PFD (1,2).
+      // 2 x 3 grid of 780 x 780 cells in ND / PFD rows; the right column holds
+      // CAPT PFD (1,0), F/O PFD (1,1) and SD (1,2).
       const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1),
                  sd = profiles::display_rect(*profile, 2);
-      assert(left.left == 0 && left.top == 0 && left.right == 780 && left.bottom == 780);
-      assert(right.left == 780 && right.top == 1560 && right.right == 1560 && right.bottom == 2340);
-      assert(sd.left == 780 && sd.top == 780 && sd.right == 1560 && sd.bottom == 1560);
+      assert(left.left == 780 && left.top == 0 && left.right == 1560 && left.bottom == 780);
+      assert(right.left == 780 && right.top == 780 && right.right == 1560 && right.bottom == 1560);
+      assert(sd.left == 780 && sd.top == 1560 && sd.right == 1560 && sd.bottom == 2340);
       for (unsigned side = 0; side < 3; ++side) {
         const auto content = profiles::display_content_rect(*profile, side);
         assert(content.right - content.left == 748 && content.bottom - content.top == 768);

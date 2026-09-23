@@ -395,10 +395,11 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
 // iniBuilds A340-300 (streamed fs24-inibuilds-aircraft-a340; encrypted, so no
 // panel.cfg). The bridge's render-target log on 2026-09-23 (a340-300_eis2)
 // showed the cockpit's one-mip typeless group, including one 1560 x 2340
-// texture: a 2 x 3 grid of 780 x 780 cells, one per display unit. The cell
-// order is assumed to follow the cockpit left to right, as the iniBuilds A350
-// EFIS surfaces do: CAPT PFD, CAPT ND / E/WD, SD / F/O ND, F/O PFD. Not yet
-// confirmed with Calibrate.
+// texture: a 2 x 3 grid of 780 x 780 cells, one per display unit. Live
+// testing on 2026-09-23 showed cell (0,0) on the CAPT ND, (1,1) on the F/O PFD
+// and (1,2) on the lower ECAM. Rows are therefore ND / PFD pairs:
+// CAPT ND, CAPT PFD / F/O ND, F/O PFD / E/WD, SD. CAPT PFD at (1,0) follows
+// that pattern and is not yet re-checked.
 inline constexpr unsigned IniA343DisplayWidth = 1560;
 inline constexpr unsigned IniA343DisplayHeight = 2340;
 inline constexpr unsigned IniA343Cell = 780;
@@ -422,7 +423,7 @@ inline constexpr AircraftProfile IniA343 = [] {
                     1,
                     TaxiControl::manual_only,
                     {"", "", ""},
-                    {{ini_a343_cell(0, 0), ini_a343_cell(1, 2), ini_a343_cell(1, 1)}}};
+                    {{ini_a343_cell(1, 0), ini_a343_cell(1, 1), ini_a343_cell(1, 2)}}};
   p.sides = 3;
   p.composition = A346Composition;
   p.formats = {28, 29, 87, 91, 27, 90};
