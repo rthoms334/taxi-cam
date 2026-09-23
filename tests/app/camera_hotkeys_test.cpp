@@ -295,6 +295,17 @@ void aircraft_hotkey_intent_checks() {
   require(a346.manual_mask == 4, "Both turns off only the pilot displays");
   toggle_manual_camera(a346, CameraSd);
   require(a346.manual_mask == 0, "SD toggles off");
+  // The iniBuilds A340-300 has no camera control: every shortcut, including
+  // the SD, is manual display intent and never an aircraft command.
+  Settings a343;
+  a343.profile = profiles::IniA343.id;
+  a343.follow_taxi = 0;
+  require(request_camera_hotkey(a343, CameraSd, {}, 0) == CameraHotkeyResult::manual && a343.manual_mask == 4 && !a343.taxi_request,
+          "The A340-300 SD shortcut turns on only the lower ECAM");
+  require(request_camera_hotkey(a343, CameraBoth, {}, 0) == CameraHotkeyResult::manual && a343.manual_mask == 7 && !a343.taxi_request,
+          "The A340-300 Both shortcut adds the pilot displays and keeps the SD");
+  require(request_camera_hotkey(a343, CameraLeft, {}, 0) == CameraHotkeyResult::manual && a343.manual_mask == 6 && !a343.follow_taxi,
+          "The A340-300 Left shortcut toggles only the captain display");
   Settings a380;
   a380.follow_taxi = 0;
   toggle_manual_camera(a380, CameraSd);

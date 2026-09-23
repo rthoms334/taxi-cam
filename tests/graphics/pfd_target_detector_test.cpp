@@ -730,5 +730,17 @@ int main() {
   const auto& gauges_found = unified.observe(gauges.data(), gauges.size(), 3000);
   assert(gauges_found.valid && gauges_found.targets[0] == 12 && gauges_found.targets[1] == 0);
 
+  // iniBuilds A340-300: the 2026-09-23 cockpit group was one-mip typeless
+  // (format 27) textures, one of them 1560 x 2340. A five-mip 2340 x 2340
+  // texture and the smaller group members are not candidates.
+  static PfdTargetDetector ini_a343;
+  ini_a343.configure(taxi_camera::profiles::IniA343);
+  std::array<PfdTargetObservation, 4> group{
+      {{30, 9, 2340, 2340, 5, 28}, {31, 9, 1024, 1024, 1, 27}, {32, 9, 1560, 2340, 1, 27}, {33, 9, 450, 400, 1, 27}}};
+  for (std::uint64_t now = 0; now < 3000; now += 1000)
+    assert(!ini_a343.observe(group.data(), group.size(), now).valid);
+  const auto& grid = ini_a343.observe(group.data(), group.size(), 3000);
+  assert(grid.valid && grid.targets[0] == 32 && grid.targets[1] == 0);
+
   std::puts("PFD target detector: PASS");
 }

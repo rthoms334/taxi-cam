@@ -339,6 +339,7 @@ if ($Validate) {
         @{Name='taxi-routes'; Sources=@('tests/graphics/taxi_button_routes_test.cpp')},
         @{Name='target-assignment'; Sources=@('tests/graphics/target_assignment_test.cpp')},
         @{Name='pfd-detector'; Sources=@('tests/graphics/pfd_target_detector_test.cpp')},
+        @{Name='render-target-shapes'; Sources=@('tests/graphics/render_target_shapes_test.cpp')},
         @{Name='display-exposure'; Sources=@('tests/graphics/display_exposure_test.cpp')},
         @{Name='ground-speed-display'; Sources=@('tests/graphics/ground_speed_display_test.cpp')},
         @{Name='calibration'; Sources=@('tests/graphics/calibration_test.cpp')},

@@ -43,7 +43,7 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er`, `pmdg-777f` and `aerosoft-a346`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` (`left`, `right`, `both`, `sd`) and apply to all aircraft.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er`, `pmdg-777f`, `aerosoft-a346` and `ini-a340-300`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` (`left`, `right`, `both`, `sd`) and apply to all aircraft.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 
@@ -108,10 +108,12 @@ Each mount stores six values: **right, up, forward, pitch, yaw, lens**.
 | A350-1000 tail | 0 | 10 | -36.17 | -15 | 0 | 0.62 |
 | Aerosoft A340-600 nose | 0 | -2.5 | 23.33 | -15 | 0 | 0.55 |
 | Aerosoft A340-600 tail | 0 | 8.18 | -28.99 | -15 | 0 | 0.62 |
+| iniBuilds A340-300 nose | 0 | -2 | 16 | -15 | 0 | 0.55 |
+| iniBuilds A340-300 tail | 0 | 10 | -33 | -15 | 0 | 0.62 |
 
 Positions are relative to the aircraft datum. Positive pitch looks up; positive yaw turns right. A larger lens value widens the field of view.
 
-The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. The Aerosoft A340-600 mounts started from the A350-900 offsets relative to its own gear contact points; the defaults are the user's live calibration from 2026-09-23. Saved mounts override the defaults above.
+The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. The Aerosoft A340-600 mounts started from the A350-900 offsets relative to its own gear contact points; the defaults are the user's live calibration from 2026-09-23. The iniBuilds A340-300 starts from the A350-900 mounts; its package is encrypted, so no gear contact points were available, and it is not yet calibrated live. Saved mounts override the defaults above.
 
 Position components are bounded to ±500 m, pitch to ±89°, yaw to ±180° and lens to 0.05–1.55 radians. Both mounts are saved in the profile.
 
@@ -241,6 +243,8 @@ Source: [IPC](../src/shared/protocol.hpp), [control loop](../src/bridge/bridge_m
 `launcher.log` records separate elapsed milliseconds for preflight, remote-load creation and wait, post-load inspection, export lookup, and start creation and wait. The two remote thread IDs and raw wait result/error distinguish cancellation, a failed wait and a loader timeout. The process-discovery timestamp is not the start of the remote load. A timeout still retains the existing guard against launching a duplicate remote load.
 
 `bridge.log` records maximum observed discovery, camera-service and control-loop work durations, plus up to sixteen candidate IDs and their draw counters alongside the automatic-selection result. These bounded records help distinguish a stalled control loop from a detector rejecting inactive or ambiguous candidates. They are CPU elapsed times, not GPU timings; normal log rotation still applies.
+
+`Render-target shapes` records every distinct 2D render-target description the simulator creates after the bridge attaches: width x height, mips (`m`), DXGI format (`f`), creation count (`n`) and the first and last creation ticks (`t`, `GetTickCount64` ms, the same clock as the line prefix). Only single-sample, non-array targets from 256 to 16384 pixels per edge are recorded. The table holds 128 shapes; further shapes are counted as `overflow`. It is written at the next status record after a new shape appears, and changed counts are repeated at most once a minute, including while an unsupported aircraft keeps the bridge in `Aircraft transition waiting`. That state also logs the aircraft's `Aircraft identity` type and path once per flight session and whenever either changes, even when the path is still empty. Shapes first created when an aircraft loads are candidates for its display textures. The record is a creation-time description only: it does not show draw activity, texture names or which instrument a texture holds.
 
 A populated PFD inventory with no associated draw activity can indicate views whose native descriptor creation predates Connect. The already-powered A350 case with opaque views and transitions on separate command lists remains unresolved: inventory membership and manual IDs do not prove a writable view. Connect-in-flight and native binding recovery remain available where the existing D3D12 evidence is sufficient; this is separate from the detector's activity ranking.
 

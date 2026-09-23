@@ -40,7 +40,7 @@ function Get-TaxiSettingsTargets([string]$Installation, [switch]$IncludeMount) {
     foreach ($name in @('settings.ini','hotkeys.ini','startup-state')) {
         $targets += [pscustomobject]@{path=(Join-Path $current $name);root=$current}
     }
-    foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-300er','pmdg-777f','aerosoft-a346')) {
+    foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-300er','pmdg-777f','aerosoft-a346','ini-a340-300')) {
         foreach ($folder in @($current,$legacy)) {
             $targets += [pscustomobject]@{path=(Join-Path $folder "profiles/$key.ini");root=$folder}
         }
@@ -132,7 +132,7 @@ function Get-TaxiCameraRateTargets {
     $current = Join-Path $local 'Taxi Cam'
     $legacy = Join-Path $local '380 Taxi Cam'
     $targets = @([pscustomobject]@{path=(Join-Path $current 'settings.ini');root=$current})
-    foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-300er','pmdg-777f','aerosoft-a346')) {
+    foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-300er','pmdg-777f','aerosoft-a346','ini-a340-300')) {
         foreach ($folder in @($current,$legacy)) {
             $targets += [pscustomobject]@{path=(Join-Path $folder "profiles/$key.ini");root=$folder}
         }

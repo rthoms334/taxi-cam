@@ -16,6 +16,7 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 | PMDG 777-300ER | `pmdg-777-300er` | Same `DUS` and `EICASCDU` layout as 200ER | Same pane sizes; nose forward **22** m |
 | PMDG 777F | `pmdg-777f` | Same `DUS` and `EICASCDU` layout as 200ER | Same pane sizes; nose mount copied from 200ER |
 | Aerosoft A340-600 | `aerosoft-a346` | Shared `$GAUGES_UNIFIED`, 4096 x 4096; gauges `CaptPFD`, `CoPFD` and `ECAM_LOWER` (750 x 750) | Nose 736 x 251 / tail 736 x 496 |
+| iniBuilds A340-300 | `ini-a340-300` | One 1560 x 2340 one-mip texture, a 2 x 3 grid of 780 x 780 display cells (name unknown) | Nose 736 x 251 / tail 736 x 496 |
 
 A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The user has verified A350 rendering in the simulator. This does not establish every aircraft variant, framing, graphics mode or automatic target ordering; see [PR 42 validation](pr42-validation.md).
 
@@ -28,6 +29,7 @@ A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6.
 | iniBuilds A380 | Manual previews or configurable camera hotkeys; cockpit buttons marked INOP | Suppress camera output above the speed limit; no aircraft-variable writes |
 | PMDG 777 | Display Select Panel: L INBD / R INBD / LWR CTR selector lamps and the CAM button (read only). Manual previews and Ctrl + Shift + L / R / B / D add displays | Suppress camera output above the speed limit; no aircraft-variable writes |
 | Aerosoft A340-600 | `L:AB_VC_CAM_CAPT_SEL`, `L:AB_VC_CAM_FO_SEL`, plus `L:AB_VC_CAM_SD_SEL` for the lower ECAM (0 OFF, 1 TAXI) | Write zero to the selected latch through public SimConnect |
+| iniBuilds A340-300 | Manual previews or camera shortcuts (Left, Right, Both, SD); no cockpit camera control | Suppress camera output above the speed limit; no aircraft-variable writes |
 
 The installed iniBuilds A350 behavior XML uses each TAXI latch for its button state and lamp. Its input-event setter toggles that latch. An idempotent zero write makes cutoff independent of toggle timing. The other side is not written. The FBW A380 and A350 adapters wait for a fresh OFF acknowledgement. The manual-only iniBuilds A380 suppresses output without waiting for a cockpit-button acknowledgement. The catalog supplies the speed limit, currently 60 knots for all profiles.
 
@@ -127,7 +129,7 @@ Pages changed in other ways can leave Taxi Cam out of step with the cockpit unti
 
 `panel.cfg` `[VCockpit02]` draws `DU_Lower` on a separate 2048 x 2048 texture, `EICASCDU`, at 1058, 21, 958, 971 on all three variants. The upper EICAS and the three CDU screens share that texture. The lower DU uses the same composed page and the same 85 px top inset as the navigation displays.
 
-`EICASCDU` has the same size as `DUS`, the tablet textures and the upper-EICAS copy, so the size filter cannot separate them. Automatic selection takes the next-highest resource id after `DUS`. One earlier 777 session log listed five 2048 x 2048 textures (268–272): `DUS` was 272, and 271 had the highest draw count of the rest, consistent with `EICASCDU`. This guess is unverified. **PFD routing** has a **LOWER DU TEXTURE** list, **Lower preview** and **Calibrate lower** to identify and correct it. On single-display profiles (the PMDG 777 and the A340-600) the calibration bars fill exactly the selected gauge rectangle. Earlier builds painted a full-height column from the top of the texture, so on the 777 **Calibrate right** also lit the left ND, and the queued private-patch path rejected the 777 gauge size. An explicit choice is kept until that texture is destroyed; a lost automatic choice is guessed again.
+`EICASCDU` has the same size as `DUS`, the tablet textures and the upper-EICAS copy, so the size filter cannot separate them. Automatic selection takes the next-highest resource id after `DUS`. One earlier 777 session log listed five 2048 x 2048 textures (268–272): `DUS` was 272, and 271 had the highest draw count of the rest, consistent with `EICASCDU`. This guess is unverified. **PFD routing** has a **LOWER DU TEXTURE** list, **Lower preview** and **Calibrate lower** to identify and correct it. On single-display profiles (the PMDG 777 and both A340s) the calibration bars fill exactly the selected gauge rectangle. Earlier builds painted a full-height column from the top of the texture, so on the 777 **Calibrate right** also lit the left ND, and the queued private-patch path rejected the 777 gauge size. An explicit choice is kept until that texture is destroyed; a lost automatic choice is guessed again.
 
 ### Aerosoft A340-600 configuration
 
@@ -141,8 +143,20 @@ Each selector is a two-state XML switch whose setter writes 1 (TAXI) or 0 (OFF) 
 
 `flight_model.cfg` contact points (feet) put the nose gear at forward/up 103.51 / -21.4 and the wing gear at right/up/forward ±17.5 / -22.4 / -4.46. The mounts started from the A350-900's gear-relative offsets. The defaults are the user's saved live calibration from 2026-09-23: nose **0 / -2.5 / 23.33 m, -15 / 0 degrees, 0.55 rad**; tail **0 / 8.18 / -28.99 m, -15 / 0 degrees, 0.62 rad**. These are visual alignments, not a metric clearance calibration. PFD refresh is not measured (`pfd_refresh_hz` 0). Settings are stored in `aerosoft-a346.ini`.
 
+### iniBuilds A340-300 configuration
+
+The iniBuilds A340-300 is a streamed MSFS 2024 package (`fs24-inibuilds-aircraft-a340`). Its archives are encrypted, so `panel.cfg`, `flight_model.cfg` and the texture names cannot be read. On 2026-09-23 the loaded `a340-300_eis2` preset reported `ATC TYPE` `Airbus` and the `AircraftLoaded` path `SimObjects\Airplanes\inibuilds-a340\presets\inibuilds\a340-300_eis2\config\aircraft.CFG`. The profile matches the SimObject folder component `SimObjects/Airplanes/inibuilds-a340` (or the package folder) and does not require ATC TYPE. Other presets in that folder, such as a different EIS, use the same profile but have not been seen.
+
+The same session's `Render-target shapes` log showed, when the cockpit loaded, a group of one-mip `R8G8B8A8_TYPELESS` textures like the other iniBuilds displays: 1560 x 2340, 1024 x 1024, 1024 x 735, 300 x 300 and two each of 450 x 400 and 450 x 340. The 1560 x 2340 texture, created once, is exactly a 2 x 3 grid of 780 x 780 cells, one per display unit. Taxi Cam treats it as a single display texture, as on the A340-600: the last size-matched texture-list entry is assigned to every side. A five-mip 2340 x 2340 texture from the same load is not a candidate.
+
+Live testing on 2026-09-23 placed the cells: the top-left cell is the captain's ND, the middle-right cell the first officer's PFD and the bottom-right cell the lower ECAM. The rows are ND / PFD pairs: CAPT ND and CAPT PFD, F/O ND and F/O PFD, then E/WD and SD. The camera displays are therefore the right column, each 780 x 780: the captain's PFD at 780, 0 (from that pattern; not yet re-checked), the first officer's PFD at 780, 780 and the lower ECAM at 780, 1560. **Calibrate left**, **Calibrate right** and **Calibrate SD** on **PFD routing** light the selected cell. Inside each cell the usual 16 / 12-pixel border leaves 748 x 768 content pixels, and guide defaults are the A340-600's.
+
+No TACS selector or other camera control was found, so the profile is manual-only like the iniBuilds A380: Ctrl + Shift + L / R / B / D and the previews turn the three displays on and off, nothing is written to the aircraft, and output stops above the speed limit. Mounts start from the A350-900 defaults. PFD refresh is not measured (`pfd_refresh_hz` 0). Settings are stored in `ini-a340-300.ini`. Automatic detection and the F/O PFD and SD placement were seen in the simulator; framing and cutoff still need a live check.
+
 ### Integration requirements
 
 Define an `AircraftProfile` in [the catalog](../src/profiles/catalog.hpp): accepted aircraft types and add-on path markers, control strategy and variables, texture constraints, side-order rule, destination rectangles and border insets, camera dimensions, mounts, composition, speed limit and the measured PFD refresh (`pfd_refresh_hz`: bridge `stamps`/s ÷ 2; 0 until measured; iniBuilds A380 16 from 0.9.11, A350 80 from the 0.9.35 sweep under frame generation, FBW A380 not yet measured). Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
+
+When the package cannot be read (streamed iniBuilds aircraft are encrypted), load the aircraft with the bridge attached and read the `Render-target shapes` and `Aircraft identity` records in `bridge.log` (see [runtime reference](runtime-reference.md)). Shapes first created at the aircraft load are the display-texture candidates.
 
 Add profile/settings tests and a GPU fixture that checks both camera regions and every preserved display region. Then verify actual cockpit buttons, texture identity, framing, cutoff and aircraft reload. An aircraft with different control semantics needs a control adapter; an aircraft without two camera views needs a different composition contract.

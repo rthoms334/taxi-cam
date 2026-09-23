@@ -155,6 +155,40 @@ void log_hook_timing(const win::Status& status) noexcept {
     log_status(status, threads);
   }
 }
+// Render-target shapes for identifying an unsupported aircraft's displays.
+// Worker thread only. Logs a new shape at the next status record and repeats
+// changed creation counts at most once a minute.
+void log_render_target_shapes(const win::Status& status, std::uint64_t now) noexcept {
+  static std::uint64_t logged_distinct = 0, logged_total = 0, logged_ms = 0;
+  const auto& inventory = win::render_target_shape_inventory();
+  const auto distinct = inventory.distinct(), total = inventory.total();
+  if (distinct == logged_distinct && (total == logged_total || now - logged_ms < 60000))
+    return;
+  static std::array<RenderTargetShapes::Shape, RenderTargetShapes::Capacity> shapes;
+  const auto n = inventory.snapshot(shapes);
+  constexpr std::size_t PerLine = 24;
+  for (std::size_t begin = 0; begin < n || begin == 0; begin += PerLine) {
+    char detail[1280];
+    auto used = static_cast<std::size_t>(std::snprintf(
+        detail, sizeof(detail), "Render-target shapes %zu-%zu/%zu overflow=%llu (WxH mips format created first_ms-last_ms):", begin + 1,
+        std::min(n, begin + PerLine), n, static_cast<unsigned long long>(inventory.overflow())));
+    for (std::size_t i = begin; i < std::min(n, begin + PerLine) && used < sizeof(detail); ++i) {
+      const auto& shape = shapes[i];
+      const auto written = std::snprintf(detail + used, sizeof(detail) - used, " %ux%u m%u f%u n%llu t%llu-%llu", shape.width, shape.height,
+                                         shape.mips, shape.format, static_cast<unsigned long long>(shape.created),
+                                         static_cast<unsigned long long>(shape.first_ms), static_cast<unsigned long long>(shape.last_ms));
+      if (written < 0 || static_cast<std::size_t>(written) >= sizeof(detail) - used)
+        break;
+      used += static_cast<std::size_t>(written);
+    }
+    log_status(status, detail);
+    if (!n)
+      break;
+  }
+  logged_distinct = distinct;
+  logged_total = total;
+  logged_ms = now;
+}
 // Dedicated thread: reads counters, never takes a bridge lock, and flips the
 // graphics gate. The worker applies the camera disarm on its next iteration.
 DWORD WINAPI watchdog_run(void*) noexcept {
@@ -498,6 +532,26 @@ DWORD run_impl() {
                         static_cast<unsigned long long>(pending_gpu_generation), public_ready, transition_session.loading,
                         transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error);
           log_status(pending, detail);
+          // An unsupported aircraft stays here: record what it is and which
+          // render targets it creates. Log once per session, then on any type
+          // or path change, including an empty path with a known type.
+          static bool waiting_logged = false;
+          static std::uint64_t waiting_session = 0;
+          static std::array<char, sizeof(pending.aircraft_type)> waiting_type{};
+          static std::array<char, sizeof(pending.aircraft_path)> waiting_path{};
+          if (!waiting_logged || waiting_session != session_epoch || std::strcmp(waiting_type.data(), pending.aircraft_type) ||
+              std::strcmp(waiting_path.data(), pending.aircraft_path)) {
+            waiting_logged = true;
+            waiting_session = session_epoch;
+            std::memcpy(waiting_type.data(), pending.aircraft_type, waiting_type.size());
+            std::memcpy(waiting_path.data(), pending.aircraft_path, waiting_path.size());
+            char identity_detail[768];
+            std::snprintf(identity_detail, sizeof(identity_detail), "Aircraft identity: session=%llu detected=%u fresh=%u type=%.255s path=%.259s",
+                          static_cast<unsigned long long>(session_epoch), identity.detected_profile, identity.fresh, identity.type.data(),
+                          identity.path.data());
+            log_status(pending, identity_detail);
+          }
+          log_render_target_shapes(pending, now);
           next_log = now + 5000;
         }
         service_scene();
@@ -1068,6 +1122,7 @@ DWORD run_impl() {
                     graphics.target_detection, static_cast<unsigned long long>(settings.left_id),
                     static_cast<unsigned long long>(settings.right_id));
       log_status(status, selection_detail);
+      log_render_target_shapes(status, now);
       char control_detail[256];
       std::snprintf(control_detail, sizeof(control_detail),
                     "Control loop timing: discovery_max_ms=%llu service_max_ms=%llu observed_loop_max_ms=%llu",

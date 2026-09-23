@@ -133,10 +133,10 @@ void guide_settings_tests() {
     edited.nose_dot = {profile->id * 0.03125f, 0.25f};
     edited.tail_upper = {0.125f, 0.375f + profile->id * 0.03125f};
     edited.tail_corner = {0.21875f, 0.6875f};
-    edited.tail_inner = {0.375f, 0.75f + profile->id * 0.03125f};
+    edited.tail_inner = {0.375f, 0.71875f + profile->id * 0.03125f};
     edited.mounts[0][1] += 0.125;
     edited.speed_color = {0.25f, 0.5f, 0.75f};
-    edited.guide_color = {profile->id * 0.125f, 0.125f, 0.875f};
+    edited.guide_color = {profile->id * 0.0625f, 0.125f, 0.875f};
     edited.exposure = -7.5f;
     assert(save_settings(edited));
     Settings loaded;
@@ -287,7 +287,11 @@ int main() {
   for (const auto* other : {&profiles::A380, &profiles::A359, &profiles::A35K, &profiles::IniA380})
     assert(!profiles::separate_lower_texture(*other));
   assert(profiles::commandable_buttons(profiles::A380) && profiles::commandable_buttons(profiles::A359) &&
-         profiles::commandable_buttons(profiles::AerosoftA346) && !profiles::commandable_buttons(profiles::IniA380));
+         profiles::commandable_buttons(profiles::AerosoftA346) && !profiles::commandable_buttons(profiles::IniA380) &&
+         !profiles::commandable_buttons(profiles::IniA343));
+  // The A340-300 SD shares the one display texture; its displays follow shortcuts only.
+  assert(profiles::IniA343.taxi_control == profiles::TaxiControl::manual_only);
+  assert(!profiles::separate_lower_texture(profiles::IniA343) && profiles::shared_texture_sides(profiles::IniA343) == 7);
   assert(profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
                                    "SimObjects\\Airplanes\\PMDG 777-200ER\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG") ==
          profiles::Pmdg777.id);
@@ -318,8 +322,13 @@ int main() {
   assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME AIRBUS.0.text", "SimObjects/Airplanes/airbus-a346-pro-copy/aircraft.cfg"));
   assert(!profiles::detect_aircraft("A346", "Community/aerosoft-aircraft-a346-pro_CVT_/aircraft.cfg"));
   assert(!profiles::detect_aircraft("A346", "SimObjects/Airplanes/Other_A346/aircraft.cfg"));
-  assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME AIRBUS.0.text",
-                                    "SimObjects\\Airplanes\\inibuilds-a340\\presets\\inibuilds\\a340-300\\config\\aircraft.CFG"));
+  // Live iniBuilds A340-300 identity: ATC TYPE Airbus and this SimObject path.
+  constexpr auto ini_a343_path = "SimObjects\\Airplanes\\inibuilds-a340\\presets\\inibuilds\\a340-300_eis2\\config\\aircraft.CFG";
+  assert(profiles::detect_aircraft("Airbus", ini_a343_path) == profiles::IniA343.id);
+  assert(profiles::detect_aircraft("", "StreamedPackages/fs24-inibuilds-aircraft-a340/SimObjects/Airplanes/other/aircraft.cfg") ==
+         profiles::IniA343.id);
+  assert(!profiles::detect_aircraft("Airbus", "SimObjects/Airplanes/inibuilds-a340-copy/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("A346", "SimObjects/Airplanes/inibuilds-a340x/aircraft.cfg"));
   assert(profiles::detect_aircraft(
              "ATCCOM.ATC_NAME AIRBUS.0.text",
              "SimObjects\\Airplanes\\FlyByWire_A380X\\presets\\flybywire\\FlyByWire_A380_842\\config\\aircraft.CFG") == 1);
@@ -418,7 +427,32 @@ int main() {
     assert(pmdg != profile->ground_speed);
     // Every profile shows the PLEASE WAIT page; only the PMDG ND draws it white.
     assert(pmdg == profile->waiting_white_text);
-    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) == (profile->display_texture[0] != '\0'));
+    // A scanned texture name implies the single-display rule. The iniBuilds
+    // A340-300 texture is identified by shape only (its package is encrypted).
+    assert(!profile->display_texture[0] || profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
+    if (profile->id == profiles::IniA343.id) {
+      assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display && profile->display_texture[0] == '\0');
+      assert(profile->width == 1560 && profile->height == 2340 && profile->mips == 1 && profile->sides == 3);
+      // 2 x 3 grid of 780 x 780 cells in ND / PFD rows; the right column holds
+      // CAPT PFD (1,0), F/O PFD (1,1) and SD (1,2).
+      const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1),
+                 sd = profiles::display_rect(*profile, 2);
+      assert(left.left == 780 && left.top == 0 && left.right == 1560 && left.bottom == 780);
+      assert(right.left == 780 && right.top == 780 && right.right == 1560 && right.bottom == 1560);
+      assert(sd.left == 780 && sd.top == 1560 && sd.right == 1560 && sd.bottom == 2340);
+      for (unsigned side = 0; side < 3; ++side) {
+        const auto content = profiles::display_content_rect(*profile, side);
+        assert(content.right - content.left == 748 && content.bottom - content.top == 768);
+      }
+      // The scanned display is one-mip R8G8B8A8_TYPELESS; typed views are admitted
+      // for patch output. The five-mip 2340 x 2340 texture beside it is not.
+      assert(profiles::matches_display(*profile, 1560, 2340, 1, 27) && profiles::matches_display(*profile, 1560, 2340, 1, 28));
+      assert(!profiles::matches_display(*profile, 1560, 2340, 5, 27) && !profiles::matches_display(*profile, 2340, 2340, 5, 28));
+      assert(!profiles::matches_display(*profile, 1560, 2340, 1, 10));
+      assert(profile->composition.tail_corner == profiles::AerosoftA346.composition.tail_corner);
+      assert(profile->mounts == profiles::A359.mounts);
+      continue;
+    }
     if (profile->id == profiles::AerosoftA346.id) {
       assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
       assert(std::strcmp(profile->display_texture, "$GAUGES_UNIFIED") == 0);
