@@ -11,9 +11,31 @@ namespace taxi_camera::native_camera {
 // owner/entry identities and update counters, never borrowed view pointers.
 // Closed gates across CPU updates do NOT prove GPU or native output lifetime;
 // the caller must establish that separately before acting on resize.
+//
+// Waiting for an output to return to its pane has no deadline: a user may stay
+// in the graphics settings for any length of time, and expiry would leave the
+// cameras off until a simulator restart. The caller keeps that wait cheap
+// (issue 69: Frame Generation switched on in flight retried for 8 minutes).
 class ViewResizeRecovery {
  public:
+  // An ordinary AA/upscaler switch restores well within this many updates
+  // (about five seconds at typical manager rates). A longer wait is reported
+  // to the user as expected and self-resolving, not as a failure.
+  static constexpr std::uint64_t SettlingNoticeUpdates = 250;
   enum class Action { wait, close_gates, resize, blocked };
+  static const char* action_name(Action action) noexcept {
+    switch (action) {
+      case Action::wait:
+        return "wait";
+      case Action::close_gates:
+        return "close_gates";
+      case Action::resize:
+        return "resize";
+      case Action::blocked:
+        return "blocked";
+    }
+    return "unknown";
+  }
   using Ids = std::array<engine_camera::EntryId, 3>;
   using Views = std::array<engine_camera::OwnedViewSnapshot, 3>;
 
@@ -42,8 +64,16 @@ class ViewResizeRecovery {
       return Action::blocked;
     }
     last_update_ = update;
+    if (!first_update_)
+      first_update_ = update;
+    // Only the feeds this pair owns. A two-feed aircraft (A380) leaves the
+    // third snapshot default, never inspected: judged here it read as a
+    // temporarily unavailable view forever, and a graphics change mid-flight
+    // (Frame Generation toggle, issue 69) never got past this wait.
+    const unsigned feeds = ids[2] ? 3u : 2u;
     bool temporary = false;
-    for (const auto& view : views) {
+    for (unsigned index = 0; index < feeds; ++index) {
+      const auto& view = views[index];
       using Status = engine_camera::OwnedViewStatus;
       if ((view.status == Status::pending && view.complete && !view.ready) ||
           (!view.complete && !view.ready &&
@@ -59,7 +89,6 @@ class ViewResizeRecovery {
       closed_seen_ = false;
       return Action::wait;
     }
-    const unsigned feeds = ids[2] ? 3u : 2u;
     for (unsigned i = 0; i < feeds; ++i) {
       for (unsigned j = i + 1; j < feeds; ++j) {
         if (views[i].view_address == views[j].view_address || views[i].view_index == views[j].view_index) {
@@ -106,11 +135,18 @@ class ViewResizeRecovery {
   // still matches the pane. Release the one-shot authorization so a later update
   // may restore instead of sitting in wait after an unused resize token.
   void release_resize_authorization() noexcept {
-    if (pending_ && !failed_)
+    if (pending_ && !failed_) {
       resize_issued_ = false;
+      ++released_;
+    }
   }
   bool pending() const noexcept { return pending_; }
   bool failed() const noexcept { return failed_; }
+  // Diagnostics only: updates observed since this recovery began, and resize
+  // authorizations released because the outputs did not match their panes.
+  std::uint64_t elapsed_updates() const noexcept { return first_update_ ? last_update_ - first_update_ : 0; }
+  unsigned released() const noexcept { return released_; }
+  bool settling() const noexcept { return pending_ && !failed_ && elapsed_updates() >= SettlingNoticeUpdates; }
   void clear() noexcept { *this = {}; }  // Explicit lifecycle reset, never automatic retry.
   void mark_failed() noexcept {
     failed_ = true;
@@ -135,7 +171,8 @@ class ViewResizeRecovery {
 
   engine_camera::ManagerToken owner_{};
   Ids ids_{};
-  std::uint64_t last_update_ = 0, closed_update_ = 0;
+  std::uint64_t last_update_ = 0, closed_update_ = 0, first_update_ = 0;
+  unsigned released_ = 0;
   bool pending_ = false, failed_ = false, closed_seen_ = false, resize_issued_ = false;
 };
 

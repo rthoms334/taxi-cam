@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <string_view>
 
 namespace {
 namespace ec = taxi_camera::engine_camera;
@@ -209,6 +210,42 @@ int main() {
   mixed[1].status = ec::OwnedViewStatus::id_mismatch;
   require(policy.observe(owner, ids, 1, mixed) == Action::blocked, "Identity refusal dominates another view's transient churn");
 
+  // Issue 69: outputs that stay off their pane release every resize
+  // authorization. Waiting has no deadline, so a restore that becomes possible
+  // much later (a long visit to the graphics settings) still succeeds without
+  // a simulator restart. Observations are sparse, like throttled inspection.
+  policy.clear();
+  require(!policy.settling(), "Idle recovery is not settling");
+  require(policy.begin(owner, ids), "Settling notice cycle begins");
+  require(policy.observe(owner, ids, 500, views) == Action::wait && !policy.settling(), "A new wait is not yet reported as long");
+  require(policy.observe(owner, ids, 499 + Policy::SettlingNoticeUpdates, views) == Action::resize && !policy.settling(),
+          "An ordinary settle stays below the notice");
+  policy.release_resize_authorization();
+  require(policy.observe(owner, ids, 500 + Policy::SettlingNoticeUpdates, views) == Action::resize && policy.settling(),
+          "A long wait is reported as settling");
+  policy.mark_failed();
+  require(!policy.settling(), "A failed recovery is never reported as settling");
+  policy.clear();
+  require(policy.begin(owner, ids), "Long wait begins");
+  constexpr std::uint64_t first = 1000;
+  require(policy.observe(owner, ids, first, views) == Action::wait, "Long wait first closed update waits");
+  unsigned releases = 0;
+  std::uint64_t update = first;
+  for (; update < first + 1'000'000; update += 12) {
+    if (update == first)
+      continue;
+    require(policy.observe(owner, ids, update, views) == Action::resize && !policy.failed(), "Mismatched outputs keep retrying");
+    policy.release_resize_authorization();
+    ++releases;
+  }
+  require(policy.released() == releases && policy.elapsed_updates() == update - 12 - first, "Retries and elapsed updates are reported");
+  require(policy.observe(owner, ids, update, views) == Action::resize && policy.finish(owner, ids) && !policy.pending() && !policy.failed(),
+          "Outputs returning after a long wait still restore");
+  require(!policy.released() && !policy.elapsed_updates() && !policy.settling(), "A finished cycle clears its diagnostics");
+  require(std::string_view(Policy::action_name(Action::resize)) == "resize" &&
+              std::string_view(Policy::action_name(Action::close_gates)) == "close_gates",
+          "Actions have log names");
+
   // Exercise the real ID owner through repeated simulated dimension changes.
   // The callbacks count ownership changes only; no GPU/native resize is modeled.
   Engine engine;
@@ -233,6 +270,26 @@ int main() {
     require(
         pair.snapshot().owned_ids == original_ids && pair.snapshot().state == ec::State::active && engine.creates == 2 && !engine.erases,
         "Recovery never erases or replaces either retained ID");
+  }
+  {
+    // Issue 69: a two-feed pair leaves the third snapshot default (never
+    // inspected, incomplete). It must not hold the recovery in wait forever.
+    Policy two_feed;
+    auto pair_views = ready_views();
+    pair_views[2] = {};
+    require(two_feed.begin(owner, ids) && two_feed.pending(), "Two-feed pair begins recovery");
+    require(two_feed.observe(owner, ids, 30, pair_views) == Action::wait, "Two-feed first closed update waits");
+    require(two_feed.observe(owner, ids, 31, pair_views) == Action::resize, "Unused third snapshot does not block two-feed resize");
+    require(two_feed.finish(owner, ids) && !two_feed.pending(), "Two-feed recovery finishes");
+    // A three-feed pair still waits on its own third view while it settles.
+    Policy three_feed;
+    constexpr Policy::Ids three_ids{1001, 1002, 1003};
+    auto settling = ready_views();
+    settling[2] = {};
+    require(three_feed.begin(owner, three_ids), "Three-feed pair begins recovery");
+    for (std::uint64_t update = 40; update < 45; ++update)
+      require(three_feed.observe(owner, three_ids, update, settling) == Action::wait, "Uninspected owned third feed keeps waiting");
+    require(!three_feed.failed(), "Uninspected owned third feed is temporary, not a failure");
   }
   std::printf("View resize recovery: PASS %u checks (CPU phase policy only)\n", checks);
 }
