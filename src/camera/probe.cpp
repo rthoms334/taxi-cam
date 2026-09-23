@@ -1244,6 +1244,37 @@ void record_stop(Runtime& runtime,
   runtime.stop_detail = detail;
 }
 
+// Retained-resolution recovery state for the periodic status log: why it is
+// still waiting, and each view's observed sizes next to the allocated pane.
+// Values only; no address or resource identity is formatted.
+std::string resize_recovery_detail(const Runtime& runtime,
+                                   const ec::Snapshot& pair,
+                                   const std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds>& views,
+                                   ViewResizeRecovery::Action action) {
+  const auto& recovery = runtime.resize_recovery;
+  char text[768];
+  int used = std::snprintf(text, sizeof(text), "%s recovery=%s updates=%llu output_retries=%u",
+                           recovery.failed() ? "Retained-resolution recovery refused; existing output could not be safely retained."
+                                             : "Primary dimensions changed; camera IDs retained and output allocation prohibited.",
+                           ViewResizeRecovery::action_name(action), static_cast<unsigned long long>(recovery.elapsed_updates()),
+                           recovery.released());
+  for (unsigned i = 0; i < views.size() && used > 0 && static_cast<std::size_t>(used) < sizeof(text); ++i) {
+    if (!pair.owned_ids[i])
+      continue;
+    const auto& view = views[i];
+    const auto& pane = runtime.allocation_panes[i];
+    const int written =
+        std::snprintf(text + used, sizeof(text) - used, "; feed%u=%s mode=%u closed=%u view=%dx%d,%dx%d,%dx%d output=%dx%d pane=%dx%d", i,
+                      ec::owned_view_status_name(view.status), view.mode, static_cast<unsigned>(view.flags[0] & 1u), view.dimensions[0][0],
+                      view.dimensions[0][1], view.dimensions[1][0], view.dimensions[1][1], view.dimensions[2][0], view.dimensions[2][1],
+                      view.output_dimensions[0], view.output_dimensions[1], pane[0], pane[1]);
+    if (written < 0)
+      break;
+    used += written;
+  }
+  return text;
+}
+
 void clear_retired_pair(Runtime& runtime) {
   // Only the observer may clear these fields, after PairController confirms
   // that its exact owned IDs are absent. A public event is not that proof.
@@ -1415,8 +1446,12 @@ void observer(void* manager) noexcept {
       runtime.schedule = next_schedule;
       return;
     }
-    if (inspection != ProbeInspectionDecision::required && !session_hold && !before.request_pending && !gate_change &&
-        !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
+    // Retained-resolution recovery keeps both gates closed, so requested gates
+    // always differ from them. That difference cannot open anything; it must
+    // not turn recovery into a full inspection on every manager update (issue 69).
+    const bool resize_recovery_held = runtime.resize_recovery.pending() || runtime.resize_recovery.failed();
+    if (inspection != ProbeInspectionDecision::required && !session_hold && !before.request_pending &&
+        (!gate_change || resize_recovery_held) && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
       runtime.schedule = next_schedule;
       return;
     }
@@ -1735,7 +1770,9 @@ void observer(void* manager) noexcept {
               runtime.gates[i] = false;
             }
           }
-          runtime.message = "Graphics settings changed; camera IDs retained while both render gates close.";
+          runtime.message = runtime.resize_recovery.settling()
+                                ? "Waiting for camera output to settle after a graphics change; cameras resume automatically."
+                                : "Graphics settings changed; camera IDs retained while both render gates close.";
           bool restored_now = false;
           if (action == ViewResizeRecovery::Action::resize) {
             const bool retainable = views[0].mode == 2 && views[1].mode == 2 && views[0].resource_present && views[1].resource_present;
@@ -1781,6 +1818,11 @@ void observer(void* manager) noexcept {
           if (restored_now)
             report.view_waiting = false;
           else {
+            if (runtime.resize_recovery.pending()) {
+              auto detail = resize_recovery_detail(runtime, pair, views, action);
+              const std::lock_guard lock(runtime.mutex);
+              runtime.stop_detail = std::move(detail);
+            }
             report.ready = report.resource_present = report.output_ready = {};
             report.outputs_matched = false;
             report.view_waiting = true;
