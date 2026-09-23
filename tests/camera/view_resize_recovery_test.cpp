@@ -271,5 +271,25 @@ int main() {
         pair.snapshot().owned_ids == original_ids && pair.snapshot().state == ec::State::active && engine.creates == 2 && !engine.erases,
         "Recovery never erases or replaces either retained ID");
   }
+  {
+    // Issue 69: a two-feed pair leaves the third snapshot default (never
+    // inspected, incomplete). It must not hold the recovery in wait forever.
+    Policy two_feed;
+    auto pair_views = ready_views();
+    pair_views[2] = {};
+    require(two_feed.begin(owner, ids) && two_feed.pending(), "Two-feed pair begins recovery");
+    require(two_feed.observe(owner, ids, 30, pair_views) == Action::wait, "Two-feed first closed update waits");
+    require(two_feed.observe(owner, ids, 31, pair_views) == Action::resize, "Unused third snapshot does not block two-feed resize");
+    require(two_feed.finish(owner, ids) && !two_feed.pending(), "Two-feed recovery finishes");
+    // A three-feed pair still waits on its own third view while it settles.
+    Policy three_feed;
+    constexpr Policy::Ids three_ids{1001, 1002, 1003};
+    auto settling = ready_views();
+    settling[2] = {};
+    require(three_feed.begin(owner, three_ids), "Three-feed pair begins recovery");
+    for (std::uint64_t update = 40; update < 45; ++update)
+      require(three_feed.observe(owner, three_ids, update, settling) == Action::wait, "Uninspected owned third feed keeps waiting");
+    require(!three_feed.failed(), "Uninspected owned third feed is temporary, not a failure");
+  }
   std::printf("View resize recovery: PASS %u checks (CPU phase policy only)\n", checks);
 }

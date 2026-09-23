@@ -66,8 +66,14 @@ class ViewResizeRecovery {
     last_update_ = update;
     if (!first_update_)
       first_update_ = update;
+    // Only the feeds this pair owns. A two-feed aircraft (A380) leaves the
+    // third snapshot default, never inspected: judged here it read as a
+    // temporarily unavailable view forever, and a graphics change mid-flight
+    // (Frame Generation toggle, issue 69) never got past this wait.
+    const unsigned feeds = ids[2] ? 3u : 2u;
     bool temporary = false;
-    for (const auto& view : views) {
+    for (unsigned index = 0; index < feeds; ++index) {
+      const auto& view = views[index];
       using Status = engine_camera::OwnedViewStatus;
       if ((view.status == Status::pending && view.complete && !view.ready) ||
           (!view.complete && !view.ready &&
@@ -83,7 +89,6 @@ class ViewResizeRecovery {
       closed_seen_ = false;
       return Action::wait;
     }
-    const unsigned feeds = ids[2] ? 3u : 2u;
     for (unsigned i = 0; i < feeds; ++i) {
       for (unsigned j = i + 1; j < feeds; ++j) {
         if (views[i].view_address == views[j].view_address || views[i].view_index == views[j].view_index) {
