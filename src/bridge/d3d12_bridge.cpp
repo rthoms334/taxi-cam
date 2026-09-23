@@ -1437,7 +1437,13 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
           r.calibration_budget.try_acquire(0, GetTickCount64())) {
         const auto area = profiles::display_rect(*r.profile, side);
         const boundary::ScopedBypass bypass;
-        if (record_calibration(native, retained, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16, area.left))
+        // Single-display gauges are whole rectangles anywhere on the texture;
+        // other profiles calibrate the upper region of their column.
+        const bool gauge = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+        if (gauge ? record_calibration_area(native, retained, area.right - area.left, area.bottom - area.top, GetTickCount64() / 16,
+                                            area.left, area.top)
+                  : record_calibration(native, retained, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16,
+                                       area.left))
           ++r.calibration_clears;
       }
     }
@@ -3304,10 +3310,13 @@ void service_display_patches() noexcept {
   }
   runtime::configure_queue_patches(r.key, config);
 }
-bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
+bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  bool l = !left, rr = !right;
+  const bool separate = profiles::separate_lower_texture(*r.profile);
+  if (!separate)
+    lower = 0;
+  bool l = !left, rr = !right, lw = !lower;
   for (const auto& [p, item] : r.resources) {
     (void)p;
     if (!item->alive || !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
@@ -3315,13 +3324,26 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
       continue;
     l |= item->id == left;
     rr |= item->id == right;
+    lw |= item->id == lower;
   }
-  if (!l || !rr)
+  if (!l || !rr || !lw || (lower && (lower == left || lower == right)))
     return false;
-  // One texture holds every single-display side; either id selects it.
-  const bool assigned = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display
-                            ? (!left || !right || left == right) && r.routes.select_single(left ? left : right)
-                            : r.routes.select_explicit({left, right});
+  // One texture holds every single-display side; either id selects it. A
+  // separate lower texture is released first so it cannot block that choice.
+  const auto previous_lower = r.routes.targets[2];
+  const bool previous_explicit = r.routes.lower_explicit();
+  if (separate)
+    r.routes.select_lower(0);
+  bool assigned = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display
+                      ? (!left || !right || left == right) && r.routes.select_single(left ? left : right, separate)
+                      : r.routes.select_explicit({left, right});
+  if (separate) {
+    assigned = assigned && r.routes.select_lower(lower);
+    if (!assigned && previous_lower && !r.routes.targets[2] && previous_explicit)
+      r.routes.select_lower(previous_lower);
+    else if (!assigned && previous_lower && !r.routes.targets[2])
+      r.routes.adopt_lower(previous_lower);
+  }
   if (assigned && live_display_rtvs(r) != live_display_resources(r))
     rearm_live_backfill(r);
   refresh_selected(r);
@@ -3484,7 +3506,9 @@ void discover_pfds(std::uint64_t now) noexcept {
     }
     const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
     const bool single_display = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
-    const bool missing = single_display ? !r.routes.targets[0] : (!r.routes.targets[0] || !r.routes.targets[1]);
+    const bool separate_lower = profiles::separate_lower_texture(*r.profile);
+    const bool missing =
+        single_display ? !r.routes.targets[0] || (separate_lower && !r.routes.targets[2]) : (!r.routes.targets[0] || !r.routes.targets[1]);
     if (now && (ranked_group || missing)) {
       // Take the full inventory after retirement cleanup, under the same
       // registry lock used for detector configuration and target assignment.
@@ -3493,9 +3517,11 @@ void discover_pfds(std::uint64_t now) noexcept {
       auto inventory = pfd_inventory_locked(r);
       const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now, r.pfd_inventory_complete.load());
       if (detection.valid) {
-        if (single_display)
-          r.routes.adopt_single(detection.targets[0]);
-        else
+        if (single_display) {
+          r.routes.adopt_single(detection.targets[0], separate_lower);
+          if (separate_lower)
+            r.routes.adopt_lower(detection.targets[1]);
+        } else
           r.routes.adopt_detected(detection.targets);
       } else if (ranked_group && detection.invalidates_targets)
         r.routes.forget_detected();

@@ -305,7 +305,15 @@ class PfdTargetDetector {
     if (now_ms - baseline_ms_ < window_ms)
       return detection_;
     seed(count, now_ms);
-    return confirm({chosen, 0});
+    confirm({chosen, 0});
+    // Unverified lower-texture guess for a profile whose side 2 is a separate
+    // texture, reported beside the confirmed display without affecting its
+    // stability: the next-highest id. One PMDG 777 session log listed five
+    // 2048 x 2048 textures; the busiest non-DUS texture, consistent with
+    // EICASCDU, was the next-highest id. Routing can override it.
+    if (detection_.valid && profiles::separate_lower_texture(*profile_) && count >= 2)
+      detection_.targets[1] = current_[count - 2].id;
+    return detection_;
   }
 
   bool contains(std::size_t count, std::uint64_t id) const noexcept {

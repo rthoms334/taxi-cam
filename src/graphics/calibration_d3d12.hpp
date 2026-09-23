@@ -26,5 +26,26 @@ inline bool record_calibration(ID3D12GraphicsCommandList* command_list,
   }
   return true;
 }
+// Same contract, for a display occupying exactly width x height at origin_x,
+// origin_y (single-display profiles such as the PMDG 777 gauges). Nothing
+// outside that rectangle is cleared.
+inline bool record_calibration_area(ID3D12GraphicsCommandList* command_list,
+                                    D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                                    std::uint32_t width,
+                                    std::uint32_t height,
+                                    std::uint64_t frame,
+                                    std::uint32_t origin_x = 0,
+                                    std::uint32_t origin_y = 0) {
+  if (command_list == nullptr || rtv.ptr == 0 || width < 32 || width > 16384 || origin_x > 16384 - width || height < 32 || height > 16384 ||
+      origin_y > 16384 - height) {
+    return false;
+  }
+  for (const auto& rectangle : calibration_area_rectangles(width, height, frame)) {
+    const D3D12_RECT native_rect{rectangle.left + static_cast<LONG>(origin_x), rectangle.top + static_cast<LONG>(origin_y),
+                                 rectangle.right + static_cast<LONG>(origin_x), rectangle.bottom + static_cast<LONG>(origin_y)};
+    command_list->ClearRenderTargetView(rtv, rectangle.color.data(), 1, &native_rect);
+  }
+  return true;
+}
 
 }  // namespace taxi_camera

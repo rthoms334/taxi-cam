@@ -51,7 +51,8 @@ class TaxiButtonIntent {
 // Session-only resource identities. The caller serializes access and forgets
 // destroyed resources; no simulator state or resource lifetime is owned here.
 // Pair detection routes the captain and first-officer sides; a single-display
-// profile routes one texture to every side.
+// profile routes one texture to every side, except that a separate lower
+// texture (PMDG 777 lower DU) keeps its own side-2 identity.
 class TaxiButtonRoutes {
  public:
   using Pair = std::array<std::uint64_t, 2>;
@@ -73,12 +74,45 @@ class TaxiButtonRoutes {
   }
   // Single-display profiles: an explicit texture serves every side, because all
   // display rectangles live on it. Zero requests automatic detection again.
-  bool select_single(std::uint64_t id) noexcept {
+  // separate_lower leaves side 2 on its own texture, which it cannot share.
+  bool select_single(std::uint64_t id, bool separate_lower = false) noexcept {
+    if (separate_lower) {
+      if (id && id == targets[2])
+        return false;
+      targets[0] = targets[1] = id;
+      detected_targets_[0] = detected_targets_[1] = 0;
+      assigned_ = id != 0;
+      return true;
+    }
     targets = {id, id, id};
     detected_targets_ = {};
+    lower_explicit_ = false;
     assigned_ = id != 0;
     return true;
   }
+  // Separate lower texture: explicit choice; zero returns it to automatic.
+  bool select_lower(std::uint64_t id) noexcept {
+    if (id && (id == targets[0] || id == targets[1]))
+      return false;
+    targets[2] = id;
+    detected_targets_[2] = 0;
+    lower_explicit_ = id != 0;
+    return true;
+  }
+  // Separate lower texture: automatic guess. An existing choice is kept until
+  // its texture is destroyed or the user selects another.
+  bool adopt_lower(std::uint64_t id) noexcept {
+    if (!id || id == targets[0] || id == targets[1])
+      return false;
+    if (targets[2] == id)
+      return true;
+    if (targets[2])
+      return false;
+    targets[2] = detected_targets_[2] = id;
+    lower_explicit_ = false;
+    return true;
+  }
+  bool lower_explicit() const noexcept { return lower_explicit_; }
   bool assign(unsigned side, std::uint64_t id) noexcept {
     if (side >= 2 || id == 0 || targets[1 - side] == id)
       return false;
@@ -119,9 +153,18 @@ class TaxiButtonRoutes {
   // Both-zero after forget() can leave assigned_ set (same sticky ownership as
   // dual-PFD both-lost). Unlike pair adoption, a lone navigation texture may
   // be re-bound automatically: there is no left/right ambiguity to resolve.
-  bool adopt_single(std::uint64_t id) noexcept {
+  bool adopt_single(std::uint64_t id, bool separate_lower = false) noexcept {
     if (!id)
       return false;
+    if (separate_lower) {
+      if (targets[0] == id && targets[1] == id)
+        return true;
+      if (targets[0] || targets[1] || targets[2] == id)
+        return false;
+      targets[0] = targets[1] = detected_targets_[0] = detected_targets_[1] = id;
+      assigned_ = true;
+      return true;
+    }
     if (targets[0] == id && targets[1] == id && targets[2] == id)
       return true;
     if (targets[0] || targets[1] || targets[2])
@@ -152,6 +195,8 @@ class TaxiButtonRoutes {
       if (targets[side] == id) {
         targets[side] = 0;
         detected_targets_[side] = 0;
+        if (side == 2)
+          lower_explicit_ = false;
       }
   }
 
@@ -182,6 +227,7 @@ class TaxiButtonRoutes {
 
  private:
   bool assigned_ = false;
+  bool lower_explicit_ = false;
   Sides detected_targets_{};
 };
 

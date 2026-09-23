@@ -190,7 +190,8 @@ void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexc
 // Control thread: configure exact display patch encoding and geometry before
 // scene_runtime::service prepares GPU work for future submission boundaries.
 void service_display_patches() noexcept;
-bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
+// lower: the separate side-2 texture (PMDG 777 lower DU); 0 is automatic.
+bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower = 0) noexcept;
 void set_target_mask(unsigned mask) noexcept;
 // Active sides inside their minimum PLEASE WAIT time. Only narrows what an
 // admitted side draws; it never admits a side for display writes.

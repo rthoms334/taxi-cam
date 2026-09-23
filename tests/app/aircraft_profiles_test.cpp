@@ -276,7 +276,18 @@ int main() {
   assert(!profiles::detect_aircraft("Airbus", "SimObjects/Airplanes/Other_A380/presets/inibuilds/aircraft.cfg"));
   assert(!profiles::detect_aircraft("A359", ini_a380_path));
   assert(profiles::IniA380.taxi_control == profiles::TaxiControl::manual_only);
-  assert(profiles::Pmdg777.taxi_control == profiles::TaxiControl::manual_only);
+  for (const auto* pmdg_profile : {&profiles::Pmdg777, &profiles::Pmdg777300ER, &profiles::Pmdg777F}) {
+    // The Display Select Panel is read only; Taxi Cam never commands it.
+    assert(pmdg_profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam && !profiles::commandable_buttons(*pmdg_profile));
+    assert(pmdg_profile->sides == 3 && profiles::side_mask(*pmdg_profile) == 7 && profiles::separate_lower_texture(*pmdg_profile));
+    assert(profiles::shared_texture_sides(*pmdg_profile) == 3);
+  }
+  // The A340-600 SD shares its display texture.
+  assert(!profiles::separate_lower_texture(profiles::AerosoftA346) && profiles::shared_texture_sides(profiles::AerosoftA346) == 7);
+  for (const auto* other : {&profiles::A380, &profiles::A359, &profiles::A35K, &profiles::IniA380})
+    assert(!profiles::separate_lower_texture(*other));
+  assert(profiles::commandable_buttons(profiles::A380) && profiles::commandable_buttons(profiles::A359) &&
+         profiles::commandable_buttons(profiles::AerosoftA346) && !profiles::commandable_buttons(profiles::IniA380));
   assert(profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
                                    "SimObjects\\Airplanes\\PMDG 777-200ER\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG") ==
          profiles::Pmdg777.id);
@@ -314,7 +325,8 @@ int main() {
              "SimObjects\\Airplanes\\FlyByWire_A380X\\presets\\flybywire\\FlyByWire_A380_842\\config\\aircraft.CFG") == 1);
   Settings pmdg;
   assert(load_settings(pmdg, L"missing", profiles::Pmdg777.id));
-  assert(pmdg.profile == profiles::Pmdg777.id && !pmdg.follow_taxi && pmdg.mounts == profiles::Pmdg777.mounts);
+  // CAM-button control is on by default.
+  assert(pmdg.profile == profiles::Pmdg777.id && pmdg.follow_taxi && pmdg.mounts == profiles::Pmdg777.mounts);
   assert(settings_path(pmdg) != settings_path(a380));
   Settings pmdg_300, pmdg_f;
   assert(load_settings(pmdg_300, L"missing", profiles::Pmdg777300ER.id));
@@ -323,6 +335,17 @@ int main() {
   assert(pmdg_300.exposure == -8.f && pmdg_f.exposure == -8.f && pmdg.exposure == -8.f);
   assert(settings_path(pmdg_300) != settings_path(pmdg) && settings_path(pmdg_f) != settings_path(pmdg));
   assert(settings_path(pmdg_300) != settings_path(pmdg_f));
+  {
+    // Profiles saved while the 777 was manual-only turn CAM control on once.
+    const auto pmdg_path = settings_path(pmdg_f);
+    assert(WritePrivateProfileStringW(L"service", L"follow_taxi", L"0", pmdg_path.c_str()));
+    assert(load_settings(pmdg_f, L"missing", profiles::Pmdg777F.id) && pmdg_f.follow_taxi == 1);
+    assert(WritePrivateProfileStringW(L"service", L"cam_button_revision", L"1", pmdg_path.c_str()));
+    assert(load_settings(pmdg_f, L"missing", profiles::Pmdg777F.id) && pmdg_f.follow_taxi == 0);
+    assert(save_settings(pmdg_f));
+    assert(GetPrivateProfileIntW(L"service", L"cam_button_revision", 0, pmdg_path.c_str()) == 1);
+    assert(load_settings(pmdg_f, L"missing", profiles::Pmdg777F.id) && pmdg_f.follow_taxi == 0);
+  }
   Settings a346;
   assert(load_settings(a346, L"missing", profiles::AerosoftA346.id));
   assert(a346.profile == profiles::AerosoftA346.id && a346.follow_taxi && a346.mounts == profiles::AerosoftA346.mounts);
@@ -447,7 +470,11 @@ int main() {
       assert(right.right == profiles::Pmdg777RightNdX + profiles::Pmdg777NdWidth &&
              right.bottom == profiles::Pmdg777RightNdY + profiles::Pmdg777NdHeight);
       assert(left.right <= profile->width && right.bottom <= profile->height);
-      for (unsigned side = 0; side < 2; ++side) {
+      // Lower DU: DU_Lower on the separate EICASCDU texture ([VCockpit02]).
+      const auto lower = profiles::display_rect(*profile, 2);
+      assert(lower.left == 1058 && lower.top == 21 && lower.right == 1058 + 958 && lower.bottom == 21 + 971);
+      assert(std::strcmp(profile->lower_display_texture, "EICASCDU") == 0 && std::strcmp(profile->display_texture, "DUS") == 0);
+      for (unsigned side = 0; side < 3; ++side) {
         const auto outer = profiles::display_rect(*profile, side);
         const auto content = profiles::display_content_rect(*profile, side);
         assert(content.left == outer.left && content.right == outer.right);

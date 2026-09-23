@@ -13,7 +13,8 @@
 
 namespace taxi_camera::standalone {
 // Protocol 14: side masks gained bit 2 (A340-600 lower ECAM).
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 14;
+// Protocol 15: Settings/Status lower_id for a separate side-2 texture (PMDG 777 lower DU).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 15;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -41,6 +42,9 @@ struct Settings {
   std::array<std::array<double, 6>, 3> mounts = profiles::A380.mounts;
   // Protocol 11: schedule rate while ground speed stays at zero; 0 disables the floor.
   std::uint32_t parked_rate = kDefaultParkedCameraRate;
+  // Protocol 15: explicit separate side-2 texture, sent with route_request
+  // (0 = automatic). Unused when side 2 shares the display texture.
+  std::uint64_t lower_id{};
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -74,6 +78,8 @@ struct Status {
   // self-describing slot each (serial, GetTickCount64 posted_ms, SimEvent).
   // Protocol 13: Settings.mounts grew to three feeds for split-bottom profiles.
   NotificationLog notifications{};
+  // Protocol 15: routed separate side-2 texture (PMDG 777 lower DU).
+  std::uint64_t lower_id{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};
@@ -96,6 +102,8 @@ inline bool valid_settings(const Settings& s) noexcept {
     return false;
   const auto sides = profiles::side_mask(*profile);
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
+    return false;
+  if (s.lower_id && (!profiles::separate_lower_texture(*profile) || s.lower_id == s.left_id || s.lower_id == s.right_id))
     return false;
   if ((s.taxi_selected_mask & ~sides) || (s.taxi_desired_mask & ~s.taxi_selected_mask) || (!s.taxi_request && s.taxi_selected_mask))
     return false;
