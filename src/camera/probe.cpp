@@ -1446,12 +1446,16 @@ void observer(void* manager) noexcept {
       runtime.schedule = next_schedule;
       return;
     }
-    // Retained-resolution recovery keeps both gates closed, so requested gates
-    // always differ from them. That difference cannot open anything; it must
-    // not turn recovery into a full inspection on every manager update (issue 69).
-    const bool resize_recovery_held = runtime.resize_recovery.pending() || runtime.resize_recovery.failed();
+    // Retained-resolution recovery keeps every gate closed, so requested gates
+    // always differ from them. Once each gate is recorded closed, that
+    // difference cannot open anything and must not turn recovery into a full
+    // inspection on every manager update (issue 69). A gate still recorded open
+    // (its view was not ready when recovery closed the others) keeps the
+    // per-update closure attempt.
+    const bool recovery_gates_closed = (runtime.resize_recovery.pending() || runtime.resize_recovery.failed()) && !runtime.gates[0] &&
+                                       !runtime.gates[1] && !runtime.gates[2];
     if (inspection != ProbeInspectionDecision::required && !session_hold && !before.request_pending &&
-        (!gate_change || resize_recovery_held) && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
+        (!gate_change || recovery_gates_closed) && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
       runtime.schedule = next_schedule;
       return;
     }
