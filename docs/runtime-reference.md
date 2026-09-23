@@ -43,7 +43,7 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er`, `pmdg-777f` and `aerosoft-a346`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` (`left`, `right`, `both`, `sd`) and apply to all aircraft.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er`, `pmdg-777f`, `aerosoft-a346` and `ini-a340-300`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` (`left`, `right`, `both`, `sd`) and apply to all aircraft.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 
@@ -108,10 +108,12 @@ Each mount stores six values: **right, up, forward, pitch, yaw, lens**.
 | A350-1000 tail | 0 | 10 | -36.17 | -15 | 0 | 0.62 |
 | Aerosoft A340-600 nose | 0 | -2.5 | 23.33 | -15 | 0 | 0.55 |
 | Aerosoft A340-600 tail | 0 | 8.18 | -28.99 | -15 | 0 | 0.62 |
+| iniBuilds A340-300 nose | 0 | -2 | 16 | -15 | 0 | 0.55 |
+| iniBuilds A340-300 tail | 0 | 10 | -33 | -15 | 0 | 0.62 |
 
 Positions are relative to the aircraft datum. Positive pitch looks up; positive yaw turns right. A larger lens value widens the field of view.
 
-The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. The Aerosoft A340-600 mounts started from the A350-900 offsets relative to its own gear contact points; the defaults are the user's live calibration from 2026-09-23. Saved mounts override the defaults above.
+The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. The Aerosoft A340-600 mounts started from the A350-900 offsets relative to its own gear contact points; the defaults are the user's live calibration from 2026-09-23. The iniBuilds A340-300 starts from the A350-900 mounts; its package is encrypted, so no gear contact points were available, and it is not yet calibrated live. Saved mounts override the defaults above.
 
 Position components are bounded to ±500 m, pitch to ±89°, yaw to ±180° and lens to 0.05–1.55 radians. Both mounts are saved in the profile.
 

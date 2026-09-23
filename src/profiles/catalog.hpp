@@ -92,7 +92,7 @@ struct AircraftProfile {
   // draws it white (PMDG 777, which has no ground-speed readout).
   bool waiting_white_text = false;
   // Display sides this aircraft drives: captain and first officer, plus the
-  // lower ECAM on the A340-600 or the lower DU on the PMDG 777.
+  // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
@@ -392,8 +392,46 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.display_texture = A346Texture;
   return p;
 }();
-inline constexpr std::array<const AircraftProfile*, 8> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
-                                                              &Pmdg777F, &AerosoftA346};
+// iniBuilds A340-300 (streamed fs24-inibuilds-aircraft-a340; encrypted, so no
+// panel.cfg). The bridge's render-target log on 2026-09-23 (a340-300_eis2)
+// showed the cockpit's one-mip typeless group, including one 1560 x 2340
+// texture: a 2 x 3 grid of 780 x 780 cells, one per display unit. The cell
+// order is assumed to follow the cockpit left to right, as the iniBuilds A350
+// EFIS surfaces do: CAPT PFD, CAPT ND / E/WD, SD / F/O ND, F/O PFD. Not yet
+// confirmed with Calibrate.
+inline constexpr unsigned IniA343DisplayWidth = 1560;
+inline constexpr unsigned IniA343DisplayHeight = 2340;
+inline constexpr unsigned IniA343Cell = 780;
+static_assert(IniA343DisplayWidth == 2 * IniA343Cell && IniA343DisplayHeight == 3 * IniA343Cell);
+inline constexpr DisplayRect ini_a343_cell(unsigned column, unsigned row) noexcept {
+  return {column * IniA343Cell, row * IniA343Cell, (column + 1) * IniA343Cell, (row + 1) * IniA343Cell};
+}
+// No TACS selector or other camera control was found, so the displays follow
+// the camera shortcuts and previews only, as on the iniBuilds A380. Mounts
+// start from the A350-900 defaults until calibrated live.
+inline constexpr AircraftProfile IniA343 = [] {
+  AircraftProfile p{9,
+                    "ini-a340-300",
+                    L"iniBuilds A340-300",
+                    {"", "", ""},
+                    {"", "", ""},
+                    {"", "", ""},
+                    A359.mounts,
+                    IniA343DisplayWidth,
+                    IniA343DisplayHeight,
+                    1,
+                    TaxiControl::manual_only,
+                    {"", "", ""},
+                    {{ini_a343_cell(0, 0), ini_a343_cell(1, 2), ini_a343_cell(1, 1)}}};
+  p.sides = 3;
+  p.composition = A346Composition;
+  p.formats = {28, 29, 87, 91, 27, 90};
+  p.package_markers = {"simobjects/airplanes/inibuilds-a340", "fs24-inibuilds-aircraft-a340", ""};
+  p.pfd_detection = PfdDetectionPolicy::single_display;
+  return p;
+}();
+inline constexpr std::array<const AircraftProfile*, 9> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
+                                                              &Pmdg777F, &AerosoftA346, &IniA343};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < p.sides && side < MaxDisplaySides ? side : 0];
 }
@@ -481,9 +519,10 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
   // reported SimObjects\Airplanes\PMDG 777-200ER\... and did not contain
   // pmdg-aircraft-77er. The 300ER and 777F use the same folder-component
   // pattern; those two paths were not in this log.
-  // The Aerosoft A346 also reports the Airbus brand string; its SimObject
-  // folder identifies the product.
-  for (const auto* profile : {&Pmdg777, &Pmdg777300ER, &Pmdg777F, &AerosoftA346}) {
+  // The Aerosoft A346 and the iniBuilds A340-300 also report the Airbus brand
+  // string; their SimObject folders identify the product. The live A340-300
+  // path was SimObjects\Airplanes\inibuilds-a340\presets\inibuilds\a340-300_eis2\...
+  for (const auto* profile : {&Pmdg777, &Pmdg777300ER, &Pmdg777F, &AerosoftA346, &IniA343}) {
     for (const auto marker : profile->package_markers)
       if (!marker.empty() && path_contains(path, marker))
         return profile->id;
