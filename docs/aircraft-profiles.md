@@ -12,9 +12,9 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 | iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | Nose 774 x 251 / tail 774 x 496 |
 | iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | Nose 774 x 251 / tail 774 x 496 |
 | iniBuilds A380 | `ini-a380` | 768 x 1024, one mip; supported RGBA/BGRA views | Nose 736 x 251 / tail 736 x 496 |
-| PMDG 777-200ER | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard` | Nose 736 x 268 / left and right wing 360 x 360 |
-| PMDG 777-300ER | `pmdg-777-300er` | Same `DUS` layout as 200ER | Same pane sizes; nose forward **22** m |
-| PMDG 777F | `pmdg-777f` | Same `DUS` layout as 200ER | Same pane sizes; nose mount copied from 200ER |
+| PMDG 777-200ER | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard`. Lower DU: `DU_Lower` on `EICASCDU`, 2048 x 2048 | Nose 736 x 268 / left and right wing 360 x 360 |
+| PMDG 777-300ER | `pmdg-777-300er` | Same `DUS` and `EICASCDU` layout as 200ER | Same pane sizes; nose forward **22** m |
+| PMDG 777F | `pmdg-777f` | Same `DUS` and `EICASCDU` layout as 200ER | Same pane sizes; nose mount copied from 200ER |
 | Aerosoft A340-600 | `aerosoft-a346` | Shared `$GAUGES_UNIFIED`, 4096 x 4096; gauges `CaptPFD`, `CoPFD` and `ECAM_LOWER` (750 x 750) | Nose 736 x 251 / tail 736 x 496 |
 
 A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The user has verified A350 rendering in the simulator. This does not establish every aircraft variant, framing, graphics mode or automatic target ordering; see [PR 42 validation](pr42-validation.md).
@@ -26,7 +26,7 @@ A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6.
 | FBW A380 | `L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON`, `L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON` | Corresponding `A32NX.FCU_EFIS_L_TAXI_PUSH` / `R_TAXI_PUSH` event |
 | A350 | `L:INI_TAXI_LEFT`, `L:INI_TAXI_RIGHT` | Write zero to the selected latch through public SimConnect |
 | iniBuilds A380 | Manual previews or configurable camera hotkeys; cockpit buttons marked INOP | Suppress camera output above the speed limit; no aircraft-variable writes |
-| PMDG 777 | Manual preview or Ctrl + Shift + L / R / B; no cockpit TAXI or CAM binding | Suppress camera output above the speed limit; no aircraft-variable writes |
+| PMDG 777 | Display Select Panel: L INBD / R INBD / LWR CTR selector lamps and the CAM button (read only). Manual previews and Ctrl + Shift + L / R / B / D add displays | Suppress camera output above the speed limit; no aircraft-variable writes |
 | Aerosoft A340-600 | `L:AB_VC_CAM_CAPT_SEL`, `L:AB_VC_CAM_FO_SEL`, plus `L:AB_VC_CAM_SD_SEL` for the lower ECAM (0 OFF, 1 TAXI) | Write zero to the selected latch through public SimConnect |
 
 The installed iniBuilds A350 behavior XML uses each TAXI latch for its button state and lamp. Its input-event setter toggles that latch. An idempotent zero write makes cutoff independent of toggle timing. The other side is not written. The FBW A380 and A350 adapters wait for a fresh OFF acknowledgement. The manual-only iniBuilds A380 suppresses output without waiting for a cockpit-button acknowledgement. The catalog supplies the speed limit, currently 60 knots for all profiles.
@@ -96,7 +96,38 @@ Published mount defaults: 777-200ER and 777F nose **0 / -2 / 16 m, pitch/yaw -18
 
 The display list only offers GPU resources that match the selected profile's size. Until this profile is selected, the bridge keeps the previous profile's filter. The default is the FBW A380 at 768 x 1024, five mips, format 28. A 2048 x 2048 `DUS` texture is not a candidate for that filter, so the list stays empty and detection reports `no_candidates`. The log does not print gauge names. After this profile is selected, a 2048 x 2048 resource with any non-zero format and 1–12 mips is a candidate. Mip count and DXGI format were not in the scan. The texture list and the display-routing dropdown use resource-id order, not draw count. When more than one candidate matches, automatic selection takes the last entry, which is the highest resource id, and assigns that one texture to both inboard rectangles. It does not take the first entry, and it does not use a texture name. Display routing can still assign a texture by hand. GPU targeting cannot read gauge or material names; `DU_LeftInboard` and `DU_RightInboard` are the rectangles above on the shared `DUS` texture.
 
-The cockpit has no CAM button for this profile. The profile does not read or write a TAXI Lvar, a CAM event, or any other aircraft variable. Camera on/off is the same Left, Right and Both shortcuts as the other aircraft (Ctrl + Shift + L / R / B) and the same left/right preview controls. There is no extra Camera shortcut. On this profile those requests are manual: they do not write an aircraft variable.
+#### CAM button and display selection
+
+The glareshield Display Select Panel (DSP) chooses the display. Select **L INBD**, **R INBD** or **LWR CTR**, then press **CAM**. That display shows the camera page until **CAM** is pressed again while the same display is selected. Displays are independent, so any combination of the two navigation displays and the lower DU can show the camera. The CAM button carries an INOP label in the cockpit, but PMDG still draws its own placeholder camera page when it is pressed; Taxi Cam stamps the live camera over that page.
+
+Taxi Cam reads public L:vars only and writes nothing to the aircraft. PMDG's SDK data broadcast is not needed. `L:GMC_L_INB`, `L:GMC_R_INB`, `L:GMC_LWR` and `L:GMC_DU` exist in the cockpit behaviour but stayed 0 while the CAM page was shown, and no model node uses them. A read-only capture on the 777-300ER on 2026-09-23 established the inputs:
+
+| L:var | Meaning | Observed values |
+| --- | --- | --- |
+| `switch_2311_a`, `switch_2321_a`, `switch_2331_a` | L INBD, R INBD and LWR CTR selector lamps | About 1.003 lit, 0 unlit; exactly one lit |
+| `switch_243_a` | CAM | 100 while pushed, for 0.1–0.25 s |
+| `switch_234_a`–`switch_242_a`, `switch_244_a`–`switch_246_a` | ENG, STAT, ELEC, HYD, FUEL, AIR, DOOR, GEAR, FCTL, CHKL, COMM, NAV | Momentary, same as CAM |
+| `switch_315_a`, `switch_290_a` | Left and right INBD DSPL knobs | Position |
+
+The same switch numbers are in the 777-200ER and 777F cockpit behaviour files. After CAM was removed from R INBD, the selector lamp returned to LWR CTR by itself.
+
+The telemetry worker polls these values with the other TAXI data and also streams changes every simulator frame, so a short CAM push is not missed. It follows the button presses rather than reading PMDG's page state:
+
+- CAM with exactly one lamp lit toggles that display.
+- Another synoptic button with a lamp lit replaces that display's CAM page.
+- Moving a side's INBD DSPL knob replaces that inboard display's CAM page.
+- All lamps dark (panel unpowered) clears every CAM page. More than one lamp lit (lamp test) ignores CAM.
+- The first sample after connection only records switch positions. A CAM page left on from before Taxi Cam connected needs CAM to be pressed again.
+
+Pages changed in other ways can leave Taxi Cam out of step with the cockpit until CAM is pressed again. The rules have been checked against the recorded sequence and unit fixtures only. Live stamping on the lower DU has not been observed yet.
+
+**Overview → CAM button** turns this cockpit control on or off. The first load of an existing PMDG 777 profile after this change turns it on once (`cam_button_revision=1`), because these profiles were previously saved as manual-only; later choices are kept. Manual previews and the Left, Right, Both and SD shortcuts add displays on top of the CAM selection and do not turn cockpit control off. A display turned on by CAM is turned off with CAM. Calibration turns cockpit control off, as on other aircraft, and turning the last calibration control off restores it.
+
+#### Lower DU
+
+`panel.cfg` `[VCockpit02]` draws `DU_Lower` on a separate 2048 x 2048 texture, `EICASCDU`, at 1058, 21, 958, 971 on all three variants. The upper EICAS and the three CDU screens share that texture. The lower DU uses the same composed page and the same 85 px top inset as the navigation displays.
+
+`EICASCDU` has the same size as `DUS`, the tablet textures and the upper-EICAS copy, so the size filter cannot separate them. Automatic selection takes the next-highest resource id after `DUS`. One earlier 777 session log listed five 2048 x 2048 textures (268–272): `DUS` was 272, and 271 had the highest draw count of the rest, consistent with `EICASCDU`. This guess is unverified. **PFD routing** has a **LOWER DU TEXTURE** list, **Lower preview** and **Calibrate lower** to identify and correct it. On single-display profiles (the PMDG 777 and the A340-600) the calibration bars fill exactly the selected gauge rectangle. Earlier builds painted a full-height column from the top of the texture, so on the 777 **Calibrate right** also lit the left ND, and the queued private-patch path rejected the 777 gauge size. An explicit choice is kept until that texture is destroyed; a lost automatic choice is guessed again.
 
 ### Aerosoft A340-600 configuration
 
