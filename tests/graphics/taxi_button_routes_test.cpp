@@ -259,5 +259,31 @@ int main() {
   assert(!recovered.replace_detected({70, 68}));  // Semantic identity is also authoritative.
   std::puts("Ranked fallback recovery: PASS; automatic provenance retained, explicit single sides preserved");
   std::puts("Explicit manual/Auto routing: PASS; partial anchors preserved, duplicate pair unchanged");
+  // PMDG 777: both NDs share DUS; the lower DU is a separate EICASCDU texture.
+  using Sides = taxi_camera::TaxiButtonRoutes::Sides;
+  taxi_camera::TaxiButtonRoutes lower;
+  assert(lower.adopt_single(272, true) && (lower.targets == Sides{272, 272, 0}));
+  assert(lower.adopt_single(272, true) && !lower.adopt_single(273, true));
+  assert(lower.active_mask(true, 7u) == 3);
+  assert(!lower.adopt_lower(0) && !lower.adopt_lower(272));  // Never the ND texture.
+  assert(lower.adopt_lower(271) && lower.adopt_lower(271) && !lower.adopt_lower(270));
+  assert((lower.targets == Sides{272, 272, 271}) && !lower.lower_explicit());
+  assert(lower.active_mask(true, 4u) == 4 && lower.active_mask(true, 7u) == 7 && lower.active_mask(false, 7u) == 0);
+  assert(lower.matches(271, 4) && !lower.matches(271, 3) && lower.matches(272, 1) && !lower.matches(272, 4));
+  assert(!lower.select_lower(272));  // The lower slot never takes the ND texture.
+  assert(lower.select_lower(270) && lower.lower_explicit() && lower.targets[2] == 270);
+  assert(!lower.adopt_lower(271) && lower.targets[2] == 270);  // Explicit choice is kept.
+  assert(!lower.select_single(270, true));                     // Taken by the lower slot.
+  assert(lower.select_single(269, true) && (lower.targets == Sides{269, 269, 270}));
+  lower.forget(270);
+  assert(lower.targets[2] == 0 && !lower.lower_explicit() && lower.active_mask(true, 4u) == 0);
+  assert(lower.adopt_lower(271));  // A lone lower texture rebinds automatically.
+  lower.forget(269);
+  assert(lower.adopt_single(268, true) && (lower.targets == Sides{268, 268, 271}));  // ND rebinds; lower kept.
+  assert(lower.select_single(0, true) && (lower.targets == Sides{0, 0, 271}));
+  // Without a separate lower texture every side still shares one texture.
+  taxi_camera::TaxiButtonRoutes shared;
+  assert(shared.adopt_single(55) && (shared.targets == Sides{55, 55, 55}));
+  std::puts("Lower DU routing: PASS; separate texture, explicit choice kept, automatic rebind, shared profiles unchanged");
   std::puts("Taxi button routes: PASS");
 }

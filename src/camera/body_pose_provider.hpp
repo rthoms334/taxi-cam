@@ -34,7 +34,7 @@ struct TaxiButtonSample {
   bool valid = false;
   bool left_on = false;
   bool right_on = false;
-  // Lower ECAM selector, on profiles with a third display side.
+  // Side 2: A340-600 lower ECAM selector or PMDG 777 LWR CTR CAM page.
   bool sd_on = false;
   unsigned mask() const noexcept { return (left_on ? 1u : 0u) | (right_on ? 2u : 0u) | (sd_on ? 4u : 0u); }
   std::uint64_t sample_ms = 0;
@@ -165,6 +165,7 @@ GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept;
 bool accept_on_ground_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 OnGroundSample on_ground_at(std::uint64_t now_ms) noexcept;
 bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms, unsigned sides = 2) noexcept;
+bool accept_pmdg_dsp_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 TaxiButtonSample taxi_buttons_at(std::uint64_t now_ms) noexcept;
 bool accept_lighting_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 LightingSample lighting_at(std::uint64_t now_ms) noexcept;

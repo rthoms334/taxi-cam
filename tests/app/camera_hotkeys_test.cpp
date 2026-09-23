@@ -275,8 +275,15 @@ void aircraft_hotkey_intent_checks() {
           "PMDG uses the same Both shortcut and writes no aircraft variable");
   require(request_camera_hotkey(pmdg, 0, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 2 && !pmdg.taxi_request,
           "PMDG Left toggles the same way as the other profiles");
-  require(request_camera_hotkey(pmdg, 3, {}, 0) == CameraHotkeyResult::unavailable && pmdg.manual_mask == 2,
-          "The PMDG 777 has no SD display for the SD shortcut");
+  require(request_camera_hotkey(pmdg, 3, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 6 && !pmdg.taxi_request,
+          "The PMDG 777 SD shortcut adds the lower DU manually");
+  // With CAM control on, shortcuts add a manual layer and keep cockpit control.
+  pmdg.follow_taxi = 1;
+  require(request_camera_hotkey(pmdg, 3, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 2 && pmdg.follow_taxi &&
+              !pmdg.taxi_request,
+          "PMDG shortcuts turned CAM-button control off");
+  toggle_manual_layer(pmdg, CameraSd);
+  require(pmdg.manual_mask == 6 && pmdg.follow_taxi, "Lower preview turned CAM-button control off");
   Settings a346;
   a346.profile = profiles::AerosoftA346.id;
   a346.follow_taxi = 0;

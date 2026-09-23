@@ -83,6 +83,7 @@ inline std::uint32_t load_notification_preference(const std::wstring& selection)
   const wchar_t* key = present(L"notifications") ? L"notifications" : present(L"in_simulator") ? L"in_simulator" : nullptr;
   return !key || GetPrivateProfileIntW(L"messages", key, 1, selection.c_str()) ? 1u : 0u;
 }
+inline constexpr unsigned kCamButtonRevision = 1;
 inline bool load_settings(Settings& s, const std::wstring& installation, std::uint32_t profile_id = 0) {
   if (!profile_id)
     profile_id = GetPrivateProfileIntW(L"aircraft", L"profile", 1, (settings_directory() + L"\\settings.ini").c_str());
@@ -149,6 +150,10 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   };
   value.enabled = integer(L"service", L"enabled", 1);
   value.follow_taxi = profile->taxi_control == profiles::TaxiControl::manual_only ? 0u : integer(L"service", L"follow_taxi", 1);
+  // PMDG 777 profiles were manual-only and saved follow_taxi=0. The CAM button
+  // now drives them: turn cockpit control on once; later choices are kept.
+  if (profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam && integer(L"service", L"cam_button_revision", 0) < kCamButtonRevision)
+    value.follow_taxi = 1;
   value.auto_detect = integer(L"service", L"auto_detect", 1);
   value.camera_rate = integer(L"display", L"camera_rate", kDefaultCameraRate);
   // 0 disables the parked floor; any other value is kept inside the rate range
@@ -209,7 +214,7 @@ inline bool save_settings(const Settings& s) {
   const auto& w = s.mounts[2];
   const int count = std::swprintf(
       text, 4096,
-      L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\n"
+      L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
       L"[display]\r\ncamera_rate=%u\r\nparked_rate=%u\r\nsingle_camera=%u\r\nautomatic_exposure=%u\r\nexposure=%.9g\r\nnight_boost=%."
       L"9g\r\nnight_boost_revision=%u\r\ncalibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\nspeed_blue=%.9g\r\n"
       L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
@@ -218,8 +223,8 @@ inline bool save_settings(const Settings& s) {
       L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
-      s.enabled, s.follow_taxi, s.auto_detect, s.camera_rate, s.parked_rate, s.single_camera, s.automatic_exposure, s.exposure,
-      s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget, s.speed_color[0], s.speed_color[1], s.speed_color[2],
+      s.enabled, s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_rate, s.parked_rate, s.single_camera, s.automatic_exposure,
+      s.exposure, s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget, s.speed_color[0], s.speed_color[1], s.speed_color[2],
       s.guide_color[0], s.guide_color[1], s.guide_color[2], s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1],
       s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3],
       t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);

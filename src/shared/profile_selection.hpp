@@ -5,7 +5,7 @@
 namespace taxi_camera::standalone {
 inline void reset_aircraft_session(Settings& settings, std::uint64_t epoch) noexcept {
   settings.aircraft_session_epoch = epoch;
-  settings.left_id = settings.right_id = settings.route_request = 0;
+  settings.left_id = settings.right_id = settings.lower_id = settings.route_request = 0;
   settings.manual_mask = settings.calibration_mask = settings.scene_test = 0;
   if (settings.taxi_request && settings.taxi_request != std::numeric_limits<std::uint64_t>::max())
     ++settings.taxi_request;

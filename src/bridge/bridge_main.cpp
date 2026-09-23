@@ -57,11 +57,12 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
     char line[2048];
     const auto length = std::snprintf(
         line, sizeof(line),
-        "%llu pid=%lu tid=%lu native=%u scene=%u mask=%u left=%llu right=%llu captured=%llu composed=%llu stamps=%llu "
+        "%llu pid=%lu tid=%lu native=%u scene=%u mask=%u left=%llu right=%llu lower=%llu captured=%llu composed=%llu stamps=%llu "
         "hooks_failed=%llu cutoff=%u | %s | %s\r\n",
         static_cast<unsigned long long>(GetTickCount64()), GetCurrentProcessId(), GetCurrentThreadId(), s.graphics_ready, s.scene_ready,
         s.taxi_mask, static_cast<unsigned long long>(s.left_id), static_cast<unsigned long long>(s.right_id),
-        static_cast<unsigned long long>(s.captures), static_cast<unsigned long long>(s.composed), static_cast<unsigned long long>(s.stamps),
+        static_cast<unsigned long long>(s.lower_id), static_cast<unsigned long long>(s.captures),
+        static_cast<unsigned long long>(s.composed), static_cast<unsigned long long>(s.stamps),
         static_cast<unsigned long long>(s.hook_failures), s.speed_inhibited, s.message, detail);
     if (length > 0 && static_cast<size_t>(length) < sizeof(line))
       win::append_rotating_log(path, std::string_view(line, static_cast<std::size_t>(length)), win::BridgeLogBytes);
@@ -552,7 +553,7 @@ DWORD run_impl() {
       next_discovery = now + 1000;
     }
     if (connected && settings.enabled && session_settings && settings.route_request && settings.route_request != route_request) {
-      if (win::assign_targets(settings.left_id, settings.right_id))
+      if (win::assign_targets(settings.left_id, settings.right_id, settings.lower_id))
         route_request = settings.route_request;
     }
     const auto identity = native_camera::get_aircraft_identity();
@@ -560,15 +561,20 @@ DWORD run_impl() {
         native_camera::aircraft_matches_profile() && (!settings.auto_profile || identity.detected_profile == settings.profile);
     const auto* profile = profiles::find(settings.profile);
     const bool manual_only = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
+    // PMDG 777: the CAM page selects displays; manual previews and shortcuts
+    // add displays on top. Nothing is sent to the aircraft.
+    const bool pmdg_dsp = profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
+    const bool commandable = profile && profiles::commandable_buttons(*profile);
+    const bool selected_profile_separate_lower = profile && profiles::separate_lower_texture(*profile);
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.mask());
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
     const unsigned mask = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() &&
                                   !cutoff.inhibited && !degraded
-                              ? (settings.follow_taxi && !manual_only ? desired.buttons
-                                 : session_settings                   ? settings.manual_mask
-                                                                      : 0) &
+                              ? (pmdg_dsp ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
+                                 : settings.follow_taxi && !manual_only ? desired.buttons
+                                                                        : settings.manual_mask) &
                                     sides
                               : 0;
     const bool test_scene = connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test &&
@@ -858,6 +864,7 @@ DWORD run_impl() {
     status.speed_inhibited = cutoff.inhibited;
     status.left_id = targets[0];
     status.right_id = targets[1];
+    status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
     status.speed = speed.valid ? static_cast<float>(speed.knots) : -1;
     status.exposure = display.applied_ev;
     status.probe_cpu_ms = scene.observer_last_ms;
@@ -915,6 +922,9 @@ DWORD run_impl() {
       target_message = !settings.auto_detect        ? "Automatic display selection is off. Select the navigation display manually."
                        : is("incomplete_inventory") ? "Display tracking was incomplete. Select the navigation display manually."
                                                     : "Waiting for the navigation display texture.";
+      if (targets[0] && (mask & 4u) && !targets[2])
+        target_message = !settings.auto_detect ? "Automatic display selection is off. Select the lower display texture in PFD routing."
+                                               : "Waiting for the lower display texture. Select it in PFD routing if this persists.";
     } else if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
       target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."
@@ -934,24 +944,26 @@ DWORD run_impl() {
             ? "Native hook failures exceeded the safe rate; Taxi Cam is disarmed for this simulator session. Restart MSFS to re-enable it."
         : degraded          ? "Presentation stalled: cameras disarmed so the simulator can keep running; they re-arm when frames resume."
         : !aircraft_matches ? aircraft_message
-        : cutoff.inhibited  ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
+        : cutoff.inhibited  ? (!commandable ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
         : failed            ? scene.message.c_str()
         : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
-        : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
+        : commandable && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
-        : (single_display ? !targets[0] : (!targets[0] || !targets[1])) ? target_message
+        : (single_display ? !targets[0] || ((mask & 4u) && !targets[2]) : (!targets[0] || !targets[1])) ? target_message
         : !active && settings.calibration_mask ? "Calibration requested on the selected display."
         : stopped_camera                       ? stopped_camera
         : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."
         : !active && manual_only               ? "Ready. Use camera hotkeys or the left/right preview controls."
-        : !active && !settings.follow_taxi     ? "Manual control selected. Enable a preview or TAXI buttons on Overview."
-        : !active                              ? "Ready. Use the aircraft's left or right TAXI button."
-        : !requested || failed                 ? scene.message.c_str()
-        : progress.stalled()                   ? "Capture paused: waiting for verified GPU state; camera views retained."
-        : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
-                                               : output.message;
+        : !active && pmdg_dsp && settings.follow_taxi
+            ? "Ready. Select L INBD, R INBD or LWR CTR on the display select panel, then press CAM."
+        : !active && !settings.follow_taxi ? "Manual control selected. Enable a preview or TAXI buttons on Overview."
+        : !active                          ? "Ready. Use the aircraft's left or right TAXI button."
+        : !requested || failed             ? scene.message.c_str()
+        : progress.stalled()               ? "Capture paused: waiting for verified GPU state; camera views retained."
+        : output.output && !output.stamps  ? "Camera images ready; waiting for a verified PFD write opportunity."
+                                           : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     notification_log.snapshot(status.notifications);
     if (mailbox.lock()) {
@@ -981,10 +993,10 @@ DWORD run_impl() {
     announce_all(sim_inputs, now);
     const bool changed = !logged || connected != last_connected || requested != last_requested || degraded != last_degraded ||
                          status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
-                         status.right_id != last_logged.right_id || status.speed_inhibited != last_logged.speed_inhibited ||
-                         scene.stop_sequence != last_stop_sequence || output.output != last_output ||
-                         scene.view_wait_count != last_view_wait_count || status.effective_rate != last_logged.effective_rate ||
-                         status.parked != last_logged.parked;
+                         status.right_id != last_logged.right_id || status.lower_id != last_logged.lower_id ||
+                         status.speed_inhibited != last_logged.speed_inhibited || scene.stop_sequence != last_stop_sequence ||
+                         output.output != last_output || scene.view_wait_count != last_view_wait_count ||
+                         status.effective_rate != last_logged.effective_rate || status.parked != last_logged.parked;
     loop_max_ms = std::max(loop_max_ms, GetTickCount64() - now);
     if (changed || now >= next_log) {
       if (!logged || status.active_profile != last_logged.active_profile || status.detected_profile != last_logged.detected_profile ||

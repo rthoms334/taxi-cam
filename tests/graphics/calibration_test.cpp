@@ -37,5 +37,13 @@ int main() {
   const auto first = taxi_camera::calibration_rectangles(768, 1024, 0);
   const auto next = taxi_camera::calibration_rectangles(768, 1024, 1);
   assert(first[2].left != next[2].left && first[3].left != next[3].left);
+  // Whole-gauge area (PMDG 777 958 x 971): bars fill exactly the gauge.
+  for (const auto frame : frames) {
+    const auto gauge = taxi_camera::calibration_area_rectangles(958, 971, frame);
+    for (const auto& rectangle : gauge)
+      assert(rectangle.left >= 0 && rectangle.top >= 0 && rectangle.right <= 958 && rectangle.bottom <= 971 &&
+             rectangle.right > rectangle.left && rectangle.bottom > rectangle.top);
+    assert(gauge[0].top == 0 && gauge[1].bottom == 971 && gauge[0].right == 958 && gauge[0].bottom == gauge[1].top);
+  }
   std::puts("PASS: 320 size/frame combinations preserve lower display, cover upper display, and produce valid animated rectangles.");
 }

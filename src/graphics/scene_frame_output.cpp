@@ -191,9 +191,13 @@ bool SceneFrameOutput::prepare_patches(std::uint64_t calibration_frame) noexcept
     if (calibration_only_) {
       // All admitted profiles currently use the same upper display height.
       // Clear precisely that patch; never copy over the lower native trim.
+      // Single-display profiles place whole gauge rectangles instead; the
+      // patch is then exactly that gauge.
       const auto* profile = profiles::find(patch_profile_);
-      if (!profile || upper_height(profile->height) != height ||
-          !record_calibration(list_, patch->rtv, width, profile->height, calibration_frame))
+      const bool gauge = profile && profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+      if (!profile || (!gauge && upper_height(profile->height) != height) ||
+          !(gauge ? record_calibration_area(list_, patch->rtv, width, height, calibration_frame)
+                  : record_calibration(list_, patch->rtv, width, profile->height, calibration_frame)))
         return fail("Recording the private calibration patch failed.");
     } else if (!patch_drawers_[patch->drawer]->record_private_patch(list_, device_, address_, width, height, &destination, &patch->content))
       return fail("Recording the private PFD patch failed.");

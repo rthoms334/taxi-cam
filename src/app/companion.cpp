@@ -190,6 +190,22 @@ void publish(const win::Settings& value) {
 void refresh_connection_button() {
   SetDlgItemTextW(window, 241, win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
 }
+// PMDG 777: the lower DU is a separate texture, chosen in the second list.
+bool separate_lower_profile(const win::Settings& s) noexcept {
+  const auto* profile = profiles::find(s.profile);
+  return profile && profiles::separate_lower_texture(*profile);
+}
+bool pmdg_cam_control(const win::Settings& s) noexcept {
+  const auto* profile = profiles::find(s.profile);
+  return profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
+}
+// Side 2 is the lower ECAM (SD) on Airbus aircraft and the lower DU on the 777.
+std::wstring side2_label(const win::Settings& s, const wchar_t* action, bool on) {
+  const std::wstring name = pmdg_cam_control(s) ? L"lower" : L"SD";
+  const auto text = std::wstring(action) == L"preview" ? (pmdg_cam_control(s) ? L"Lower" : L"SD") + std::wstring(L" preview")
+                                                       : std::wstring(L"Calibrate ") + name;
+  return text + (on ? L": On" : L": Off");
+}
 void request_connection(win::ConnectCommand command) {
   {
     const std::lock_guard lock(app_mutex);
@@ -226,8 +242,9 @@ void request_connection(win::ConnectCommand command) {
     SetDlgItemTextW(window, 226, L"Calibrate left: Off");
     SetDlgItemTextW(window, 227, L"Calibrate right: Off");
     SetDlgItemTextW(window, 229, L"Scene test: Off");
-    SetDlgItemTextW(window, 232, L"SD preview: Off");
-    SetDlgItemTextW(window, 233, L"Calibrate SD: Off");
+    const auto labels = draft();
+    SetDlgItemTextW(window, 232, side2_label(labels, L"preview", false).c_str());
+    SetDlgItemTextW(window, 233, side2_label(labels, L"calibrate", false).c_str());
   }
   InvalidateRect(window, nullptr, FALSE);
 }
@@ -354,16 +371,19 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
       else if (selected > 0 && static_cast<size_t>(selected - 1) < combo_ids.size())
         selected_ids[i] = combo_ids[selected - 1];
     }
-    // Single-display aircraft route one texture to every side from the first list.
+    // Single-display aircraft route one texture to every side from the first
+    // list. On the PMDG 777 the second list is the separate lower DU texture.
+    const bool separate_lower = separate_lower_profile(settings);
+    const auto lower = separate_lower ? selected_ids[1] : 0;
     if (single_display_profile(settings))
       selected_ids[1] = 0;
-    const auto result =
-        win::update_target_assignment(settings.left_id, settings.right_id, settings.route_request, selected_ids[0], selected_ids[1]);
+    const auto result = win::update_target_assignment(settings.left_id, settings.right_id, settings.route_request, selected_ids[0],
+                                                      selected_ids[1], settings.lower_id, lower);
     if (result == win::TargetAssignmentResult::duplicate || result == win::TargetAssignmentResult::sequence_exhausted) {
       if (error)
-        *error = result == win::TargetAssignmentResult::duplicate
-                     ? L"Choose different textures for left and right, or Automatic assignment."
-                     : L"Display assignment request limit reached. Restart Taxi Cam.";
+        *error = result != win::TargetAssignmentResult::duplicate ? L"Display assignment request limit reached. Restart Taxi Cam."
+                 : separate_lower ? L"Choose a lower DU texture different from the navigation display texture, or Automatic assignment."
+                                  : L"Choose different textures for left and right, or Automatic assignment.";
       return false;
     }
   }
@@ -461,8 +481,8 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       make(L"STATIC", L"", 650 + i, 20, y + 38, 640, 25, 0, small);
     }
     make(L"STATIC",
-         L"Both turns the captain and first-officer displays on; press again to turn both off. SD needs an aircraft with a lower\n"
-         L"ECAM camera. Shortcuts apply to all aircraft and work while Taxi Cam is hidden.",
+         L"Both turns the captain and first-officer displays on; press again to turn both off. SD is the lower ECAM or, on the\n"
+         L"PMDG 777, the lower DU. Shortcuts apply to all aircraft and work while Taxi Cam is hidden.",
          660, 20, 400, 640, 45, 0, small);
     make(L"BUTTON", L"Reset shortcuts", 640, 20, 457, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
     make(L"BUTTON", L"Save changes", IDOK, 400, 457, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
@@ -633,7 +653,7 @@ void target_combos(const win::Settings& s) {
   const bool existing = GetDlgItem(window, 400) != nullptr;
   if (existing && next == combo_ids)
     return;
-  std::array<std::uint64_t, 2> selected{s.left_id, s.right_id};
+  std::array<std::uint64_t, 2> selected{s.left_id, separate_lower_profile(s) ? s.lower_id : s.right_id};
   if (existing) {
     for (unsigned side = 0; side < 2; ++side) {
       const auto index = SendDlgItemMessageW(window, 400 + side, CB_GETCURSEL, 0, 0);
@@ -664,9 +684,9 @@ void target_combos(const win::Settings& s) {
       if (combo_ids[i] == selected[side])
         selection = static_cast<int>(i + 1);
     }
-    SendMessageW(combo, CB_SETCURSEL, side && single_display_profile(s) ? 0 : selection, 0);
+    SendMessageW(combo, CB_SETCURSEL, side && single_display_profile(s) && !separate_lower_profile(s) ? 0 : selection, 0);
   }
-  EnableWindow(GetDlgItem(window, 401), !single_display_profile(s));
+  EnableWindow(GetDlgItem(window, 401), !single_display_profile(s) || separate_lower_profile(s));
   refreshing = was_refreshing;
 }
 // Runs on the UI thread, including when hidden to the tray.
@@ -687,14 +707,14 @@ void sync_aircraft_session() {
   // Do not rebuild numeric edits when a flight changes in the background.
   for (unsigned side = 0; side < 2; ++side)
     SendDlgItemMessageW(window, 400 + side, CB_SETCURSEL, 0, 0);
-  for (const auto& label : std::array<std::pair<int, const wchar_t*>, 7>{{{224, L"Left preview: Off"},
+  for (const auto& label : std::array<std::pair<int, const wchar_t*>, 5>{{{224, L"Left preview: Off"},
                                                                           {225, L"Right preview: Off"},
                                                                           {226, L"Calibrate left: Off"},
                                                                           {227, L"Calibrate right: Off"},
-                                                                          {229, L"Scene test: Off"},
-                                                                          {232, L"SD preview: Off"},
-                                                                          {233, L"Calibrate SD: Off"}}})
+                                                                          {229, L"Scene test: Off"}}})
     SetDlgItemTextW(window, label.first, label.second);
+  SetDlgItemTextW(window, 232, side2_label(s, L"preview", false).c_str());
+  SetDlgItemTextW(window, 233, side2_label(s, L"calibrate", false).c_str());
 }
 void toggle_camera_from_hotkey(unsigned action) {
   // Keep unfinished numeric edits in their controls. A global shortcut must not
@@ -724,7 +744,9 @@ void toggle_camera_from_hotkey(unsigned action) {
   notice = L"Camera request: left " + std::wstring(s.manual_mask & 1 ? L"on" : L"off") + L", right " +
            (s.manual_mask & 2 ? L"on" : L"off") + L".";
   if (const auto* profile = profiles::find(s.profile); profile && profile->sides > 2)
-    notice.insert(notice.size() - 1, std::wstring(L", SD ") + (s.manual_mask & 4 ? L"on" : L"off"));
+    notice.insert(notice.size() - 1, std::wstring(pmdg_cam_control(s) ? L", lower DU " : L", SD ") + (s.manual_mask & 4 ? L"on" : L"off"));
+  if (pmdg_cam_control(s) && s.follow_taxi)
+    notice += L" Displays selected with CAM stay on until CAM is pressed again.";
   if (!s.enabled)
     notice = L"Camera request updated. Choose Connect to enable camera output.";
   for (unsigned side = 0; side < 2; ++side) {
@@ -732,9 +754,12 @@ void toggle_camera_from_hotkey(unsigned action) {
     SetDlgItemTextW(window, 224 + side, label.c_str());
     SetDlgItemTextW(window, 226 + side, side ? L"Calibrate right: Off" : L"Calibrate left: Off");
   }
-  SetDlgItemTextW(window, 232, s.manual_mask & 4 ? L"SD preview: On" : L"SD preview: Off");
-  SetDlgItemTextW(window, 233, L"Calibrate SD: Off");
-  SetDlgItemTextW(window, 221, s.follow_taxi ? L"TAXI buttons: On" : L"TAXI buttons: Off");
+  SetDlgItemTextW(window, 232, side2_label(s, L"preview", (s.manual_mask & 4) != 0).c_str());
+  SetDlgItemTextW(window, 233, side2_label(s, L"calibrate", false).c_str());
+  SetDlgItemTextW(window, 221,
+                  pmdg_cam_control(s) ? (s.follow_taxi ? L"CAM button: On" : L"CAM button: Off")
+                  : s.follow_taxi     ? L"TAXI buttons: On"
+                                      : L"TAXI buttons: Off");
   SetDlgItemTextW(window, 229, L"Scene test: Off");
   InvalidateRect(window, nullptr, FALSE);
 }
@@ -834,7 +859,7 @@ void build_controls() {
     button(win::connection_button_label(connection_requested.load(std::memory_order_acquire)), 241, 260, 236, 155, 34);
     const auto* profile = profiles::find(s.profile);
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
-    toggle(L"TAXI buttons", 221, s.follow_taxi && !manual, 800, 412, 180);
+    toggle(pmdg_cam_control(s) ? L"CAM button" : L"TAXI buttons", 221, s.follow_taxi && !manual, 800, 412, 180);
     EnableWindow(GetDlgItem(window, 221), !manual);
     button(L"Keyboard shortcuts…", 645, 580, 412, 205);
     edit(s.camera_rate, 200, 855, 528, 100);
@@ -871,8 +896,8 @@ void build_controls() {
     toggle(L"Calibrate left", 226, (s.calibration_mask & 1) != 0, 260, 540, 200);
     toggle(L"Calibrate right", 227, (s.calibration_mask & 2) != 0, 505, 540, 200);
     if (const auto* sides = profiles::find(s.profile); sides && sides->sides > 2) {
-      toggle(L"SD preview", 232, (s.manual_mask & 4) != 0, 750, 429, 200);
-      toggle(L"Calibrate SD", 233, (s.calibration_mask & 4) != 0, 750, 540, 200);
+      toggle(pmdg_cam_control(s) ? L"Lower preview" : L"SD preview", 232, (s.manual_mask & 4) != 0, 750, 429, 200);
+      toggle(pmdg_cam_control(s) ? L"Calibrate lower" : L"Calibrate SD", 233, (s.calibration_mask & 4) != 0, 750, 540, 200);
     }
   } else if (page == 4) {
     toggle(L"Scene test", 229, s.scene_test, 260, 449, 200);
@@ -1036,7 +1061,7 @@ void draw_page(HDC dc) {
     sample = status;
     live = connection;
   }
-  const bool has_displays = sample.candidate_count != 0 || sample.left_id != 0 || sample.right_id != 0;
+  const bool has_displays = sample.candidate_count != 0 || sample.left_id != 0 || sample.right_id != 0 || sample.lower_id != 0;
   if (page == 0) {
     panel(dc, 244, 137, 766, 140);
     text(dc,
@@ -1058,10 +1083,12 @@ void draw_page(HDC dc) {
     text(dc, L"Flight-deck control", 264, 406, 300, 30, heading);
     const auto* profile = profiles::find(draft().profile);
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
+    const bool cam = profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
     text(dc,
          manual ? L"Use Keyboard shortcuts or PFD routing previews for this aircraft."
+         : cam  ? L"Select L INBD, R INBD or LWR CTR, then press CAM. Press CAM again with that display selected to turn it off."
                 : L"Left and right EFIS TAXI buttons activate their own PFD.",
-         264, 446, 530, 30, small, Muted, DT_LEFT | DT_WORDBREAK);
+         264, 446, 530, 40, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
     text(dc, L"Range 5–60 per camera; install default 10. Parked aircraft run at the 5 fps floor.", 264, 564, 560, 24, small, Muted);
@@ -1112,7 +1139,10 @@ void draw_page(HDC dc) {
     panel(dc, 244, 119, 766, 226);
     text(dc, L"PFD assignment", 262, 127, 420, 30, heading);
     text(dc, L"Target identities apply to this simulator session.", 262, 166, 715, 25, small, Muted);
-    if (single_display_profile(draft())) {
+    if (separate_lower_profile(draft())) {
+      text(dc, L"NAVIGATION DISPLAYS TEXTURE", 260, 207, 315, 25, small, Muted);
+      text(dc, L"LOWER DU TEXTURE", 635, 207, 315, 25, small, Muted);
+    } else if (single_display_profile(draft())) {
       text(dc, L"DISPLAY TEXTURE (EVERY SIDE)", 260, 207, 315, 25, small, Muted);
       text(dc, L"NOT USED ON THIS AIRCRAFT", 635, 207, 315, 25, small, Muted);
     } else {
@@ -1121,7 +1151,10 @@ void draw_page(HDC dc) {
     }
     panel(dc, 244, 368, 766, 112);
     text(dc, L"Manual camera preview", 260, 381, 705, 29, heading);
-    text(dc, L"Manual preview and calibration turn off automatic TAXI-button control.", 260, 410, 705, 22, small, Muted);
+    text(dc,
+         pmdg_cam_control(draft()) ? L"Previews add displays on top of the CAM button. Calibration turns CAM control off."
+                                   : L"Manual preview and calibration turn off automatic TAXI-button control.",
+         260, 410, 705, 22, small, Muted);
     panel(dc, 244, 500, 766, 112);
     text(dc, L"Target calibration", 260, 507, 705, 29, heading);
     text(dc, L"Animated bars identify each screen before enabling a live feed.", 260, 581, 705, 23, small, Muted);
@@ -1917,7 +1950,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (id == 223)
           s.auto_detect = !s.auto_detect;
         if (id == 224 || id == 225 || id == 232) {
-          win::toggle_manual_camera(s, id == 224 ? win::CameraLeft : id == 225 ? win::CameraRight : win::CameraSd);
+          const auto action = id == 224 ? win::CameraLeft : id == 225 ? win::CameraRight : win::CameraSd;
+          if (pmdg_cam_control(s))
+            win::toggle_manual_layer(s, action);
+          else
+            win::toggle_manual_camera(s, action);
         }
         if (id == 226 || id == 227 || id == 233) {
           s.manual_mask = 0;
@@ -2005,7 +2042,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (!apply(false))
           return 0;
         auto s = draft();
-        const auto result = win::update_target_assignment(s.left_id, s.right_id, s.route_request, s.right_id, s.left_id);
+        const auto result =
+            win::update_target_assignment(s.left_id, s.right_id, s.route_request, s.right_id, s.left_id, s.lower_id, s.lower_id);
         if (result == win::TargetAssignmentResult::sequence_exhausted) {
           notice = L"Display assignment request limit reached. Restart Taxi Cam.";
           InvalidateRect(hwnd, nullptr, FALSE);
