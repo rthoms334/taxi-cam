@@ -559,6 +559,56 @@ int offline_tests() {
     std::memcpy(taxi_packet.data() + 16, &object_id, 4);
     check(testing::accept_taxi_packet(taxi_packet.data(), 56, 10000));
   }
+  // PMDG 777 Display Select Panel: 18 L:vars on definition 3, polled on
+  // request 3 and streamed on request 8 with the CHANGED flag.
+  {
+    constexpr DWORD bytes = 40 + 18 * 8;
+    std::array<unsigned char, bytes> dsp_packet{};
+    std::array<DWORD, 10> dsp_header{bytes, 0, 8, 8, 2883584, 3, 1, 0, 1, 18};
+    std::array<double, 18> dsp{};
+    const auto send = [&](std::uint64_t at) {
+      std::memcpy(dsp_packet.data(), dsp_header.data(), sizeof(dsp_header));
+      std::memcpy(dsp_packet.data() + 40, dsp.data(), sizeof(dsp));
+      return testing::accept_pmdg_dsp_packet(dsp_packet.data(), bytes, at);
+    };
+    dsp[0] = 1.00275;  // L INBD lamp, as observed live.
+    check(send(11000) && testing::taxi_buttons_at(11000).valid && testing::taxi_buttons_at(11000).mask() == 0);
+    dsp[3] = 100;  // CAM pushed.
+    check(send(11010));
+    dsp[3] = 0;
+    dsp_header[3] = 3;  // The polled request reports the release.
+    dsp_header[6] = 0;
+    check(send(11020));
+    const auto cam = testing::taxi_buttons_at(11020);
+    check(cam.valid && cam.left_on && !cam.right_on && !cam.sd_on && cam.mask() == 1);
+    dsp[0] = 0;
+    dsp[2] = 1.00275;  // LWR CTR selected.
+    check(send(11030));
+    dsp[3] = 100;
+    check(send(11040));
+    dsp[3] = 0;
+    check(send(11050) && testing::taxi_buttons_at(11050).mask() == 5 && testing::taxi_buttons_at(11050).sd_on);
+    for (unsigned field : {0u, 2u, 3u, 5u, 9u}) {
+      const auto saved = dsp_header[field];
+      dsp_header[field] = saved + 1;
+      check(!send(11060));
+      dsp_header[field] = saved;
+    }
+    dsp_header[6] = 2;  // Unknown request flags.
+    check(!send(11060));
+    dsp_header[6] = 0;
+    check(!testing::accept_pmdg_dsp_packet(dsp_packet.data(), bytes - 8, 11060));
+    check(!testing::accept_pmdg_dsp_packet(taxi_packet.data(), taxi_packet.size(), 11060));
+    check(!testing::accept_taxi_packet(dsp_packet.data(), bytes, 11060));
+    check(testing::taxi_buttons_at(11050).mask() == 5);
+    dsp[3] = std::numeric_limits<double>::quiet_NaN();
+    check(send(11070));
+    check(!testing::taxi_buttons_at(11070).valid && std::strcmp(testing::taxi_buttons_at(11070).error, "pmdg_display_select_values") == 0);
+    dsp[3] = 0;
+    check(send(11080) && testing::taxi_buttons_at(11080).mask() == 5);  // The decoder kept its pages.
+    refresh_taxi();
+    check(testing::accept_taxi_packet(taxi_packet.data(), taxi_packet.size(), 11090) && !testing::taxi_buttons_at(11090).sd_on);
+  }
   // Invalid TAXI values invalidate only the independent button cache. A
   // malformed/wrong-definition packet cannot be mistaken for body telemetry.
   values[6] = 12.75;

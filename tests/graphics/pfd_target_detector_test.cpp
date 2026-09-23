@@ -697,7 +697,8 @@ int main() {
   assert(!inboard.observe(pair.data(), pair.size(), 1000).valid && inboard.snapshot().stable_windows == 1);
   assert(!inboard.observe(pair.data(), pair.size(), 2000).valid && inboard.snapshot().stable_windows == 2);
   const auto& last = inboard.observe(pair.data(), pair.size(), 3000);
-  assert(last.valid && last.targets[0] == 43 && last.targets[1] == 0);
+  // The next-highest texture is the unverified lower DU (EICASCDU) guess.
+  assert(last.valid && last.targets[0] == 43 && last.targets[1] == 42);
   PfdTargetObservation kept = pair[1];
   const auto& still_last = inboard.observe(&kept, 1, 4000);
   assert(still_last.valid && still_last.targets[0] == 43 && still_last.targets[1] == 0);
@@ -712,7 +713,7 @@ int main() {
   assert(!inboard.observe(reversed.data(), reversed.size(), 1000).valid);
   assert(!inboard.observe(reversed.data(), reversed.size(), 2000).valid);
   const auto& tail = inboard.observe(reversed.data(), reversed.size(), 3000);
-  assert(tail.valid && tail.targets[0] == 90 && tail.targets[1] == 0);
+  assert(tail.valid && tail.targets[0] == 90 && tail.targets[1] == 50);
   reversed[0].id = 91;
   assert(!inboard.observe(reversed.data(), reversed.size(), 4000).valid);
   assert(std::strcmp(inboard.snapshot().status, "candidate_disappeared") == 0 && inboard.snapshot().targets[0] == 0);

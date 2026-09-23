@@ -30,11 +30,28 @@ inline void toggle_manual_camera(Settings& settings, unsigned action, std::uint3
   settings.scene_test = 0;
 }
 
+// PMDG 777: the CAM page keeps selecting displays while follow_taxi is on.
+// Manual previews and shortcuts add displays on top of it and never turn
+// cockpit control off. A display turned on by CAM is turned off with CAM.
+inline void toggle_manual_layer(Settings& settings, unsigned action) noexcept {
+  const auto* profile = profiles::find(settings.profile);
+  const auto affected = profile ? camera_action_sides(*profile, action) : 0u;
+  if (!affected)
+    return;
+  settings.manual_mask = toggle_sides(settings.manual_mask & profiles::side_mask(*profile), affected);
+  settings.calibration_mask = 0;
+  settings.scene_test = 0;
+}
+
 enum class CameraHotkeyResult { manual, aircraft, unavailable };
 inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned action, const Status& status, std::uint64_t now) noexcept {
   const auto* profile = profiles::find(settings.profile);
   if (!profile || !camera_action_sides(*profile, action))
     return CameraHotkeyResult::unavailable;
+  if (profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam) {
+    toggle_manual_layer(settings, action);
+    return CameraHotkeyResult::manual;
+  }
   if (profile->taxi_control == profiles::TaxiControl::manual_only) {
     const auto follow = settings.follow_taxi;
     toggle_manual_camera(settings, action);

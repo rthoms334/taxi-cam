@@ -26,7 +26,7 @@ If you find Taxi Cam useful, please consider donating.
 - **iniBuilds A350-900**, including **ULR** — nose and tail cameras on the PFD.
 - **iniBuilds A350-1000** — nose and tail cameras on the PFD.
 - **iniBuilds A380** — nose and tail cameras; use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
-- **PMDG 777** (777-200ER, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on the inboard navigation displays. Split-bottom ND layout; ground-speed overlay off; reference guides disabled. Use Ctrl + Shift + L / R / B. No cockpit CAM button.
+- **PMDG 777** (777-200ER, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on either inboard navigation display or the lower DU. Split-bottom layout; ground-speed overlay off; reference guides disabled. Use the cockpit **CAM** button (see below); Ctrl + Shift + L / R / B / D also work.
 - **Aerosoft A340-600** — nose and tail cameras on the captain's and first officer's PFDs and the lower ECAM, controlled by the **CAM CAPT**, **CAM F/O** and **CAM SD** selectors (or **Ctrl + Shift + D** for the SD). The captain's PFD and the lower ECAM were confirmed in the simulator; the F/O PFD placement follows the same layout and is not yet re-checked.
 
 ## Installation
@@ -49,7 +49,9 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 
 1. Load a supported aircraft. Leave **Auto aircraft** enabled in **Overview** to select the matching settings automatically.
 2. Allow a few seconds for the cameras to become ready.
-3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380 and the PMDG 777, use **Ctrl + Shift + L**, **R** or **B**. Repeat the control to turn them off.
+3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380, use **Ctrl + Shift + L**, **R** or **B**. Repeat the control to turn them off.
+
+   On the PMDG 777, use the glareshield display select panel: select **L INBD**, **R INBD** or **LWR CTR**, then press **CAM** (labelled INOP). That display shows the cameras until you press **CAM** again with the same display selected. PMDG's data broadcast setting is not needed. The keyboard shortcuts add displays manually. If the lower DU shows the cameras on the wrong screen, pick its texture under **LOWER DU TEXTURE** in **PFD routing**; its automatic choice is not yet verified.
 
 Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the cameras. The page also returns while the camera image is missing or more than a second old. The text uses the ground-speed colour on the Airbus aircraft and is white on the PMDG 777.
 

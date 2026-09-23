@@ -35,10 +35,31 @@ void edits() {
   require(update_target_assignment(left, right, request, 41, 42) == TargetAssignmentResult::unchanged,
           "Unchanged selection failed at the sequence limit");
 }
+void lower_display() {
+  std::uint64_t left{}, right{}, lower{}, request{};
+  require(
+      update_target_assignment(left, right, request, 272, 0, lower, 0) == TargetAssignmentResult::changed && left == 272 && request == 1,
+      "A single navigation texture was refused");
+  require(update_target_assignment(left, right, request, 272, 0, lower, 272) == TargetAssignmentResult::duplicate && lower == 0,
+          "The lower display accepted the navigation texture");
+  require(
+      update_target_assignment(left, right, request, 272, 0, lower, 271) == TargetAssignmentResult::changed && lower == 271 && request == 2,
+      "A lower display choice was not published");
+  require(update_target_assignment(left, right, request, 272, 0, lower, 271) == TargetAssignmentResult::unchanged && request == 2,
+          "An unchanged lower choice repeated the request");
+  require(update_target_assignment(left, right, request, 271, 0, lower, 271) == TargetAssignmentResult::duplicate && left == 272,
+          "A side accepted the lower texture");
+  require(update_target_assignment(left, right, request, 272, 0, lower, 0) == TargetAssignmentResult::changed && lower == 0,
+          "The lower display could not return to automatic");
+  request = std::numeric_limits<std::uint64_t>::max();
+  require(update_target_assignment(left, right, request, 272, 0, lower, 270) == TargetAssignmentResult::sequence_exhausted && lower == 0,
+          "Lower request sequence wrapped");
+}
 }  // namespace
 int main() {
   try {
     edits();
+    lower_display();
     std::printf("PASS target assignment: %u manual, automatic, duplicate, repeat and sequence checks.\n", checks);
     return 0;
   } catch (const std::exception& error) {

@@ -97,10 +97,12 @@ int wmain(int argc, wchar_t** argv) {
     owner.data()->status.rate_limits = 1;
     owner.data()->status.parked = 1;
     owner.data()->status.notifications[0] = {1, 5000, static_cast<std::uint32_t>(taxi_camera::SimEvent::cameras_ready), 0};
+    owner.data()->settings.lower_id = 271;
+    owner.data()->status.lower_id = 272;
     owner.unlock();
     require(reader.lock(100), "Read mailbox lock");
     require(reader.data()->settings.camera_rate == 60, "Settings exchange");
-    require(ProtocolVersion == 14 && reader.data()->settings.notifications == 1 &&
+    require(ProtocolVersion == 15 && reader.data()->settings.notifications == 1 &&
                 reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
                 reader.data()->settings.tail_upper == std::array<float, 2>{0.25f, 0.625f} &&
                 reader.data()->settings.tail_corner == std::array<float, 2>{0.1875f, 0.75f} &&
@@ -112,6 +114,8 @@ int wmain(int argc, wchar_t** argv) {
     require(reader.data()->status.notifications[0].serial == 1 &&
                 reader.data()->status.notifications[0].event == static_cast<std::uint32_t>(taxi_camera::SimEvent::cameras_ready),
             "Notification log exchanged in protocol12");
+    require(reader.data()->settings.lower_id == 271 && reader.data()->status.lower_id == 272, "Lower DU texture exchanged in protocol15");
+    reader.data()->settings.lower_id = 0;  // The default A380 profile has no separate lower texture.
     require(reader.data()->settings.guide_color == std::array<float, 3>{0.125f, 0.5f, 0.875f} &&
                 reader.data()->settings.speed_color == settings.speed_color,
             "Marking colour exchanged independently of ground-speed colour");

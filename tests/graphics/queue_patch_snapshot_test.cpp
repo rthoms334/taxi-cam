@@ -285,6 +285,47 @@ void run(bool warp, bool a350) {
       "debug=%d errors=%llu.\n",
       warp ? "WARP" : "hardware", profile.id, checked, debug_enabled, errors);
 }
+// PMDG 777: both navigation displays share one texture, and the lower DU is a
+// third slot on another texture. Each slot gets its own exact rectangle.
+void lower_display(bool warp) {
+  Reference<IDXGIFactory4> factory;
+  check(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.put())), "Lower DXGI factory");
+  Reference<IDXGIAdapter> adapter;
+  if (warp)
+    check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.put())), "Lower WARP");
+  Reference<ID3D12Device> device;
+  check(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(device.put())), "Lower device");
+  constexpr std::uint64_t key = 9302;
+  const auto& profile = profiles::Pmdg777300ER;
+  require(runtime::init_device(key, device.get()) && runtime::set_patch_profile(key, profile.id), "Lower runtime profile");
+  runtime::QueuePatchConfig config{
+      1, profile.id, 0, 7, {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM}};
+  require(runtime::configure_queue_patches(key, config), "Configure three display slots");
+  auto narrow = config;
+  narrow.profile = profiles::A359.id;
+  require(!runtime::set_patch_profile(key, profiles::A359.id) || !runtime::configure_queue_patches(key, narrow),
+          "A two-display profile accepted a lower slot");
+  require(runtime::set_patch_profile(key, profile.id) && runtime::configure_queue_patches(key, config), "Restore the 777 profile");
+  runtime::service();
+  runtime::QueuePatchSnapshot snapshot;
+  require(runtime::try_snapshot_queue_patches(key, 1, snapshot) && snapshot.ready_mask == 7, "Lower DU calibration patch missing");
+  auto* item = runtime::find(key);
+  require(drain_copy_queue(item->calibration_output.queue(), device.get()), "Lower calibration completed");
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+    const auto outer = profiles::display_rect(profile, side), inner = profiles::display_content_rect(profile, side);
+    const auto& patch = snapshot.sides[side];
+    require(patch.calibration && patch.buffer && patch.destination.left == static_cast<LONG>(outer.left) &&
+                patch.destination.top == static_cast<LONG>(outer.top) && patch.destination.right == static_cast<LONG>(outer.right) &&
+                patch.destination.bottom == static_cast<LONG>(outer.bottom) && patch.content.top == static_cast<LONG>(inner.top) &&
+                patch.footprint.Footprint.Width == outer.right - outer.left &&
+                patch.footprint.Footprint.Height == outer.bottom - outer.top && patch.footprint.Footprint.Format == config.formats[side],
+            "A 777 display slot received the wrong rectangle or encoding");
+  }
+  require(snapshot.sides[2].destination.left == 1058 && snapshot.sides[2].destination.top == 21, "Lower DU is not DU_Lower on EICASCDU");
+  runtime::reset_feed(key);
+  std::printf("PASS queue patch snapshots %s profile=%u: left/right navigation displays and lower DU rectangles.\n",
+              warp ? "WARP" : "hardware", profile.id);
+}
 }  // namespace
 int main(int argc, char** argv) {
   try {
@@ -297,6 +338,8 @@ int main(int argc, char** argv) {
       else
         return 2;
     run(warp, a350);
+    if (!a350)
+      lower_display(warp);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL queue patch snapshot: %s\n", error.what());

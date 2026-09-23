@@ -10,6 +10,7 @@
 #include <utility>
 #include "../profiles/catalog.hpp"
 #include "body_pose_math.hpp"
+#include "pmdg_display_select.hpp"
 #include "taxi_speed_cutoff.hpp"
 
 namespace taxi_camera::native_camera {
@@ -63,6 +64,7 @@ struct State {
   std::uint64_t on_ground_ms = 0;
   const char* on_ground_error = "not_initialized";
   bool taxi_left = false, taxi_right = false, taxi_sd = false;
+  PmdgDisplaySelect pmdg_dsp;
   AircraftIdentityCache identity;
   AircraftSessionLifecycle aircraft_session;
   bool flow_subscribed = false;
@@ -109,6 +111,7 @@ void reset_session_locked() noexcept {
   state.on_ground_error = "aircraft_session_changed";
   state.timing.last_sample_ms = state.timing.last_interval_ms = 0;
   state.taxi_left = state.taxi_right = state.taxi_sd = false;
+  state.pmdg_dsp.reset();
   state.speed_cutoff = {};
   state.button_commands.reset_session();
   state.cutoff_status = "below_speed_limit";
@@ -334,6 +337,34 @@ bool accept_taxi_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms, u
   ReleaseSRWLockExclusive(&state.lock);
   return true;
 }
+// PMDG 777 Display Select Panel on definition 3: request 3 polls it; request
+// 8 streams changes each simulator frame so a 0.1 s CAM push is not missed.
+bool accept_pmdg_dsp_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) noexcept {
+  constexpr DWORD PacketBytes = 40 + PmdgDisplaySelect::Values * sizeof(double);
+  if (!raw || bytes != PacketBytes || !sample_ms)
+    return false;
+  std::array<DWORD, 10> header{};
+  std::memcpy(header.data(), raw, sizeof(header));
+  const bool polled = header[3] == 3 && header[6] == 0, streamed = header[3] == 8 && (header[6] == 0 || header[6] == 1);
+  if (header[0] != PacketBytes || header[2] != 8 || !(polled || streamed) || header[5] != 3 || header[9] != PmdgDisplaySelect::Values)
+    return false;
+  std::array<double, PmdgDisplaySelect::Values> values{};
+  std::memcpy(values.data(), static_cast<const unsigned char*>(raw) + 40, sizeof(values));
+  AcquireSRWLockExclusive(&state.lock);
+  if (state.pmdg_dsp.observe(values)) {
+    const auto mask = state.pmdg_dsp.mask();
+    state.taxi_left = (mask & 1u) != 0;
+    state.taxi_right = (mask & 2u) != 0;
+    state.taxi_sd = (mask & 4u) != 0;
+    state.taxi_ms = sample_ms;
+    state.taxi_error = "";
+  } else {
+    state.taxi_ms = 0;
+    state.taxi_error = "pmdg_display_select_values";
+  }
+  ReleaseSRWLockExclusive(&state.lock);
+  return true;
+}
 bool accept_lighting_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) noexcept {
   // Definition4 cannot change the established body7/TAXI2 packet layouts.
   if (!raw || bytes != 56 || !sample_ms)
@@ -470,12 +501,29 @@ DWORD WINAPI worker(void*) noexcept {
       taxi_packets[taxi_packet_cursor++ % taxi_packets.size()] = id;
   };
   const bool manual_only = profile.taxi_control == profiles::TaxiControl::manual_only;
+  const bool pmdg_dsp = profile.taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
+  const bool commandable = profiles::commandable_buttons(profile);
   bool taxi_defined = !manual_only && last_packet != nullptr;
-  for (unsigned side = 0; side < profile.sides; ++side) {
-    if (!taxi_defined)
-      break;
-    taxi_defined = SUCCEEDED(define(session, 3, profile.taxi_lvars[side], "number", 4, 0, 0xffffffffu));
-    remember_taxi_packet();
+  if (pmdg_dsp) {
+    for (const auto name : PmdgDspLvars) {
+      if (!taxi_defined)
+        break;
+      taxi_defined = SUCCEEDED(define(session, 3, name, "number", 4, 0, 0xffffffffu));
+      remember_taxi_packet();
+    }
+    // SIM_FRAME with CHANGED: sent only when a lamp or switch moves.
+    // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_requestdataonsimobject/
+    if (taxi_defined) {
+      taxi_defined = SUCCEEDED(request(session, 8, 3, 0, 3, 1, 0, 0, 0));
+      remember_taxi_packet();
+    }
+  } else {
+    for (unsigned side = 0; side < profile.sides; ++side) {
+      if (!taxi_defined)
+        break;
+      taxi_defined = SUCCEEDED(define(session, 3, profile.taxi_lvars[side], "number", 4, 0, 0xffffffffu));
+      remember_taxi_packet();
+    }
   }
   if (!taxi_defined)
     taxi_failure(manual_only ? "taxi_buttons_unavailable_use_manual_control" : "taxi_definition_unavailable");
@@ -640,7 +688,8 @@ DWORD WINAPI worker(void*) noexcept {
           if (!accept_lighting_packet(raw, bytes, GetTickCount64()))
             lighting_failure("lighting_packet_layout");
         } else if (bytes >= 40 && (header[3] == 3 || header[5] == 3)) {
-          if (!accept_taxi_packet(raw, bytes, GetTickCount64(), profile.sides))
+          if (!(pmdg_dsp ? accept_pmdg_dsp_packet(raw, bytes, GetTickCount64())
+                         : accept_taxi_packet(raw, bytes, GetTickCount64(), profile.sides)))
             taxi_failure("taxi_packet_layout");
         } else {
           accept_aircraft_packet(raw, bytes, GetTickCount64());
@@ -706,7 +755,7 @@ DWORD WINAPI worker(void*) noexcept {
     const auto command_now = GetTickCount64();
     AcquireSRWLockExclusive(&state.lock);
     const auto commands = state.speed_cutoff.update(command_now, speed.valid, speed.knots, buttons.valid, buttons.mask(), buttons.sample_ms,
-                                                    profile.speed_cutoff_knots, !manual_only);
+                                                    profile.speed_cutoff_knots, commandable);
     state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
                           : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
                                                            : "below_speed_limit";
@@ -715,7 +764,7 @@ DWORD WINAPI worker(void*) noexcept {
     const auto decision = state.button_commands.step(
         {command_now, epoch, buttons.sample_ms, profile.id, buttons.mask(), commands,
          readiness_locked(command_now).ready && identity.fresh && identity.detected_profile == profile.id, buttons.valid, speed.valid,
-         state.speed_cutoff.inhibited(), !manual_only, speed.knots, profile.speed_cutoff_knots});
+         state.speed_cutoff.inhibited(), commandable, speed.knots, profile.speed_cutoff_knots});
     ReleaseSRWLockExclusive(&state.lock);
     for (unsigned side = 0; side < profile.sides; ++side) {
       if (!(decision.send_mask & (1u << side)))
@@ -838,6 +887,7 @@ bool stop_provider_locked() noexcept {
   state.lighting_ms = 0;
   state.lighting_error = "not_initialized";
   state.taxi_left = state.taxi_right = state.taxi_sd = false;
+  state.pmdg_dsp.reset();
   state.speed_cutoff = {};
   state.button_commands.reset_session();
   state.cutoff_status = "below_speed_limit";
@@ -1125,7 +1175,7 @@ void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted
   const auto* profile = profiles::find(profile_id.load());
   const auto now = GetTickCount64();
   state.button_commands.update(request, permitted && readiness_locked(now).ready, now, state.aircraft_session.epoch(),
-                               profile ? profile->id : 0, profile && profile->taxi_control != profiles::TaxiControl::manual_only);
+                               profile ? profile->id : 0, profile && profiles::commandable_buttons(*profile));
   ReleaseSRWLockExclusive(&state.lock);
 }
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept {
@@ -1223,6 +1273,9 @@ GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept {
 }
 bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms, unsigned sides) noexcept {
   return native_camera::accept_taxi_packet(packet, bytes, sample_ms, sides);
+}
+bool accept_pmdg_dsp_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
+  return native_camera::accept_pmdg_dsp_packet(packet, bytes, sample_ms);
 }
 TaxiButtonSample taxi_buttons_at(std::uint64_t now_ms) noexcept {
   AcquireSRWLockShared(&state.lock);

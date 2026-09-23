@@ -30,7 +30,8 @@ struct Composition {
   float bottom_gap = 0;
 };
 static_assert(sizeof(Composition) == 27 * sizeof(float));
-enum class TaxiControl { push_event, lvar_off, manual_only };
+// pmdg_dsp_cam reads the glareshield Display Select Panel. Nothing is written.
+enum class TaxiControl { push_event, lvar_off, manual_only, pmdg_dsp_cam };
 enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group, single_display };
 inline constexpr Composition A350Etacs = [] {
   Composition c;
@@ -79,6 +80,9 @@ struct AircraftProfile {
   unsigned pfd_refresh_hz = 0;
   // Scanned texture name, when the display is not named by pfd_labels alone.
   const char* display_texture = "";
+  // Single-display profiles: a separate texture for side 2 (the PMDG 777
+  // lower DU). Empty keeps every side on display_texture.
+  const char* lower_display_texture = "";
   // Existing compositor guide switch. False draws no alignment markers.
   bool reference_guides = true;
   // False keeps ground speed out of the composed ND (PMDG 777).
@@ -88,11 +92,23 @@ struct AircraftProfile {
   // draws it white (PMDG 777, which has no ground-speed readout).
   bool waiting_white_text = false;
   // Display sides this aircraft drives: captain and first officer, plus the
-  // lower ECAM on the A340-600.
+  // lower ECAM on the A340-600 or the lower DU on the PMDG 777.
   unsigned sides = 2;
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
+}
+// Side 2 lives on its own texture rather than the shared display texture.
+inline constexpr bool separate_lower_texture(const AircraftProfile& p) noexcept {
+  return p.sides > 2 && p.pfd_detection == PfdDetectionPolicy::single_display && p.lower_display_texture[0] != '\0';
+}
+// Sides drawn from the shared single-display texture.
+inline constexpr unsigned shared_texture_sides(const AircraftProfile& p) noexcept {
+  return separate_lower_texture(p) ? side_mask(p) & ~4u : side_mask(p);
+}
+// Taxi Cam may send button commands only to these cockpit controls.
+inline constexpr bool commandable_buttons(const AircraftProfile& p) noexcept {
+  return p.taxi_control == TaxiControl::push_event || p.taxi_control == TaxiControl::lvar_off;
 }
 // Minimum PLEASE WAIT time after a side starts drawing, and the camera-image
 // age that brings the page back while the side stays on.
@@ -211,6 +227,12 @@ inline constexpr unsigned Pmdg777RightNdX = 30;
 inline constexpr unsigned Pmdg777RightNdY = 1058;
 inline constexpr unsigned Pmdg777NdWidth = 958;
 inline constexpr unsigned Pmdg777NdHeight = 971;
+// Lower DU: panel.cfg [VCockpit02] draws DU_Lower on the separate 2048 x 2048
+// EICASCDU texture at 1058, 21, 958, 971 (same on all three variants). The
+// upper EICAS and the three CDU screens share that texture.
+inline constexpr const char* Pmdg777LowerTexture = "EICASCDU";
+inline constexpr unsigned Pmdg777LowerX = 1058;
+inline constexpr unsigned Pmdg777LowerY = 21;
 // Mip count and DXGI format were not in the scan.
 inline constexpr unsigned Pmdg777DisplayMips = 0;
 inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
@@ -264,40 +286,42 @@ inline constexpr CameraPanes Pmdg777Panes{
     {{736, static_cast<std::int32_t>((Pmdg777NosePictureHeight * 736 + 384) / 768)},
      {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)},
      {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)}}};
-inline constexpr auto make_pmdg_777 = [](std::uint32_t id, std::string_view key, const wchar_t* name,
-                                         std::string_view marker,
-                                         std::array<std::array<double, 6>, 3> mounts) {
-  AircraftProfile p{id,
-                    key,
-                    name,
-                    {"", ""},
-                    {"", ""},
-                    {Pmdg777LeftGauge, Pmdg777RightGauge},
-                    mounts,
-                    Pmdg777DisplayWidth,
-                    Pmdg777DisplayHeight,
-                    Pmdg777DisplayMips,
-                    TaxiControl::manual_only,
-                    {"", "", ""},
-                    {{{Pmdg777LeftNdX, Pmdg777LeftNdY, Pmdg777LeftNdX + Pmdg777NdWidth, Pmdg777LeftNdY + Pmdg777NdHeight},
-                      {Pmdg777RightNdX, Pmdg777RightNdY, Pmdg777RightNdX + Pmdg777NdWidth, Pmdg777RightNdY + Pmdg777NdHeight}}},
-                    Pmdg777Panes,
-                    true,
-                    60,
-                    Pmdg777Composition,
-                    Pmdg777Formats,
-                    {marker, "", ""}};
-  p.pfd_detection = PfdDetectionPolicy::single_display;
-  p.display_texture = Pmdg777Texture;
-  p.reference_guides = false;
-  p.ground_speed = false;
-  p.waiting_white_text = true;
-  // Larger top ND inset moves the stamped page down without shortening the nose
-  // picture. Bottom inset stays 0; leftover working-image rows under the squares
-  // are black. L/R stay 0.
-  p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
-  return p;
-};
+inline constexpr auto make_pmdg_777 =
+    [](std::uint32_t id, std::string_view key, const wchar_t* name, std::string_view marker, std::array<std::array<double, 6>, 3> mounts) {
+      AircraftProfile p{id,
+                        key,
+                        name,
+                        {"", "", ""},
+                        {"", "", ""},
+                        {Pmdg777LeftGauge, Pmdg777RightGauge, "DU_Lower"},
+                        mounts,
+                        Pmdg777DisplayWidth,
+                        Pmdg777DisplayHeight,
+                        Pmdg777DisplayMips,
+                        TaxiControl::pmdg_dsp_cam,
+                        {"", "", ""},
+                        {{{Pmdg777LeftNdX, Pmdg777LeftNdY, Pmdg777LeftNdX + Pmdg777NdWidth, Pmdg777LeftNdY + Pmdg777NdHeight},
+                          {Pmdg777RightNdX, Pmdg777RightNdY, Pmdg777RightNdX + Pmdg777NdWidth, Pmdg777RightNdY + Pmdg777NdHeight},
+                          {Pmdg777LowerX, Pmdg777LowerY, Pmdg777LowerX + Pmdg777NdWidth, Pmdg777LowerY + Pmdg777NdHeight}}},
+                        Pmdg777Panes,
+                        true,
+                        60,
+                        Pmdg777Composition,
+                        Pmdg777Formats,
+                        {marker, "", ""}};
+      p.pfd_detection = PfdDetectionPolicy::single_display;
+      p.display_texture = Pmdg777Texture;
+      p.lower_display_texture = Pmdg777LowerTexture;
+      p.sides = 3;
+      p.reference_guides = false;
+      p.ground_speed = false;
+      p.waiting_white_text = true;
+      // Larger top ND inset moves the stamped page down without shortening the nose
+      // picture. Bottom inset stays 0; leftover working-image rows under the squares
+      // are black. L/R stay 0.
+      p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
+      return p;
+    };
 inline constexpr AircraftProfile Pmdg777 =
     make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
 inline constexpr AircraftProfile Pmdg777300ER =

@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.9.42",
+      "date": "2026-09-23",
+      "changes": [
+        "PMDG 777: the cockpit CAM button now shows the cameras. Select L INBD, R INBD or LWR CTR, then press CAM; press CAM again with that display selected to turn it off. PMDG's data broadcast setting is not needed.",
+        "PMDG 777: the cameras can also show on the lower DU. Choose its texture under LOWER DU TEXTURE in PFD routing if they appear on the wrong screen.",
+        "PMDG 777: Ctrl + Shift + L / R / B / D and the previews add displays without turning the CAM button off.",
+        "Calibration on the PMDG 777 and A340-600 now lights only the selected display."
+      ]
+    },
+    {
       "version": "0.9.41",
       "date": "2026-09-23",
       "changes": [
