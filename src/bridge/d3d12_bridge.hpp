@@ -3,6 +3,7 @@
 #include <vector>
 #include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/pfd_target_detector.hpp"
+#include "../graphics/render_target_shapes.hpp"
 #include "../graphics/scene_runtime.hpp"
 namespace taxi_camera::standalone {
 inline constexpr const char* pfd_gpu_operation_name(unsigned slot) noexcept {
@@ -182,6 +183,8 @@ bool graphics_armed() noexcept;
 // stays disarmed for the rest of the simulator process.
 bool graphics_admission_halted() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
+// Render-target shapes seen at creation since the bridge attached.
+const RenderTargetShapes& render_target_shape_inventory() noexcept;
 // Control-thread only. Turns off late-attach barrier/copy/OM extras after the
 // profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled
 // list keeps association a little longer so stamps/calibration can light.

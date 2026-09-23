@@ -18,6 +18,7 @@
 #include "../graphics/pfd_copy_proof.hpp"
 #include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/query_scope.hpp"
+#include "../graphics/render_target_shapes.hpp"
 #include "../graphics/taxi_button_routes.hpp"
 #include "../graphics/write_budget.hpp"
 #include "../hooks/render_boundary_observer.hpp"
@@ -759,7 +760,7 @@ bool plausible_resource(ID3D12Resource* native) noexcept {
   std::memcpy(&query, static_cast<const void*>(table), sizeof(query));
   return image_region(query, true);
 }
-bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial);
+bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial, bool created = false);
 bool admit_live_resource(ID3D12Resource* native, source_state::Model initial) {
   const OwnedWork guard;
   auto& r = registry();
@@ -834,7 +835,11 @@ bool bind_live_rtv(Registry& r, List& l, SIZE_T handle) {
   maybe_stop_live_backfill(r);
   return r.routes.matches(found->second->id, r.active_mask | r.calibration_mask);
 }
-bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial) {
+RenderTargetShapes& render_target_shapes() noexcept {
+  static RenderTargetShapes shapes;
+  return shapes;
+}
+bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial, bool created) {
   auto& r = registry();
   if (!r.ready || !object || !same_device(device))
     return false;
@@ -842,6 +847,11 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
   if (FAILED(object->QueryInterface(IID_PPV_ARGS(&native))))
     return false;
   const auto desc = native->GetDesc();
+  // Creation only: RTV and barrier backfill see the same resource again.
+  if (created && desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1 &&
+      (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 && desc.Width <= RenderTargetShapes::MaximumEdge)
+    render_target_shapes().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels, static_cast<std::uint32_t>(desc.Format),
+                                  GetTickCount64());
   if (relevant(desc)) {
     std::shared_ptr<Resource> item;
     {
@@ -2058,7 +2068,8 @@ struct Creation<I, HRESULT (STDMETHODCALLTYPE C::*)(Args...)> {
       auto** out = std::get<sizeof...(Args) - 1>(tuple);
       if (out && *out)
         observe_safely([&] {
-          observe_resource(reinterpret_cast<ID3D12Device*>(self), static_cast<IUnknown*>(*out), model(std::get<StateArgs[I]>(tuple)));
+          observe_resource(reinterpret_cast<ID3D12Device*>(self), static_cast<IUnknown*>(*out), model(std::get<StateArgs[I]>(tuple)),
+                           true);
         });
     }
     return hr;
@@ -3245,6 +3256,9 @@ static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
                         static_cast<UINT>(item->desc.Format), item->submission_activity.load()});
   }
   return result;
+}
+const RenderTargetShapes& render_target_shape_inventory() noexcept {
+  return render_target_shapes();
 }
 std::vector<PfdTargetObservation> pfd_inventory() {
   std::vector<PfdTargetObservation> result;
