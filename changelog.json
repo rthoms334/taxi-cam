@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "0.9.43",
+      "date": "2026-09-23",
+      "changes": [
+        "After a graphics settings change, the cameras wait for the simulator's camera output to settle with much less work on the simulator's main thread. If it takes more than a few seconds, the status says so, and the cameras resume on their own once the output settles."
+      ]
+    },
+    {
       "version": "0.9.42",
       "date": "2026-09-23",
       "changes": [
