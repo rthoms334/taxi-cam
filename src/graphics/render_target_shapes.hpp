@@ -32,7 +32,10 @@ class RenderTargetShapes {
         current = key;
       }
       if (current == key) {
-        slot.last_ms.store(now, std::memory_order_relaxed);
+        // Concurrent creators can arrive out of order; keep the latest tick.
+        auto last = slot.last_ms.load(std::memory_order_relaxed);
+        while (last < now && !slot.last_ms.compare_exchange_weak(last, now, std::memory_order_relaxed)) {
+        }
         slot.created.fetch_add(1, std::memory_order_relaxed);
         total_.fetch_add(1, std::memory_order_relaxed);
         return true;

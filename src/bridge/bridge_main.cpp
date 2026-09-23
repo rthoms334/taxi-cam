@@ -533,9 +533,17 @@ DWORD run_impl() {
                         transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error);
           log_status(pending, detail);
           // An unsupported aircraft stays here: record what it is and which
-          // render targets it creates.
+          // render targets it creates. Log once per session, then on any type
+          // or path change, including an empty path with a known type.
+          static bool waiting_logged = false;
+          static std::uint64_t waiting_session = 0;
+          static std::array<char, sizeof(pending.aircraft_type)> waiting_type{};
           static std::array<char, sizeof(pending.aircraft_path)> waiting_path{};
-          if (std::strcmp(waiting_path.data(), pending.aircraft_path)) {
+          if (!waiting_logged || waiting_session != session_epoch || std::strcmp(waiting_type.data(), pending.aircraft_type) ||
+              std::strcmp(waiting_path.data(), pending.aircraft_path)) {
+            waiting_logged = true;
+            waiting_session = session_epoch;
+            std::memcpy(waiting_type.data(), pending.aircraft_type, waiting_type.size());
             std::memcpy(waiting_path.data(), pending.aircraft_path, waiting_path.size());
             char identity_detail[768];
             std::snprintf(identity_detail, sizeof(identity_detail), "Aircraft identity: session=%llu detected=%u fresh=%u type=%.255s path=%.259s",

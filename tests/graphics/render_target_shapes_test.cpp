@@ -22,6 +22,10 @@ int main() {
   assert(out[1].width == 4096 && out[1].mips == 1 && out[1].format == 27 && out[1].created == 2);
   assert(out[1].first_ms == 200 && out[1].last_ms == 300);
   assert(out[2].mips == 12 && out[3].format == 28);
+  // A creator reporting an older tick late does not move the last creation back.
+  assert(shapes.record(4096, 4096, 1, 27, 250));
+  n = shapes.snapshot(out);
+  assert(out[1].created == 3 && out[1].first_ms == 200 && out[1].last_ms == 300);
 
   // Small and oversized targets are not display candidates.
   assert(!shapes.record(255, 1024, 1, 27, 600) && !shapes.record(1024, 128, 1, 27, 600));
