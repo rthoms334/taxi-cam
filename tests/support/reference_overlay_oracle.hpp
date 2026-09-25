@@ -4,6 +4,9 @@
 #include <array>
 #include <cmath>
 namespace reference_overlay_oracle {
+// Compositor output alpha is an encoding flag, not coverage: camera pixels
+// carry display-referred codes; overlays are authored like aircraft UI.
+constexpr unsigned char CameraAlpha = 255, OverlayAlpha = 0;
 // Validate font layout and colour independently of the production vector paths.
 // Only these bounded glyph cells admit antialiased pixels; all padding, the
 // opaque panel, guides and source imagery still use the exact pixel oracle.
@@ -23,7 +26,7 @@ inline int font_cell(unsigned x, unsigned y, bool valid = false, unsigned speed 
 struct FontCoverage {
   std::array<unsigned, 4> lit{}, core{}, antialiased{};
   bool observe(int cell, const unsigned char* pixel) {
-    if (cell < 0 || cell >= static_cast<int>(lit.size()) || pixel[3] != 255)
+    if (cell < 0 || cell >= static_cast<int>(lit.size()) || pixel[3] != OverlayAlpha)
       return false;
     const bool label = cell < 2;
     // Approved common GS colour is RGB 22/109/19. Compare each channel's
@@ -55,11 +58,11 @@ inline bool pixel(unsigned x,
   const unsigned count = number_count(valid, speed);
   const unsigned panel_width = count == 1 ? 96 : 112;
   if (x >= 16 && x < 16 + panel_width && y >= 12 && y < 48) {
-    out = {0, 0, 0, 255};
+    out = {0, 0, 0, OverlayAlpha};
     return true;
   }
   if (y >= 251 && y < 263) {
-    out = {0, 0, 0, 255};
+    out = {0, 0, 0, OverlayAlpha};
     return true;
   }
   if (!guides || y >= 763)
@@ -70,7 +73,7 @@ inline bool pixel(unsigned x,
     const double dx = px - .14 * 768, dy = py - .48 * 255;
     if (round_nose ? dx * dx + dy * dy > 36 : std::abs(dx) >= 7 || std::abs(dy) >= 7)
       return false;
-    out = {255, 0, 255, 255};
+    out = {255, 0, 255, OverlayAlpha};
     return true;
   }
   const std::array<double, 2> corner{.305 * 768, .75 * 504};
@@ -81,7 +84,7 @@ inline bool pixel(unsigned x,
     return std::hypot(px - a[0] - t * dx, py - a[1] - t * dy);
   };
   if (std::min(distance(upper, corner), distance(corner, inner)) <= 2) {
-    out = {255, 0, 255, 255};
+    out = {255, 0, 255, OverlayAlpha};
     return true;
   }
   return false;

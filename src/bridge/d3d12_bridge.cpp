@@ -411,6 +411,9 @@ bool idle_callback() noexcept {
 }
 constexpr std::array<DXGI_FORMAT, 4> TypedFormats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,
                                                   DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
+// Camera pixels (compositor alpha 255) keep their compositor codes on UNORM and
+// sRGB views. The chosen typed encoding still sets how overlays (alpha 0) and
+// calibration clears are stored; UNKNOWN refuses delivery to the view.
 DXGI_FORMAT output_format(const View& view) noexcept {
   if (!view.resource || !view.resource->alive || view.mip)
     return DXGI_FORMAT_UNKNOWN;
@@ -418,8 +421,8 @@ DXGI_FORMAT output_format(const View& view) noexcept {
     return std::find(TypedFormats.begin(), TypedFormats.end(), view.format) != TypedFormats.end() ? view.format : DXGI_FORMAT_UNKNOWN;
   // Recovered binds identify the resource, not the application's opaque RTV
   // format. Prefer the single observed typed RTV encoding on typeless displays
-  // so display-referred compositor codes get the same HW sRGB encode as
-  // aircraft UI. With no typed evidence, keep UNORM (cannot invent sRGB).
+  // so overlays authored like aircraft UI get the same HW sRGB encode as the
+  // aircraft's own UI. With no typed evidence, keep UNORM (cannot invent sRGB).
   const auto format = view.resource->desc.Format;
   const auto from_typed_refs = [&](unsigned first, unsigned last, DXGI_FORMAT fallback) noexcept {
     unsigned count = 0;

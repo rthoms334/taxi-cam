@@ -187,7 +187,7 @@ Ground speed is read from SimConnect and rendered by Taxi Cam when the profile e
 
 The guides use adjustable positions within each camera image. Changing the camera mount or field of view does not move them with the wheels; use the Reference guides page to realign them after changing the framing.
 
-Exposure controls operate in the compositor. For the HDR `R11G11B10_FLOAT` camera format, the shader applies the selected exposure, tone mapping and colour encoding. Automatic exposure adjusts the requested EV from ambient-light data, with a gradual transition. It can brighten captured content but cannot supply lighting that MSFS omitted from the scene.
+Exposure controls operate in the compositor. For the HDR `R11G11B10_FLOAT` camera format, the shader applies the selected exposure, tone mapping and colour encoding; these codes reach the display unchanged. Automatic exposure adjusts the requested EV from ambient-light data, with a gradual transition. It can brighten captured content but cannot supply lighting that MSFS omitted from the scene.
 
 Private PFD patches are created only when a validated texture-copy opportunity requests an exact pixel format, size and content rectangle. The first request reserves bounded metadata without GPU work; a later composition renders that patch, including its border, image, GS and guides, into a stable GPU buffer. It becomes available only after submission. Without an admitted copy request, composition creates no typed patches and the final command-list drawing path uses the shared image directly.
 
@@ -216,6 +216,8 @@ Both paths exclude the navigation area, central gutter and lower trim display. C
 | Lower 261 rows | Aircraft's existing trim display |
 
 This is why the camera appears on the cockpit's physical screen: the cockpit model samples the texture that Taxi Cam has just updated. The camera is part of the image rendered on the aircraft display.
+
+**Colour encoding.** Aircraft can draw a display texture through an sRGB view; the iniBuilds A350 draws its typeless display that way. The composed image already holds display codes, so every path (queue copy, barrier copy, recording-end draw) stores camera pixels as those codes on both UNORM and sRGB views instead of encoding them a second time. Taxi Cam's overlays (ground speed, guides, dividers, frames, the PMDG 777 T and the PLEASE WAIT page) pass through unchanged, so an sRGB view encodes them. That is inferred to match how it encodes the aircraft's own UI colours; how aircraft pass those colours has not been captured. The compositor's alpha channel carries this choice for each pixel: 1 for camera, 0 for overlay. The display always receives alpha 1. Local GPU tests check the stored bytes; they do not establish appearance in MSFS.
 
 Barrier metadata uses one command-list lookup per native batch. A thread-local scope retains the tracking record during the batch; each item still checks its identity and recording generation. Nested batches have separate scopes. A changed or retired recording, a mismatched identity or exhausted scope capacity uses the ordinary lookup path. The scope does not hold the registry lock while processing callbacks.
 

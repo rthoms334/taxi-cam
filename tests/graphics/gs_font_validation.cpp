@@ -62,7 +62,7 @@ unsigned waiting_page_case(ID3D12Device* device, const wchar_t* preview) {
     for (unsigned y = 0; y < Height; ++y)
       for (unsigned x = 0; x < Width; ++x) {
         const auto* p = pixels + y * Pitch + x * 4;
-        require(p[3] == 255, "Waiting page is opaque");
+        require(p[3] == reference_overlay_oracle::OverlayAlpha, "Waiting page is all overlay; the stamp writes it opaque");
         const bool text = x >= Left && x < Left + TextWidth && y >= Top && y < Top + TextHeight;
         const unsigned cell = text ? (x - Left) / Advance : 0;
         if (!text || (x - Left) % Advance >= CellWidth || cell == 6) {
@@ -197,8 +197,9 @@ int wmain(int argc, wchar_t** argv) {
         for (unsigned y = 0; y < Height; ++y)
           for (unsigned x = 0; x < Width; ++x) {
             const auto* p = pixels + y * Pitch + x * 4;
-            require(p[3] == 255, "GS panel and surroundings remain opaque");
             const bool panel = x >= 16 && x < panel_right && y >= 12 && y < 48;
+            require(p[3] == (panel ? reference_overlay_oracle::OverlayAlpha : reference_overlay_oracle::CameraAlpha),
+                    "GS panel is flagged overlay and its surroundings camera");
             int cell = -1;
             if (y >= 20 && y < 40) {
               if (x >= 24 && x < 36)

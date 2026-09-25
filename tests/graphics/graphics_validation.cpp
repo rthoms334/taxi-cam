@@ -2008,25 +2008,47 @@ void native_case(bool warp,
     void* mapped{};
     const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)}, none{};
     check(readbacks[0]->Map(0, &range, &mapped), "Map typed private patch pixels");
+    // The UNORM reference stores compositor codes. sRGB views keep camera codes
+    // and encode only overlays; the only encoded overlay colours here are the GS
+    // glyphs. Its panel is shrunk by one working pixel against float mapping.
+    const auto encode = [](double code) {
+      const auto v = code / 255.;
+      return std::round(255 * (v <= .0031308 ? 12.92 * v : 1.055 * std::pow(v, 1. / 2.4) - .055));
+    };
+    std::uint64_t srgb_camera_pixels = 0, srgb_overlay_pixels = 0;
     for (UINT y = 0; y < 1024; ++y)
       for (UINT x = 0; x < display_width; ++x) {
         const auto offset = SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
         const auto* actual = static_cast<const unsigned char*>(mapped) + offset;
         const auto* ref = reference_patch.data() + offset;
         const bool inside = x < (a350 ? 806u : 768u) && y < 763;
+        bool overlay = false;
+        if (inside && x >= 16 && x < 790 && y >= 12) {
+          const double wx = (x - 16 + .5) * 768 / 774, wy = (y - 12 + .5) * 763 / 751;
+          overlay = wx >= 17 && wx < 127 && wy >= 13 && wy < 47;
+        }
+        // Count only codes whose encoded value differs by more than the
+        // tolerance, so the exercise counters separate the fix from a double encode.
+        bool camera_code = false, encoded_overlay = false;
         for (UINT c = 0; c < 4; ++c) {
           const UINT channel = bgra && c != 1 && c != 3 ? 2 - c : c;
           double expected = c == 3 ? 255 : inside ? ref[channel] : 0;
-          if (srgb && c != 3) {
-            const auto v = expected / 255.;
-            expected = 255 * (v <= .0031308 ? 12.92 * v : 1.055 * std::pow(v, 1. / 2.4) - .055);
+          if (c != 3 && inside) {
+            const bool telling = std::abs(encode(ref[channel]) - ref[channel]) > 1;
+            camera_code |= !overlay && telling;
+            encoded_overlay |= overlay && telling;
           }
+          if (srgb && overlay && c != 3)
+            expected = encode(expected);
           require(std::abs(actual[c] - std::round(expected)) <= (srgb ? 1 : 0),
-                  "Private typed patch preserves RGBA/BGRA/sRGB pixels and leaves outside pixels untouched");
+                  "Private typed patch keeps camera codes, encodes sRGB overlays and leaves outside pixels untouched");
         }
+        srgb_camera_pixels += srgb && camera_code;
+        srgb_overlay_pixels += srgb && encoded_overlay;
         ++pixels;
       }
     readbacks[0]->Unmap(0, &none);
+    require(!srgb || (srgb_camera_pixels && srgb_overlay_pixels), "sRGB typed patch exercised camera codes and encoded GS overlay");
     reset();
     require(win::assign_targets(first, second), "Restore initial PFD pair");
   }

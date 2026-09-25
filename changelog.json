@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "0.9.45",
+      "date": "2026-09-25",
+      "changes": [
+        "On aircraft that draw their displays in sRGB, such as the iniBuilds A350, camera colours are no longer encoded a second time, which brightened the shadows. The camera picture may look darker than before; recheck the exposure settings on the Display page. Ground-speed, guide and divider colours are unchanged."
+      ]
+    },
+    {
       "version": "0.9.44",
       "date": "2026-09-23",
       "changes": [
