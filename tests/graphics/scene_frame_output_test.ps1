@@ -29,7 +29,7 @@ foreach ($frameAdapter in @('hardware', 'warp')) {
   $frameOutput = & $frameExecutable @frameArguments
   if ($LASTEXITCODE -ne 0) { throw "Frame output validation failed on $frameAdapter." }
   $frameResult = $frameOutput | ConvertFrom-Json
-  if ($frameResult.passed -ne $true -or $frameResult.checked_pixels -ne 1171968) { throw 'Invalid frame output receipt.' }
+  if ($frameResult.passed -ne $true -or $frameResult.checked_pixels -ne 1171968 -or $frameResult.encoding_pixels -le 0) { throw 'Invalid frame output receipt.' }
   $frameOutput | Set-Content -LiteralPath (Join-Path $frameBuild "scene-frame-output-$frameAdapter.json") -Encoding utf8
   Write-Output $frameOutput
 }

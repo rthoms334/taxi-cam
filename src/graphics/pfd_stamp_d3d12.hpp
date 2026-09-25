@@ -51,6 +51,10 @@ class PfdStampD3D12 {
   // draw callbacks; creates root/PSO and compiles once. RGBA/BGRA8 UNORM/sRGB;
   // DSV may be UNKNOWN (absent), D16, D24S8, D32 or D32S8. Depth/stencil testing
   // and writes remain disabled; the bound DSV is never changed by the stamp.
+  // Source alpha is a per-pixel encoding flag. Alpha 255 marks a camera pixel
+  // (display-referred code): sRGB PSOs linearize it so the view stores the same
+  // byte (+-1) as UNORM. Alpha 0 marks an overlay authored like aircraft UI; it
+  // passes through, so an sRGB view encodes it. Target alpha is always 1.
   HRESULT initialize(ID3D12Device*, DXGI_FORMAT target_format, DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN) noexcept;
   // PRIVATE command list only. Caller binds our owned patch RTV, no DSV. This
   // overwrites graphics state without replaying any application bindings.
@@ -72,6 +76,7 @@ class PfdStampD3D12 {
   // only matching original state (graphics CBV restores its existing value).
   bool record(ID3D12GraphicsCommandList*, const PfdGraphicsState&, const PfdStampFrame&, UINT width, UINT height) noexcept;
   // Connectable owned-output adapter: exact768x763 RGBA8 byte rows at3072B pitch.
+  // Each pixel's alpha is the encoding flag described at initialize().
   // Address must belong to this device's live owned DEFAULT buffer, ready for
   // shader reads (COMMON promotion is valid for buffers). Producer completion
   // and exclusion of concurrent/future writes during every consumer submission

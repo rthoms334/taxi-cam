@@ -343,7 +343,7 @@ void pixel_case(ID3D12Device* device,
     if (overlay_case && frame == 0) {
       const auto is_magenta = [&](UINT x, UINT y) {
         const auto* pixel = static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch + 4 * x;
-        return pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 255 && pixel[3] == 255;
+        return pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 255 && pixel[3] == reference_overlay_oracle::OverlayAlpha;
       };
       require(is_magenta(107, 122) && is_magenta(660, 122) && !is_magenta(107, 109) && !is_magenta(120, 122),
               "Nose reference square centres or outside edges are incorrect");
@@ -366,6 +366,7 @@ void pixel_case(ID3D12Device* device,
                   is_magenta(488, 641) && !is_magenta(245, 631),
               "Tail reference brackets missed the approved calibration landmarks");
     }
+    constexpr auto OverlayAlpha = reference_overlay_oracle::OverlayAlpha;
     reference_overlay_oracle::FontCoverage font_coverage;
     for (UINT y = 0; y < 1024; ++y) {
       const auto* row = static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch;
@@ -373,11 +374,11 @@ void pixel_case(ID3D12Device* device,
         const bool overlay_enabled = overlay_case && (frame == 0 || recolor_guides);
         std::array<unsigned char, 4> guide_oracle{};
         const bool guide_pixel = reference_overlay_oracle::pixel(x, y, guide_oracle, overlay_enabled, overlay_enabled, 11, round_nose) &&
-                                 guide_oracle == std::array<unsigned char, 4>{255, 0, 255, 255};
+                                 guide_oracle == std::array<unsigned char, 4>{255, 0, 255, OverlayAlpha};
         if (recolor_guides && frame) {
           const auto* previous = first_color_frame.data() + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch + 4 * x;
           if (guide_pixel) {
-            require(row[4 * x] == 32 && row[4 * x + 1] == 174 && row[4 * x + 2] == 224 && row[4 * x + 3] == 255,
+            require(row[4 * x] == 32 && row[4 * x + 1] == 174 && row[4 * x + 2] == 224 && row[4 * x + 3] == OverlayAlpha,
                     "Every guide pixel changes to the chosen live RGB color at its original position");
             ++result.recolored_guide_pixels;
           } else
@@ -399,8 +400,8 @@ void pixel_case(ID3D12Device* device,
           if (y >= 251 && y < 263)
             ++result.divider_pixels;
           if (guide_pixel && recolor_guides && frame)
-            expected = {32, 174, 224, 255};
-          if (expected == std::array<unsigned char, 4>{255, 0, 255, 255})
+            expected = {32, 174, 224, OverlayAlpha};
+          if (expected == std::array<unsigned char, 4>{255, 0, 255, OverlayAlpha})
             ++result.magenta_pixels;
         } else {
           const UINT source_index = y < 255 ? 0 : 1;
@@ -413,6 +414,7 @@ void pixel_case(ID3D12Device* device,
           for (UINT channel = 0; channel < 3; ++channel)
             expected[channel] = expected_channel(source_descriptions[source_index], x, source_y, region_height, channel,
                                                  recolor_guides ? 0 : frame, source_index, exposures[frame]);
+          expected[3] = reference_overlay_oracle::CameraAlpha;
           tolerance = 2;
         }
         for (UINT channel = 0; channel < 4; ++channel) {

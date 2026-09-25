@@ -1,8 +1,12 @@
 #include "../../src/graphics/scene_frame_output.hpp"
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -62,7 +66,214 @@ struct Commands {
     check(device->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(allocator.put())), "Create allocator");
     check(device->CreateCommandList(0, desc.Type, allocator.p, nullptr, IID_PPV_ARGS(list.put())), "Create list");
   }
+  void execute(ID3D12Device* device) {
+    check(list->Close(), "Close test list");
+    ID3D12CommandList* lists[]{list.p};
+    queue->ExecuteCommandLists(1, lists);
+    Ref<ID3D12Fence> fence;
+    check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.put())), "Test list fence");
+    check(queue->Signal(fence.p, 1), "Signal test list");
+    wait([&] { return fence->GetCompletedValue() >= 1; });
+  }
 };
+// Independent double-precision sRGB OETF: what an sRGB view stores for a code.
+int srgb_encoded(int code) {
+  const double v = code / 255.;
+  return static_cast<int>(std::lround(255 * (v <= .0031308 ? 12.92 * v : 1.055 * std::pow(v, 1 / 2.4) - .055)));
+}
+struct EncodingResult {
+  std::uint64_t pixels = 0, srgb_camera_exact = 0;
+};
+// PMDG 777 layout through the production output: compositor buffer, then every
+// typed patch format. Camera codes survive UNORM and sRGB patches; the #1C1B22
+// T and black frames are overlays, which an sRGB patch encodes like aircraft UI.
+EncodingResult encoding_case(ID3D12Device* device, Manager& manager) {
+  namespace profiles = taxi_camera::profiles;
+  using reference_overlay_oracle::CameraAlpha;
+  using reference_overlay_oracle::OverlayAlpha;
+  const auto& profile = profiles::Pmdg777;
+  auto output = std::make_unique<Output>();
+  require(output->initialize(device), output->error());
+  require(output->set_composition(profile.composition) && output->hide_ground_speed() && output->set_reference_guides(false) &&
+              output->set_patch_profile(profile.id),
+          "Configure the PMDG 777 encoding output");
+  const auto outer = profiles::display_rect(profile, 0);
+  const auto inner = profiles::display_content_rect(profile, 0);
+  const UINT width = outer.right - outer.left, height = outer.bottom - outer.top;
+  const D3D12_RECT content{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+  require(width == 958 && height == 971 && content.left == 0 && content.top == 85 && content.right == 958 && content.bottom == 971,
+          "PMDG 777 navigation display patch geometry");
+  constexpr std::array<DXGI_FORMAT, 4> formats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,
+                                               DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
+  for (const auto format : formats)
+    require(output->request_patch(format, width, height, content), "Request every typed PMDG 777 patch format");
+  // Flat feeds make each pane one code. Dark codes changed most under double encoding.
+  constexpr std::array<std::array<unsigned char, 4>, 3> colors{{{2, 13, 34, 255}, {50, 122, 200, 255}, {34, 50, 2, 255}}};
+  Commands upload;
+  upload.initialize(device);
+  std::array<Ref<ID3D12Resource>, 3> inputs, uploads;
+  for (unsigned feed = 0; feed < inputs.size(); ++feed) {
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture.Width = 32;
+    texture.Height = 24;
+    texture.DepthOrArraySize = texture.MipLevels = texture.SampleDesc.Count = 1;
+    texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    const auto default_heap = heap(D3D12_HEAP_TYPE_DEFAULT), upload_heap = heap(D3D12_HEAP_TYPE_UPLOAD);
+    check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(inputs[feed].put())),
+          "Encoding input texture");
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 required = 0;
+    device->GetCopyableFootprints(&texture, 0, 1, 0, &footprint, nullptr, nullptr, &required);
+    D3D12_RESOURCE_DESC upload_desc{};
+    upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload_desc.Width = required;
+    upload_desc.Height = upload_desc.DepthOrArraySize = upload_desc.MipLevels = upload_desc.SampleDesc.Count = 1;
+    upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                          IID_PPV_ARGS(uploads[feed].put())),
+          "Encoding input upload");
+    void* mapped = nullptr;
+    const D3D12_RANGE none{0, 0};
+    check(uploads[feed]->Map(0, &none, &mapped), "Map encoding upload");
+    for (unsigned y = 0; y < 24; ++y)
+      for (unsigned x = 0; x < 32; ++x)
+        std::memcpy(static_cast<unsigned char*>(mapped) + y * footprint.Footprint.RowPitch + x * 4, colors[feed].data(), 4);
+    uploads[feed]->Unmap(0, nullptr);
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = uploads[feed].p;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    from.PlacedFootprint = footprint;
+    to.pResource = inputs[feed].p;
+    to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    upload.list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+  }
+  upload.execute(device);
+  require(output->prepare(inputs[0].p, DXGI_FORMAT_R8G8B8A8_UNORM, inputs[1].p, DXGI_FORMAT_R8G8B8A8_UNORM, inputs[2].p,
+                          DXGI_FORMAT_R8G8B8A8_UNORM),
+          output->error());
+  const auto transaction = manager.begin_private_submission(7, output->queue());
+  require(transaction.receipt != 0, "Encoding output timeline receipt");
+  require(output->submit(), output->error());
+  require(manager.end_private_submission(transaction.receipt), "Encoding output timeline signal");
+  wait([&] { return output->idle(); });
+
+  // Output is idle, so these test-only reads need no consumer registration.
+  Commands reader;
+  reader.initialize(device);
+  const auto read_heap = heap(D3D12_HEAP_TYPE_READBACK);
+  D3D12_RESOURCE_DESC read_desc{};
+  read_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  read_desc.Width = Output::BufferBytes;
+  read_desc.Height = read_desc.DepthOrArraySize = read_desc.MipLevels = read_desc.SampleDesc.Count = 1;
+  read_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  Ref<ID3D12Resource> composed;
+  check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &read_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(composed.put())),
+        "Encoding compositor readback");
+  reader.list->CopyBufferRegion(composed.p, 0, output->buffer(), 0, Output::BufferBytes);
+  std::array<Output::Patch, formats.size()> patches{};
+  std::array<Ref<ID3D12Resource>, formats.size()> patch_reads;
+  for (unsigned n = 0; n < formats.size(); ++n) {
+    patches[n] = output->patch(formats[n], width, height, content);
+    require(patches[n].buffer && patches[n].footprint.Footprint.Format == formats[n], "Submitted typed encoding patch is published");
+    read_desc.Width = patches[n].buffer->GetDesc().Width;
+    check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &read_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(patch_reads[n].put())),
+          "Encoding patch readback");
+    reader.list->CopyBufferRegion(patch_reads[n].p, 0, patches[n].buffer, 0, read_desc.Width);
+  }
+  reader.execute(device);
+
+  void* mapped = nullptr;
+  const D3D12_RANGE none{0, 0};
+  check(composed->Map(0, nullptr, &mapped), "Map encoding compositor buffer");
+  std::vector<unsigned char> working(static_cast<const unsigned char*>(mapped),
+                                     static_cast<const unsigned char*>(mapped) + Output::BufferBytes);
+  composed->Unmap(0, &none);
+  const auto code = [&](UINT x, UINT y) { return working.data() + SIZE_T{y} * Output::RowPitch + x * 4; };
+  const auto code_is = [&](UINT x, UINT y, std::array<unsigned char, 4> expected) {
+    return std::memcmp(code(x, y), expected.data(), 4) == 0;
+  };
+  require(code_is(384, 140, colors[0]) && code_is(180, 500, colors[1]) && code_is(588, 500, colors[2]),
+          "PMDG 777 camera panes are flagged camera pixels");
+  require(code_is(384, 299, {28, 27, 34, OverlayAlpha}) && code_is(384, 500, {28, 27, 34, OverlayAlpha}),
+          "PMDG 777 T bar and gap are flagged overlay #1C1B22");
+  require(code_is(5, 140, {0, 0, 0, OverlayAlpha}) && code_is(384, 700, {0, 0, 0, OverlayAlpha}),
+          "PMDG 777 nose side frame and rows below the squares are flagged overlay black");
+
+  EncodingResult result;
+  for (unsigned n = 0; n < formats.size(); ++n) {
+    const bool bgra = formats[n] == DXGI_FORMAT_B8G8R8A8_UNORM || formats[n] == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    const bool srgb = formats[n] == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || formats[n] == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    const auto pitch = patches[n].footprint.Footprint.RowPitch;
+    check(patch_reads[n]->Map(0, nullptr, &mapped), "Map encoding patch");
+    const auto* bytes = static_cast<const unsigned char*>(mapped) + patches[n].footprint.Offset;
+    const auto stored = [&](UINT x, UINT y, UINT channel) {
+      const auto* p = bytes + SIZE_T{y} * pitch + x * 4;
+      return static_cast<int>(bgra && channel < 3 ? p[2 - channel] : p[channel]);
+    };
+    // The stamp shader's own float mapping from target pixel to working pixel.
+    const auto working_x = [&](UINT x) { return std::min(static_cast<UINT>((static_cast<float>(x) + .5f) * 768.f / 958.f), 767u); };
+    const auto working_y = [&](UINT y) { return std::min(static_cast<UINT>((static_cast<float>(y) + .5f - 85.f) * 763.f / 886.f), 762u); };
+    for (UINT y = 0; y < height; ++y)
+      for (UINT x = 0; x < width; ++x) {
+        if (y < 85) {
+          require(stored(x, y, 0) == 0 && stored(x, y, 1) == 0 && stored(x, y, 2) == 0 && stored(x, y, 3) == 255,
+                  "PMDG 777 top inset stays opaque black on every typed patch");
+          continue;
+        }
+        const UINT wx = working_x(x), wy = working_y(y);
+        // Skip edges whose neighbouring working pixels differ: GPU and CPU
+        // float mapping may disagree by one pixel there.
+        bool uniform = true;
+        for (int dy = -1; dy <= 1 && uniform; ++dy)
+          for (int dx = -1; dx <= 1 && uniform; ++dx) {
+            const UINT nx = static_cast<UINT>(std::clamp(static_cast<int>(wx) + dx, 0, 767));
+            const UINT ny = static_cast<UINT>(std::clamp(static_cast<int>(wy) + dy, 0, 762));
+            uniform = std::memcmp(code(nx, ny), code(wx, wy), 4) == 0;
+          }
+        if (!uniform)
+          continue;
+        const auto* source = code(wx, wy);
+        const bool camera = source[3] == CameraAlpha;
+        require(camera || source[3] == OverlayAlpha, "Compositor alpha is exactly one encoding flag");
+        require(stored(x, y, 3) == 255, "Typed patches are opaque on the display");
+        bool exact = true;
+        for (UINT channel = 0; channel < 3; ++channel) {
+          const int expected = srgb && !camera ? srgb_encoded(source[channel]) : source[channel];
+          const int actual = stored(x, y, channel);
+          if (std::abs(actual - expected) > (srgb ? 1 : 0)) {
+            char message[256]{};
+            std::snprintf(message, sizeof(message), "PMDG 777 format %u %s pixel (%u,%u) channel %u stored %d, expected %d",
+                          static_cast<unsigned>(formats[n]), camera ? "camera" : "overlay", x, y, channel, actual, expected);
+            throw std::runtime_error(message);
+          }
+          exact &= actual == expected;
+        }
+        ++result.pixels;
+        result.srgb_camera_exact += srgb && camera && exact;
+      }
+    // Headline pixels, at target positions inside uniform working regions.
+    const auto at = [&](UINT wx, UINT wy, std::array<int, 3> expected, int tolerance) {
+      const UINT x = static_cast<UINT>((wx + .5) * 958 / 768), y = 85 + static_cast<UINT>((wy + .5) * 886 / 763);
+      for (UINT channel = 0; channel < 3; ++channel)
+        if (std::abs(stored(x, y, channel) - expected[channel]) > tolerance)
+          return false;
+      return true;
+    };
+    if (srgb)
+      require(at(384, 140, {2, 13, 34}, 1) && at(180, 500, {50, 122, 200}, 1) && at(384, 299, {93, 92, 102}, 1),
+              "sRGB patch keeps nose 2/13/34 and stores the overlay T as #5D5C66");
+    else
+      require(at(384, 140, {2, 13, 34}, 0) && at(384, 299, {28, 27, 34}, 0), "UNORM patch stores nose 2/13/34 and the T #1C1B22 exactly");
+    patch_reads[n]->Unmap(0, &none);
+  }
+  require(result.pixels > 3000000 && result.srgb_camera_exact > 0, "Encoding case checked every typed patch format");
+  return result;
+}
 void run(bool warp) {
   Ref<ID3D12Debug> debug;
   const bool debug_layer = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debug.put())));
@@ -311,6 +522,7 @@ void run(bool warp) {
   for (unsigned replay = 0; replay < patch_replays.size(); ++replay)
     manager->destroy_command_list(patch_replays[replay].commands.list.p, 30 + replay);
   require(checked_patch_pixels == 102, "Both typed formats and the old profile replay were checked");
+  const auto encoding = encoding_case(device.p, *manager);
   unsigned debug_errors = 0;
   if (info.p)
     for (UINT64 i = 0; i < info->GetNumStoredMessages(); ++i) {
@@ -325,9 +537,12 @@ void run(bool warp) {
   require(debug_errors == 0, "D3D12 debug layer errors");
   std::printf(
       "{\"passed\":true,\"checks\":%u,\"checked_pixels\":%llu,\"frames\":2,\"stable_address\":true,"
-      "\"consumer_recordings\":3,\"patch_pixels\":102,\"gpu_timing_fenced\":true,\"debugLayer\":%s,\"debugErrors\":%u,\"adapter\":\"%s\"}"
+      "\"consumer_recordings\":3,\"patch_pixels\":102,\"encoding_pixels\":%llu,\"srgb_camera_exact\":%llu,\"gpu_timing_fenced\":true,"
+      "\"debugLayer\":%s,\"debugErrors\":%u,\"adapter\":\"%s\"}"
       "\n",
-      checks, static_cast<unsigned long long>(checked_pixels), debug_layer ? "true" : "false", debug_errors, warp ? "WARP" : "hardware");
+      checks, static_cast<unsigned long long>(checked_pixels), static_cast<unsigned long long>(encoding.pixels),
+      static_cast<unsigned long long>(encoding.srgb_camera_exact), debug_layer ? "true" : "false", debug_errors,
+      warp ? "WARP" : "hardware");
 }
 }  // namespace
 int main(int argc, char** argv) {

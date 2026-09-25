@@ -138,7 +138,7 @@ Pixel coordinates start at the top left. Row ranges below are inclusive. The tab
 | Visible divider | Black working rows 251-262 (12 pixels) |
 | Preserved aircraft display | Rows 763–1023 |
 | Ground-speed panel (A380 and A350) | Origin (16, 12); 8-pixel internal padding; height 36; width 96 / 112 for 1 / 2 digits (`--` uses 112) |
-| Stable output buffer | Row pitch 3072 bytes; total 2,343,936 bytes |
+| Stable output buffer | Row pitch 3072 bytes; total 2,343,936 bytes. The alpha byte is an encoding flag (255 camera, 0 overlay) and is never written to the display |
 
 The logical gap between panes is four working-image rows. The visible divider covers four additional working rows of each pane. The whole 768 x 763 composition, including GS and guides, maps into the inner bordered area; working-image coordinates scale with it. Native source dimensions above match the resulting pane sizes to the nearest pixel.
 
@@ -196,6 +196,8 @@ targetEV = clamp(manualEV + nightBoost * darkness, -16, 4)
 Automatic adjustment moves toward the target at one EV per second. Stale lighting returns the target to manual EV. Ambient uses the SimConnect variable's numeric scale, not lux.
 
 The shader applies exposure and tone mapping to `R11G11B10_FLOAT` camera inputs. Other supported formats use their sampled-colour path.
+
+Earlier builds encoded the camera codes a second time on displays drawn through an sRGB view, which brightened shadows. Recheck the exposure settings on the Display page for those aircraft.
 
 Source: [exposure controller](../src/graphics/display_exposure.hpp), [colour shader](../src/graphics/camera_compositor_d3d12.hpp).
 

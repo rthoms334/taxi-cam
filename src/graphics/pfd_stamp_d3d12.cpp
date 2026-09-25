@@ -92,12 +92,21 @@ void PfdStampFrame::abandon() noexcept {
 HRESULT PfdStampD3D12::initialize(ID3D12Device* device, DXGI_FORMAT format, DXGI_FORMAT depth_format) noexcept {
   if (!device || device_ || !format_supported(format) || !depth_format_supported(depth_format))
     return E_INVALIDARG;
+  // Compositor RGB bytes are display-referred codes; its alpha byte is a
+  // per-pixel encoding flag. Camera pixels (alpha 255) are linearized in sRGB
+  // PSOs so the view's hardware encode stores the original code. Overlays
+  // (alpha 0) pass through, so an sRGB view encodes them like aircraft UI.
   constexpr char shader[] = R"(
 ByteAddressBuffer Pixels : register(t0);
 cbuffer Parameters : register(b0) {
   uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY;
   uint InsetLeft; uint InsetTop; uint InsetRight; uint InsetBottom;
 };
+#if SRGB_TARGET
+float srgb_to_linear(float value) {
+  return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+}
+#endif
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
@@ -111,9 +120,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   uint x = min((uint)((local.x - InsetLeft) * 768 / contentSize.x), 767);
   uint y = min((uint)((local.y - InsetTop) * 763 / contentSize.y), 762);
   uint rgba = Pixels.Load(y * 3072 + x * 4);
-  return float4(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255, 255) / 255.0;
+  float3 code = float3(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255) / 255.0;
+#if SRGB_TARGET
+  if ((rgba >> 24) >= 128)
+    code = float3(srgb_to_linear(code.r), srgb_to_linear(code.g), srgb_to_linear(code.b));
+#endif
+  return float4(code, 1);
 }
 )";
+  const bool srgb_target = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  const D3D_SHADER_MACRO defines[]{{"SRGB_TARGET", srgb_target ? "1" : "0"}, {nullptr, nullptr}};
   ID3DBlob *serialized = nullptr, *vs = nullptr, *ps = nullptr;
   D3D12_ROOT_PARAMETER params[2]{};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
@@ -128,10 +144,10 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   if (SUCCEEDED(hr))
     hr = device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&root_));
   if (SUCCEEDED(hr))
-    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", nullptr, nullptr, "vs_main", "vs_5_0",
+    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", defines, nullptr, "vs_main", "vs_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vs, nullptr);
   if (SUCCEEDED(hr))
-    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", nullptr, nullptr, "ps_main", "ps_5_0",
+    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", defines, nullptr, "ps_main", "ps_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &ps, nullptr);
   if (SUCCEEDED(hr)) {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};

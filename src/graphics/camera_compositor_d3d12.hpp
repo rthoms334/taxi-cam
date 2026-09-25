@@ -37,7 +37,10 @@ namespace taxi_camera {
 // R11G11B10_FLOAT feeds receive exposure, per-channel Reinhard compression and
 // sRGB encoding for this SDR display. Other formats retain their sampled RGB.
 // This explicit display conversion is not simulator exposure/color calibration.
-// Each feed stretches over its full region.
+// Each feed stretches over its full region. Output alpha is a per-pixel encoding
+// flag for the PFD stamp, not coverage: 1 marks camera pixels (display-referred
+// codes), 0 marks overlays authored like aircraft UI colours. Displays always
+// receive alpha 1.
 class CameraCompositorD3D12 {
  public:
   static constexpr UINT Width = 768;
@@ -556,6 +559,8 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
  float SquareNoseMarkers; float SplitBottom; float BottomGap; };
+// Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
+float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
   float2 delta = last - first;
   return length(sample_position - (first + saturate(dot(sample_position - first, delta) / dot(delta, delta)) * delta));
@@ -652,13 +657,13 @@ float4 waiting_pixel(float2 position) {
   float2 size = float2(16 * 10 + 12, 20) * WaitingScale;
   float2 origin = floor((float2(768, 763) - size) * 0.5);
   float2 local = (position - origin) / WaitingScale;
-  if (any(local < 0) || local.y >= 20 || local.x >= 16 * 11) return float4(0, 0, 0, 1);
+  if (any(local < 0) || local.y >= 20 || local.x >= 16 * 11) return ui_pixel(float3(0, 0, 0));
   uint cell = min((uint)(local.x / 16), 10);
   uint glyph = WaitingText[cell];
   float2 inner = local - float2(16 * cell, 0);
-  if (glyph == 20 || inner.x >= 12) return float4(0, 0, 0, 1);
+  if (glyph == 20 || inner.x >= 12) return ui_pixel(float3(0, 0, 0));
   float coverage = saturate(WaitingScale * (0.9 - glyph_distance(inner, glyph)) + 0.5);
-  return float4(float3(SpeedRed, SpeedGreen, SpeedBlue) * coverage, 1);
+  return ui_pixel(float3(SpeedRed, SpeedGreen, SpeedBlue) * coverage);
 }
 uint ground_speed_digits() {
   // Mode 1 is a live reading. Unavailable (0) keeps the two-digit panel width.
@@ -681,7 +686,7 @@ float4 ground_speed_pixel(float2 position) {
       divisor /= 10;
     }
   }
-  return float4(label.xxx + float3(SpeedRed, SpeedGreen, SpeedBlue) * speed, 1);
+  return ui_pixel(label.xxx + float3(SpeedRed, SpeedGreen, SpeedBlue) * speed);
 }
 // Screen-space references matched to the supplied ETACS photograph. These
 // marks do not claim metric clearance after mount, attitude or FOV changes.
@@ -720,6 +725,9 @@ float3 display_rgb(float3 rgb, uint feed) {
   if ((HdrMask & (1u << feed)) == 0) return rgb;
   return float3(hdr_channel(rgb.r), hdr_channel(rgb.g), hdr_channel(rgb.b));
 }
+// Alpha 1 flags a display-referred camera code: the PFD stamp stores this byte
+// on UNORM and sRGB views alike. Overlays use ui_pixel.
+float4 camera_pixel(float3 rgb, uint feed) { return float4(display_rgb(rgb, feed), 1); }
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
@@ -735,10 +743,9 @@ float sd_round_rect(float2 p, float2 bmin, float2 bmax, float4 radii) {
   return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
 }
 float4 split_bottom_t() {
-  // Display-referred codes (same space as hdr_channel's final sRGB encode). The
-  // stamp writes these floats into the display's typed RTV; an sRGB RTV encodes
-  // them the same way aircraft UI does. Do not invent a brighter hex here.
-  return float4(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0, 1);
+  // #1C1B22 is authored like aircraft UI: an overlay colour, not a camera code.
+  // An sRGB view stores it as about #5D5C66, as it does PMDG's own UI tapes.
+  return ui_pixel(float3(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0));
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
   // Mode 3 is the waiting page: no camera input is sampled.
@@ -754,16 +761,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
       // Horizontal T bar: same 10 px black as the other edges, only at the
       // left and right ends — not a black strip along the whole bar.
       const float edge = 10;
-      if (position.x < edge || position.x >= 768.0 - edge) return float4(0, 0, 0, 1);
+      if (position.x < edge || position.x >= 768.0 - edge) return ui_pixel(float3(0, 0, 0));
       return split_bottom_t();
     }
-    return float4(0, 0, 0, 1);
+    return ui_pixel(float3(0, 0, 0));
   }
   if (SplitBottom != 0 && position.y >= TailTop) {
     float pane = (768 - BottomGap) * 0.5;
     // Square pane height matches half-width; leftover rows under the squares stay black.
     float pane_h = pane;
-    if (position.y >= TailTop + pane_h) return float4(0, 0, 0, 1);
+    if (position.y >= TailTop + pane_h) return ui_pixel(float3(0, 0, 0));
     if (position.x >= pane && position.x < pane + BottomGap) return split_bottom_t();
     // Black frame on top + sides only (no bottom border). One 24 px round:
     // left pane top-right, right pane top-left. Other three corners stay square.
@@ -787,29 +794,30 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
       // Only the T-junction round can sit outside the outer shape → T grey.
       return split_bottom_t();
     }
-    if (sd_round_rect(local, inner_min, inner_max, inner_radii) > 0) return float4(0, 0, 0, 1);
+    if (sd_round_rect(local, inner_min, inner_max, inner_radii) > 0) return ui_pixel(float3(0, 0, 0));
   }
-  if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
+  if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight))
+    return ui_pixel(float3(GuideRed, GuideGreen, GuideBlue));
   if (position.y < NoseHeight) {
     // Split-bottom nose frame: bottom edge always; left/right only when GS is
     // hidden so the font fixture's padded-panel surroundings stay camera pixels.
     const float nose_border = 10;
     const bool side_borders = SplitBottom != 0 && GroundSpeedValid == 2;
-    if (SplitBottom != 0 && position.y >= NoseHeight - nose_border) return float4(0, 0, 0, 1);
+    if (SplitBottom != 0 && position.y >= NoseHeight - nose_border) return ui_pixel(float3(0, 0, 0));
     if (side_borders && (position.x < nose_border || position.x >= 768.0 - nose_border))
-      return float4(0, 0, 0, 1);
+      return ui_pixel(float3(0, 0, 0));
     float left = side_borders ? nose_border : 0;
     float right = side_borders ? 768.0 - nose_border : 768.0;
     float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
     float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
-    return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
+    return camera_pixel(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0);
   }
-  if (position.y < TailTop) return float4(0, 0, 0, 1);
+  if (position.y < TailTop) return ui_pixel(float3(0, 0, 0));
   if (SplitBottom != 0) {
     float pane = (768 - BottomGap) * 0.5;
     const float pane_border = 10;
     float pane_h = pane;
-    if (position.y >= TailTop + pane_h) return float4(0, 0, 0, 1);
+    if (position.y >= TailTop + pane_h) return ui_pixel(float3(0, 0, 0));
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
     float2 content_min = float2(pane_border, pane_border);
@@ -817,11 +825,11 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
                        (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
-      return float4(display_rgb(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
-    return float4(display_rgb(TailRight.SampleLevel(LinearClamp, uv, 0).rgb, 2), 1);
+      return camera_pixel(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1);
+    return camera_pixel(TailRight.SampleLevel(LinearClamp, uv, 0).rgb, 2);
   }
   float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
-  return float4(display_rgb(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
+  return camera_pixel(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1);
 }
 )";
 
