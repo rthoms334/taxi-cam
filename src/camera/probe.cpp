@@ -13,6 +13,7 @@
 #include "manager_inspection.hpp"
 #include "owned_entry_inventory.hpp"
 #include "owned_view.hpp"
+#include "pose_source_cache.hpp"
 #include "probe_inspection_gate.hpp"
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
@@ -86,6 +87,10 @@ struct Runtime {
   double peak_local_ms = 0;
   std::atomic<bool> peak_reset{false};
   ObserverPeak peak;
+  // Proven aircraft controller for the camera pose (observer thread). A session
+  // reset from any thread advances pose_source_resets, which retires it.
+  PoseSourceCache pose_source;
+  std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
   std::array<ec::EntryId, kMaxCameraFeeds> scheduled_ids{};
@@ -165,6 +170,7 @@ Runtime& state() {
 
 // Caller owns the mailbox mutex. No native engine call is made here.
 void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& profile) {
+  runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
   runtime.reset_requested.store(true, std::memory_order_release);
   runtime.suspended.store(true, std::memory_order_release);
   scene_handoff().stop_scene();
@@ -528,34 +534,56 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
   // transform during a taxi turn. Retain its session/freshness/plausibility
   // guards, but never use it as the mount transform or interpolate toward it.
   LocalMemoryReader objects;
-  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-  std::uint64_t user = 0;
-  // One read-only scope for the aircraft walk and the scene pose it leads to:
-  // pages and allocations are proven once and revalidated together at its end.
-  // Nothing is published unless that endpoint validation succeeds.
   AircraftScenePose scene;
-  const auto aircraft = inspected(
-      runtime,
-      [&] {
-        auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
-                                                          runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr, &user,
-                                                          runtime.contract.layout);
-        if (found.valid && found.available && user) {
-          objects.reset_budget();
-          scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
-        }
-        return found;
-      },
-      &memory_detail);
-  if (!aircraft.valid || !aircraft.available || !user) {
-    runtime.pose_busy = true;
-    runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
-    if (!memory_detail.empty())
-      runtime.message += " " + memory_detail;
-    return false;
+  const auto now = GetTickCount64();
+  const auto epoch = get_aircraft_session_readiness().epoch;
+  const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+  // A controller proven by the full walk less than a second ago in this session
+  // skips the walk. Its scene read keeps every identity check and the public
+  // pose match; anything unexpected forgets it and proves the chain again now.
+  std::uint64_t user = runtime.pose_source.reuse(now, epoch, resets);
+  if (user) {
+    scene = inspected(
+        runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
+    if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose)) {
+      runtime.pose_source.forget();
+      user = 0;
+      scene = {};
+      memory_detail.clear();
+      objects.reset_budget();
+    }
+  }
+  if (!user) {
+    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+    // One read-only scope for the aircraft walk and the scene pose it leads to:
+    // pages and allocations are proven once and revalidated together at its end.
+    // Nothing is published unless that endpoint validation succeeds.
+    const auto aircraft = inspected(
+        runtime,
+        [&] {
+          auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
+                                                            runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr,
+                                                            &user, runtime.contract.layout);
+          if (found.valid && found.available && user) {
+            objects.reset_budget();
+            scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
+          }
+          return found;
+        },
+        &memory_detail);
+    if (!aircraft.valid || !aircraft.available || !user) {
+      runtime.pose_busy = true;
+      runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
+      if (!memory_detail.empty())
+        runtime.message += " " + memory_detail;
+      return false;
+    }
+    if (scene.complete && scene_body_matches_public(scene.pose, body.pose))
+      runtime.pose_source.prove(user, now, epoch, resets);
   }
   if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose) ||
       !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+    runtime.pose_source.forget();
     runtime.pose_busy = true;
     runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") +
                       (scene.complete ? "public_pose_mismatch" : scene.error);

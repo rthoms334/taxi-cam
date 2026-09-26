@@ -111,7 +111,7 @@ A scheduled closing pulse uses a separate inspection contract that validates own
 
 ### Following the aircraft
 
-Camera mounts use the active aircraft model's scene transform, read in the verified camera-update observer. The current simulator profile identifies the user/controller's generation-checked model node, requires its second node reference to agree, checks the attached model identity, and rereads every observed field before accepting a pose. Native matrix rows map to aircraft right, up and forward with the first row negated.
+Camera mounts use the active aircraft model's scene transform, read in the verified camera-update observer. The current simulator profile identifies the user/controller's generation-checked model node, requires its second node reference to agree, checks the attached model identity, and rereads every observed field before accepting a pose. Native matrix rows map to aircraft right, up and forward with the first row negated. Finding that controller walks the world, user and component chain. A controller found this way is reused for under a second within one aircraft session, while its scene transform is still read and checked on every camera pulse; any failed check walks the chain again.
 
 SimConnect still supplies aircraft identity, speed and a separate position/orientation plausibility check. Public camera data and the internal view establish the coordinate calibration used by that check. The asynchronous telemetry pose is never blended into the scene pose used for the mounts. A missing, changing or mismatched model pose closes the camera render gates while retaining the existing views.
 
