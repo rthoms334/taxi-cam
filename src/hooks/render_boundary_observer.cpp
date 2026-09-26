@@ -55,6 +55,11 @@ SRWLOCK control_lock = SRWLOCK_INIT;
 struct alignas(64) Shard {
   SRWLOCK lock = SRWLOCK_INIT;
   std::unordered_map<ID3D12GraphicsCommandList*, Identity> identities;
+  // Advanced before every exclusive release of this shard, so a reader that
+  // sees the same value before and after a call knows none of its identities
+  // changed in between. Its own line: readers poll it on every hook call.
+  // Starts at 1; 0 means "not read from this shard".
+  alignas(64) std::atomic<std::uint64_t> changes{1};
 };
 std::array<Shard, 16> shards;
 constexpr std::size_t kMaximumIdentities = 8192;
@@ -64,10 +69,9 @@ Shard& shard_for(const ID3D12GraphicsCommandList* key) noexcept {
   return shards[(hash >> 60) & 15];
 }
 Callbacks callbacks;
-std::atomic<bool> enabled{false};
-// Advanced before every exclusive registry release, so a reader that sees the
-// same value before and after a call knows no identity changed in between.
-std::atomic<std::uint64_t> identity_changes{0};
+// Read on every hook call. Kept off the lines of the counters below, which
+// every thread's barrier and copy hooks write.
+alignas(64) std::atomic<bool> enabled{false};
 std::atomic<Legacy> original_legacy{nullptr};
 std::atomic<Begin> original_begin{nullptr};
 std::atomic<End> original_end{nullptr};
@@ -76,9 +80,24 @@ std::atomic<Draw> original_draw{nullptr};
 std::atomic<DrawIndexed> original_draw_indexed{nullptr};
 std::atomic<CopyResource> original_copy_resource{nullptr};
 std::atomic<CopyTexture> original_copy_texture{nullptr};
-std::atomic<std::uint64_t> legacy_calls{0}, enhanced_calls{0}, legacy_candidates{0}, enhanced_candidates{0}, pass_refusals{0},
-    batch_refusals{0};
-std::atomic<std::uint64_t> copy_resource_calls{0}, copy_texture_calls{0}, metadata_truncated_calls{0}, maximum_legacy_batch{0};
+// Diagnostic counters written from every recording thread, on lines of their
+// own so the writes do not evict the read-mostly state above.
+struct alignas(64) Counters {
+  std::atomic<std::uint64_t> legacy_calls{0}, enhanced_calls{0}, legacy_candidates{0}, enhanced_candidates{0}, pass_refusals{0},
+      batch_refusals{0};
+  std::atomic<std::uint64_t> copy_resource_calls{0}, copy_texture_calls{0}, metadata_truncated_calls{0}, maximum_legacy_batch{0};
+};
+Counters counters;
+auto& legacy_calls = counters.legacy_calls;
+auto& enhanced_calls = counters.enhanced_calls;
+auto& legacy_candidates = counters.legacy_candidates;
+auto& enhanced_candidates = counters.enhanced_candidates;
+auto& pass_refusals = counters.pass_refusals;
+auto& batch_refusals = counters.batch_refusals;
+auto& copy_resource_calls = counters.copy_resource_calls;
+auto& copy_texture_calls = counters.copy_texture_calls;
+auto& metadata_truncated_calls = counters.metadata_truncated_calls;
+auto& maximum_legacy_batch = counters.maximum_legacy_batch;
 std::array<Slot, 8> slots{{{26}, {68}, {69}, {80}, {12}, {13}, {16}, {17}}};
 struct ActiveEndSlot {
   void* table = nullptr;
@@ -108,7 +127,7 @@ struct Lock {
       ReleaseSRWLockShared(&lock);
   }
 };
-// One identity shard. Every exclusive release advances identity_changes first.
+// One identity shard. Every exclusive release advances the shard's changes first.
 struct ShardLock {
   Shard& shard;
   bool exclusive;
@@ -120,7 +139,7 @@ struct ShardLock {
   }
   ~ShardLock() {
     if (exclusive) {
-      identity_changes.fetch_add(1, std::memory_order_release);
+      shard.changes.fetch_add(1, std::memory_order_release);
       ReleaseSRWLockExclusive(&shard.lock);
     } else {
       ReleaseSRWLockShared(&shard.lock);
@@ -134,7 +153,8 @@ struct AllShardsLock {
       AcquireSRWLockExclusive(&shard.lock);
   }
   ~AllShardsLock() {
-    identity_changes.fetch_add(1, std::memory_order_release);
+    for (auto& shard : shards)
+      shard.changes.fetch_add(1, std::memory_order_release);
     for (auto it = shards.rbegin(); it != shards.rend(); ++it)
       ReleaseSRWLockExclusive(&it->lock);
   }
@@ -171,16 +191,55 @@ Identity find_identity(ID3D12GraphicsCommandList* key, bool& found) noexcept {
     return found ? it->second : Identity{};
   });
 }
+// Identities this thread read directly under its own list pointer, with the
+// shard's change count at that read. A copy is current exactly while that count
+// is unchanged: every identity write happens under the exclusive shard lock and
+// advances the count before release, and the count read under the shared lock
+// cannot move until that lock is released. Only direct hits are kept; a proxy
+// argument's identity lives under another key and takes the checked path.
+struct CachedIdentity {
+  ID3D12GraphicsCommandList* list = nullptr;
+  std::uint64_t changes = 0;
+  Identity value{};
+};
+thread_local std::array<CachedIdentity, 4> cached_identities{};
+thread_local unsigned next_cached_identity = 0;
 // Registered keys are unwrapped native lists, and hooks receive native lists,
 // so an entry under the argument itself needs no unwrap. Only a miss pays for
 // QueryInterface, which finds the native list behind a proxy argument.
-Identity lookup(ID3D12GraphicsCommandList* list) noexcept {
+// changes receives the list's shard count for a direct hit, else 0.
+Identity lookup(ID3D12GraphicsCommandList* list, std::uint64_t& changes) noexcept {
+  auto& shard = shard_for(list);
+  const auto now = shard.changes.load(std::memory_order_acquire);
+  for (const auto& entry : cached_identities)
+    if (entry.list == list && entry.changes == now) {
+      changes = now;
+      return entry.value;
+    }
+  changes = 0;
   bool found = false;
-  const auto direct = find_identity(list, found);
-  if (found)
+  Identity direct{};
+  std::uint64_t observed = 0;
+  {
+    const ShardLock lock(shard, false);
+    const auto it = shard.identities.find(list);
+    found = it != shard.identities.end();
+    if (found) {
+      direct = it->second;
+      observed = shard.changes.load(std::memory_order_relaxed);
+    }
+  }
+  if (found) {
+    cached_identities[next_cached_identity++ % cached_identities.size()] = {list, observed, direct};
+    changes = observed;
     return direct;
+  }
   const auto key = identity_key(list);
   return key == list ? Identity{} : find_identity(key, found);
+}
+Identity lookup(ID3D12GraphicsCommandList* list) noexcept {
+  std::uint64_t changes = 0;
+  return lookup(list, changes);
 }
 void disable_capture() noexcept {
   enabled.store(false, std::memory_order_release);
@@ -263,11 +322,11 @@ void observe_work(ID3D12GraphicsCommandList* list) noexcept {
       it->second.prior_work = true;
   });
 }
-// The identity read before the draw is still current unless some identity
-// changed while it ran. That saves a second unwrap and registry lock per draw.
+// A direct identity read before the draw is still current unless its shard
+// changed while the draw ran. That saves a second lookup per draw.
 void after_draw_work(ID3D12GraphicsCommandList* list, const Identity& before, std::uint64_t changes) noexcept {
   const auto generation = before.generation;
-  const auto current = identity_changes.load(std::memory_order_acquire) == changes ? before : lookup(list);
+  const auto current = changes && shard_for(list).changes.load(std::memory_order_acquire) == changes ? before : lookup(list);
   if (!generation || current.generation != generation)
     return;
   if (!current.prior_work)
@@ -291,8 +350,8 @@ draw(ID3D12GraphicsCommandList* list, UINT vertices, UINT instances, UINT first_
   }
   const Guard guard;
   const hook_timing::Scope timing(hook_timing::draw);
-  const auto changes = identity_changes.load(std::memory_order_acquire);
-  const auto identity = lookup(list);
+  std::uint64_t changes = 0;
+  const auto identity = lookup(list, changes);
   hook_timing::forward(original, list, vertices, instances, first_vertex, first_instance);
   if (vertices && instances)
     after_draw_work(list, identity, changes);
@@ -310,8 +369,8 @@ void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
   }
   const Guard guard;
   const hook_timing::Scope timing(hook_timing::draw);
-  const auto changes = identity_changes.load(std::memory_order_acquire);
-  const auto identity = lookup(list);
+  std::uint64_t changes = 0;
+  const auto identity = lookup(list, changes);
   hook_timing::forward(original, list, indices, instances, first_index, vertex_offset, first_instance);
   if (indices && instances)
     after_draw_work(list, identity, changes);

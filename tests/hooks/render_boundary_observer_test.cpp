@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace obs = taxi_camera::engine_hook::render_boundary;
@@ -1137,6 +1138,48 @@ int main() {
     require(obs::register_list(list, 3, callbacks).ready, "Begin-retired generation cannot re-register");
     require(metadata_begins == metadata_ends && !metadata_depth && !metadata_errors,
             "Legacy/enhanced metadata escaped balanced unlocked batch scopes");
+    {
+      // Each thread keeps copies of identities it read. An identity write on
+      // another thread must still reach this thread's next draw, in both
+      // directions. The two threads alternate strictly through step.
+      obs::successful_reset(list, 3);
+      list->DrawInstanced(3, 1, 0, 0);
+      require(evidence.draw_allowed, "Cross-thread fixture did not start from a capturable recording");
+      constexpr unsigned rounds = 2000;
+      std::atomic<unsigned> step{0};
+      std::atomic<unsigned> other_failures{0};
+      std::thread other([&] {
+        for (unsigned round = 0; round < rounds; ++round) {
+          while (step.load(std::memory_order_acquire) != round * 4 + 1)
+            YieldProcessor();
+          // The main thread just changed the identity this thread cached last round.
+          list->DrawInstanced(3, 1, 0, 0);
+          if (evidence.draw_allowed != (round % 2 == 1))
+            other_failures.fetch_add(1, std::memory_order_relaxed);
+          if (round % 2 == 0)
+            obs::successful_reset(list, 3);
+          else
+            obs::invalidate_recording(list, 3);
+          step.store(round * 4 + 2, std::memory_order_release);
+        }
+      });
+      unsigned main_failures = 0;
+      for (unsigned round = 0; round < rounds; ++round) {
+        if (round % 2 == 0)
+          obs::invalidate_recording(list, 3);
+        else
+          obs::successful_reset(list, 3);
+        step.store(round * 4 + 1, std::memory_order_release);
+        while (step.load(std::memory_order_acquire) != round * 4 + 2)
+          YieldProcessor();
+        list->DrawInstanced(3, 1, 0, 0);
+        if (evidence.draw_allowed != (round % 2 == 0))
+          ++main_failures;
+      }
+      other.join();
+      require(!main_failures && !other_failures.load(), "A thread's cached identity hid another thread's identity change");
+      obs::successful_reset(list, 3);
+    }
     std::vector<Fake> more(8192, Fake{table.data()});
     for (std::size_t n = 0; n < 8191; ++n)
       require(obs::register_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&more[n]), 3, callbacks).ready, "Registry early refusal");
