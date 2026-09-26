@@ -57,14 +57,25 @@ Validation: `build.ps1 -Validate` passed on hardware and WARP (receipt version 0
 
 ## 4. Levers that need your decision or a live test
 
-### Your decision
-- **Dynamic tail rate.** At about 18 fps a lower tail *rate* changes nothing, because pulses are capped by frame count. The saving has to come from skipping some of the tail's turns: nose, tail, nose, idle. That is 25% fewer extra renders, with the tail at about 2.3 updates a second.
-  - **Turning** (heading change above about 3°/s, with hysteresis like the parked floor): both cameras equal, because wing, tail and main-gear clearance matter.
-  - **Rolling straight below about 25 fps:** nose priority, with the tail skipping every other turn.
-  - **25 fps or more:** equal, because both cameras already update at 6 or more times a second.
-  - **Parked:** the 2-per-second floor.
-  - **Inputs:** heading comes from the existing telemetry pose; the frame rate comes from the camera-manager update rate. Neither needs new memory reads.
-  - This needs a live check of how a 2.3 Hz tail feels on straight segments.
+### Dynamic tail rate (built after this review, on your go-ahead)
+At about 18 fps a lower tail *rate* changes nothing, because pulses are capped by frame count. The saving comes from skipping some of the tail's turns: nose, tail, nose, idle. Each skipped turn consumes a full slot (the pulse and its closed update), which gives about 25% fewer extra renders. The nose keeps its full cadence and the tail runs at about 2.3 updates a second.
+
+| Situation | Cameras |
+|---|---|
+| Rolling straight below 24 sim fps | Nose priority |
+| Heading change of 3°/s or more | Equal at once |
+| Straight again | Priority returns after 2 s continuously below 1.5°/s |
+| Sim above 27 fps | Equal |
+| Parked | 2-per-second floor |
+| Telemetry missing or stale | Equal |
+| Setting off | Equal |
+
+- **Inputs:** heading comes from the cached telemetry pose; the frame rate is the SIM_FRAME sample rate over 2 s windows. Neither needs new memory reads.
+- **PMDG 777:** each wing camera skips every other turn.
+- **Where to see and change it:**
+  - Setting: `dynamic_tail` in the profile INI, or **Diagnostics → Dynamic tail rate**. This required IPC protocol 16.
+  - `bridge.log`: `nose_priority=`, `turn_dps=`, `sim_fps=` and `rate_limit=nose_priority`.
+- **Still to check live:** how a 2.3 Hz tail feels on straight segments, and whether 3°/s catches the start of turns early enough.
 - **Nose framing.** The saved A380 nose camera is pitched −17.5° with a lens of 1.24 rad (vertical field of view), so it sees 18° above the horizon and about 128° across: the whole OMDB skyline. Pitching down to about −30°, or a lens near 1.0, would cut distant objects and so draw calls per nose render. Mounts can be changed live, so this can be compared without a new build.
 
 ### Needs reverse engineering and a live test

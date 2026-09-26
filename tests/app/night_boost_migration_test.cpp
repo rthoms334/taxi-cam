@@ -53,8 +53,8 @@ bool same_preferences(const Settings& a, const Settings& b) {
          a.automatic_exposure == b.automatic_exposure && a.exposure == b.exposure && a.night_boost == b.night_boost &&
          a.auto_profile == b.auto_profile && a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper &&
          a.tail_corner == b.tail_corner && a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi &&
-         a.auto_detect == b.auto_detect && a.single_camera == b.single_camera && a.calibration_budget == b.calibration_budget &&
-         a.mounts == b.mounts;
+         a.auto_detect == b.auto_detect && a.single_camera == b.single_camera && a.dynamic_tail == b.dynamic_tail &&
+         a.calibration_budget == b.calibration_budget && a.mounts == b.mounts;
 }
 
 Settings customized(const profiles::AircraftProfile& profile) {
@@ -150,6 +150,14 @@ void parked_rate_persists_and_defaults() {
   saved.parked_rate = 5;
   require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 5,
           "A floor of 5 saved with the revision is kept");
+  // Dynamic tail rate: on when missing, and a saved off is kept.
+  require(loaded.dynamic_tail == 1 && ini(path, L"display", L"dynamic_tail") == L"1", "Dynamic tail rate saves on by default");
+  saved.dynamic_tail = 0;
+  require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 0,
+          "A saved dynamic tail off is kept");
+  patch(path, L"display", L"dynamic_tail", nullptr);
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 1,
+          "A profile without dynamic_tail loads with it on");
 }
 
 void all_profiles_migrate_once() {

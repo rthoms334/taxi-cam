@@ -167,6 +167,7 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   if (integer(L"display", L"parked_rate_revision", 0) < kParkedRateRevision && value.parked_rate == kPreviousDefaultParkedCameraRate)
     value.parked_rate = kDefaultParkedCameraRate;
   value.single_camera = integer(L"display", L"single_camera", 0);
+  value.dynamic_tail = integer(L"display", L"dynamic_tail", 1) ? 1u : 0u;
   value.calibration_budget = integer(L"display", L"calibration_budget", 4096);
   value.automatic_exposure = integer(L"display", L"automatic_exposure", 1);
   constexpr const wchar_t* color_keys[]{L"speed_red", L"speed_green", L"speed_blue"};
@@ -221,7 +222,8 @@ inline bool save_settings(const Settings& s) {
   const int count = std::swprintf(
       text, 4096,
       L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
-      L"[display]\r\ncamera_rate=%u\r\nparked_rate=%u\r\nparked_rate_revision=%u\r\nsingle_camera=%u\r\nautomatic_exposure=%u\r\n"
+      L"[display]\r\ncamera_rate=%u\r\nparked_rate=%u\r\nparked_rate_revision=%u\r\nsingle_camera=%u\r\ndynamic_tail=%u\r\n"
+      L"automatic_exposure=%u\r\n"
       L"exposure=%.9g\r\nnight_boost=%.9g\r\nnight_boost_revision=%u\r\ncalibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\n"
       L"speed_blue=%.9g\r\n"
       L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
@@ -231,10 +233,10 @@ inline bool save_settings(const Settings& s) {
       L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
       s.enabled, s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_rate, s.parked_rate, kParkedRateRevision, s.single_camera,
-      s.automatic_exposure, s.exposure, s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget, s.speed_color[0],
-      s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2], s.nose_dot[0], s.nose_dot[1],
-      s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1], n[2], n[3], n[4],
-      n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
+      s.dynamic_tail, s.automatic_exposure, s.exposure, s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget,
+      s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2], s.nose_dot[0],
+      s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1],
+      n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
   if (count <= 0)
     return false;
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

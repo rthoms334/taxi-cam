@@ -306,7 +306,9 @@ DWORD run_impl() {
   };
   std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
+  bool nose_priority{};
   ParkedRatePolicy parked_policy;
+  NosePriorityPolicy nose_policy;
   win::WaitingPageTimer waiting_page;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
@@ -569,6 +571,7 @@ DWORD run_impl() {
       prewarm = {};
       warmup_startup = {};
       rate = feeds = 0;
+      nose_priority = false;
       applied_profile = pending_profile;
       applied_profile_request = pending_profile_request;
       applied_session_epoch = pending_session_epoch;
@@ -723,10 +726,25 @@ DWORD run_impl() {
         effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
     const unsigned desired_feeds =
         settings.single_camera ? 1u : (rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u);
-    if (connected && (rate != effective_rate.rate || feeds != desired_feeds)) {
+    // Dynamic tail rate: cached telemetry only, no simulator or engine reads.
+    const auto heading_pose = native_camera::sample_body_pose(now);
+    NosePriorityPolicy::Input nose_input;
+    nose_input.now_ms = now;
+    nose_input.enabled = settings.dynamic_tail != 0 && desired_feeds >= 2;
+    nose_input.moving = speed.valid && !parked;
+    nose_input.pose_valid = heading_pose.valid;
+    nose_input.pose_sample_ms = heading_pose.sample_ms;
+    nose_input.forward = heading_pose.pose.forward;
+    nose_input.up = heading_pose.pose.up;
+    nose_input.sim_frames = native_camera::get_body_telemetry_timing().accepted_samples;
+    const bool desired_priority = nose_policy.update(nose_input);
+    if (desired_priority)
+      effective_rate.reasons |= kRateLimitNosePriority;
+    if (connected && (rate != effective_rate.rate || feeds != desired_feeds || nose_priority != desired_priority)) {
       rate = effective_rate.rate;
       feeds = desired_feeds;
-      native_camera::request_scene_rate(rate, feeds);
+      nose_priority = desired_priority;
+      native_camera::request_scene_rate(rate, feeds, nose_priority);
       scene_runtime::manager().set_source_rate(rate);
     }
     if (connected && applied_mounts != settings.mounts) {
@@ -1071,7 +1089,7 @@ DWORD run_impl() {
           "stop_seq=%llu stop=%s "
           "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
           "entries=%llu/%llu suspended=%u "
-          "rate=%u saved_rate=%u useful_rate=%u rate_limit=%s parked=%u speed_knots=%.2f "
+          "rate=%u saved_rate=%u useful_rate=%u rate_limit=%s parked=%u speed_knots=%.2f nose_priority=%u turn_dps=%.1f sim_fps=%.1f "
           "gates=%u/%u tail=%s "
           "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu ignored_recordings=%llu "
           "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
@@ -1087,8 +1105,10 @@ DWORD run_impl() {
           scene.output_ready[1], scene.output_waits, scene.inspection_status[0], scene.inspection_status[1],
           static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
           demand.suspend, status.effective_rate, settings.camera_rate, status.useful_rate, camera_rate_limit_name(status.rate_limits),
-          status.parked, speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1], output.capture.tail_status,
-          static_cast<unsigned long long>(output.capture.source_draws),
+          status.parked, speed.valid ? speed.knots : -1.0, nose_policy.priority(),
+          std::isfinite(nose_policy.turn_rate()) ? nose_policy.turn_rate() : -1.0,
+          std::isfinite(nose_policy.frame_rate()) ? nose_policy.frame_rate() : -1.0, scene.gates[0], scene.gates[1],
+          output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
           static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
           static_cast<unsigned long long>(output.capture.invalid_source_recordings),
           static_cast<unsigned long long>(output.capture.scoped_source_invalidations),

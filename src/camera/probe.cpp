@@ -1434,7 +1434,7 @@ void observer(void* manager) noexcept {
       }
     }
     auto next_schedule = runtime.schedule;
-    next_schedule.configure(settings & 0xffu, settings >> 8);
+    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
     std::array<bool, kMaxCameraFeeds> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
@@ -1860,7 +1860,7 @@ void observer(void* manager) noexcept {
           // The early tick only decides whether validation is necessary. Anchor
           // the committed pulse near its call after potentially slow reads.
           next_schedule = runtime.schedule;
-          next_schedule.configure(settings & 0xffu, settings >> 8);
+          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
           if (new_pair) {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
@@ -2360,8 +2360,9 @@ void suspend_scene_rendering(bool suspended) noexcept {
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
 }
 
-void request_scene_rate(unsigned rate, unsigned feeds) noexcept {
-  const auto settings = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8);
+void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {
+  const auto settings = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
+                        (nose_priority ? 1u << 16 : 0u);
   state().requested_settings.store(settings, std::memory_order_release);
 }
 
@@ -2407,7 +2408,8 @@ ProbeSnapshot scene_snapshot() {
   result.stop_detail = runtime.stop_detail;
   const auto settings = runtime.requested_settings.load(std::memory_order_acquire);
   result.requested_rate = settings & 0xffu;
-  result.requested_feeds = settings >> 8;
+  result.requested_feeds = (settings >> 8) & 0xffu;
+  result.requested_nose_priority = ((settings >> 16) & 1u) != 0;
   result.mounts = runtime.requested_mounts;
   return result;
 }

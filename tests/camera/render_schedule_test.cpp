@@ -367,6 +367,174 @@ void low_frame_rate_share() {
   require(parked * 100 <= ten * 45 && parked * 100 >= ten * 30, "The parked floor did not cut the 18 fps render share to about 20%");
 }
 
+// Dynamic tail rate: every other turn of the non-nose feeds is an idle slot.
+std::array<unsigned, 3> priority_counts(unsigned rate, unsigned feeds, std::uint64_t step, bool priority, std::uint64_t duration = 10000) {
+  RenderSchedule schedule;
+  schedule.configure(rate, feeds, priority);
+  std::array<unsigned, 3> count{};
+  std::array<std::uint64_t, 3> last{};
+  bool previous_on = false;
+  for (std::uint64_t now = 0; now < duration; now += step) {
+    const auto active = schedule.tick(now);
+    const unsigned open = unsigned(active[0]) + unsigned(active[1]) + unsigned(active[2]);
+    require(open <= 1, "Nose priority opened two feeds in one update");
+    require(!(open && previous_on), "Nose priority skipped a mandatory closed update");
+    previous_on = open != 0;
+    for (unsigned feed = 0; feed < feeds; ++feed)
+      if (active[feed]) {
+        if (count[feed])
+          require(now - last[feed] >= (1000 + rate - 1) / rate, "Nose priority exceeded a per-feed budget");
+        last[feed] = now;
+        ++count[feed];
+      }
+  }
+  return count;
+}
+
+void nose_priority_schedule() {
+  // 18 fps: nose, tail, nose, idle, each followed by its closed update.
+  RenderSchedule schedule;
+  schedule.configure(10, 2, true);
+  require(schedule.nose_priority(), "Nose priority was not configured");
+  const std::array<int, 16> expected{0, -1, 1, -1, 0, -1, -1, -1, 0, -1, 1, -1, 0, -1, -1, -1};
+  for (unsigned tick = 0; tick < expected.size(); ++tick) {
+    const auto active = schedule.tick(tick * 55);
+    const int opened = active[0] ? 0 : active[1] ? 1 : active[2] ? 2 : -1;
+    require(opened == expected[tick], "Nose priority did not run nose, tail, nose, idle at 18 fps");
+  }
+  for (const std::uint64_t step : {22u, 33u, 55u, 56u}) {
+    const auto equal = priority_counts(10, 2, step, false);
+    const auto priority = priority_counts(10, 2, step, true);
+    require(priority[0] + 1 >= equal[0] * 3 / 4, "Nose priority starved the nose");
+    require(priority[1] * 2 <= equal[1] + 2 && priority[1] * 2 + 4 >= equal[1], "Nose priority did not halve the tail");
+    require(priority[0] + priority[1] < equal[0] + equal[1], "Nose priority did not reduce the render share");
+  }
+  // At 18 fps the nose keeps its cadence exactly and the total drops by a quarter.
+  const auto equal = priority_counts(10, 2, 55, false);
+  const auto priority = priority_counts(10, 2, 55, true);
+  require(priority[0] + 1 >= equal[0] && priority[0] <= equal[0] + 1, "At 18 fps nose priority changed the nose cadence");
+  const auto total = [](const std::array<unsigned, 3>& c) { return c[0] + c[1] + c[2]; };
+  require(total(priority) * 100 <= total(equal) * 77 && total(priority) * 100 >= total(equal) * 73,
+          "At 18 fps nose priority did not remove about a quarter of the renders");
+  // Three feeds: the nose keeps its turns, each wing gets every other one.
+  const auto equal3 = priority_counts(10, 3, 55, false);
+  const auto priority3 = priority_counts(10, 3, 55, true);
+  require(priority3[0] + 1 >= equal3[0] && priority3[1] * 2 <= equal3[1] + 2 && priority3[2] * 2 <= equal3[2] + 2 && priority3[1] &&
+              priority3[2],
+          "Three-feed nose priority starved or failed to halve a wing");
+  // Single feed: nothing to skip.
+  require(priority_counts(10, 1, 55, true) == priority_counts(10, 1, 55, false), "Single-feed schedule changed under nose priority");
+  // Switching priority on and off every few updates never bursts or opens two.
+  RenderSchedule toggled;
+  bool previous_on = false;
+  std::uint64_t last_any = 0;
+  bool any = false;
+  for (std::uint64_t now = 0; now < 20000; now += 22) {
+    toggled.configure(10, 2, (now / 330) % 2 == 0);
+    const auto active = toggled.tick(now);
+    const bool on = active[0] || active[1];
+    require(!(active[0] && active[1]) && !(on && previous_on), "Priority switching broke the closed-update contract");
+    if (on) {
+      require(!any || now - last_any >= 50, "Priority switching caused a catch-up burst");
+      any = true;
+      last_any = now;
+    }
+    previous_on = on;
+  }
+  // Suspension still closes everything, including a pending idle slot.
+  RenderSchedule suspended;
+  suspended.configure(10, 2, true);
+  require(suspended.tick(0)[0], "Priority schedule did not open the nose first");
+  for (std::uint64_t now = 1; now < 3000; now += 55)
+    require(suspended.tick(now, true) == std::array<bool, 3>{}, "Suspension left a priority gate open");
+}
+
+void nose_priority_policy() {
+  using taxi_camera::heading_change_degrees;
+  using taxi_camera::NosePriorityPolicy;
+  constexpr double degrees = 3.14159265358979323846 / 180;
+  const std::array<double, 3> up{0, 1, 0};
+  const auto forward = [&](double heading, double pitch = 0) {
+    return std::array<double, 3>{std::sin(heading * degrees) * std::cos(pitch * degrees), std::sin(pitch * degrees),
+                                 std::cos(heading * degrees) * std::cos(pitch * degrees)};
+  };
+  require(std::abs(heading_change_degrees(forward(10), forward(15), up) - 5) < 1e-9 &&
+              std::abs(heading_change_degrees(forward(15), forward(10), up) + 5) < 1e-9,
+          "Heading change magnitude or sign");
+  require(std::abs(heading_change_degrees(forward(359), forward(1), up) - 2) < 1e-9, "Heading change across north");
+  require(std::abs(heading_change_degrees(forward(30, 0), forward(30, 4), up)) < 1e-9, "Pitch alone counted as turning");
+  require(std::isnan(heading_change_degrees(up, forward(0), up)), "Degenerate forward vector produced a heading change");
+
+  // Drives the policy with 5 ms control ticks so simulated frame rates stay exact.
+  struct Drive {
+    NosePriorityPolicy policy;
+    std::uint64_t now = 0, frames = 0, pose_ms = 0;
+    double heading = 0;
+    bool run(std::uint64_t until, double turn_dps, double fps, bool enabled = true, bool moving = true, bool pose = true) {
+      bool result = false;
+      for (; now < until; now += 5) {
+        const auto frame_ms = static_cast<std::uint64_t>(1000 / fps);
+        if (now - pose_ms >= frame_ms) {
+          heading += turn_dps * static_cast<double>(now - pose_ms) / 1000;
+          pose_ms = now;
+          ++frames;
+        }
+        NosePriorityPolicy::Input in;
+        in.now_ms = now;
+        in.enabled = enabled;
+        in.moving = moving;
+        in.pose_valid = pose;
+        in.pose_sample_ms = pose_ms;
+        const double h = heading * 3.14159265358979323846 / 180;
+        in.forward = {std::sin(h), 0, std::cos(h)};
+        in.up = {0, 1, 0};
+        in.sim_frames = frames;
+        result = policy.update(in);
+      }
+      return result;
+    }
+  };
+  Drive straight;
+  straight.now = straight.pose_ms = 1000;
+  require(!straight.run(2000, 0, 18), "Priority before a frame-rate window and straight hold");
+  require(straight.run(6000, 0, 18), "Straight taxi at 18 fps did not give the nose priority");
+  require(std::abs(straight.policy.frame_rate() - 18) < 1.5 && straight.policy.turn_rate() < 0.5, "Measured rates");
+  require(!straight.run(6300, 6, 18), "A 6 deg/s turn kept nose priority");
+  require(!straight.run(8200, 0, 18), "Priority returned before the straight hold after a turn");
+  require(straight.run(9000, 0, 18), "Priority did not return after the straight hold");
+  require(straight.run(12000, 2, 18), "A gentle curve inside the band dropped priority on a straight");
+  require(!straight.run(12500, 4, 18), "Entering a turn kept priority");
+  require(!straight.run(16000, 2, 18), "A gentle curve inside the band ended a turn");
+  require(straight.run(19000, 0, 18), "Straight rolling after a curve did not regain priority");
+  require(!straight.run(19500, 0, 18, false), "Disabled setting kept priority");
+  require(!straight.run(20000, 0, 18, true, false), "Parked or unknown speed kept priority");
+  require(straight.run(20100, 0, 18), "Priority did not resume when moving again");
+  require(!straight.run(20500, 0, 18, true, true, false), "Invalid pose kept priority");
+  require(!straight.run(22000, 0, 18), "Priority returned before a fresh straight hold after a telemetry gap");
+  require(straight.run(24000, 0, 18), "Priority did not recover after the telemetry gap");
+
+  Drive fast;
+  require(!fast.run(8000, 0, 30), "A 30 fps simulator used nose priority");
+  Drive hysteresis;
+  require(hysteresis.run(8000, 0, 20), "Nose priority missing at 20 fps");
+  require(hysteresis.run(14000, 0, 25.6), "Nose priority dropped inside the frame-rate band");
+  require(!hysteresis.run(20000, 0, 31), "Nose priority kept above the frame-rate band");
+  require(!hysteresis.run(26000, 0, 25.6), "Nose priority returned inside the frame-rate band");
+  require(hysteresis.run(32000, 0, 20), "Nose priority did not return below the band");
+
+  // A stalled pose (no new samples) is stale after a second: back to equal.
+  Drive stalled;
+  require(stalled.run(8000, 0, 18), "Stall fixture did not reach priority");
+  NosePriorityPolicy::Input frozen;
+  frozen.now_ms = 8000 + NosePriorityPolicy::kHeadingStaleMs + 25;
+  frozen.enabled = frozen.moving = frozen.pose_valid = true;
+  frozen.pose_sample_ms = stalled.pose_ms;
+  frozen.forward = {0, 0, 1};
+  frozen.up = {0, 1, 0};
+  frozen.sim_frames = stalled.frames;
+  require(!stalled.policy.update(frozen), "A stale pose kept nose priority");
+}
+
 void adaptive_rate_switch_contract() {
   // Lowering to the floor right after an opening pulse keeps that pulse's
   // mandatory close and its aggregate deadline; raising back never bursts.
@@ -400,10 +568,12 @@ int main() {
     effective_rate_caps();
     adaptive_parked_schedule();
     low_frame_rate_share();
+    nose_priority_schedule();
+    nose_priority_policy();
     adaptive_rate_switch_contract();
     std::printf(
         "PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off intervals, no catch-up bursts, "
-        "parked floor and rate caps.\n",
+        "parked floor, nose priority and rate caps.\n",
         checks);
     return 0;
   } catch (const std::exception& error) {

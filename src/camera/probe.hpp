@@ -72,6 +72,7 @@ struct ProbeSnapshot {
   std::uint64_t created_total = 0;
   std::uint32_t requested_rate = kDefaultCameraRate;
   std::uint32_t requested_feeds = 2;
+  bool requested_nose_priority = false;
   // Last native activation requests, not a measured rendered-frame rate.
   std::array<bool, kMaxCameraFeeds> gates{};
   std::array<std::uint64_t, kMaxCameraFeeds> activation_counts{};
@@ -134,10 +135,12 @@ std::uint64_t request_scene_session_reset(std::uint32_t id) noexcept;
 void request_scene_stop(bool keep_telemetry = false) noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
-// Limits activation opportunities to 5..60 per second per selected feed.
+// Limits activation opportunities to 1..60 per second per selected feed (the
+// moving minimum of 5 applies to the saved rate; parked floors go lower).
+// nose_priority skips every other turn of the non-nose feeds.
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
-void request_scene_rate(unsigned rate, unsigned feeds = 2) noexcept;
+void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;
