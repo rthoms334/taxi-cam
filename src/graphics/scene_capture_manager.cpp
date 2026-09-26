@@ -679,9 +679,41 @@ SceneCaptureManager::SourceCandidate* SceneCaptureManager::source_candidate(ID3D
       return &sources_[index];
   return nullptr;
 }
-bool SceneCaptureManager::may_be_source(ID3D12Resource* resource) const noexcept {
+SceneCaptureManager::SourceFilterBits SceneCaptureManager::source_filter_bits(const void* resource) noexcept {
+  // Fibonacci hashing mixes into the high bits: word from the top 8, two bits
+  // in that word from the next 12.
   const auto hash = (reinterpret_cast<std::uint64_t>(resource) >> 4) * 0x9e3779b97f4a7c15ull;
-  return resource && (source_filter_[(hash >> 6) & 15].load(std::memory_order_acquire) & (1ull << (hash & 63)));
+  static_assert(SourceFilterWords == 256);
+  return {static_cast<std::size_t>(hash >> 56), (1ull << ((hash >> 50) & 63)) | (1ull << ((hash >> 44) & 63))};
+}
+bool SceneCaptureManager::may_be_source(ID3D12Resource* resource) const noexcept {
+  if (!resource)
+    return false;
+  const auto bits = source_filter_bits(resource);
+  if ((source_filter_[bits.word].load(std::memory_order_acquire) & bits.mask) != bits.mask)
+    return false;
+  // Registration publishes the handle and generation, then the slot bound,
+  // then the filter bits; the acquire above makes all of them visible here.
+  const auto handle = reinterpret_cast<std::uint64_t>(resource);
+  const auto used = std::min(source_slots_used_.load(std::memory_order_acquire), sources_.size());
+  for (std::size_t index = 0; index < used; ++index)
+    if (source_handles_[index].load(std::memory_order_relaxed) == handle && source_generations_[index].load(std::memory_order_acquire))
+      return true;
+  return false;
+}
+void SceneCaptureManager::rebuild_source_filter() noexcept {
+  // Every live candidate's bits are set in both the old and the new word, so a
+  // concurrent reader never misses one; only retired candidates' bits clear.
+  // Registration also holds mutex_, so no new bit can be lost.
+  std::array<std::uint64_t, SourceFilterWords> words{};
+  for (const auto& source : sources_)
+    if (source.native) {
+      const auto bits = source_filter_bits(source.native);
+      words[bits.word] |= bits.mask;
+    }
+  for (std::size_t word = 0; word < words.size(); ++word)
+    if (source_filter_[word].load(std::memory_order_relaxed) != words[word])
+      source_filter_[word].store(words[word], std::memory_order_release);
 }
 unsigned SceneCaptureManager::rearm_source_states_locked() noexcept {
   unsigned restored = 0;
@@ -757,8 +789,10 @@ bool SceneCaptureManager::register_source_candidate(std::uint64_t key,
     source_device_keys_[index].store(key, std::memory_order_relaxed);
     source_handles_[index].store(reinterpret_cast<std::uint64_t>(resource), std::memory_order_relaxed);
     source_generations_[index].store(generation, std::memory_order_release);
-    const auto hash = (reinterpret_cast<std::uint64_t>(resource) >> 4) * 0x9e3779b97f4a7c15ull;
-    source_filter_[(hash >> 6) & 15].fetch_or(1ull << (hash & 63), std::memory_order_release);
+    if (source_slots_used_.load(std::memory_order_relaxed) <= index)
+      source_slots_used_.store(index + 1, std::memory_order_release);
+    const auto bits = source_filter_bits(resource);
+    source_filter_[bits.word].fetch_or(bits.mask, std::memory_order_release);
     ++stats_.source_candidates;
     return true;
   }
@@ -775,7 +809,8 @@ void SceneCaptureManager::unregister_source_candidate(std::uint64_t key, ID3D12R
     auto expected = generation;
     source_generations_[index].compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
   }
-  // Rejection-only filter bits remain set; retirement can never hide a new key.
+  // Filter bits remain set until collect() retires the slot and rebuilds the
+  // filter under mutex_; retirement can never hide a live key.
 }
 void SceneCaptureManager::stage_source_draw(ID3D12GraphicsCommandList* native,
                                             std::uint64_t generation,
@@ -1934,6 +1969,7 @@ void SceneCaptureManager::abort_private_submission(std::uint64_t receipt) noexce
 
 void SceneCaptureManager::collect() noexcept {
   apply_deferred();
+  bool retired = false;
   for (std::size_t index = 0; index < sources_.size(); ++index) {
     auto& source = sources_[index];
     if (!source.native || source_generations_[index].load(std::memory_order_acquire))
@@ -1942,7 +1978,10 @@ void SceneCaptureManager::collect() noexcept {
       owner->source_states.unregister_source({reinterpret_cast<std::uint64_t>(source.native), source.generation});
     source = {};
     --stats_.source_candidates;
+    retired = true;
   }
+  if (retired)
+    rebuild_source_filter();
   for (auto& packet : packets_) {
     packet.tail_timing.poll();
     if (!packet.assigned || packet.quarantined)

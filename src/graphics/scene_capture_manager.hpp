@@ -495,7 +495,17 @@ class SceneCaptureManager {
   unsigned rearm_source_states_locked() noexcept;
   void collect() noexcept;
   SourceCandidate* source_candidate(ID3D12Resource*) noexcept;
+  // Lock-free, exact: a blocked Bloom filter rejects most targets, and a hit is
+  // confirmed against the live candidate handles. A bit shared with a busy
+  // application target (0.9.56 logs: ~80k draws/s) no longer takes mutex_.
   bool may_be_source(ID3D12Resource*) const noexcept;
+  struct SourceFilterBits {
+    std::size_t word = 0;
+    std::uint64_t mask = 0;
+  };
+  static SourceFilterBits source_filter_bits(const void* resource) noexcept;
+  // Under mutex_: the filter from live candidates only, after retirements.
+  void rebuild_source_filter() noexcept;
   bool prepare_tail(Packet&, Device&) noexcept;
   // Packet slots in the order a new capture should try them: idle packets
   // already holding this device's texture shape, then empty slots, then the
@@ -547,7 +557,10 @@ class SceneCaptureManager {
   std::array<Packet, MaximumPackets> packets_{};
   std::array<SourceCandidate, MaximumDevices * 128> sources_{};
   std::array<std::atomic<std::uint64_t>, MaximumDevices * 128> source_handles_{}, source_generations_{}, source_device_keys_{};
-  std::array<std::atomic<std::uint64_t>, 16> source_filter_{};
+  static constexpr std::size_t SourceFilterWords = 256;
+  std::array<std::atomic<std::uint64_t>, SourceFilterWords> source_filter_{};
+  // One past the highest candidate slot ever used; bounds the exact check.
+  std::atomic<std::size_t> source_slots_used_{0};
   bool source_tracking_ = false;
   bool draining_ = false;  // apply_deferred_work is running on the lock holder; nested calls return.
   bool capture_enabled_ = true;

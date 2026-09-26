@@ -9,7 +9,8 @@
         "Taxi Cam does less work on the simulator's threads. Its hooks no longer make the simulator's threads wait on each other while the cameras are off, which could cause occasional frame hitches, and each camera update does less work on the main thread.",
         "Taxi Cam now reuses the capture memory of each camera instead of recreating it when the nose and tail cameras, which differ in size, take turns. While its background thread holds a lock the simulator's threads wait on, Windows now gives it priority so it is not paused mid-way. Both could cause occasional hitches of a few milliseconds.",
         "Each camera update reads the aircraft's position with fewer Windows memory calls on the simulator's main thread. This lowers Taxi Cam's main-thread time and the chance of a brief main-thread spike while the simulator streams scenery.",
-        "Taxi Cam now finds your aircraft in the simulator's memory about once a second instead of on every camera update. Every update still checks the aircraft's model position and compares it with the simulator's reported position, and any mismatch finds the aircraft again straight away. This removes about a third of the memory reads behind each camera update."
+        "Taxi Cam now finds your aircraft in the simulator's memory about once a second instead of on every camera update. Every update still checks the aircraft's model position and compares it with the simulator's reported position, and any mismatch finds the aircraft again straight away. This removes about a third of the memory reads behind each camera update.",
+        "Fixed a slowdown that could start when the camera display turned on and last for the rest of the flight. Taxi Cam's quick check for draws into camera images could mistake one of the simulator's own busy render targets for a camera image, and then took a shared lock on every draw into it. The check is now exact."
       ]
     },
     {

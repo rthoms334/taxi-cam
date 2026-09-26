@@ -872,6 +872,44 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     require(manager->register_source_candidate(DeviceKey, unrelated_source.p, UnrelatedGeneration, desc,
                                                taxi_camera::source_state::Model::legacy_rt),
             "Register unrelated pass target");
+    // The source prefilter is exact. An application target whose filter bits
+    // are set (a hash collision, or bits of a retired candidate) is not a
+    // source, so its draws never take the manager lock; a retired candidate's
+    // bits are cleared when collect() rebuilds the filter.
+    const auto live_union = [&](std::size_t word) {
+      std::uint64_t bits = 0;
+      for (const auto& source : manager->sources_)
+        if (source.native && Manager::source_filter_bits(source.native).word == word)
+          bits |= Manager::source_filter_bits(source.native).mask;
+      return bits;
+    };
+    auto* colliding = reinterpret_cast<ID3D12Resource*>(std::uintptr_t{0x7ff012345670});  // Never dereferenced.
+    const auto colliding_bits = Manager::source_filter_bits(colliding);
+    manager->source_filter_[colliding_bits.word].fetch_or(colliding_bits.mask);
+    require(!manager->may_be_source(colliding), "A colliding filter bit made an application target a camera source");
+    require(manager->may_be_source(sources[0].p) && manager->may_be_source(sources[1].p) && manager->may_be_source(unrelated_source.p),
+            "A registered candidate failed the exact source check");
+    Ref<ID3D12Resource> retired_source;
+    check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                          IID_PPV_ARGS(retired_source.put())),
+          "Create short-lived pane-sized target");
+    constexpr std::uint64_t RetiredGeneration = UnrelatedGeneration + 1;
+    require(manager->register_source_candidate(DeviceKey, retired_source.p, RetiredGeneration, desc,
+                                               taxi_camera::source_state::Model::legacy_rt) &&
+                manager->may_be_source(retired_source.p),
+            "Register short-lived candidate");
+    const auto retired_bits = Manager::source_filter_bits(retired_source.p);
+    manager->unregister_source_candidate(DeviceKey, retired_source.p, RetiredGeneration);
+    require(!manager->may_be_source(retired_source.p), "A retired candidate stayed a source before collection");
+    {
+      const std::lock_guard lock(manager->mutex_);
+      manager->collect();
+    }
+    require((manager->source_filter_[retired_bits.word].load() & retired_bits.mask & ~live_union(retired_bits.word)) == 0 &&
+                (manager->source_filter_[colliding_bits.word].load() & colliding_bits.mask & ~live_union(colliding_bits.word)) == 0,
+            "Collecting a retired candidate kept stale filter bits");
+    require(manager->may_be_source(sources[0].p) && manager->may_be_source(sources[1].p) && manager->may_be_source(unrelated_source.p),
+            "Rebuilding the filter dropped a live candidate");
   }
   check(producer.list->Close(), "Close initial state recording");
   ID3D12CommandList* original = producer.list.p;
