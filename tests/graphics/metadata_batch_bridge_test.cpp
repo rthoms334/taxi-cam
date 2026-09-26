@@ -509,6 +509,7 @@ void known_list_and_idle_checks() {
   target->id = 61;
   target->display_shape = true;
   constexpr D3D12_CPU_DESCRIPTOR_HANDLE handle{0x6120};
+  r.remember_rtv(handle.ptr);  // As replace_view does before storing a tracked view.
   r.rtvs[handle.ptr] = {target, DXGI_FORMAT_R8G8B8A8_UNORM, 0, handle.ptr};
   TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
   require(target_forwards == 1 && item->count == 1 && item->targets[0].resource == target && !item->snapshot_rtvs,
@@ -524,6 +525,7 @@ void known_list_and_idle_checks() {
   scene->native = reinterpret_cast<ID3D12Resource*>(0x6200);
   scene->id = 62;
   constexpr D3D12_CPU_DESCRIPTOR_HANDLE scene_handle{0x6220};
+  r.remember_rtv(scene_handle.ptr);
   r.rtvs[scene_handle.ptr] = {scene, DXGI_FORMAT_R8G8B8A8_UNORM, 0, scene_handle.ptr};
   TargetsHook::invoke(forward_targets, native, 1, &scene_handle, FALSE, nullptr);
   win::after_draw(nullptr, native, item->id, true);
@@ -533,6 +535,36 @@ void known_list_and_idle_checks() {
   ClearHook::invoke(inner_clear, native, nullptr);
   win::after_draw(nullptr, native, item->id, true);
   require(item->count == 0 && target->draws == 1, "Idle ClearState must end target activity without retaining stale RTV bindings");
+  {
+    // An idle recording binding only handles the RTV filter has never seen
+    // must not touch the registry lock: hold it on another thread and require
+    // the binding to complete without a contended wait. A tracked handle must
+    // still take the locked lookup and report the expired wait.
+    const auto contention = [&] { return r.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)].load(); };
+    constexpr D3D12_CPU_DESCRIPTOR_HANDLE untracked{0x7770};
+    require(!r.may_track_rtv(untracked.ptr), "Fixture handle unexpectedly shares the tracked handle's filter bit");
+    std::atomic<bool> held{false}, release{false};
+    std::thread holder([&] {
+      const std::lock_guard lock(r.mutex);
+      held = true;
+      while (!release)
+        std::this_thread::yield();
+    });
+    while (!held)
+      std::this_thread::yield();
+    const auto before = contention();
+    TargetsHook::invoke(forward_targets, native, 1, &untracked, FALSE, nullptr);
+    const bool skipped = contention() == before && item->count == 1 && !item->targets[0].resource;
+    TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
+    const bool locked = contention() == before + 1 && item->count == 0;
+    release = true;
+    holder.join();
+    require(skipped, "Idle binding of untracked RTV handles waited on the registry lock");
+    require(locked, "A tracked RTV handle bypassed the registry lookup");
+    TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
+    require(item->count == 1 && item->targets[0].resource == target, "Tracked idle binding was lost after the filter check");
+    ClearHook::invoke(inner_clear, native, nullptr);
+  }
   r.rtvs.erase(handle.ptr);
   D3D12_RESOURCE_BARRIER barrier{};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -750,6 +782,7 @@ void unbound_clear_suffix_checks() {
   win::View view;
   view.resource = resource;
   view.rtv = handle;
+  r.remember_rtv(handle);
   r.rtvs[handle] = view;
   r.selected_native[0].store(resource->native);
   r.selected_mask.store(1);

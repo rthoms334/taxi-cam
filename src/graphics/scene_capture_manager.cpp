@@ -552,15 +552,17 @@ void SceneCaptureManager::apply_recording_refusal(std::uint32_t effects, bool fa
 }
 void SceneCaptureManager::apply_deferred() noexcept {
   apply_deferred_work();
-  if (deferred_recordings_.exchange(false, std::memory_order_acq_rel))
+  // Every lock holder drains these. Read before exchanging so the common empty
+  // case does not write lines that recording threads set.
+  if (deferred_recordings_.load(std::memory_order_acquire) && deferred_recordings_.exchange(false, std::memory_order_acq_rel))
     for (auto& published : published_lists_) {
       auto word = published.effects.load();
       const auto marks = word & (EscapedRecording | BoundedEscapedRecording);
       if (marks && published.effects.compare_exchange_strong(word, word & ~marks))
         apply_recording_refusal(static_cast<std::uint32_t>(word), (marks & EscapedRecording) != 0);
     }
-  const auto failed = deferred_uncertain_.exchange(0, std::memory_order_acq_rel);
-  const auto sources = deferred_sources_.exchange(0, std::memory_order_acq_rel);
+  const auto failed = deferred_uncertain_.load(std::memory_order_acquire) ? deferred_uncertain_.exchange(0, std::memory_order_acq_rel) : 0u;
+  const auto sources = deferred_sources_.load(std::memory_order_acquire) ? deferred_sources_.exchange(0, std::memory_order_acq_rel) : 0u;
   const auto origins = sources ? deferred_origins_.exchange(0, std::memory_order_acq_rel) : 0u;
   for (std::size_t index = 0; index < devices_.size(); ++index) {
     auto& owner = devices_[index];
@@ -944,6 +946,16 @@ void SceneCaptureManager::invalidate_source_targets(ID3D12GraphicsCommandList* n
   if (!count)
     return;
   const bool truncated = count > 8 || !targets || !generations;
+  if (!truncated) {
+    // Only a registered camera source can take a scoped effect, and the filter
+    // never clears a registered key's bit. With no possible source the report
+    // would append nothing, so ordinary passes need not take the lock at all.
+    bool candidate_present = false;
+    for (UINT index = 0; index < count; ++index)
+      candidate_present |= may_be_source(targets[index]);
+    if (!candidate_present)
+      return;
+  }
   std::unique_lock<std::mutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_)) {
     DeferredWork work;
@@ -1089,8 +1101,12 @@ void SceneCaptureManager::successful_reset(ID3D12GraphicsCommandList* native, st
   }
   auto* item = list(native);
   if (item && item->object_generation == generation) {
+    // Only a retired packet gives this Reset anything to collect. Every packet
+    // assignment, submission and worker poll still collects first.
+    const bool had_packets = item->packets != 0;
     retire_native_list(*item, false);
-    collect();
+    if (had_packets)
+      collect();
   }
 }
 void SceneCaptureManager::destroy_command_list(ID3D12GraphicsCommandList* native, std::uint64_t generation) noexcept {

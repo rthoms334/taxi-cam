@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -164,7 +165,9 @@ struct Registry {
   // Only demand transitions and publication of a real Reset/new-list proof
   // take this lock. Ordinary setters and metadata callbacks never take it.
   std::mutex observation_mutex;
-  std::atomic<std::uint64_t> observation_epoch{1};  // Odd: observing; even: idle.
+  // Read by every hook call, so kept off the lock words above, which every
+  // acquisition on any thread writes.
+  alignas(64) std::atomic<std::uint64_t> observation_epoch{1};  // Odd: observing; even: idle.
   std::atomic<std::uint64_t> session_recording_floor{};
   std::atomic<bool> diagnostics_enabled{};
   std::atomic<std::uint64_t> list_lookup_calls{}, list_cache_hits{}, list_registry_lookups{};
@@ -198,13 +201,15 @@ struct Registry {
   std::atomic<std::uint64_t> failure_window_ms{}, failure_window_count{}, failure_rate_peak{};
   std::atomic<bool> admission_halted{};
   // Watchdog gate. False makes every hook idle and every PFD plan not_ready.
-  std::atomic<bool> armed{true};
-  std::atomic<std::uint64_t> frame_pulse{};
-  ID3D12Device* device{};
+  // armed, device, key and ready are read by every hook call; the counters
+  // around them are written from every thread, so each group has its own line.
+  alignas(64) std::atomic<bool> armed{true};
+  alignas(64) std::atomic<std::uint64_t> frame_pulse{};  // Every Close on every thread.
+  alignas(64) ID3D12Device* device{};
   std::uint64_t key{}, next_id = 0;
   UINT rtv_stride{}, dsv_stride{};
   std::atomic<bool> ready{};
-  std::atomic<std::uint64_t> failures{}, draws{}, clear_states{};
+  alignas(64) std::atomic<std::uint64_t> failures{}, draws{}, clear_states{};
   // PassBegin reports that reached the manager's global path: the pass bound
   // no RTV, or bound RTVs the bridge could not resolve to tracked resources.
   std::atomic<std::uint64_t> pass_no_targets{}, pass_unresolved_targets{};
@@ -370,6 +375,24 @@ struct Registry {
   // Monotonic negative filter: retirement never clears shared bits. False
   // positives take the exact registry lookup; a tracked display cannot vanish.
   std::array<std::atomic<std::uint64_t>, 16> display_filter{};
+  // The same for RTV handles: a bit is set before any view is stored under its
+  // handle in rtvs and never cleared, so a miss proves the handle maps nothing.
+  std::array<std::atomic<std::uint64_t>, 256> rtv_filter{};
+  static unsigned rtv_filter_bit(SIZE_T handle) noexcept {
+    auto x = static_cast<std::uint64_t>(handle);
+    x ^= x >> 29;
+    x *= 0xbf58476d1ce4e5b9ull;
+    x ^= x >> 32;
+    return static_cast<unsigned>(x) & (256 * 64 - 1);
+  }
+  void remember_rtv(SIZE_T handle) noexcept {
+    const auto bit = rtv_filter_bit(handle);
+    rtv_filter[bit / 64].fetch_or(1ull << (bit % 64), std::memory_order_release);
+  }
+  bool may_track_rtv(SIZE_T handle) const noexcept {
+    const auto bit = rtv_filter_bit(handle);
+    return (rtv_filter[bit / 64].load(std::memory_order_acquire) & (1ull << (bit % 64))) != 0;
+  }
 };
 Registry& registry() {
   static auto* r = new Registry;
@@ -460,6 +483,7 @@ void replace_view(Registry& r, SIZE_T handle, const View& supplied) {
   if (old != r.rtvs.end())
     account_view(old->second, false);
   if (view.resource && (old != r.rtvs.end() || r.rtvs.size() < 65536)) {
+    r.remember_rtv(handle);
     r.rtvs[handle] = view;
     account_view(view, true);
   } else if (old != r.rtvs.end())
@@ -2409,10 +2433,19 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     // Demand cannot change between qualifying this native Reset and publishing
     // its PFD-state proof. Source state remains continuously observed separately.
     // Without the lock the recording is simply unobserved until the next Reset.
-    const BoundedLock observation_lock(registry().observation_mutex, wait_budget::recording_us,
-                                       &registry().contention[static_cast<unsigned>(ContentionSite::observation_recording)]);
+    // An even (idle) epoch can never qualify a recording: recording_observed
+    // needs an odd current epoch equal to the stored one, and a session floor
+    // raised after it only exceeds it. So an idle Reset needs no lock; every
+    // simulator thread resets many lists per frame and would contend on it.
+    const bool idle_epoch = (observation_epoch & 1u) == 0;
+    std::optional<BoundedLock<std::mutex>> observation_lock;
+    if (!idle_epoch)
+      observation_lock.emplace(registry().observation_mutex, wait_budget::recording_us,
+                               &registry().contention[static_cast<unsigned>(ContentionSite::observation_recording)]);
     item->observation_epoch =
-        observation_lock && observation_epoch == registry().observation_epoch.load(std::memory_order_acquire) ? observation_epoch : 0;
+        (idle_epoch || *observation_lock) && observation_epoch == registry().observation_epoch.load(std::memory_order_acquire)
+            ? observation_epoch
+            : 0;
     item->pfd_dirty = false;
     item->pending_pfds = {};
     item->pending_rt = {};
@@ -2590,6 +2623,23 @@ struct Targets {
     l.raw_rtv_count = 0;
     l.raw_has_dsv = depth != nullptr;
     l.raw_dsv = {};
+    // A recording Reset while idle can never be admitted for PFD work, so its
+    // depth format and descriptor snapshots are never read. Only tracked views
+    // give it draw activity or source effects, and rtv_filter proves none of
+    // the bound handles maps one. The locked lookup would then bind nothing,
+    // so ordinary idle bindings skip the registry lock every thread shares.
+    if (!recording_observed(l) && !r.live_backfill.load(std::memory_order_relaxed) && !r.views_stale.load(std::memory_order_acquire) &&
+        count <= 8 && (!count || handles) && !(contiguous && count && handles[0].ptr > SIZE_MAX - SIZE_T{count - 1} * r.rtv_stride)) {
+      bool tracked = false;
+      for (UINT i = 0; i < count && !tracked; ++i) {
+        const auto handle = contiguous ? handles[0].ptr + SIZE_T{i} * r.rtv_stride : handles[i].ptr;
+        tracked = !handle || r.may_track_rtv(handle);
+      }
+      if (!tracked) {
+        l.count = count;
+        return;
+      }
+    }
     const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
     if (!lock || r.views_stale.load(std::memory_order_acquire)) {
       // Untracked binding: nothing in this recording may be written through it,
