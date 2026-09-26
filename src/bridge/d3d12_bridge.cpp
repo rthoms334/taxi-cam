@@ -161,6 +161,70 @@ struct DeferredHandoffRetirement {
 struct DeferredSettlement {
   PfdSubmissionProof::Settlement row{};
 };
+// Bounded shared acquisition of an SRW lock through BoundedLock.
+struct SharedSrw {
+  SRWLOCK* lock;
+  bool try_lock() noexcept { return TryAcquireSRWLockShared(lock) != FALSE; }
+  void unlock() noexcept { ReleaseSRWLockShared(lock); }
+};
+// Read-mostly mirror of a registry map for simulator-thread lookups. Every
+// writer already holds the registry lock and changes a shard under its
+// exclusive SRW lock, so registry holders may still read the maps themselves.
+// Readers take one shard shared within the per-command budget and never the
+// registry lock; the 2026-09-26 lock trace showed 3.5-6k list and ~5k resource
+// lookups per second taking it. A miss, a retired entry or a busy shard is not
+// evidence: callers fall back to the registry map.
+template <class Key, class Item>
+class RegistryIndex {
+ public:
+  std::shared_ptr<Item> find(Key key) const noexcept {
+    auto& shard = shard_for(key);
+    SharedSrw shared{&shard.lock};
+    const BoundedLock bounded(shared, wait_budget::recording_us);
+    if (!bounded)
+      return {};
+    const auto it = shard.map.find(key);
+    return it != shard.map.end() && it->second->alive.load(std::memory_order_acquire) ? it->second : nullptr;
+  }
+  // Registry lock held.
+  void assign(Key key, const std::shared_ptr<Item>& item) {
+    auto& shard = shard_for(key);
+    AcquireSRWLockExclusive(&shard.lock);
+    try {
+      shard.map[key] = item;
+    } catch (...) {
+      shard.map.erase(key);  // No stale mirror entry; lookups use the registry.
+    }
+    ReleaseSRWLockExclusive(&shard.lock);
+  }
+  // Registry lock held. Removes the entry only if it still names this item.
+  void erase(Key key, const Item* item) noexcept {
+    auto& shard = shard_for(key);
+    AcquireSRWLockExclusive(&shard.lock);
+    if (const auto it = shard.map.find(key); it != shard.map.end() && it->second.get() == item)
+      shard.map.erase(it);
+    ReleaseSRWLockExclusive(&shard.lock);
+  }
+  // Registry lock held.
+  void erase_retired() noexcept {
+    for (auto& shard : shards_) {
+      AcquireSRWLockExclusive(&shard.lock);
+      std::erase_if(shard.map, [](const auto& entry) { return !entry.second->alive.load(std::memory_order_acquire); });
+      ReleaseSRWLockExclusive(&shard.lock);
+    }
+  }
+
+ private:
+  struct alignas(64) Shard {
+    mutable SRWLOCK lock = SRWLOCK_INIT;
+    std::unordered_map<Key, std::shared_ptr<Item>> map;
+  };
+  Shard& shard_for(Key key) const noexcept {
+    const auto hash = (reinterpret_cast<std::uintptr_t>(key) >> 4) * 0x9e3779b97f4a7c15ull;
+    return shards_[(hash >> 60) & 15];
+  }
+  mutable std::array<Shard, 16> shards_;
+};
 struct Registry {
   std::recursive_mutex mutex;
   // Only demand transitions and publication of a real Reset/new-list proof
@@ -224,6 +288,10 @@ struct Registry {
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
   std::unordered_map<ID3D12GraphicsCommandList*, std::shared_ptr<List>> lists;
+  // Mirrors of lists and resources for lookups without the registry lock.
+  // Written only beside the maps above, under the registry lock.
+  RegistryIndex<ID3D12GraphicsCommandList*, List> list_index;
+  RegistryIndex<ID3D12Resource*, Resource> resource_index;
   std::unordered_map<SIZE_T, View> rtvs;
   std::unordered_map<SIZE_T, DXGI_FORMAT> dsvs;
   TaxiButtonRoutes routes;
@@ -946,6 +1014,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
           item->display_shape = item->display_shape || profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height,
                                                                                  desc.MipLevels, static_cast<UINT>(desc.Format));
         r.resources[native] = item;
+        r.resource_index.assign(native, item);
         for (const auto* profile : profiles::Catalog)
           if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels,
                                         static_cast<UINT>(desc.Format))) {
@@ -983,6 +1052,8 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
 // resource; every caller treats null as "no proof" and skips.
 std::shared_ptr<Resource> resource(ID3D12Resource* p) {
   auto& r = registry();
+  if (auto item = r.resource_index.find(p))
+    return item;
   const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
   if (!lock)
     return nullptr;
@@ -1091,6 +1162,13 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
       if (diagnostics)
         r.list_cache_hits.fetch_add(1, std::memory_order_relaxed);
     }
+  // The mirror serves every registered list without the registry lock.
+  if (!item && (item = r.list_index.find(p))) {
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+    if (!bypass_known_list_cache)
+#endif
+      known_lists.remember(item);
+  }
   if (!item) {
 #ifdef TAXI_METADATA_BATCH_VALIDATION
     ++registry_lookup_calls;
@@ -1846,6 +1924,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     if (const auto found = r.lists.find(native); found != r.lists.end()) {
       if (found->second->alive.load(std::memory_order_acquire))
         return found->second;
+      r.list_index.erase(native, found->second.get());
       r.lists.erase(found);
     }
     if (r.lists.size() >= 4096 || r.next_id == UINT64_MAX) {
@@ -1863,6 +1942,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     item->submission_proof.reset(item->recording, observed);
     item->raw_om_known = observed;
     r.lists[native] = item;
+    r.list_index.assign(native, item);
     r.live_bind.clear(native);
   }
   const auto hooked = boundary::register_list(native, item->id, Boundaries);
@@ -2667,13 +2747,18 @@ struct Targets {
     l.raw_rtv_count = 0;
     l.raw_has_dsv = depth != nullptr;
     l.raw_dsv = {};
-    // A recording Reset while idle can never be admitted for PFD work, so its
-    // depth format and descriptor snapshots are never read. Only tracked views
-    // give it draw activity or source effects, and rtv_filter proves none of
-    // the bound handles maps one. The locked lookup would then bind nothing,
-    // so ordinary idle bindings skip the registry lock every thread shares.
-    if (!recording_observed(l) && !r.live_backfill.load(std::memory_order_relaxed) && !r.views_stale.load(std::memory_order_acquire) &&
-        count <= 8 && (!count || handles) && !(contiguous && count && handles[0].ptr > SIZE_MAX - SIZE_T{count - 1} * r.rtv_stride)) {
+    // Only tracked views give a binding draw activity, source effects or a PFD
+    // draw, and rtv_filter proves none of the bound handles maps one. The depth
+    // format and descriptor snapshots are read only for a binding with a
+    // tracked selected target or a pending PFD draw (pending_rt): a recording
+    // Reset while idle can never have either, and an observed one without a
+    // pending draw would snapshot nothing. The locked lookup would then bind
+    // nothing, so those bindings skip the registry lock every thread shares.
+    // Live, observed recordings took it 8-20k times a second with cameras on.
+    const bool pending = std::any_of(l.pending_rt.begin(), l.pending_rt.end(), [](bool side) { return side; });
+    if ((!recording_observed(l) || !pending) && !r.live_backfill.load(std::memory_order_relaxed) &&
+        !r.views_stale.load(std::memory_order_acquire) && count <= 8 && (!count || handles) &&
+        !(contiguous && count && handles[0].ptr > SIZE_MAX - SIZE_T{count - 1} * r.rtv_stride)) {
       bool tracked = false;
       for (UINT i = 0; i < count && !tracked; ++i) {
         const auto handle = contiguous ? handles[0].ptr + SIZE_T{i} * r.rtv_stride : handles[i].ptr;
@@ -3671,6 +3756,8 @@ void discover_pfds(std::uint64_t now) noexcept {
     }
     std::erase_if(r.roots, [](const auto& p) { return !p.second->alive; });
     std::erase_if(r.lists, [](const auto& p) { return !p.second->alive; });
+    r.list_index.erase_retired();
+    r.resource_index.erase_retired();
     for (auto i = r.rtvs.begin(); i != r.rtvs.end();) {
       if (!i->second.resource || !i->second.resource->alive) {
         account_view(i->second, false);

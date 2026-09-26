@@ -610,6 +610,55 @@ void known_list_and_idle_checks() {
           "A native Reset spanning idle and resume must remain stale");
   reset_result = ResetResult::success;
   require(win::reset(native, nullptr, nullptr) == S_OK && win::recording_observed(*item), "Next wholly observed Reset must recover");
+  {
+    // With the registry lock held elsewhere: mirrored lists and resources are
+    // found without it, a retired mirror entry is not trusted, and an observed
+    // recording binds untracked handles without it unless a PFD draw is pending.
+    const auto contention = [&] { return r.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)].load(); };
+    std::atomic<bool> held{false}, release{false};
+    std::thread holder([&] {
+      const std::lock_guard lock(r.mutex);
+      held = true;
+      while (!release)
+        std::this_thread::yield();
+    });
+    while (!held)
+      std::this_thread::yield();
+    const auto before = contention();
+    win::bypass_known_list_cache = true;
+    const auto locks_before = win::registry_lookup_calls;
+    const bool unmirrored_refused = !win::find_list(native) && win::lookup_contended;
+    r.list_index.assign(native, item);
+    const bool mirrored = win::find_list(native) == item && win::registry_lookup_calls == locks_before + 1;
+    auto mirrored_resource = std::make_shared<win::Resource>();
+    mirrored_resource->native = reinterpret_cast<ID3D12Resource*>(0x6300);
+    mirrored_resource->id = 63;
+    r.resource_index.assign(mirrored_resource->native, mirrored_resource);
+    const bool resource_found = win::resource(mirrored_resource->native) == mirrored_resource;
+    mirrored_resource->alive = false;
+    const auto after_lookups = contention();
+    const bool retired_refused = !win::resource(mirrored_resource->native);
+    const bool retired_used_registry = contention() == after_lookups + 1;
+    win::bypass_known_list_cache = false;
+    constexpr D3D12_CPU_DESCRIPTOR_HANDLE untracked{0x7780};
+    const auto observed_before = contention();
+    TargetsHook::invoke(forward_targets, native, 1, &untracked, FALSE, nullptr);
+    const bool observed_skipped = contention() == observed_before && item->count == 1 && !item->targets[0].resource;
+    item->pending_rt = {true, false};
+    TargetsHook::invoke(forward_targets, native, 1, &untracked, FALSE, nullptr);
+    const bool pending_locked = contention() == observed_before + 1;
+    item->pending_rt = {};
+    release = true;
+    holder.join();
+    require(unmirrored_refused && contention() >= before + 1, "An unmirrored list lookup bypassed the registry");
+    require(mirrored, "A mirrored list still needed the registry lock");
+    require(resource_found, "A mirrored resource still needed the registry lock");
+    require(retired_refused && retired_used_registry, "A retired mirror entry was trusted");
+    require(observed_skipped, "An observed recording took the registry lock to bind untracked handles");
+    require(pending_locked, "A pending PFD draw skipped the locked binding and its descriptor snapshots");
+    r.resource_index.erase(mirrored_resource->native, mirrored_resource.get());
+    r.list_index.erase(native, item.get());
+  }
   reset_result = ResetResult::fail;
   require(win::reset(native, nullptr, nullptr) == E_FAIL && !item->ready, "Failed native Reset cannot admit a recording");
   require(reset_forwards == 4, "Native Reset must forward exactly once per request");
