@@ -167,7 +167,7 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   if (integer(L"display", L"parked_rate_revision", 0) < kParkedRateRevision && value.parked_rate == kPreviousDefaultParkedCameraRate)
     value.parked_rate = kDefaultParkedCameraRate;
   value.single_camera = integer(L"display", L"single_camera", 0);
-  value.dynamic_tail = integer(L"display", L"dynamic_tail", 1) ? 1u : 0u;
+  value.dynamic_tail = integer(L"display", L"dynamic_tail", 0) ? 1u : 0u;
   value.calibration_budget = integer(L"display", L"calibration_budget", 4096);
   value.automatic_exposure = integer(L"display", L"automatic_exposure", 1);
   constexpr const wchar_t* color_keys[]{L"speed_red", L"speed_green", L"speed_blue"};

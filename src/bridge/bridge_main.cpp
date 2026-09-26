@@ -147,6 +147,14 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
 }
 // Bridge CPU time on simulator threads since the previous periodic log. Worker
 // thread only: the report keeps the previous totals between calls.
+// Which call sites held the registry and capture-manager locks, and for how
+// long, since the previous record. Worker thread only.
+void log_lock_holds(const win::Status& status) noexcept {
+  char detail[1400];
+  win::lock_hold_report(detail, sizeof(detail));
+  if (detail[0])
+    log_status(status, detail);
+}
 void log_hook_timing(const win::Status& status) noexcept {
   static hook_timing::Report report;
   char sites[1024], threads[1400];
@@ -1294,6 +1302,7 @@ DWORD run_impl() {
       log_status(status, copy_detail);
       log_contention(status, graphics, output);
       log_hook_timing(status);
+      log_lock_holds(status);
       // More accepted captures than activations for a feed means the engine
       // drew its view on closed-gate updates too (issue 71 frame jumps).
       char cadence_detail[384];

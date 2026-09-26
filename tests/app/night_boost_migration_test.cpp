@@ -150,14 +150,14 @@ void parked_rate_persists_and_defaults() {
   saved.parked_rate = 5;
   require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 5,
           "A floor of 5 saved with the revision is kept");
-  // Dynamic tail rate: on when missing, and a saved off is kept.
-  require(loaded.dynamic_tail == 1 && ini(path, L"display", L"dynamic_tail") == L"1", "Dynamic tail rate saves on by default");
-  saved.dynamic_tail = 0;
-  require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 0,
-          "A saved dynamic tail off is kept");
+  // Dynamic tail rate: off when missing, and a saved on is kept.
+  require(loaded.dynamic_tail == 0 && ini(path, L"display", L"dynamic_tail") == L"0", "Dynamic tail rate saves off by default");
+  saved.dynamic_tail = 1;
+  require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 1,
+          "A saved dynamic tail on is kept");
   patch(path, L"display", L"dynamic_tail", nullptr);
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 1,
-          "A profile without dynamic_tail loads with it on");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 0,
+          "A profile without dynamic_tail loads with it off");
 }
 
 void all_profiles_migrate_once() {

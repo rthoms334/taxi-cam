@@ -1117,6 +1117,20 @@ int main() {
     win::metadata_end(nullptr, native, 41);
     replacement->copy_proof.after_draw(first_key);
     require(replacement->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::unknown, "Deselection failed to clear retained proof");
+    {
+      // The first report only sets the interval baseline; the next names the
+      // registry lines that held the lock since then, with list misses.
+      char report[1400];
+      win::lock_hold_report(report, sizeof(report));
+      win::known_lists = {};
+      win::find_list(native);
+      { const win::WorkerRegistryLock held(r); }
+      win::lock_hold_report(report, sizeof(report));
+      const std::string text(report);
+      require(text.rfind("Lock holds (site=count/total_us/max_us)", 0) == 0 && text.find(" registry: L") != std::string::npos &&
+                  text.find("list_misses=1 ") != std::string::npos && text.find("; manager:") != std::string::npos,
+              "Lock hold report is malformed or missed the registry holds");
+    }
     std::printf(
         "{\"checks\":%u,\"barriers\":%zu,\"unscopedLookups\":%llu,\"batchedLookups\":%llu,\"unscopedMs\":%.3f,\"batchedMs\":%.3f,"
         "\"nativeGpuCalls\":0}\n",

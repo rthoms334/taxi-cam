@@ -235,13 +235,13 @@ int main() {
     require(current.single_camera == 1 && is_on(228, current), "First-camera control remains functional");
     command(228);
     require(!current.single_camera, "First-camera control can be disabled");
-    require(GetDlgItem(window, 235) && current.dynamic_tail == 1 && is_on(235, current), "Dynamic tail rate starts on");
+    require(GetDlgItem(window, 235) && current.dynamic_tail == 0 && !is_on(235, current), "Dynamic tail rate starts off");
     command(235);
-    require(!current.dynamic_tail && !is_on(235, current), "Dynamic tail rate can be turned off for comparison");
+    require(current.dynamic_tail == 1 && is_on(235, current), "Dynamic tail rate can be turned on for comparison");
     GetDlgItemTextW(window, 235, label, 96);
-    require(std::wstring(label) == L"Dynamic tail rate: Off", "Dynamic tail label reflects its state");
+    require(std::wstring(label) == L"Dynamic tail rate: On", "Dynamic tail label reflects its state");
     command(235);
-    require(current.dynamic_tail == 1, "Dynamic tail rate can be turned back on");
+    require(current.dynamic_tail == 0, "Dynamic tail rate can be turned back off");
     SetDlgItemTextW(window, 203, L"1024");
     command(500);
     require(current.scene_test == 1 && current.calibration_budget == 1024, "Save applies the calibration budget without stopping scenes");

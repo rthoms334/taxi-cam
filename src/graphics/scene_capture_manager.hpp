@@ -3,6 +3,7 @@
 #include "../hooks/queue_submit_observer.hpp"
 #include "../shared/bounded_lock.hpp"
 #include "../shared/camera_rate.hpp"
+#include "../shared/lock_hold_stats.hpp"
 #include "owned_gpu_timing.hpp"
 #include "pfd_submission_pool.hpp"
 #include "scene_capture_d3d12.hpp"
@@ -16,6 +17,8 @@
 #include <unordered_map>
 
 namespace taxi_camera {
+// Hold times of every SceneCaptureManager mutex_, drained by the bridge log.
+LockHoldStats& manager_lock_holds() noexcept;
 
 // Process-lifetime manager. Register all native DIRECT queues with callbacks()
 // before admitting recorded captures/consumers. A failed queue observation must
@@ -449,7 +452,9 @@ class SceneCaptureManager {
   // contention and returns false; the caller defers or skips its own work.
   // Nothing global is invalidated. Success first drains the deferred ring so
   // a skipped Reset or earlier evidence on the same list precedes this call.
-  bool evidence_lock(std::unique_lock<std::mutex>& lock, std::uint32_t budget_us, std::atomic<std::uint64_t>& counter) noexcept;
+  // mutex_ reports how long each site held it (manager_lock_holds()).
+  using ManagerMutex = TimedMutex<std::mutex>;
+  bool evidence_lock(std::unique_lock<ManagerMutex>& lock, std::uint32_t budget_us, std::atomic<std::uint64_t>& counter) noexcept;
   void defer(const DeferredWork&) noexcept;
   void publish_source_uncertainty(std::uint32_t origin, std::uint32_t devices) noexcept;
   void escape_unordered(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
@@ -510,7 +515,7 @@ class SceneCaptureManager {
   bool finish_transaction(std::uint64_t, bool refused, bool fatal = true) noexcept;
 
   SceneHandoff& handoff_;
-  mutable std::mutex mutex_;
+  mutable ManagerMutex mutex_{manager_lock_holds()};
   std::mutex submission_mutex_;
   std::array<Device, MaximumDevices> devices_{};
   std::array<List, MaximumLists> lists_{};

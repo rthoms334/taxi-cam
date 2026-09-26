@@ -48,8 +48,9 @@ struct Settings {
   std::uint64_t lower_id{};
   // Protocol 16: while rolling straight at a low simulator frame rate, skip
   // every other turn of the non-nose feeds (NosePriorityPolicy); 0 keeps all
-  // feeds equal. Saved per aircraft profile.
-  std::uint32_t dynamic_tail = 1;
+  // feeds equal. Off by default: live the tail looked like a slide show.
+  // Saved per aircraft profile.
+  std::uint32_t dynamic_tail = 0;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;

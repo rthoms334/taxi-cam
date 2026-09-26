@@ -71,11 +71,11 @@ int main() {
     require(!valid_settings(settings), "Parked floor above the schedule maximum is rejected");
     settings.parked_rate = 0;
     require(valid_settings(settings), "Parked floor 0 disables the floor and stays valid");
-    require(settings.dynamic_tail == 1, "Dynamic tail rate defaults on");
+    require(settings.dynamic_tail == 0, "Dynamic tail rate defaults off");
     settings.dynamic_tail = 2;
     require(!valid_settings(settings), "Dynamic tail rate accepts only 0 or 1");
-    settings.dynamic_tail = 0;
-    require(valid_settings(settings), "Dynamic tail rate can be turned off");
+    settings.dynamic_tail = 1;
+    require(valid_settings(settings), "Dynamic tail rate can be turned on");
     {
       // Bit 2 is the lower ECAM: valid only for a profile with that side.
       auto sd = settings;
@@ -128,7 +128,7 @@ int main() {
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol11 guide coordinates roundtrip");
     require(control.settings().parked_rate == settings.parked_rate, "Protocol11 parked floor roundtrip");
-    require(control.settings().dynamic_tail == 0, "Protocol16 dynamic tail roundtrip");
+    require(control.settings().dynamic_tail == 1, "Protocol16 dynamic tail roundtrip");
     require(control.settings().notifications == 0, "Protocol12 notification preference roundtrip");
     {
       // Protocol 12 status: the bridge's notification log travels in Status
