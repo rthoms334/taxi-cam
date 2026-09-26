@@ -1340,7 +1340,7 @@ bool SceneCaptureManager::capture_source(List& item,
   collect();
   if (!owner.active || owner.failed)
     return false;
-  for (std::size_t index = 0; index < packets_.size(); ++index) {
+  for (const auto index : reuse_order(owner.key, desc)) {
     auto& packet = packets_[index];
     if (required_packet && &packet != required_packet)
       continue;
@@ -1368,6 +1368,7 @@ bool SceneCaptureManager::capture_source(List& item,
         continue;
       }
       stats_.bytes += packet.gpu.allocation_bytes();
+      ++stats_.allocations;
       packet.description = desc;
       packet.device_key = owner.key;
     }
@@ -1397,6 +1398,23 @@ bool SceneCaptureManager::capture_source(List& item,
   }
   ++stats_.skipped;
   return false;
+}
+
+std::array<std::uint8_t, SceneCaptureManager::MaximumPackets> SceneCaptureManager::reuse_order(
+    std::uint64_t device_key,
+    const D3D12_RESOURCE_DESC& desc) const noexcept {
+  std::array<std::uint8_t, MaximumPackets> order{};
+  std::size_t used = 0;
+  for (unsigned rank = 0; rank < 3; ++rank)
+    for (std::size_t index = 0; index < packets_.size(); ++index) {
+      const auto& packet = packets_[index];
+      const auto state = packet.gpu.state();
+      const bool fits =
+          state == SceneCaptureD3D12::State::idle && packet.device_key == device_key && same_description(packet.description, desc);
+      if ((fits ? 0u : state == SceneCaptureD3D12::State::empty ? 1u : 2u) == rank)
+        order[used++] = static_cast<std::uint8_t>(index);
+    }
+  return order;
 }
 
 bool SceneCaptureManager::prepare_tail(Packet& packet, Device& owner) noexcept {
@@ -1494,7 +1512,8 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
       continue;
     }
     stats_.tail_status = "tail_packet_unavailable";
-    for (auto& packet : packets_) {
+    for (const auto index : reuse_order(owner.key, leased_source->GetDesc())) {
+      auto& packet = packets_[index];
       if (!prepare_tail(packet, owner))
         continue;
       List private_recording;

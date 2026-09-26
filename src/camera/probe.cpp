@@ -80,6 +80,12 @@ struct Runtime {
   double observer_last_ms = 0;
   double observer_max_ms = 0;
   ProbePerformance performance;
+  // Slowest update since the worker's last take_observer_peak(). peak_local_ms
+  // is observer-thread only; peak is guarded by mutex and written only when an
+  // update sets a new maximum, so ordinary updates take no lock for it.
+  double peak_local_ms = 0;
+  std::atomic<bool> peak_reset{false};
+  ObserverPeak peak;
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
   std::array<ec::EntryId, kMaxCameraFeeds> scheduled_ids{};
@@ -1385,6 +1391,32 @@ bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
   begin_session_reset(runtime, *runtime.requested_profile);
   return true;
 }
+// Observer thread. Measures the whole update after its own work, including
+// throttled and idle returns, and keeps the interval's slowest one.
+void record_observer_peak(Runtime& runtime, LARGE_INTEGER entered, LARGE_INTEGER started, bool serviced) noexcept {
+  LARGE_INTEGER finished{};
+  if (!runtime.counter_frequency.QuadPart)
+    QueryPerformanceFrequency(&runtime.counter_frequency);
+  if (!QueryPerformanceCounter(&finished) || runtime.counter_frequency.QuadPart <= 0 || !entered.QuadPart ||
+      finished.QuadPart < entered.QuadPart)
+    return;
+  if (runtime.peak_reset.load(std::memory_order_acquire) && runtime.peak_reset.exchange(false, std::memory_order_acq_rel))
+    runtime.peak_local_ms = 0;
+  const auto milliseconds_per_tick = 1000.0 / static_cast<double>(runtime.counter_frequency.QuadPart);
+  const auto total_ms = static_cast<double>(finished.QuadPart - entered.QuadPart) * milliseconds_per_tick;
+  if (total_ms <= runtime.peak_local_ms)
+    return;
+  runtime.peak_local_ms = total_ms;
+  serviced = serviced && started.QuadPart >= entered.QuadPart;
+  try {
+    const std::lock_guard lock(runtime.mutex);
+    runtime.peak.total_ms = total_ms;
+    runtime.peak.pre_ms = serviced ? static_cast<double>(started.QuadPart - entered.QuadPart) * milliseconds_per_tick : total_ms;
+    runtime.peak.serviced = serviced;
+    runtime.peak.performance = serviced ? runtime.performance : ProbePerformance{};
+  } catch (...) {
+  }
+}
 void observer(void* manager) noexcept {
   auto& runtime = state();
   if (!runtime.enabled.load(std::memory_order_acquire) || runtime.observing.test_and_set(std::memory_order_acquire))
@@ -1394,8 +1426,17 @@ void observer(void* manager) noexcept {
     Runtime& runtime;
     ~Guard() { runtime.observing.clear(std::memory_order_release); }
   } guard{runtime};
+  LARGE_INTEGER entered{};
+  QueryPerformanceCounter(&entered);
   bool serviced = false;
   LARGE_INTEGER started{};
+  struct PeakRecorder {
+    Runtime& runtime;
+    const LARGE_INTEGER& entered;
+    const LARGE_INTEGER& started;
+    const bool& serviced;
+    ~PeakRecorder() { record_observer_peak(runtime, entered, started, serviced); }
+  } peak_recorder{runtime, entered, started, serviced};
   LocalMemoryMetrics memory_metrics;
   ScopedLocalMemoryMetrics memory_scope(memory_metrics);
   try {
@@ -2411,6 +2452,19 @@ ProbeSnapshot scene_snapshot() {
   result.requested_feeds = (settings >> 8) & 0xffu;
   result.requested_nose_priority = ((settings >> 16) & 1u) != 0;
   result.mounts = runtime.requested_mounts;
+  return result;
+}
+
+ObserverPeak take_observer_peak() noexcept {
+  auto& runtime = state();
+  ObserverPeak result;
+  try {
+    const std::lock_guard lock(runtime.mutex);
+    result = runtime.peak;
+    runtime.peak = {};
+  } catch (...) {
+  }
+  runtime.peak_reset.store(true, std::memory_order_release);
   return result;
 }
 

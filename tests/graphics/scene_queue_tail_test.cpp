@@ -697,6 +697,44 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
             "Tail allocator/list retained the snapshot's previous device");
     check(packet.tail_list->Close(), "Close unused other-device tail list");
   }
+  {
+    // Feeds of different sizes alternate. A capture must reuse the idle packet
+    // that already holds its shape, then an empty slot, and release another
+    // shape's texture only last; first-fit recreated one per alternation.
+    const auto shape = [](UINT64 width, UINT height) {
+      D3D12_RESOURCE_DESC desc{};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Width = width;
+      desc.Height = height;
+      desc.DepthOrArraySize = desc.MipLevels = 1;
+      desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      desc.SampleDesc.Count = 1;
+      return desc;
+    };
+    const auto nose = shape(64, 32), tail = shape(32, 32);
+    auto& packets = manager->packets_;
+    const auto last = packets.size() - 1;
+    for (const auto& [index, desc] : {std::pair{std::size_t{0}, nose}, std::pair{std::size_t{1}, tail}}) {
+      check(packets[index].gpu.initialize(device.p, desc), "Initialize a shaped idle packet");
+      packets[index].description = desc;
+      packets[index].device_key = DeviceKey;
+    }
+    auto order = manager->reuse_order(DeviceKey, tail);
+    require(order[0] == 1 && order[1] == 2 && order[last] == 0, "Tail capture reuses its idle shape before an empty slot or the nose's");
+    order = manager->reuse_order(DeviceKey, nose);
+    require(order[0] == 0 && order[1] == 2 && order[last] == 1, "Nose capture reuses its idle shape and leaves the tail's");
+    order = manager->reuse_order(DeviceKey + 1, nose);
+    require(order[0] == 2 && order[last - 1] == 0 && order[last] == 1, "Another device's idle packets are reused only after empty slots");
+    unsigned seen = 0;
+    for (const auto index : order)
+      seen |= 1u << index;
+    require(seen == (1u << packets.size()) - 1, "Reuse order visits every packet slot once");
+    for (const std::size_t index : {0u, 1u}) {
+      require(packets[index].gpu.release_idle(), "Release the shaped test packet");
+      packets[index].description = {};
+      packets[index].device_key = 0;
+    }
+  }
   require(manager->source_rate_ == taxi_camera::kDefaultCameraRate, "Capture rate default remains the shipped default");
   for (const auto setting : std::array<std::array<std::uint32_t, 2>, 9>{
            {{0, 1}, {1, 1}, {2, 2}, {4, 4}, {14, 14}, {20, 20}, {60, 60}, {61, 60}, {0xffffffffu, 60}}}) {

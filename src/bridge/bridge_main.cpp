@@ -12,6 +12,7 @@
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/companion_control.hpp"
 #include "../shared/hook_timing.hpp"
+#include "../shared/lock_holder_priority.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
@@ -155,6 +156,34 @@ void log_lock_holds(const win::Status& status) noexcept {
   if (detail[0])
     log_status(status, detail);
 }
+// Slowest camera-manager update on the simulator main thread since the
+// previous record, with its stage breakdown when it serviced the pair. Idle
+// intervals (under 1 ms) are not logged. Worker thread only.
+void log_observer_peak(const win::Status& status) noexcept {
+  const auto peak = native_camera::take_observer_peak();
+  if (peak.total_ms < 1)
+    return;
+  static constexpr std::array<const char*, static_cast<std::size_t>(native_camera::ProbeStage::count)> names{
+      "manager", "pool", "lifecycle", "entries", "view1", "view2", "handoff", "pose", "activation", "publication", "aa"};
+  char detail[768];
+  auto used = static_cast<std::size_t>(std::snprintf(detail, sizeof(detail), "Observer peak: total_ms=%.2f pre_ms=%.2f serviced=%u",
+                                                     peak.total_ms, peak.pre_ms, peak.serviced ? 1u : 0u));
+  if (peak.serviced && used < sizeof(detail)) {
+    double staged = 0;
+    for (std::size_t i = 0; i < names.size() && used < sizeof(detail); ++i) {
+      staged += peak.performance.stage_ms[i];
+      const auto written = std::snprintf(detail + used, sizeof(detail) - used, " %s=%.2f", names[i], peak.performance.stage_ms[i]);
+      used += written > 0 ? static_cast<std::size_t>(written) : 0;
+    }
+    const auto& p = peak.performance;
+    if (used < sizeof(detail))
+      std::snprintf(
+          detail + used, sizeof(detail) - used, " unstaged=%.2f query_ms=%.2f read_ms=%.2f queries=%llu reads=%llu cache_hits=%llu",
+          std::max(0.0, peak.total_ms - peak.pre_ms - staged), p.query_ms, p.read_ms, static_cast<unsigned long long>(p.query_calls),
+          static_cast<unsigned long long>(p.read_calls), static_cast<unsigned long long>(p.query_cache_hits));
+  }
+  log_status(status, detail);
+}
 void log_hook_timing(const win::Status& status) noexcept {
   static hook_timing::Report report;
   char sites[1024], threads[1400];
@@ -250,6 +279,7 @@ DWORD WINAPI watchdog_run(void*) noexcept {
   }
 }
 DWORD run_impl() {
+  lock_holder_priority::mark_worker_thread();
   win::Mailbox mailbox;
   if (!mailbox.open(GetCurrentProcessId(), false))
     return ERROR_INVALID_DATA;
@@ -1240,23 +1270,23 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
       char retention_detail[640];
-      std::snprintf(
-          retention_detail, sizeof(retention_detail),
-          "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
-          "waiting_pages=%llu "
-          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
-          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
-          "rt_holds=%llu",
-          static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
-          static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
-          static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(output.waiting_pages),
-          static_cast<unsigned long long>(scene.retirement_deferrals),
-          scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1],
-          static_cast<unsigned long long>(scene.flags[0][0]), static_cast<unsigned long long>(scene.flags[0][1]),
-          static_cast<unsigned long long>(scene.flags[1][0]), static_cast<unsigned long long>(scene.flags[1][1]),
-          static_cast<unsigned long long>(scene.aa_restores), static_cast<unsigned long long>(scene.aa_restore_failures),
-          scene.aa_cleared_pending, scene.output_slots[0], scene.output_slots[1], scene.rt_record_refusals,
-          static_cast<unsigned long long>(scene.rt_record_holds));
+      std::snprintf(retention_detail, sizeof(retention_detail),
+                    "Camera retention: created_total=%llu snapshot_bytes=%llu snapshot_allocations=%llu quarantined=%llu prewarm=%s "
+                    "patch_requests=%u patch_draws=%llu "
+                    "waiting_pages=%llu "
+                    "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
+                    "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
+                    "rt_holds=%llu",
+                    static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
+                    static_cast<unsigned long long>(output.capture.allocations),
+                    static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
+                    static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(output.waiting_pages),
+                    static_cast<unsigned long long>(scene.retirement_deferrals), scene.retirement_waiting, scene.retirement_status,
+                    scene.retirement_queue_counts[0], scene.retirement_queue_counts[1], static_cast<unsigned long long>(scene.flags[0][0]),
+                    static_cast<unsigned long long>(scene.flags[0][1]), static_cast<unsigned long long>(scene.flags[1][0]),
+                    static_cast<unsigned long long>(scene.flags[1][1]), static_cast<unsigned long long>(scene.aa_restores),
+                    static_cast<unsigned long long>(scene.aa_restore_failures), scene.aa_cleared_pending, scene.output_slots[0],
+                    scene.output_slots[1], scene.rt_record_refusals, static_cast<unsigned long long>(scene.rt_record_holds));
       log_status(status, retention_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];
@@ -1303,6 +1333,7 @@ DWORD run_impl() {
       log_contention(status, graphics, output);
       log_hook_timing(status);
       log_lock_holds(status);
+      log_observer_peak(status);
       // More accepted captures than activations for a feed means the engine
       // drew its view on closed-gate updates too (issue 71 frame jumps).
       char cadence_detail[384];

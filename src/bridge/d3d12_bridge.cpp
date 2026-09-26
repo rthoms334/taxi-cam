@@ -504,15 +504,18 @@ struct RegistryLock : BoundedLock<std::recursive_mutex> {
   std::uint32_t line_;
   std::uint64_t start_;
 };
-// Blocking registry acquisition for the bridge's own worker threads.
+// Blocking registry acquisition for the bridge's own worker threads. A marked
+// worker runs above normal while it holds the lock (lock_holder_priority).
 struct WorkerRegistryLock {
   explicit WorkerRegistryLock(Registry& r, std::uint32_t line = __builtin_LINE()) : mutex_(r.mutex), line_(line) {
+    lock_holder_priority::enter();
     mutex_.lock();
     start_ = __rdtsc();
   }
   ~WorkerRegistryLock() {
     const auto held = __rdtsc() - start_;
     mutex_.unlock();
+    lock_holder_priority::leave();
     registry_lock_holds().record(line_, held);
   }
   WorkerRegistryLock(const WorkerRegistryLock&) = delete;

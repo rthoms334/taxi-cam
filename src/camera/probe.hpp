@@ -47,6 +47,16 @@ struct ProbePerformance {
   std::uint32_t bucket_count = 0;
 };
 
+// Slowest camera-manager update (simulator main thread) since the previous
+// take_observer_peak(). pre_ms runs from entry to the serviced start (or to
+// the return when throttled or idle); stages cover only that serviced update.
+struct ObserverPeak {
+  double total_ms = 0;
+  double pre_ms = 0;
+  bool serviced = false;
+  ProbePerformance performance;
+};
+
 struct ProbeSnapshot {
   bool hook_installed = false;
   bool accepting_requests = false;
@@ -146,5 +156,7 @@ void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = 
 bool request_scene_profile(std::uint32_t id) noexcept;
 bool request_scene_mounts(const MountPair& mounts) noexcept;
 ProbeSnapshot scene_snapshot();
+// Diagnostics only; the worker logs one peak per status interval.
+ObserverPeak take_observer_peak() noexcept;
 
 }  // namespace taxi_camera::native_camera

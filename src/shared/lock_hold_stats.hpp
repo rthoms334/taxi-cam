@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include "lock_holder_priority.hpp"
 
 namespace taxi_camera {
 
@@ -90,6 +91,7 @@ class HoldTimer {
 // A mutex that reports each hold to LockHoldStats, keyed by the address that
 // acquired it (or a site the holder sets afterwards). Hold state belongs to
 // the owner, so it needs no synchronization of its own. Not recursive.
+// A bridge worker thread holding it runs above normal (lock_holder_priority).
 template <class Mutex>
 class TimedMutex {
  public:
@@ -97,12 +99,16 @@ class TimedMutex {
   TimedMutex(const TimedMutex&) = delete;
   TimedMutex& operator=(const TimedMutex&) = delete;
   __attribute__((noinline)) void lock() {
+    lock_holder_priority::enter();
     mutex_.lock();
     acquired(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
   }
+  // Raised only once acquired: a bounded wait spins on try_lock, and a failed
+  // attempt must not cost a priority system call.
   __attribute__((noinline)) bool try_lock() {
     if (!mutex_.try_lock())
       return false;
+    lock_holder_priority::enter();
     acquired(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
     return true;
   }
@@ -110,6 +116,7 @@ class TimedMutex {
     const auto held = __rdtsc() - start_;
     const auto site = site_;
     mutex_.unlock();
+    lock_holder_priority::leave();
     stats_.record(site, held);
   }
   // Owner only: attribute the current hold to a more useful site.

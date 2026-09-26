@@ -357,6 +357,7 @@ if ($Validate) {
         @{Name='freeze-guards'; Sources=@('tests/graphics/freeze_guards_test.cpp')},
         @{Name='hook-timing'; Sources=@('tests/hooks/hook_timing_test.cpp')},
         @{Name='lock-hold-stats'; Sources=@('tests/hooks/lock_hold_stats_test.cpp')},
+        @{Name='lock-holder-priority'; Sources=@('tests/hooks/lock_holder_priority_test.cpp')},
         @{Name='sim-messages'; Sources=@('tests/app/sim_messages_test.cpp')},
         @{Name='scene-handoff'; Sources=@('tests/graphics/scene_handoff_test.cpp','src/graphics/scene_handoff.cpp')},
         @{Name='source-state'; Sources=@('tests/graphics/scene_source_state_test.cpp','src/graphics/scene_source_state.cpp')},

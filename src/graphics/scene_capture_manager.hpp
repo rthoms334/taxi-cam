@@ -119,6 +119,8 @@ class SceneCaptureManager {
     std::uint64_t captures = 0, submissions = 0, resets = 0;
     std::uint64_t display_copies = 0;
     std::uint64_t completed = 0, skipped = 0, quarantined = 0, bytes = 0;
+    // Snapshot textures created. Steady captures reuse packets of their shape.
+    std::uint64_t allocations = 0;
     std::uint64_t render_target_writes = 0, render_target_rewrites = 0;
     std::array<RenderTargetDiagnostic, 3> render_targets{};
     std::uint64_t copy_writes = 0, copy_rewrites = 0;
@@ -495,6 +497,11 @@ class SceneCaptureManager {
   SourceCandidate* source_candidate(ID3D12Resource*) noexcept;
   bool may_be_source(ID3D12Resource*) const noexcept;
   bool prepare_tail(Packet&, Device&) noexcept;
+  // Packet slots in the order a new capture should try them: idle packets
+  // already holding this device's texture shape, then empty slots, then the
+  // rest. First-fit released and recreated a texture under mutex_ whenever
+  // feeds of different sizes alternated.
+  std::array<std::uint8_t, MaximumPackets> reuse_order(std::uint64_t device_key, const D3D12_RESOURCE_DESC&) const noexcept;
   // Records and closes this receipt's private tail captures under mutex_ and
   // returns them for the caller to Execute after releasing it.
   void record_queue_tail(Transaction&, TailBatch&) noexcept;
