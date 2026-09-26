@@ -100,6 +100,12 @@ struct Runtime {
   // Consecutive activation pulses refused because the diffuse texture had no
   // render-target record; bounded by ViewResizeWarmup::MaximumOutputWaits.
   unsigned rt_record_refusals = 0;
+  // Last add-diffuse/depth-stencil slot digits per feed. Pair inspections
+  // observe those diagnostic-only slots at most once a second; between samples
+  // the retention log repeats the last observation of the same entry.
+  std::array<std::uint32_t, kMaxCameraFeeds> slot_digits{};
+  std::array<ec::EntryId, kMaxCameraFeeds> slot_digit_ids{};
+  std::uint64_t slot_digits_ms = 0;
   std::uint64_t rt_record_holds = 0;
   std::array<std::uint64_t, kMaxCameraFeeds> owned_pool_views{};
   std::uint64_t owned_pool_renderer{};
@@ -591,6 +597,8 @@ void inspect_pair(Runtime& runtime,
   }
   reader.reset_budget();
   const auto entries = timed(runtime, ProbeStage::entries, [&] { return ec::inspect_owned_entries(reader, runtime.manager, ids); });
+  const auto slots_now = GetTickCount64();
+  const bool sample_slots = runtime.slot_digit_ids != ids || slots_now - runtime.slot_digits_ms >= 1000;
   runtime.performance.entry_count = entries.entry_count;
   runtime.performance.bucket_count = entries.bucket_count;
   if (!entries.complete) {
@@ -609,7 +617,7 @@ void inspect_pair(Runtime& runtime,
     }
     reader.reset_budget();
     const auto view = timed(runtime, i == 0 ? ProbeStage::first_view : ProbeStage::second_view,
-                            [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool); });
+                            [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool, sample_slots); });
     views[i] = view;
     report.inspection_status[i] = ec::owned_view_status_name(view.status);
     report.ready[i] = view.complete && view.ready;
@@ -624,7 +632,15 @@ void inspect_pair(Runtime& runtime,
     report.resource_present[i] = report.ready[i] && view.resource_present;
     report.output_ready[i] =
         report.ready[i] && runtime.resized_ids[i] == ids[i] && owned_view_output_ready(view, runtime.resized_dimensions[i]);
-    report.output_slots[i] = view.complete && view.ready ? owned_view_slot_digits(view) : 0u;
+    if (view.complete && view.ready && view.diagnostic_slots_observed) {
+      runtime.slot_digits[i] = owned_view_slot_digits(view) & 0xFFu;
+      runtime.slot_digit_ids[i] = ids[i];
+      runtime.slot_digits_ms = slots_now;
+    }
+    report.output_slots[i] = !(view.complete && view.ready) ? 0u
+                             : view.diagnostic_slots_observed || runtime.slot_digit_ids[i] != ids[i]
+                                 ? owned_view_slot_digits(view)
+                                 : (owned_view_slot_digits(view) & ~0xFFu) | runtime.slot_digits[i];
     if (report.ready[i]) {
       report.dimensions[i] = view.dimensions;
       report.flags[i] = view.flags;

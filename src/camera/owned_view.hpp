@@ -123,6 +123,9 @@ struct OwnedViewSnapshot {
   // published with the complete ready snapshot. Index 0 is the gate-relevant
   // diffuse; the others are diagnostics for the retention log.
   std::array<OutputSlotObservation, 3> output_slots{};
+  // False when the caller skipped the diagnostic slots 1 and 2; they are then
+  // left unobserved (all false), never guessed.
+  bool diagnostic_slots_observed = false;
 };
 
 // Separate authority for an owned mode2 gate closure only. Never convertible to
@@ -171,9 +174,13 @@ OwnedViewCloseSnapshot inspect_owned_view_for_close(MemoryReader& reader,
 // The three dimension pairs and two flag words above are included in that
 // trace. Zero, negative or unusual dimensions remain diagnostic observations;
 // this reader does not infer validity limits or silently resize a view.
+// diagnostic_slots=false skips only the add-diffuse and depth-stencil slot
+// observations, which feed the retention log and nothing else; the diffuse
+// slot and every readiness field are always traced.
 OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
                                      std::uint64_t entry_address,
                                      std::uint64_t expected_id,
-                                     const ViewPoolSnapshot& pool) noexcept;
+                                     const ViewPoolSnapshot& pool,
+                                     bool diagnostic_slots = true) noexcept;
 
 }  // namespace taxi_camera::engine_camera

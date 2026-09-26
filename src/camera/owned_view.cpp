@@ -271,7 +271,8 @@ bool output_resource(BoundedReader<OwnedViewSnapshot>& source,
                      std::uint64_t view,
                      std::uint64_t& address,
                      std::array<std::int32_t, 2>& output_dimensions,
-                     std::array<OutputSlotObservation, 3>& slots) noexcept {
+                     std::array<OutputSlotObservation, 3>& slots,
+                     bool diagnostic_slots) noexcept {
   slots = {};
   std::uint64_t entry_material = 0;
   std::uint64_t view_material = 0;
@@ -295,8 +296,8 @@ bool output_resource(BoundedReader<OwnedViewSnapshot>& source,
   slots[0].texture = true;
   if (!source.span(record, 16, 0x50) || !render_target_record(source, record, slots[0].render_target_record))
     return false;
-  if (!source.span(entry_material, 664, 728) || !output_slot(source, entry_material, 664, slots[1]) ||
-      !output_slot(source, entry_material, 712, slots[2]))
+  if (diagnostic_slots && (!source.span(entry_material, 664, 728) || !output_slot(source, entry_material, 664, slots[1]) ||
+                           !output_slot(source, entry_material, 712, slots[2])))
     return false;
   std::uint64_t wrapper = 0;
   if (!source.word(record, 16, wrapper))
@@ -405,7 +406,8 @@ OwnedViewCloseSnapshot inspect_owned_view_for_close(MemoryReader& reader,
 OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
                                      std::uint64_t entry_address,
                                      std::uint64_t expected_id,
-                                     const ViewPoolSnapshot& pool) noexcept {
+                                     const ViewPoolSnapshot& pool,
+                                     bool diagnostic_slots) noexcept {
   OwnedViewSnapshot result;
   if (expected_id == 0 || !pointer_range(entry_address, 0, 8)) {
     fail(result, OwnedViewStatus::invalid_request, "Owned-entry inspection requires a nonzero ID and aligned entry address.");
@@ -493,7 +495,8 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
   std::uint64_t resource_address = 0;
   std::array<std::int32_t, 2> output_dimensions{};
   std::array<OutputSlotObservation, 3> output_slots{};
-  if (!output_resource(source, result, entry_address, view, resource_address, output_dimensions, output_slots) || !source.recheck())
+  if (!output_resource(source, result, entry_address, view, resource_address, output_dimensions, output_slots, diagnostic_slots) ||
+      !source.recheck())
     return result;
   result.complete = true;
   result.ready = true;
@@ -510,6 +513,7 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
   result.resource_present = resource_address != 0;
   result.resource_address = resource_address;
   result.output_slots = output_slots;
+  result.diagnostic_slots_observed = diagnostic_slots;
   return result;
 }
 

@@ -191,9 +191,10 @@ struct Fixture {
     }
     return result;
   }
+  bool diagnostic_slots = true;
   OwnedViewSnapshot run() {
     reader.reads.clear();
-    const auto result = inspect_owned_view(reader, entry, id, pool);
+    const auto result = inspect_owned_view(reader, entry, id, pool, diagnostic_slots);
     std::uint32_t total = 0;
     for (const auto& read : reader.reads) {
       require(std::find(reader.permitted.begin(), reader.permitted.end(), read) != reader.permitted.end(),
@@ -344,8 +345,22 @@ void render_target_records() {
   others.reader.word(kRecord + 0x1000 + 0x40, kRtRecord + 0x1000);
   others.reader.region(kRecord + 0x1000 + 0x40, 16);
   result = others.run();
-  require(result.ready && result.output_slots[1].mask() == 1 && result.output_slots[2].mask() == 7,
+  require(result.ready && result.output_slots[1].mask() == 1 && result.output_slots[2].mask() == 7 && result.diagnostic_slots_observed,
           "Add-diffuse and depth-stencil slot observations were wrong");
+  // Pulses may skip the diagnostic slots: the diffuse slot, output and every
+  // readiness field are still traced and reread; slots 1/2 stay unobserved.
+  const auto full_reads = others.reader.reads.size();
+  others.diagnostic_slots = false;
+  const auto skipped = others.run();
+  require(skipped.ready && skipped.resource_present && skipped.resource_address == result.resource_address &&
+              skipped.output_dimensions == result.output_dimensions && skipped.output_slots[0].mask() == 7 &&
+              skipped.output_slots[1].mask() == 0 && skipped.output_slots[2].mask() == 0 && !skipped.diagnostic_slots_observed &&
+              skipped.dimensions == result.dimensions && skipped.flags == result.flags && skipped.fov == result.fov,
+          "Skipping the diagnostic slots changed a readiness or output observation");
+  require(others.reader.reads.size() + 12 == full_reads &&
+              std::none_of(others.reader.reads.begin(), others.reader.reads.end(),
+                           [](const auto& read) { return read.first >= kMaterial + 664 && read.first < kMaterial + 728; }),
+          "Skipped diagnostic slots were still read");
   // Nothing beyond the record pointer itself is dereferenced.
   for (const auto& read : direct.reader.reads)
     require(read.first < kRtRecord || read.first >= kRtRecord + 0x1000, "A render-target record was dereferenced");
