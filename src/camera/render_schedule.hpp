@@ -13,8 +13,9 @@ namespace taxi_camera::native_camera {
 // apply every returned state through freshly validated owned engine entries.
 class RenderSchedule {
  public:
+  // Parked floors go below the moving minimum; see kMinimumParkedCameraRate.
   void configure(unsigned rate, unsigned feeds = 2) noexcept {
-    rate_ = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate);
+    rate_ = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate);
     feeds_ = std::clamp(feeds, 1u, kMaxCameraFeeds);
     if (next_feed_ >= feeds_)
       next_feed_ = 0;

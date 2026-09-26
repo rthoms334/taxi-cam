@@ -65,8 +65,10 @@ int main() {
     settings.speed_color = {0.25f, 0.75f, 0.375f};
     settings.parked_rate = 8;
     require(valid_settings(settings), "Adjusted parked floor is valid");
-    settings.parked_rate = 3;
-    require(!valid_settings(settings), "Parked floor below the schedule minimum is rejected");
+    settings.parked_rate = 1;
+    require(valid_settings(settings), "A parked floor below the moving minimum is valid");
+    settings.parked_rate = 61;
+    require(!valid_settings(settings), "Parked floor above the schedule maximum is rejected");
     settings.parked_rate = 0;
     require(valid_settings(settings), "Parked floor 0 disables the floor and stays valid");
     {

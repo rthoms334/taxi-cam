@@ -115,7 +115,7 @@ inline bool valid_settings(const Settings& s) noexcept {
         m[5] < 0.05 || m[5] > 1.55)
       return false;
   }
-  if (s.parked_rate && (s.parked_rate < kMinimumCameraRate || s.parked_rate > kMaximumCameraRate))
+  if (s.parked_rate && (s.parked_rate < kMinimumParkedCameraRate || s.parked_rate > kMaximumCameraRate))
     return false;
   return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate && s.automatic_exposure <= 1 &&
          std::isfinite(s.exposure) && s.exposure >= -16 && s.exposure <= 4 && std::isfinite(s.night_boost) && s.night_boost >= 0 &&

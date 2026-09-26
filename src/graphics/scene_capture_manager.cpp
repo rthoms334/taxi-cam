@@ -708,7 +708,7 @@ void SceneCaptureManager::stop_source_tracking() noexcept {
 }
 void SceneCaptureManager::set_source_rate(std::uint32_t rate) noexcept {
   const std::lock_guard lock(mutex_);
-  source_rate_ = rate < kMinimumCameraRate ? kMinimumCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
+  source_rate_ = rate < kMinimumParkedCameraRate ? kMinimumParkedCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
 }
 void SceneCaptureManager::set_gpu_timing_enabled(bool enabled) noexcept {
   const std::lock_guard lock(mutex_);
@@ -820,7 +820,10 @@ void SceneCaptureManager::observe_source_draw_after(ID3D12GraphicsCommandList* n
                                                     ID3D12Resource* const* targets,
                                                     const std::uint64_t* generations,
                                                     bool allowed) noexcept {
-  source_stage = {};
+  // Runs after every observed draw. Only stage_source_draw sets owner, after
+  // clearing the stage, so an ownerless stage is already empty.
+  if (source_stage.owner)
+    source_stage = {};
   if (!native || !generation || !count || count > 8 || !targets || !generations)
     return;
   bool candidate_present = false;

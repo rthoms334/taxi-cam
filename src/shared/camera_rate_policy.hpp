@@ -48,7 +48,7 @@ constexpr EffectiveCameraRate effective_camera_rate(unsigned user_rate,
       result.reasons |= kRateLimitManager;
   }
   if (parked && parked_rate) {
-    const unsigned floor = std::clamp(parked_rate, kMinimumCameraRate, kMaximumCameraRate);
+    const unsigned floor = std::clamp(parked_rate, kMinimumParkedCameraRate, kMaximumCameraRate);
     if (floor < result.rate) {
       result.rate = floor;
       result.reasons |= kRateLimitParked;

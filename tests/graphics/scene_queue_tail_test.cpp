@@ -698,10 +698,12 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     check(packet.tail_list->Close(), "Close unused other-device tail list");
   }
   require(manager->source_rate_ == taxi_camera::kDefaultCameraRate, "Capture rate default remains the shipped default");
-  for (const auto setting :
-       std::array<std::array<std::uint32_t, 2>, 8>{{{0, 5}, {4, 5}, {5, 5}, {14, 14}, {20, 20}, {60, 60}, {61, 60}, {0xffffffffu, 60}}}) {
+  for (const auto setting : std::array<std::array<std::uint32_t, 2>, 9>{
+           {{0, 1}, {1, 1}, {2, 2}, {4, 4}, {14, 14}, {20, 20}, {60, 60}, {61, 60}, {0xffffffffu, 60}}}) {
+    // Parked floors go below the moving minimum, so capture spacing follows the
+    // schedule's 1..60 clamp rather than the saved camera_rate's 5..60.
     manager->set_source_rate(setting[0]);
-    require(manager->source_rate_ == setting[1], "Capture rate follows shared5..60 clamp");
+    require(manager->source_rate_ == setting[1], "Capture rate follows the shared 1..60 schedule clamp");
   }
   manager->set_source_rate(20);
   Commands producer, second_queue, consumer, unknown;

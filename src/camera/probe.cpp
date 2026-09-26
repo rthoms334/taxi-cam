@@ -2361,7 +2361,7 @@ void suspend_scene_rendering(bool suspended) noexcept {
 }
 
 void request_scene_rate(unsigned rate, unsigned feeds) noexcept {
-  const auto settings = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8);
+  const auto settings = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8);
   state().requested_settings.store(settings, std::memory_order_release);
 }
 
