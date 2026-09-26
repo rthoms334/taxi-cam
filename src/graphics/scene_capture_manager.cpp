@@ -65,8 +65,8 @@ LockHoldStats& manager_lock_holds() noexcept {
 }
 // Out of line so the hold is attributed to the hook that asked for evidence.
 __attribute__((noinline)) bool SceneCaptureManager::evidence_lock(std::unique_lock<ManagerMutex>& lock,
-                                        std::uint32_t budget_us,
-                                        std::atomic<std::uint64_t>& counter) noexcept {
+                                                                  std::uint32_t budget_us,
+                                                                  std::atomic<std::uint64_t>& counter) noexcept {
   BoundedLock bounded(mutex_, budget_us, &counter);
   contended_call = !bounded;
   if (!bounded)

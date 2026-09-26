@@ -1124,7 +1124,9 @@ int main() {
       win::lock_hold_report(report, sizeof(report));
       win::known_lists = {};
       win::find_list(native);
-      { const win::WorkerRegistryLock held(r); }
+      {
+        const win::WorkerRegistryLock held(r);
+      }
       win::lock_hold_report(report, sizeof(report));
       const std::string text(report);
       require(text.rfind("Lock holds (site=count/total_us/max_us)", 0) == 0 && text.find(" registry: L") != std::string::npos &&
