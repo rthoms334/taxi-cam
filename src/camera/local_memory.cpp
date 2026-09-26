@@ -322,6 +322,10 @@ bool read_local_flag_words(std::uint64_t address, std::array<std::uint64_t, 2>& 
   return true;
 }
 
+const LocalMemoryMetrics* active_local_memory_metrics() noexcept {
+  return active_metrics;
+}
+
 ScopedLocalMemoryMetrics::ScopedLocalMemoryMetrics(LocalMemoryMetrics& metrics) noexcept : previous_(active_metrics) {
   active_metrics = &metrics;
 }

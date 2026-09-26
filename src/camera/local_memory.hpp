@@ -35,6 +35,10 @@ struct LocalMemoryMetrics {
   std::uint64_t query_cache_validation_failures = 0;
 };
 
+// The innermost active scope on this thread, or null. Read-only view for
+// callers that attribute counts to their own sub-stages.
+const LocalMemoryMetrics* active_local_memory_metrics() noexcept;
+
 class ScopedLocalMemoryMetrics {
  public:
   explicit ScopedLocalMemoryMetrics(LocalMemoryMetrics& metrics) noexcept;

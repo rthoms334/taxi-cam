@@ -33,6 +33,10 @@ struct ProbePerformance {
   // creation, cleanup and resize work. AA measures recurring pulse preparation;
   // initial AA setup remains in lifecycle. Unclassified overhead remains in total.
   std::array<double, static_cast<std::size_t>(ProbeStage::count)> stage_ms{};
+  // Kernel memory calls inside each stage: ReadProcessMemory reads, and region
+  // or working-set queries (query_calls below counts both kinds too).
+  std::array<std::uint32_t, static_cast<std::size_t>(ProbeStage::count)> stage_reads{};
+  std::array<std::uint32_t, static_cast<std::size_t>(ProbeStage::count)> stage_queries{};
   std::uint64_t query_calls = 0;
   std::uint64_t query_allocation_calls = 0;
   std::uint64_t query_page_calls = 0;

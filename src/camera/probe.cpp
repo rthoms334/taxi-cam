@@ -224,19 +224,31 @@ void publish_transition(Runtime& runtime, ProbeSnapshot& report) {
 
 class StageTimer {
  public:
-  StageTimer(Runtime& runtime, ProbeStage stage) noexcept : runtime_(runtime), stage_(stage) { QueryPerformanceCounter(&started_); }
+  StageTimer(Runtime& runtime, ProbeStage stage) noexcept : runtime_(runtime), stage_(stage) {
+    if (const auto* metrics = active_local_memory_metrics()) {
+      reads_ = metrics->read_calls;
+      queries_ = metrics->query_calls;
+    }
+    QueryPerformanceCounter(&started_);
+  }
   ~StageTimer() {
     LARGE_INTEGER finished{};
+    const auto index = static_cast<std::size_t>(stage_);
     if (QueryPerformanceCounter(&finished) && started_.QuadPart > 0 && finished.QuadPart >= started_.QuadPart &&
         runtime_.counter_frequency.QuadPart > 0)
-      runtime_.performance.stage_ms[static_cast<std::size_t>(stage_)] +=
+      runtime_.performance.stage_ms[index] +=
           static_cast<double>(finished.QuadPart - started_.QuadPart) * 1000.0 / runtime_.counter_frequency.QuadPart;
+    if (const auto* metrics = active_local_memory_metrics()) {
+      runtime_.performance.stage_reads[index] += static_cast<std::uint32_t>(metrics->read_calls - reads_);
+      runtime_.performance.stage_queries[index] += static_cast<std::uint32_t>(metrics->query_calls - queries_);
+    }
   }
 
  private:
   Runtime& runtime_;
   ProbeStage stage_;
   LARGE_INTEGER started_{};
+  std::uint64_t reads_ = 0, queries_ = 0;
 };
 
 template <typename Operation>
@@ -518,12 +530,21 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
   LocalMemoryReader objects;
   LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
   std::uint64_t user = 0;
+  // One read-only scope for the aircraft walk and the scene pose it leads to:
+  // pages and allocations are proven once and revalidated together at its end.
+  // Nothing is published unless that endpoint validation succeeds.
+  AircraftScenePose scene;
   const auto aircraft = inspected(
       runtime,
       [&] {
-        return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
-                                                    runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr, &user,
-                                                    runtime.contract.layout);
+        auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
+                                                          runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr, &user,
+                                                          runtime.contract.layout);
+        if (found.valid && found.available && user) {
+          objects.reset_budget();
+          scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
+        }
+        return found;
       },
       &memory_detail);
   if (!aircraft.valid || !aircraft.available || !user) {
@@ -533,9 +554,6 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
       runtime.message += " " + memory_detail;
     return false;
   }
-  objects.reset_budget();
-  const auto scene =
-      inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
   if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose) ||
       !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
     runtime.pose_busy = true;

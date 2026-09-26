@@ -29,10 +29,12 @@ struct Fixture : taxi_camera::engine_camera::MemoryReader {
       memory[address + i] = data[i];
   }
   bool read(std::uint64_t address, void* out, std::size_t size) override {
-    if (address == fail || size > 24)
+    // Fields are at most 24 bytes; the only wider reads are the two spans.
+    if (address == fail || (size > 24 && !(size == 32 && address == control) && !(size == 120 && address == matrix)))
       return false;
-    if (++reads[address] == 2 && address == change)
-      memory[address] ^= 1;
+    // A change lands between the capture and the reread of whatever covers it.
+    if (++reads[address] == 2 && change >= address && change - address < size)
+      memory[change] ^= 1;
     for (std::size_t i = 0; i < size; ++i) {
       const auto found = memory.find(address + i);
       if (found == memory.end())
@@ -45,6 +47,8 @@ struct Fixture : taxi_camera::engine_camera::MemoryReader {
     expected = body_math::body({55.94415, longitude, 36.64, .245, -.02, heading}, 53.396);
     put(user, base + 133534840);
     put(user + 336, std::array<std::uint64_t, 2>{control, 7});
+    for (unsigned i = 8; i < 28; ++i)
+      put(control + i, std::uint8_t{0});  // Rest of the 32-byte control record.
     put(control + 28, std::uint32_t{7});
     put(control, node);
     put(user + 464, node);
@@ -57,6 +61,8 @@ struct Fixture : taxi_camera::engine_camera::MemoryReader {
     put(matrix + 32, expected.up);
     put(matrix + 64, expected.forward);
     put(matrix + 96, expected.origin);
+    for (unsigned row = 0; row < 3; ++row)
+      put(matrix + row * 32 + 24, std::uint64_t{0});  // Row stride padding.
   }
 };
 void fixed_mounts() {
@@ -66,6 +72,14 @@ void fixed_mounts() {
     Fixture fixture(heading, -3.3897 + heading * .00001);
     const auto scene = inspect_aircraft_scene_pose(fixture, user, base);
     require(scene.complete && scene.read_bytes <= 1024, "verified scene pose");
+    // Ten reads and ten rereads: the control record and the four matrix rows
+    // are one read each, where they were three and four.
+    unsigned reads = 0;
+    for (const auto& [address, count] : fixture.reads)
+      reads += count;
+    require(reads == 20 && fixture.reads[control] == 2 && fixture.reads[matrix] == 2 && !fixture.reads.count(control + 28) &&
+                !fixture.reads.count(matrix + 96),
+            "scene pose read count");
     require(scene.pose.origin == fixture.expected.origin && scene.pose.right == fixture.expected.right &&
                 scene.pose.up == fixture.expected.up && scene.pose.forward == fixture.expected.forward,
             "native axis mapping");
@@ -84,12 +98,16 @@ void fixed_mounts() {
   }
 }
 void refusal() {
-  for (const auto address : {user, user + 336, control + 28, control, user + 464, node, node + 256, attached, attached + 160, node + 296,
-                             matrix, matrix + 32, matrix + 64, matrix + 96}) {
+  // Every exact read; the spans at control and matrix also serve control + 28
+  // and the later matrix rows.
+  for (const auto address : {user, user + 336, control, user + 464, node, node + 256, attached, attached + 160, node + 296, matrix}) {
     Fixture missing;
     missing.fail = address;
     const auto failed = inspect_aircraft_scene_pose(missing, user, base);
     require(!failed.complete && failed.pose.origin == Vector3{}, "unreadable field publishes no pose");
+  }
+  for (const auto address : {user, user + 336, control + 28, control, user + 464, node, node + 256, attached, attached + 160, node + 296,
+                             matrix, matrix + 32, matrix + 64, matrix + 96}) {
     Fixture torn;
     torn.change = address;
     require(!inspect_aircraft_scene_pose(torn, user, base).complete, "changed field refuses whole snapshot");

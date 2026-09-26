@@ -165,14 +165,15 @@ void log_observer_peak(const win::Status& status) noexcept {
     return;
   static constexpr std::array<const char*, static_cast<std::size_t>(native_camera::ProbeStage::count)> names{
       "manager", "pool", "lifecycle", "entries", "view1", "view2", "handoff", "pose", "activation", "publication", "aa"};
-  char detail[768];
+  char detail[1024];
   auto used = static_cast<std::size_t>(std::snprintf(detail, sizeof(detail), "Observer peak: total_ms=%.2f pre_ms=%.2f serviced=%u",
                                                      peak.total_ms, peak.pre_ms, peak.serviced ? 1u : 0u));
   if (peak.serviced && used < sizeof(detail)) {
     double staged = 0;
     for (std::size_t i = 0; i < names.size() && used < sizeof(detail); ++i) {
       staged += peak.performance.stage_ms[i];
-      const auto written = std::snprintf(detail + used, sizeof(detail) - used, " %s=%.2f", names[i], peak.performance.stage_ms[i]);
+      const auto written = std::snprintf(detail + used, sizeof(detail) - used, " %s=%.2f/%u/%u", names[i], peak.performance.stage_ms[i],
+                                         peak.performance.stage_reads[i], peak.performance.stage_queries[i]);
       used += written > 0 ? static_cast<std::size_t>(written) : 0;
     }
     const auto& p = peak.performance;

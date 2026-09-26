@@ -36,21 +36,60 @@ inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader
     std::uint64_t address = 0;
     std::array<unsigned char, 24> value{};
     std::size_t bytes = 0;
+    int span = -1;  // Served from this span, or -1 for its own read.
+  };
+  // One exact read of a record whose fields are captured next: the handle's
+  // 32-byte control record (node at +0, generation at +28) and the four matrix
+  // rows. The reread repeats each span once and compares only observed bytes.
+  struct Span {
+    std::uint64_t address = 0;
+    std::size_t bytes = 0;
+    std::array<unsigned char, 128> value{};
   };
   std::array<Field, 16> trace{};
-  unsigned count = 0;
+  std::array<Span, 2> spans{};
+  unsigned count = 0, span_count = 0;
+  const auto covering = [&](std::uint64_t address, std::size_t size) {
+    for (unsigned i = 0; i < span_count; ++i)
+      if (address >= spans[i].address && size <= spans[i].bytes && address - spans[i].address <= spans[i].bytes - size)
+        return static_cast<int>(i);
+    return -1;
+  };
+  auto span = [&](std::uint64_t owner, std::size_t size) {
+    if (!owner || owner > UINT64_MAX - size || size > spans[0].value.size() || result.read_bytes > 1024 - size)
+      return false;
+    if (covering(owner, size) >= 0)
+      return true;
+    if (span_count >= spans.size())
+      return false;
+    auto& value = spans[span_count];
+    value.address = owner;
+    value.bytes = size;
+    result.read_bytes += static_cast<std::uint32_t>(size);
+    if (!reader.read(owner, value.value.data(), size))
+      return false;
+    ++span_count;
+    return true;
+  };
   auto read = [&](std::uint64_t owner, std::uint64_t offset, auto& value) {
     constexpr auto size = sizeof(value);
     static_assert(size <= 24);
-    if (!owner || owner > UINT64_MAX - offset || owner + offset > UINT64_MAX - size || count >= trace.size() ||
-        result.read_bytes > 1024 - size)
+    if (!owner || owner > UINT64_MAX - offset || owner + offset > UINT64_MAX - size || count >= trace.size())
       return false;
     auto& field = trace[count++];
     field.address = owner + offset;
     field.bytes = size;
-    result.read_bytes += size;
-    if (!reader.read(field.address, field.value.data(), size))
-      return false;
+    field.span = covering(field.address, size);
+    if (field.span >= 0) {
+      const auto& served = spans[static_cast<std::size_t>(field.span)];
+      std::memcpy(field.value.data(), served.value.data() + (field.address - served.address), size);
+    } else {
+      if (result.read_bytes > 1024 - size)
+        return false;
+      result.read_bytes += size;
+      if (!reader.read(field.address, field.value.data(), size))
+        return false;
+    }
     std::memcpy(&value, field.value.data(), size);
     return true;
   };
@@ -61,13 +100,17 @@ inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader
   std::array<Vector3, 4> rows{};
   result.error = "scene_body_identity";
   if (!read(verified_user, 0, user_vptr) || user_vptr != image_base + layout.aircraft_controller_vtable ||
-      !read(verified_user, 336, handle) || !read(handle[0], 28, generation) || generation != static_cast<std::uint32_t>(handle[1]) ||
-      !read(handle[0], 0, node) || !node || (node & 7) || !read(verified_user, 464, alias) || alias != node || !read(node, 0, node_vptr) ||
+      !read(verified_user, 336, handle) || !span(handle[0], 32) || !read(handle[0], 28, generation) ||
+      generation != static_cast<std::uint32_t>(handle[1]) || !read(handle[0], 0, node) || !node || (node & 7) ||
+      !read(verified_user, 464, alias) || alias != node || !read(node, 0, node_vptr) ||
       node_vptr != image_base + layout.scene_node_vtable || !read(node, 256, attached) || !attached || (attached & 7) ||
       !read(attached, 0, attached_vptr) || attached_vptr != image_base + layout.scene_model_vtable || !read(attached, 160, type) ||
       type != 5 || !read(node, 296, matrix) || !matrix || (matrix & 7))
     return result;
   result.error = "scene_body_matrix";
+  // Rows are 24 bytes at a 32-byte stride: one 120-byte read serves all four.
+  if (!span(matrix, 3 * 32 + sizeof(Vector3)))
+    return result;
   for (unsigned row = 0; row < rows.size(); ++row)
     if (!read(matrix, row * 32, rows[row]))
       return result;
@@ -76,13 +119,33 @@ inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader
   if (!valid_body_pose(candidate) || radius < 6300000 || radius > 6500000)
     return result;
   result.error = "scene_body_changed";
+  std::array<std::array<unsigned char, 128>, 2> reread_spans;
+  unsigned reread = 0;
   for (unsigned i = 0; i < count; ++i) {
     const auto& field = trace[i];
-    std::array<unsigned char, 24> again{};
-    if (result.read_bytes > 1024 - field.bytes)
-      return result;
-    result.read_bytes += static_cast<std::uint32_t>(field.bytes);
-    if (!reader.read(field.address, again.data(), field.bytes) || std::memcmp(again.data(), field.value.data(), field.bytes))
+    const unsigned char* again = nullptr;
+    std::array<unsigned char, 24> single{};
+    if (field.span >= 0) {
+      const auto index = static_cast<unsigned>(field.span);
+      const auto& served = spans[index];
+      if (!(reread & (1u << index))) {
+        if (result.read_bytes > 1024 - served.bytes)
+          return result;
+        result.read_bytes += static_cast<std::uint32_t>(served.bytes);
+        if (!reader.read(served.address, reread_spans[index].data(), served.bytes))
+          return result;
+        reread |= 1u << index;
+      }
+      again = reread_spans[index].data() + (field.address - served.address);
+    } else {
+      if (result.read_bytes > 1024 - field.bytes)
+        return result;
+      result.read_bytes += static_cast<std::uint32_t>(field.bytes);
+      if (!reader.read(field.address, single.data(), field.bytes))
+        return result;
+      again = single.data();
+    }
+    if (std::memcmp(again, field.value.data(), field.bytes))
       return result;
   }
   result.pose = candidate;

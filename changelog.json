@@ -7,7 +7,8 @@
         "While the aircraft is parked, the cameras refresh twice a second, so at busy airports far fewer frames carry an extra camera view at the gate. They return to your camera frame rate as soon as the aircraft moves. Profiles that still hold the previous parked value of 5 change to 2 once; parked_rate in the profile file accepts 1 to 60, and 0 turns this off.",
         "New option, off by default: Diagnostics > Dynamic tail rate lets the tail camera skip every other update while rolling straight on a slow simulator (below about 24 fps), so fewer frames carry an extra view. In turns, and on faster simulators, both cameras update equally.",
         "Taxi Cam does less work on the simulator's threads. Its hooks no longer make the simulator's threads wait on each other while the cameras are off, which could cause occasional frame hitches, and each camera update does less work on the main thread.",
-        "Taxi Cam now reuses the capture memory of each camera instead of recreating it when the nose and tail cameras, which differ in size, take turns. While its background thread holds a lock the simulator's threads wait on, Windows now gives it priority so it is not paused mid-way. Both could cause occasional hitches of a few milliseconds."
+        "Taxi Cam now reuses the capture memory of each camera instead of recreating it when the nose and tail cameras, which differ in size, take turns. While its background thread holds a lock the simulator's threads wait on, Windows now gives it priority so it is not paused mid-way. Both could cause occasional hitches of a few milliseconds.",
+        "Each camera update reads the aircraft's position with fewer Windows memory calls on the simulator's main thread. This lowers Taxi Cam's main-thread time and the chance of a brief main-thread spike while the simulator streams scenery."
       ]
     },
     {
