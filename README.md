@@ -58,7 +58,7 @@ Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the c
 
 The cameras switch off above **60 knots**. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 
-Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. On the A340-600 and A340-300, **Ctrl + Shift + D** toggles the lower ECAM (SD). In **Settings → Overview → Flight-deck control**, select **Keyboard shortcuts…** to configure or disable them. On aircraft with working TAXI buttons, shortcuts also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard controls](docs/keyboard-shortcuts.md) for details.
+Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. On the A340-600 and A340-300, **Ctrl + Shift + D** toggles the lower ECAM (SD). In **Settings → Overview → Flight-deck control**, select **Shortcuts and buttons…** to configure or disable them. The same editor can also assign a joystick, button box or gamepad button to each action. On aircraft with working TAXI buttons, shortcuts and controller buttons also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard shortcuts and controller buttons](docs/keyboard-shortcuts.md) for details.
 
 ## Adjusting the views
 
@@ -106,7 +106,7 @@ Please report unexpected behaviour using **Report a bug**.
 
 Use **Check for updates** in the tray menu, or download the latest installer from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and Taxi Cam before installing an update. Your saved settings are kept by default; setup offers an explicit reset if you want to start again.
 
-Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, open **Overview → Flight-deck control → Keyboard shortcuts…**, select **Reset shortcuts**, then **Save changes** in that editor.
+Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, open **Overview → Flight-deck control → Shortcuts and buttons…**, select **Reset shortcuts**, then **Save changes** in that editor.
 
 Click the version number at the bottom of the settings sidebar to open the Taxi Cam GitHub repository in your browser.
 

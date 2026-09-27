@@ -103,16 +103,11 @@ inline bool load_camera_hotkeys(CameraHotkeys& chords, const std::wstring& direc
   chords = loaded;
   return true;
 }
-inline bool save_camera_hotkeys(const CameraHotkeys& chords, const std::wstring& directory) {
-  if (directory.empty() || !valid_camera_hotkeys(chords))
-    return false;
-  const auto path = directory + L"\\hotkeys.ini", temporary = path + L".tmp";
-  wchar_t value[256];
-  const int count =
-      std::swprintf(value, 256, L"[shortcuts]\r\nleft=%u\r\nright=%u\r\nboth=%u\r\nsd=%u\r\n", hotkey_control_value(chords[0]),
-                    hotkey_control_value(chords[1]), hotkey_control_value(chords[2]), hotkey_control_value(chords[3]));
+// Replaces a UTF-16 preferences file through a flushed temporary file.
+inline bool write_preferences_file(const std::wstring& path, const wchar_t* value, int count) {
   if (count <= 0)
     return false;
+  const auto temporary = path + L".tmp";
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE)
     return false;
@@ -128,6 +123,15 @@ inline bool save_camera_hotkeys(const CameraHotkeys& chords, const std::wstring&
   else
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
   return ok;
+}
+inline bool save_camera_hotkeys(const CameraHotkeys& chords, const std::wstring& directory) {
+  if (directory.empty() || !valid_camera_hotkeys(chords))
+    return false;
+  wchar_t value[256];
+  const int count =
+      std::swprintf(value, 256, L"[shortcuts]\r\nleft=%u\r\nright=%u\r\nboth=%u\r\nsd=%u\r\n", hotkey_control_value(chords[0]),
+                    hotkey_control_value(chords[1]), hotkey_control_value(chords[2]), hotkey_control_value(chords[3]));
+  return write_preferences_file(directory + L"\\hotkeys.ini", value, count);
 }
 
 class CameraHotkeyRegistration {
