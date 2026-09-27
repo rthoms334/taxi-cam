@@ -1064,16 +1064,28 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
   enabled.store(true, std::memory_order_release);
   return result("registered", 0, true);
 }
-void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
-  const auto key = registry_key(list);
+bool erase_identity(ID3D12GraphicsCommandList* key, std::uint64_t generation) noexcept {
   auto& shard = shard_for(key);
   const ShardLock lock(shard, true);
   auto& identities = shard.identities;
   const auto it = identities.find(key);
-  if (it != identities.end() && it->second.generation == generation) {
-    identities.erase(it);
-    identity_count.fetch_sub(1, std::memory_order_relaxed);
-  }
+  if (it == identities.end() || it->second.generation != generation)
+    return false;
+  identities.erase(it);
+  identity_count.fetch_sub(1, std::memory_order_relaxed);
+  return true;
+}
+// Runs from the list's private-data release while the runtime destroys it, so
+// the list is not called when its own pointer is the key: hooks register the
+// native list they receive, which is its own key. Only a registration under
+// another key (a proxy argument) pays registry_key's unwrap. Under PIX's GPU
+// capture layer, QueryInterface on a list in destruction raised an exception
+// through this noexcept path and aborted the simulator (2026-09-27).
+void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  if (erase_identity(list, generation) || !identity_count.load(std::memory_order_relaxed))
+    return;
+  if (const auto key = registry_key(list); key != list)
+    erase_identity(key, generation);
 }
 // Hooks receive the native list, which is normally its own registry key. An
 // entry under that exact pointer with the caller's generation belongs to this
