@@ -75,6 +75,7 @@ win::CameraButtons button_draft{}, button_saved{};
 win::CameraButtonInput button_input;
 win::CameraButtonRepeatGuard button_repeat;
 int button_capture = -1;  // Action waiting for a controller button in the editor.
+std::vector<win::CameraButton> button_capture_down;  // Went down while waiting; the first to come up is set.
 win::Updater updater;
 ULONGLONG next_update_check{};
 bool update_prompt{};
@@ -407,8 +408,8 @@ void refresh_shortcut_status() {
     const auto device = binding.button ? win::CameraButtonInput::device_name(binding.vendor, binding.product) : std::wstring();
     const bool capturing = button_capture == static_cast<int>(i);
     SetDlgItemTextW(shortcut_window, 670 + i,
-                    capturing ? L"Press a controller button…" : win::describe_camera_button(binding, device).c_str());
-    const auto button_state = capturing                    ? std::wstring(L"Waiting — press the button to use, or Clear to cancel")
+                    capturing ? L"Press and release a controller button…" : win::describe_camera_button(binding, device).c_str());
+    const auto button_state = capturing                    ? std::wstring(L"Waiting — press and release the button, or Clear to cancel")
                               : binding != button_saved[i] ? std::wstring(L"Unsaved — select Save changes to apply")
                               : !binding.button            ? std::wstring(L"Disabled")
                               : preview_ui                 ? std::wstring(L"Preview only — button not active")
@@ -433,15 +434,28 @@ void update_camera_button_input() {
     button_input.disable();
 }
 void toggle_camera_from_hotkey(unsigned action);
-void camera_button_pressed(win::CameraButton press) {
+void start_button_capture(int action) {
+  button_capture = action;
+  button_capture_down.clear();
+}
+void camera_button_event(win::CameraButtonEvent event) {
+  // Setting a button needs a full press: down, then up. A switch position the
+  // controller holds permanently never comes up, so it cannot be picked up.
   if (button_capture >= 0) {
-    button_draft[button_capture] = press;
-    button_capture = -1;
-    update_camera_button_input();
-    refresh_shortcut_status();
+    const auto down = std::find(button_capture_down.begin(), button_capture_down.end(), event.button);
+    if (event.pressed) {
+      if (down == button_capture_down.end() && button_capture_down.size() < 32)
+        button_capture_down.push_back(event.button);
+    } else if (down != button_capture_down.end()) {
+      button_draft[button_capture] = event.button;
+      button_capture = -1;
+      button_capture_down.clear();
+      update_camera_button_input();
+      refresh_shortcut_status();
+    }
     return;
   }
-  const int action = win::camera_button_action(button_saved, press);
+  const int action = event.pressed ? win::camera_button_action(button_saved, event.button) : -1;
   if (action >= 0 && !preview_ui && button_repeat.accept(static_cast<size_t>(action), GetTickCount64()))
     toggle_camera_from_hotkey(static_cast<unsigned>(action));
 }
@@ -561,7 +575,7 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       return TRUE;
     }
     if (id >= 680 && id < 680 + static_cast<int>(win::CameraHotkeyNames.size())) {
-      button_capture = id - 680;
+      start_button_capture(id - 680);
       update_camera_button_input();
       if (!button_input.enabled()) {
         button_capture = -1;
@@ -1719,16 +1733,18 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       return 0;
     }
     case WM_INPUT:
-      for (const auto press : button_input.read(reinterpret_cast<HRAWINPUT>(l))) {
+      for (const auto event : button_input.read(reinterpret_cast<HRAWINPUT>(l))) {
         const bool capturing = button_capture >= 0;
-        camera_button_pressed(press);
-        if (capturing)
-          break;  // Other buttons pressed with the captured one do not act.
+        camera_button_event(event);
+        if (capturing && button_capture < 0)
+          break;  // Other buttons changing with the captured one do not act.
       }
       break;  // DefWindowProc releases foreground Raw Input.
     case WM_INPUT_DEVICE_CHANGE:
       if (w == GIDC_REMOVAL)
         button_input.remove(reinterpret_cast<HANDLE>(l));
+      else if (w == GIDC_ARRIVAL)
+        button_input.arrived(reinterpret_cast<HANDLE>(l));
       refresh_shortcut_status();
       return 0;
     case WM_GETMINMAXINFO: {

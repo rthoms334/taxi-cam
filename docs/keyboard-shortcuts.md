@@ -25,9 +25,9 @@ The key combinations apply to all aircraft and are saved separately from calibra
 
 ## Controller buttons
 
-Each action can also be assigned to a button on a joystick, throttle, button box or gamepad that Windows lists as a game controller. In the editor, select **Set button** beside the action, then press the controller button. **Clear** removes the button, or stops waiting for one. Select **Save changes** to apply. No buttons are assigned by default, and **Reset shortcuts** does not change them.
+Each action can also be assigned to a button on a joystick, throttle, button box or gamepad that Windows lists as a game controller. In the editor, select **Set button** beside the action, then press and release the controller button. A switch position that the controller reports as a permanently held button, such as the engine master switches on a WinWing throttle, is never picked up. **Clear** removes the button, or stops waiting for one. Select **Save changes** to apply. No buttons are assigned by default, and **Reset shortcuts** does not change them.
 
-A button acts when it is pressed; releasing it does nothing. A switch that stays on (a latching toggle) therefore toggles the display each time it is switched on. Presses of the same button less than a quarter of a second apart count once, so switch bounce cannot turn a display straight back off. A button can drive only one action.
+A button acts when it is pressed; releasing it does nothing. Buttons already held when Taxi Cam starts listening, or when a controller is connected, are not presses. A switch that stays on (a latching toggle) therefore toggles the display each time it is switched on. Presses of the same button less than a quarter of a second apart count once, so switch bounce cannot turn a display straight back off. A button can drive only one action.
 
 Controller buttons work while MSFS has focus and Taxi Cam is hidden, and behave like the shortcuts above: the same aircraft button synchronization, session and speed rules apply. MSFS also receives every controller button, so choose one that has no assignment in the simulator's controls, or clear its assignment there. Taxi Cam cannot detect a simulator assignment.
 

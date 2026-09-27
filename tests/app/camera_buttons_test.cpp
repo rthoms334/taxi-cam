@@ -81,31 +81,54 @@ void persistence_checks(const std::wstring& directory) {
 }
 
 void edge_checks() {
+  using Buttons = std::vector<std::uint16_t>;
   ButtonReportState state;
-  std::vector<std::uint16_t> newly;
-  state.update(0, {3, 1}, newly);
-  require((newly == std::vector<std::uint16_t>{1, 3}), "Buttons down in the first report are presses");
-  newly.clear();
-  state.update(0, {1, 3}, newly);
-  require(newly.empty(), "Held buttons do not repeat while axes keep reporting");
-  state.update(0, {3, 3, 4}, newly);
-  require((newly == std::vector<std::uint16_t>{4}), "Only newly pressed buttons are reported, once each");
-  newly.clear();
-  state.update(0, {}, newly);
-  state.update(0, {1}, newly);
-  require((newly == std::vector<std::uint16_t>{1}), "Release then press is a new press");
-  newly.clear();
+  Buttons down, up;
+  state.update(0, {3, 1}, down, up);
+  require(down == Buttons{1, 3} && up.empty(), "Outside the baseline, buttons down in a first report are presses");
+  down.clear();
+  state.update(0, {1, 3}, down, up);
+  require(down.empty() && up.empty(), "Held buttons do not repeat while axes keep reporting");
+  state.update(0, {3, 3, 4}, down, up);
+  require(down == Buttons{4} && up == Buttons{1}, "Changes are reported once each, in both directions");
+  down.clear();
+  up.clear();
+  state.update(0, {}, down, up);
+  state.update(0, {1}, down, up);
+  require(down == Buttons{1} && up == Buttons{3, 4}, "Release then press is a new press");
+  down.clear();
+  up.clear();
   // Buttons 1-32 in report 1 and 33-64 in report 2.
   ButtonReportState split;
-  split.update(1, {2}, newly);
-  split.update(2, {40}, newly);
-  newly.clear();
-  split.update(2, {40}, newly);
-  split.update(1, {2}, newly);
-  require(newly.empty(), "A report that does not carry a button is not its release");
-  split.update(1, {}, newly);
-  split.update(2, {40, 41}, newly);
-  require((newly == std::vector<std::uint16_t>{41}), "Each report ID keeps its own held buttons");
+  split.update(1, {2}, down, up);
+  split.update(2, {40}, down, up);
+  down.clear();
+  split.update(2, {40}, down, up);
+  split.update(1, {2}, down, up);
+  require(down.empty() && up.empty(), "A report that does not carry a button is not its release");
+  split.update(1, {}, down, up);
+  split.update(2, {40, 41}, down, up);
+  require(down == Buttons{41} && up == Buttons{2}, "Each report ID keeps its own held buttons");
+  // Recorded idle WinWing URSA MINOR throttle: switch positions stream as held.
+  const Buttons throttle{2, 4, 8, 15, 21, 27, 30, 35, 38};
+  ButtonReportState winwing;
+  down.clear();
+  up.clear();
+  winwing.update(1, throttle, down, up, true);
+  winwing.update(1, throttle, down, up, true);
+  winwing.update(1, throttle, down, up);
+  require(down.empty() && up.empty(), "Held switch positions at the start are not presses");
+  auto engine_on = throttle;
+  engine_on.erase(engine_on.begin());
+  engine_on.push_back(1);
+  winwing.update(1, engine_on, down, up);
+  require(down == Buttons{1} && up == Buttons{2}, "Moving a held switch reports its new position as a press");
+  down.clear();
+  up.clear();
+  ButtonReportState later;
+  later.update(1, {}, down, up, true);
+  later.update(1, {6}, down, up, true);
+  require(down == Buttons{6}, "The baseline only records a report ID's first report");
 }
 
 void repeat_checks() {

@@ -4,7 +4,8 @@
       "version": "0.9.47",
       "date": "2026-09-27",
       "changes": [
-        "New: assign a joystick, throttle, button box or gamepad button to the Left, Right, Both and SD camera actions. In Overview > Flight-deck control, select Shortcuts and buttons…, then Set button beside an action and press the button. Buttons work while Taxi Cam is hidden. MSFS also receives them, so use buttons that have no assignment in the simulator."
+        "New: assign a joystick, throttle, button box or gamepad button to the Left, Right, Both and SD camera actions. In Overview > Flight-deck control, select Shortcuts and buttons…, then Set button beside an action and press and release the button. Switches that are held on or off, such as throttle engine masters, are not picked up or treated as presses. Buttons work while Taxi Cam is hidden.",
+        "MSFS also receives controller buttons, so use buttons that have no assignment in the simulator."
       ]
     },
     {

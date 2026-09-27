@@ -132,19 +132,41 @@ inline std::wstring describe_camera_button(CameraButton binding, const std::wstr
 // carry a button is never read as its release.
 class ButtonReportState {
  public:
-  // Records the report's pressed buttons and appends those not already held.
-  void update(std::uint8_t report_id, std::vector<std::uint16_t> pressed, std::vector<std::uint16_t>& newly) {
+  // Records the report's pressed buttons, appending those that went down and
+  // those that came up. A baseline report only records what is already held:
+  // switch positions such as the WinWing throttle's engine masters report as
+  // permanently held buttons, and are not presses.
+  void update(std::uint8_t report_id,
+              std::vector<std::uint16_t> pressed,
+              std::vector<std::uint16_t>& down,
+              std::vector<std::uint16_t>& up,
+              bool baseline = false) {
     std::sort(pressed.begin(), pressed.end());
     pressed.erase(std::unique(pressed.begin(), pressed.end()), pressed.end());
     auto held = std::find_if(held_.begin(), held_.end(), [&](const auto& entry) { return entry.first == report_id; });
-    if (held == held_.end())
+    if (held == held_.end()) {
       held = held_.insert(held_.end(), {report_id, {}});
-    std::set_difference(pressed.begin(), pressed.end(), held->second.begin(), held->second.end(), std::back_inserter(newly));
+      if (baseline) {
+        held->second = std::move(pressed);
+        return;
+      }
+    }
+    std::set_difference(pressed.begin(), pressed.end(), held->second.begin(), held->second.end(), std::back_inserter(down));
+    std::set_difference(held->second.begin(), held->second.end(), pressed.begin(), pressed.end(), std::back_inserter(up));
     held->second = std::move(pressed);
   }
 
  private:
   std::vector<std::pair<std::uint8_t, std::vector<std::uint16_t>>> held_;
+};
+// Reports that first arrive this soon after listening starts, or after a
+// controller arrives, only record held buttons. Controllers with axes stream
+// reports continuously, so they settle well inside it; a controller that
+// reports only on change has sent nothing and its first press still counts.
+inline constexpr std::uint64_t CameraButtonBaselineMs = 500;
+struct CameraButtonEvent {
+  CameraButton button;
+  bool pressed{};  // False when the button was released.
 };
 // Switch bounce would otherwise turn a display straight back off.
 inline constexpr std::uint64_t CameraButtonRepeatMs = 250;
@@ -187,6 +209,7 @@ class CameraButtonInput {
     }
     window_ = window;
     error_ = 0;
+    baseline_until_ = GetTickCount64() + CameraButtonBaselineMs;
     return true;
   }
   void disable() noexcept {
@@ -199,9 +222,9 @@ class CameraButtonInput {
   }
   bool enabled() const noexcept { return window_ != nullptr; }
   DWORD error() const noexcept { return error_; }
-  // Buttons that went down in one WM_INPUT message.
-  std::vector<CameraButton> read(HRAWINPUT handle) {
-    std::vector<CameraButton> presses;
+  // Buttons that went down or came up in one WM_INPUT message.
+  std::vector<CameraButtonEvent> read(HRAWINPUT handle) {
+    std::vector<CameraButtonEvent> presses;
     UINT size{};
     if (!window_ || GetRawInputData(handle, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 || size < sizeof(RAWINPUTHEADER))
       return presses;
@@ -218,6 +241,7 @@ class CameraButtonInput {
         std::uint64_t(hid.dwSizeHid) * hid.dwCount > std::uint64_t(size - offset))
       return presses;
     const auto preparsed = reinterpret_cast<PHIDP_PREPARSED_DATA>(device.preparsed.data());
+    const bool baseline = GetTickCount64() < device.baseline_until;
     for (DWORD r = 0; r < hid.dwCount; ++r) {
       auto* report = reinterpret_cast<CHAR*>(const_cast<BYTE*>(hid.bRawData) + std::size_t(r) * hid.dwSizeHid);
       auto count = static_cast<ULONG>(device.usages.size());
@@ -225,13 +249,24 @@ class CameraButtonInput {
       if (HidP_GetUsages(HidP_Input, HID_USAGE_PAGE_BUTTON, 0, device.usages.data(), &count, preparsed, report, hid.dwSizeHid) !=
           HIDP_STATUS_SUCCESS)
         continue;
-      newly_.clear();
+      down_.clear();
+      up_.clear();
       device.state.update(device.report_ids ? static_cast<std::uint8_t>(report[0]) : 0,
-                          std::vector<std::uint16_t>(device.usages.begin(), device.usages.begin() + count), newly_);
-      for (const auto button : newly_)
-        presses.push_back({device.vendor, device.product, button});
+                          std::vector<std::uint16_t>(device.usages.begin(), device.usages.begin() + count), down_, up_, baseline);
+      for (const auto button : down_)
+        presses.push_back({{device.vendor, device.product, button}, true});
+      for (const auto button : up_)
+        presses.push_back({{device.vendor, device.product, button}, false});
     }
     return presses;
+  }
+  // A controller plugged in while listening settles like one present at start.
+  // Windows also announces every present controller after registration.
+  void arrived(HANDLE handle) {
+    if (!window_)
+      return;
+    devices_.erase(handle);
+    find(handle).baseline_until = GetTickCount64() + CameraButtonBaselineMs;
   }
   // Raw Input handles can be reused after a controller is unplugged.
   void remove(HANDLE device) { devices_.erase(device); }
@@ -273,6 +308,7 @@ class CameraButtonInput {
     std::vector<USAGE> usages;
     ButtonReportState state;
     bool report_ids{};
+    std::uint64_t baseline_until{};
   };
   static std::array<RAWINPUTDEVICE, 3> collections(DWORD flags, HWND window) {
     constexpr USHORT MultiAxisController = 0x08;
@@ -294,6 +330,7 @@ class CameraButtonInput {
     if (existing != devices_.end())
       return existing->second;
     auto& device = devices_[handle];
+    device.baseline_until = baseline_until_;
     RID_DEVICE_INFO info{};
     UINT size{};
     if (!controller(handle, info) || GetRawInputDeviceInfoW(handle, RIDI_PREPARSEDDATA, nullptr, &size) != 0 || !size)
@@ -323,8 +360,9 @@ class CameraButtonInput {
   Register register_;
   HWND window_{};
   DWORD error_{};
+  std::uint64_t baseline_until_{};
   std::unordered_map<HANDLE, Device> devices_;
   std::vector<std::uint64_t> buffer_;
-  std::vector<std::uint16_t> newly_;
+  std::vector<std::uint16_t> down_, up_;
 };
 }  // namespace taxi_camera::standalone
