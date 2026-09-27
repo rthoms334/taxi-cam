@@ -905,6 +905,7 @@ void build_controls() {
     edit(s.calibration_budget, 203, 840, 548, 120);
     button(L"Open log folder", 510, 260, 591, 210);
     button(L"Stop camera tests", 511, 500, 591, 210);
+    toggle(L"Dynamic tail rate", 235, s.dynamic_tail, 740, 591, 250);
   } else if (page == 5) {
     const auto* guide_profile = profiles::find(s.profile);
     const bool draw_guides = !guide_profile || guide_profile->reference_guides;
@@ -1120,7 +1121,7 @@ void draw_page(HDC dc) {
     const wchar_t* descriptions[]{L"Exposure compensation in EV. Your calibrated baseline is −8.8.",
                                   L"Gradually brighten the camera display as ambient light drops.",
                                   L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
-                                  L"Per camera, 5–60; default 10. Parked aircraft use the 5 fps floor; higher rates are capped."};
+                                  L"Per camera, 5–60; default 10. Parked aircraft refresh twice a second; higher rates are capped."};
     for (int i = 0; i < 4; ++i) {
       panel(dc, 244, ys[i], 766, 105);
       text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);
@@ -1581,6 +1582,8 @@ bool is_on(int id, const win::Settings& s) {
       return s.calibration_mask & 4;
     case 228:
       return s.single_camera;
+    case 235:
+      return s.dynamic_tail;
     case 229:
       return s.scene_test;
     default:
@@ -1931,7 +1934,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_connection();
         return 0;
       }
-      if ((id >= 221 && id <= 229) || id == 232 || id == 233) {
+      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235) {
         if (!apply(false))
           return 0;
         auto s = draft();
@@ -1964,6 +1967,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         if (id == 228)
           s.single_camera = !s.single_camera;
+        if (id == 235)
+          s.dynamic_tail = !s.dynamic_tail;
         if (id == 229)
           s.scene_test = !s.scene_test;
         publish(s);

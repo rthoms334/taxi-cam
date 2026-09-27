@@ -13,6 +13,7 @@
 #include "manager_inspection.hpp"
 #include "owned_entry_inventory.hpp"
 #include "owned_view.hpp"
+#include "pose_source_cache.hpp"
 #include "probe_inspection_gate.hpp"
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
@@ -80,6 +81,16 @@ struct Runtime {
   double observer_last_ms = 0;
   double observer_max_ms = 0;
   ProbePerformance performance;
+  // Slowest update since the worker's last take_observer_peak(). peak_local_ms
+  // is observer-thread only; peak is guarded by mutex and written only when an
+  // update sets a new maximum, so ordinary updates take no lock for it.
+  double peak_local_ms = 0;
+  std::atomic<bool> peak_reset{false};
+  ObserverPeak peak;
+  // Proven aircraft controller for the camera pose (observer thread). A session
+  // reset from any thread advances pose_source_resets, which retires it.
+  PoseSourceCache pose_source;
+  std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
   std::array<ec::EntryId, kMaxCameraFeeds> scheduled_ids{};
@@ -100,6 +111,12 @@ struct Runtime {
   // Consecutive activation pulses refused because the diffuse texture had no
   // render-target record; bounded by ViewResizeWarmup::MaximumOutputWaits.
   unsigned rt_record_refusals = 0;
+  // Last add-diffuse/depth-stencil slot digits per feed. Pair inspections
+  // observe those diagnostic-only slots at most once a second; between samples
+  // the retention log repeats the last observation of the same entry.
+  std::array<std::uint32_t, kMaxCameraFeeds> slot_digits{};
+  std::array<ec::EntryId, kMaxCameraFeeds> slot_digit_ids{};
+  std::uint64_t slot_digits_ms = 0;
   std::uint64_t rt_record_holds = 0;
   std::array<std::uint64_t, kMaxCameraFeeds> owned_pool_views{};
   std::uint64_t owned_pool_renderer{};
@@ -153,6 +170,7 @@ Runtime& state() {
 
 // Caller owns the mailbox mutex. No native engine call is made here.
 void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& profile) {
+  runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
   runtime.reset_requested.store(true, std::memory_order_release);
   runtime.suspended.store(true, std::memory_order_release);
   scene_handoff().stop_scene();
@@ -212,19 +230,31 @@ void publish_transition(Runtime& runtime, ProbeSnapshot& report) {
 
 class StageTimer {
  public:
-  StageTimer(Runtime& runtime, ProbeStage stage) noexcept : runtime_(runtime), stage_(stage) { QueryPerformanceCounter(&started_); }
+  StageTimer(Runtime& runtime, ProbeStage stage) noexcept : runtime_(runtime), stage_(stage) {
+    if (const auto* metrics = active_local_memory_metrics()) {
+      reads_ = metrics->read_calls;
+      queries_ = metrics->query_calls;
+    }
+    QueryPerformanceCounter(&started_);
+  }
   ~StageTimer() {
     LARGE_INTEGER finished{};
+    const auto index = static_cast<std::size_t>(stage_);
     if (QueryPerformanceCounter(&finished) && started_.QuadPart > 0 && finished.QuadPart >= started_.QuadPart &&
         runtime_.counter_frequency.QuadPart > 0)
-      runtime_.performance.stage_ms[static_cast<std::size_t>(stage_)] +=
+      runtime_.performance.stage_ms[index] +=
           static_cast<double>(finished.QuadPart - started_.QuadPart) * 1000.0 / runtime_.counter_frequency.QuadPart;
+    if (const auto* metrics = active_local_memory_metrics()) {
+      runtime_.performance.stage_reads[index] += static_cast<std::uint32_t>(metrics->read_calls - reads_);
+      runtime_.performance.stage_queries[index] += static_cast<std::uint32_t>(metrics->query_calls - queries_);
+    }
   }
 
  private:
   Runtime& runtime_;
   ProbeStage stage_;
   LARGE_INTEGER started_{};
+  std::uint64_t reads_ = 0, queries_ = 0;
 };
 
 template <typename Operation>
@@ -504,28 +534,56 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
   // transform during a taxi turn. Retain its session/freshness/plausibility
   // guards, but never use it as the mount transform or interpolate toward it.
   LocalMemoryReader objects;
-  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-  std::uint64_t user = 0;
-  const auto aircraft = inspected(
-      runtime,
-      [&] {
-        return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
-                                                    runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr, &user,
-                                                    runtime.contract.layout);
-      },
-      &memory_detail);
-  if (!aircraft.valid || !aircraft.available || !user) {
-    runtime.pose_busy = true;
-    runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
-    if (!memory_detail.empty())
-      runtime.message += " " + memory_detail;
-    return false;
+  AircraftScenePose scene;
+  const auto now = GetTickCount64();
+  const auto epoch = get_aircraft_session_readiness().epoch;
+  const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+  // A controller proven by the full walk less than a second ago in this session
+  // skips the walk. Its scene read keeps every identity check and the public
+  // pose match; anything unexpected forgets it and proves the chain again now.
+  std::uint64_t user = runtime.pose_source.reuse(now, epoch, resets);
+  if (user) {
+    scene = inspected(
+        runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
+    if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose)) {
+      runtime.pose_source.forget();
+      user = 0;
+      scene = {};
+      memory_detail.clear();
+      objects.reset_budget();
+    }
   }
-  objects.reset_budget();
-  const auto scene =
-      inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
+  if (!user) {
+    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+    // One read-only scope for the aircraft walk and the scene pose it leads to:
+    // pages and allocations are proven once and revalidated together at its end.
+    // Nothing is published unless that endpoint validation succeeds.
+    const auto aircraft = inspected(
+        runtime,
+        [&] {
+          auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
+                                                            runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr,
+                                                            &user, runtime.contract.layout);
+          if (found.valid && found.available && user) {
+            objects.reset_budget();
+            scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
+          }
+          return found;
+        },
+        &memory_detail);
+    if (!aircraft.valid || !aircraft.available || !user) {
+      runtime.pose_busy = true;
+      runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
+      if (!memory_detail.empty())
+        runtime.message += " " + memory_detail;
+      return false;
+    }
+    if (scene.complete && scene_body_matches_public(scene.pose, body.pose))
+      runtime.pose_source.prove(user, now, epoch, resets);
+  }
   if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose) ||
       !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+    runtime.pose_source.forget();
     runtime.pose_busy = true;
     runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") +
                       (scene.complete ? "public_pose_mismatch" : scene.error);
@@ -591,6 +649,8 @@ void inspect_pair(Runtime& runtime,
   }
   reader.reset_budget();
   const auto entries = timed(runtime, ProbeStage::entries, [&] { return ec::inspect_owned_entries(reader, runtime.manager, ids); });
+  const auto slots_now = GetTickCount64();
+  const bool sample_slots = runtime.slot_digit_ids != ids || slots_now - runtime.slot_digits_ms >= 1000;
   runtime.performance.entry_count = entries.entry_count;
   runtime.performance.bucket_count = entries.bucket_count;
   if (!entries.complete) {
@@ -609,7 +669,7 @@ void inspect_pair(Runtime& runtime,
     }
     reader.reset_budget();
     const auto view = timed(runtime, i == 0 ? ProbeStage::first_view : ProbeStage::second_view,
-                            [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool); });
+                            [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool, sample_slots); });
     views[i] = view;
     report.inspection_status[i] = ec::owned_view_status_name(view.status);
     report.ready[i] = view.complete && view.ready;
@@ -624,7 +684,15 @@ void inspect_pair(Runtime& runtime,
     report.resource_present[i] = report.ready[i] && view.resource_present;
     report.output_ready[i] =
         report.ready[i] && runtime.resized_ids[i] == ids[i] && owned_view_output_ready(view, runtime.resized_dimensions[i]);
-    report.output_slots[i] = view.complete && view.ready ? owned_view_slot_digits(view) : 0u;
+    if (view.complete && view.ready && view.diagnostic_slots_observed) {
+      runtime.slot_digits[i] = owned_view_slot_digits(view) & 0xFFu;
+      runtime.slot_digit_ids[i] = ids[i];
+      runtime.slot_digits_ms = slots_now;
+    }
+    report.output_slots[i] = !(view.complete && view.ready) ? 0u
+                             : view.diagnostic_slots_observed || runtime.slot_digit_ids[i] != ids[i]
+                                 ? owned_view_slot_digits(view)
+                                 : (owned_view_slot_digits(view) & ~0xFFu) | runtime.slot_digits[i];
     if (report.ready[i]) {
       report.dimensions[i] = view.dimensions;
       report.flags[i] = view.flags;
@@ -1369,6 +1437,32 @@ bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
   begin_session_reset(runtime, *runtime.requested_profile);
   return true;
 }
+// Observer thread. Measures the whole update after its own work, including
+// throttled and idle returns, and keeps the interval's slowest one.
+void record_observer_peak(Runtime& runtime, LARGE_INTEGER entered, LARGE_INTEGER started, bool serviced) noexcept {
+  LARGE_INTEGER finished{};
+  if (!runtime.counter_frequency.QuadPart)
+    QueryPerformanceFrequency(&runtime.counter_frequency);
+  if (!QueryPerformanceCounter(&finished) || runtime.counter_frequency.QuadPart <= 0 || !entered.QuadPart ||
+      finished.QuadPart < entered.QuadPart)
+    return;
+  if (runtime.peak_reset.load(std::memory_order_acquire) && runtime.peak_reset.exchange(false, std::memory_order_acq_rel))
+    runtime.peak_local_ms = 0;
+  const auto milliseconds_per_tick = 1000.0 / static_cast<double>(runtime.counter_frequency.QuadPart);
+  const auto total_ms = static_cast<double>(finished.QuadPart - entered.QuadPart) * milliseconds_per_tick;
+  if (total_ms <= runtime.peak_local_ms)
+    return;
+  runtime.peak_local_ms = total_ms;
+  serviced = serviced && started.QuadPart >= entered.QuadPart;
+  try {
+    const std::lock_guard lock(runtime.mutex);
+    runtime.peak.total_ms = total_ms;
+    runtime.peak.pre_ms = serviced ? static_cast<double>(started.QuadPart - entered.QuadPart) * milliseconds_per_tick : total_ms;
+    runtime.peak.serviced = serviced;
+    runtime.peak.performance = serviced ? runtime.performance : ProbePerformance{};
+  } catch (...) {
+  }
+}
 void observer(void* manager) noexcept {
   auto& runtime = state();
   if (!runtime.enabled.load(std::memory_order_acquire) || runtime.observing.test_and_set(std::memory_order_acquire))
@@ -1378,8 +1472,17 @@ void observer(void* manager) noexcept {
     Runtime& runtime;
     ~Guard() { runtime.observing.clear(std::memory_order_release); }
   } guard{runtime};
+  LARGE_INTEGER entered{};
+  QueryPerformanceCounter(&entered);
   bool serviced = false;
   LARGE_INTEGER started{};
+  struct PeakRecorder {
+    Runtime& runtime;
+    const LARGE_INTEGER& entered;
+    const LARGE_INTEGER& started;
+    const bool& serviced;
+    ~PeakRecorder() { record_observer_peak(runtime, entered, started, serviced); }
+  } peak_recorder{runtime, entered, started, serviced};
   LocalMemoryMetrics memory_metrics;
   ScopedLocalMemoryMetrics memory_scope(memory_metrics);
   try {
@@ -1418,7 +1521,7 @@ void observer(void* manager) noexcept {
       }
     }
     auto next_schedule = runtime.schedule;
-    next_schedule.configure(settings & 0xffu, settings >> 8);
+    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
     std::array<bool, kMaxCameraFeeds> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
@@ -1844,7 +1947,7 @@ void observer(void* manager) noexcept {
           // The early tick only decides whether validation is necessary. Anchor
           // the committed pulse near its call after potentially slow reads.
           next_schedule = runtime.schedule;
-          next_schedule.configure(settings & 0xffu, settings >> 8);
+          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
           if (new_pair) {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
@@ -2344,8 +2447,9 @@ void suspend_scene_rendering(bool suspended) noexcept {
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
 }
 
-void request_scene_rate(unsigned rate, unsigned feeds) noexcept {
-  const auto settings = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8);
+void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {
+  const auto settings = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
+                        (nose_priority ? 1u << 16 : 0u);
   state().requested_settings.store(settings, std::memory_order_release);
 }
 
@@ -2391,8 +2495,22 @@ ProbeSnapshot scene_snapshot() {
   result.stop_detail = runtime.stop_detail;
   const auto settings = runtime.requested_settings.load(std::memory_order_acquire);
   result.requested_rate = settings & 0xffu;
-  result.requested_feeds = settings >> 8;
+  result.requested_feeds = (settings >> 8) & 0xffu;
+  result.requested_nose_priority = ((settings >> 16) & 1u) != 0;
   result.mounts = runtime.requested_mounts;
+  return result;
+}
+
+ObserverPeak take_observer_peak() noexcept {
+  auto& runtime = state();
+  ObserverPeak result;
+  try {
+    const std::lock_guard lock(runtime.mutex);
+    result = runtime.peak;
+    runtime.peak = {};
+  } catch (...) {
+  }
+  runtime.peak_reset.store(true, std::memory_order_release);
   return result;
 }
 

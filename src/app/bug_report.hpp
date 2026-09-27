@@ -57,7 +57,8 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
   };
   out << "Profile=";
   profile(s.profile);
-  out << "; service=" << s.enabled << "; fps=" << s.camera_rate << "; parked_fps=" << s.parked_rate << '\n';
+  out << "; service=" << s.enabled << "; fps=" << s.camera_rate << "; parked_fps=" << s.parked_rate << "; dynamic_tail=" << s.dynamic_tail
+      << '\n';
   out << "TAXI_follow=" << s.follow_taxi << "; preview_mask=" << s.manual_mask << "; calibration_mask=" << s.calibration_mask
       << "; scene_test=" << s.scene_test << "; first_camera_only=" << s.single_camera << '\n';
   out << "Auto_detect=" << s.auto_detect << "; requested_PFDs=" << s.left_id << '/' << s.right_id << '/' << s.lower_id

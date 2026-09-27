@@ -509,6 +509,7 @@ void known_list_and_idle_checks() {
   target->id = 61;
   target->display_shape = true;
   constexpr D3D12_CPU_DESCRIPTOR_HANDLE handle{0x6120};
+  r.remember_rtv(handle.ptr);  // As replace_view does before storing a tracked view.
   r.rtvs[handle.ptr] = {target, DXGI_FORMAT_R8G8B8A8_UNORM, 0, handle.ptr};
   TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
   require(target_forwards == 1 && item->count == 1 && item->targets[0].resource == target && !item->snapshot_rtvs,
@@ -524,6 +525,7 @@ void known_list_and_idle_checks() {
   scene->native = reinterpret_cast<ID3D12Resource*>(0x6200);
   scene->id = 62;
   constexpr D3D12_CPU_DESCRIPTOR_HANDLE scene_handle{0x6220};
+  r.remember_rtv(scene_handle.ptr);
   r.rtvs[scene_handle.ptr] = {scene, DXGI_FORMAT_R8G8B8A8_UNORM, 0, scene_handle.ptr};
   TargetsHook::invoke(forward_targets, native, 1, &scene_handle, FALSE, nullptr);
   win::after_draw(nullptr, native, item->id, true);
@@ -533,6 +535,36 @@ void known_list_and_idle_checks() {
   ClearHook::invoke(inner_clear, native, nullptr);
   win::after_draw(nullptr, native, item->id, true);
   require(item->count == 0 && target->draws == 1, "Idle ClearState must end target activity without retaining stale RTV bindings");
+  {
+    // An idle recording binding only handles the RTV filter has never seen
+    // must not touch the registry lock: hold it on another thread and require
+    // the binding to complete without a contended wait. A tracked handle must
+    // still take the locked lookup and report the expired wait.
+    const auto contention = [&] { return r.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)].load(); };
+    constexpr D3D12_CPU_DESCRIPTOR_HANDLE untracked{0x7770};
+    require(!r.may_track_rtv(untracked.ptr), "Fixture handle unexpectedly shares the tracked handle's filter bit");
+    std::atomic<bool> held{false}, release{false};
+    std::thread holder([&] {
+      const std::lock_guard lock(r.mutex);
+      held = true;
+      while (!release)
+        std::this_thread::yield();
+    });
+    while (!held)
+      std::this_thread::yield();
+    const auto before = contention();
+    TargetsHook::invoke(forward_targets, native, 1, &untracked, FALSE, nullptr);
+    const bool skipped = contention() == before && item->count == 1 && !item->targets[0].resource;
+    TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
+    const bool locked = contention() == before + 1 && item->count == 0;
+    release = true;
+    holder.join();
+    require(skipped, "Idle binding of untracked RTV handles waited on the registry lock");
+    require(locked, "A tracked RTV handle bypassed the registry lookup");
+    TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
+    require(item->count == 1 && item->targets[0].resource == target, "Tracked idle binding was lost after the filter check");
+    ClearHook::invoke(inner_clear, native, nullptr);
+  }
   r.rtvs.erase(handle.ptr);
   D3D12_RESOURCE_BARRIER barrier{};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -578,6 +610,55 @@ void known_list_and_idle_checks() {
           "A native Reset spanning idle and resume must remain stale");
   reset_result = ResetResult::success;
   require(win::reset(native, nullptr, nullptr) == S_OK && win::recording_observed(*item), "Next wholly observed Reset must recover");
+  {
+    // With the registry lock held elsewhere: mirrored lists and resources are
+    // found without it, a retired mirror entry is not trusted, and an observed
+    // recording binds untracked handles without it unless a PFD draw is pending.
+    const auto contention = [&] { return r.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)].load(); };
+    std::atomic<bool> held{false}, release{false};
+    std::thread holder([&] {
+      const std::lock_guard lock(r.mutex);
+      held = true;
+      while (!release)
+        std::this_thread::yield();
+    });
+    while (!held)
+      std::this_thread::yield();
+    const auto before = contention();
+    win::bypass_known_list_cache = true;
+    const auto locks_before = win::registry_lookup_calls;
+    const bool unmirrored_refused = !win::find_list(native) && win::lookup_contended;
+    r.list_index.assign(native, item);
+    const bool mirrored = win::find_list(native) == item && win::registry_lookup_calls == locks_before + 1;
+    auto mirrored_resource = std::make_shared<win::Resource>();
+    mirrored_resource->native = reinterpret_cast<ID3D12Resource*>(0x6300);
+    mirrored_resource->id = 63;
+    r.resource_index.assign(mirrored_resource->native, mirrored_resource);
+    const bool resource_found = win::resource(mirrored_resource->native) == mirrored_resource;
+    mirrored_resource->alive = false;
+    const auto after_lookups = contention();
+    const bool retired_refused = !win::resource(mirrored_resource->native);
+    const bool retired_used_registry = contention() == after_lookups + 1;
+    win::bypass_known_list_cache = false;
+    constexpr D3D12_CPU_DESCRIPTOR_HANDLE untracked{0x7780};
+    const auto observed_before = contention();
+    TargetsHook::invoke(forward_targets, native, 1, &untracked, FALSE, nullptr);
+    const bool observed_skipped = contention() == observed_before && item->count == 1 && !item->targets[0].resource;
+    item->pending_rt = {true, false};
+    TargetsHook::invoke(forward_targets, native, 1, &untracked, FALSE, nullptr);
+    const bool pending_locked = contention() == observed_before + 1;
+    item->pending_rt = {};
+    release = true;
+    holder.join();
+    require(unmirrored_refused && contention() >= before + 1, "An unmirrored list lookup bypassed the registry");
+    require(mirrored, "A mirrored list still needed the registry lock");
+    require(resource_found, "A mirrored resource still needed the registry lock");
+    require(retired_refused && retired_used_registry, "A retired mirror entry was trusted");
+    require(observed_skipped, "An observed recording took the registry lock to bind untracked handles");
+    require(pending_locked, "A pending PFD draw skipped the locked binding and its descriptor snapshots");
+    r.resource_index.erase(mirrored_resource->native, mirrored_resource.get());
+    r.list_index.erase(native, item.get());
+  }
   reset_result = ResetResult::fail;
   require(win::reset(native, nullptr, nullptr) == E_FAIL && !item->ready, "Failed native Reset cannot admit a recording");
   require(reset_forwards == 4, "Native Reset must forward exactly once per request");
@@ -750,6 +831,7 @@ void unbound_clear_suffix_checks() {
   win::View view;
   view.resource = resource;
   view.rtv = handle;
+  r.remember_rtv(handle);
   r.rtvs[handle] = view;
   r.selected_native[0].store(resource->native);
   r.selected_mask.store(1);
@@ -1084,6 +1166,22 @@ int main() {
     win::metadata_end(nullptr, native, 41);
     replacement->copy_proof.after_draw(first_key);
     require(replacement->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::unknown, "Deselection failed to clear retained proof");
+    {
+      // The first report only sets the interval baseline; the next names the
+      // registry lines that held the lock since then, with list misses.
+      char report[1400];
+      win::lock_hold_report(report, sizeof(report));
+      win::known_lists = {};
+      win::find_list(native);
+      {
+        const win::WorkerRegistryLock held(r);
+      }
+      win::lock_hold_report(report, sizeof(report));
+      const std::string text(report);
+      require(text.rfind("Lock holds (site=count/total_us/max_us)", 0) == 0 && text.find(" registry: L") != std::string::npos &&
+                  text.find("list_misses=1 ") != std::string::npos && text.find("; manager:") != std::string::npos,
+              "Lock hold report is malformed or missed the registry holds");
+    }
     std::printf(
         "{\"checks\":%u,\"barriers\":%zu,\"unscopedLookups\":%llu,\"batchedLookups\":%llu,\"unscopedMs\":%.3f,\"batchedMs\":%.3f,"
         "\"nativeGpuCalls\":0}\n",

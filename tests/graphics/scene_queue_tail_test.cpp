@@ -697,11 +697,51 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
             "Tail allocator/list retained the snapshot's previous device");
     check(packet.tail_list->Close(), "Close unused other-device tail list");
   }
+  {
+    // Feeds of different sizes alternate. A capture must reuse the idle packet
+    // that already holds its shape, then an empty slot, and release another
+    // shape's texture only last; first-fit recreated one per alternation.
+    const auto shape = [](UINT64 width, UINT height) {
+      D3D12_RESOURCE_DESC desc{};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Width = width;
+      desc.Height = height;
+      desc.DepthOrArraySize = desc.MipLevels = 1;
+      desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      desc.SampleDesc.Count = 1;
+      return desc;
+    };
+    const auto nose = shape(64, 32), tail = shape(32, 32);
+    auto& packets = manager->packets_;
+    const auto last = packets.size() - 1;
+    for (const auto& [index, desc] : {std::pair{std::size_t{0}, nose}, std::pair{std::size_t{1}, tail}}) {
+      check(packets[index].gpu.initialize(device.p, desc), "Initialize a shaped idle packet");
+      packets[index].description = desc;
+      packets[index].device_key = DeviceKey;
+    }
+    auto order = manager->reuse_order(DeviceKey, tail);
+    require(order[0] == 1 && order[1] == 2 && order[last] == 0, "Tail capture reuses its idle shape before an empty slot or the nose's");
+    order = manager->reuse_order(DeviceKey, nose);
+    require(order[0] == 0 && order[1] == 2 && order[last] == 1, "Nose capture reuses its idle shape and leaves the tail's");
+    order = manager->reuse_order(DeviceKey + 1, nose);
+    require(order[0] == 2 && order[last - 1] == 0 && order[last] == 1, "Another device's idle packets are reused only after empty slots");
+    unsigned seen = 0;
+    for (const auto index : order)
+      seen |= 1u << index;
+    require(seen == (1u << packets.size()) - 1, "Reuse order visits every packet slot once");
+    for (const std::size_t index : {0u, 1u}) {
+      require(packets[index].gpu.release_idle(), "Release the shaped test packet");
+      packets[index].description = {};
+      packets[index].device_key = 0;
+    }
+  }
   require(manager->source_rate_ == taxi_camera::kDefaultCameraRate, "Capture rate default remains the shipped default");
-  for (const auto setting :
-       std::array<std::array<std::uint32_t, 2>, 8>{{{0, 5}, {4, 5}, {5, 5}, {14, 14}, {20, 20}, {60, 60}, {61, 60}, {0xffffffffu, 60}}}) {
+  for (const auto setting : std::array<std::array<std::uint32_t, 2>, 9>{
+           {{0, 1}, {1, 1}, {2, 2}, {4, 4}, {14, 14}, {20, 20}, {60, 60}, {61, 60}, {0xffffffffu, 60}}}) {
+    // Parked floors go below the moving minimum, so capture spacing follows the
+    // schedule's 1..60 clamp rather than the saved camera_rate's 5..60.
     manager->set_source_rate(setting[0]);
-    require(manager->source_rate_ == setting[1], "Capture rate follows shared5..60 clamp");
+    require(manager->source_rate_ == setting[1], "Capture rate follows the shared 1..60 schedule clamp");
   }
   manager->set_source_rate(20);
   Commands producer, second_queue, consumer, unknown;
@@ -832,6 +872,44 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     require(manager->register_source_candidate(DeviceKey, unrelated_source.p, UnrelatedGeneration, desc,
                                                taxi_camera::source_state::Model::legacy_rt),
             "Register unrelated pass target");
+    // The source prefilter is exact. An application target whose filter bits
+    // are set (a hash collision, or bits of a retired candidate) is not a
+    // source, so its draws never take the manager lock; a retired candidate's
+    // bits are cleared when collect() rebuilds the filter.
+    const auto live_union = [&](std::size_t word) {
+      std::uint64_t bits = 0;
+      for (const auto& source : manager->sources_)
+        if (source.native && Manager::source_filter_bits(source.native).word == word)
+          bits |= Manager::source_filter_bits(source.native).mask;
+      return bits;
+    };
+    auto* colliding = reinterpret_cast<ID3D12Resource*>(std::uintptr_t{0x7ff012345670});  // Never dereferenced.
+    const auto colliding_bits = Manager::source_filter_bits(colliding);
+    manager->source_filter_[colliding_bits.word].fetch_or(colliding_bits.mask);
+    require(!manager->may_be_source(colliding), "A colliding filter bit made an application target a camera source");
+    require(manager->may_be_source(sources[0].p) && manager->may_be_source(sources[1].p) && manager->may_be_source(unrelated_source.p),
+            "A registered candidate failed the exact source check");
+    Ref<ID3D12Resource> retired_source;
+    check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                          IID_PPV_ARGS(retired_source.put())),
+          "Create short-lived pane-sized target");
+    constexpr std::uint64_t RetiredGeneration = UnrelatedGeneration + 1;
+    require(manager->register_source_candidate(DeviceKey, retired_source.p, RetiredGeneration, desc,
+                                               taxi_camera::source_state::Model::legacy_rt) &&
+                manager->may_be_source(retired_source.p),
+            "Register short-lived candidate");
+    const auto retired_bits = Manager::source_filter_bits(retired_source.p);
+    manager->unregister_source_candidate(DeviceKey, retired_source.p, RetiredGeneration);
+    require(!manager->may_be_source(retired_source.p), "A retired candidate stayed a source before collection");
+    {
+      const std::lock_guard lock(manager->mutex_);
+      manager->collect();
+    }
+    require((manager->source_filter_[retired_bits.word].load() & retired_bits.mask & ~live_union(retired_bits.word)) == 0 &&
+                (manager->source_filter_[colliding_bits.word].load() & colliding_bits.mask & ~live_union(colliding_bits.word)) == 0,
+            "Collecting a retired candidate kept stale filter bits");
+    require(manager->may_be_source(sources[0].p) && manager->may_be_source(sources[1].p) && manager->may_be_source(unrelated_source.p),
+            "Rebuilding the filter dropped a live candidate");
   }
   check(producer.list->Close(), "Close initial state recording");
   ID3D12CommandList* original = producer.list.p;

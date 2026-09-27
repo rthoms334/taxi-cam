@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -24,6 +25,7 @@
 #include "../hooks/render_boundary_observer.hpp"
 #include "../shared/bounded_lock.hpp"
 #include "../shared/hook_timing.hpp"
+#include "../shared/lock_hold_stats.hpp"
 #include "native_hooks.hpp"
 #include "root_layout.hpp"
 
@@ -159,16 +161,85 @@ struct DeferredHandoffRetirement {
 struct DeferredSettlement {
   PfdSubmissionProof::Settlement row{};
 };
+// Bounded shared acquisition of an SRW lock through BoundedLock.
+struct SharedSrw {
+  SRWLOCK* lock;
+  bool try_lock() noexcept { return TryAcquireSRWLockShared(lock) != FALSE; }
+  void unlock() noexcept { ReleaseSRWLockShared(lock); }
+};
+// Read-mostly mirror of a registry map for simulator-thread lookups. Every
+// writer already holds the registry lock and changes a shard under its
+// exclusive SRW lock, so registry holders may still read the maps themselves.
+// Readers take one shard shared within the per-command budget and never the
+// registry lock; the 2026-09-26 lock trace showed 3.5-6k list and ~5k resource
+// lookups per second taking it. A miss, a retired entry or a busy shard is not
+// evidence: callers fall back to the registry map.
+template <class Key, class Item>
+class RegistryIndex {
+ public:
+  std::shared_ptr<Item> find(Key key) const noexcept {
+    auto& shard = shard_for(key);
+    SharedSrw shared{&shard.lock};
+    const BoundedLock bounded(shared, wait_budget::recording_us);
+    if (!bounded)
+      return {};
+    const auto it = shard.map.find(key);
+    return it != shard.map.end() && it->second->alive.load(std::memory_order_acquire) ? it->second : nullptr;
+  }
+  // Registry lock held.
+  void assign(Key key, const std::shared_ptr<Item>& item) {
+    auto& shard = shard_for(key);
+    AcquireSRWLockExclusive(&shard.lock);
+    try {
+      shard.map[key] = item;
+    } catch (...) {
+      shard.map.erase(key);  // No stale mirror entry; lookups use the registry.
+    }
+    ReleaseSRWLockExclusive(&shard.lock);
+  }
+  // Registry lock held. Removes the entry only if it still names this item.
+  void erase(Key key, const Item* item) noexcept {
+    auto& shard = shard_for(key);
+    AcquireSRWLockExclusive(&shard.lock);
+    if (const auto it = shard.map.find(key); it != shard.map.end() && it->second.get() == item)
+      shard.map.erase(it);
+    ReleaseSRWLockExclusive(&shard.lock);
+  }
+  // Registry lock held.
+  void erase_retired() noexcept {
+    for (auto& shard : shards_) {
+      AcquireSRWLockExclusive(&shard.lock);
+      std::erase_if(shard.map, [](const auto& entry) { return !entry.second->alive.load(std::memory_order_acquire); });
+      ReleaseSRWLockExclusive(&shard.lock);
+    }
+  }
+
+ private:
+  struct alignas(64) Shard {
+    mutable SRWLOCK lock = SRWLOCK_INIT;
+    std::unordered_map<Key, std::shared_ptr<Item>> map;
+  };
+  Shard& shard_for(Key key) const noexcept {
+    const auto hash = (reinterpret_cast<std::uintptr_t>(key) >> 4) * 0x9e3779b97f4a7c15ull;
+    return shards_[(hash >> 60) & 15];
+  }
+  mutable std::array<Shard, 16> shards_;
+};
 struct Registry {
   std::recursive_mutex mutex;
   // Only demand transitions and publication of a real Reset/new-list proof
   // take this lock. Ordinary setters and metadata callbacks never take it.
   std::mutex observation_mutex;
-  std::atomic<std::uint64_t> observation_epoch{1};  // Odd: observing; even: idle.
+  // Read by every hook call, so kept off the lock words above, which every
+  // acquisition on any thread writes.
+  alignas(64) std::atomic<std::uint64_t> observation_epoch{1};  // Odd: observing; even: idle.
   std::atomic<std::uint64_t> session_recording_floor{};
   std::atomic<bool> diagnostics_enabled{};
   std::atomic<std::uint64_t> list_lookup_calls{}, list_cache_hits{}, list_registry_lookups{};
-  std::atomic<std::uint64_t> idle_state_bypasses{}, idle_callback_bypasses{}, observation_invalidations{};
+  // Always counted: list lookups the per-thread cache could not serve, each of
+  // which takes the registry lock. On its own line; misses come from every thread.
+  alignas(64) std::atomic<std::uint64_t> list_misses{};
+  alignas(64) std::atomic<std::uint64_t> idle_state_bypasses{}, idle_callback_bypasses{}, observation_invalidations{};
   // Simulator threads wait on the locks above only within wait_budget. These
   // count the expired waits per site; the worker drains the deferred rings.
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(ContentionSite::count)> contention{};
@@ -198,13 +269,15 @@ struct Registry {
   std::atomic<std::uint64_t> failure_window_ms{}, failure_window_count{}, failure_rate_peak{};
   std::atomic<bool> admission_halted{};
   // Watchdog gate. False makes every hook idle and every PFD plan not_ready.
-  std::atomic<bool> armed{true};
-  std::atomic<std::uint64_t> frame_pulse{};
-  ID3D12Device* device{};
+  // armed, device, key and ready are read by every hook call; the counters
+  // around them are written from every thread, so each group has its own line.
+  alignas(64) std::atomic<bool> armed{true};
+  alignas(64) std::atomic<std::uint64_t> frame_pulse{};  // Every Close on every thread.
+  alignas(64) ID3D12Device* device{};
   std::uint64_t key{}, next_id = 0;
   UINT rtv_stride{}, dsv_stride{};
   std::atomic<bool> ready{};
-  std::atomic<std::uint64_t> failures{}, draws{}, clear_states{};
+  alignas(64) std::atomic<std::uint64_t> failures{}, draws{}, clear_states{};
   // PassBegin reports that reached the manager's global path: the pass bound
   // no RTV, or bound RTVs the bridge could not resolve to tracked resources.
   std::atomic<std::uint64_t> pass_no_targets{}, pass_unresolved_targets{};
@@ -215,6 +288,10 @@ struct Registry {
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
   std::unordered_map<ID3D12GraphicsCommandList*, std::shared_ptr<List>> lists;
+  // Mirrors of lists and resources for lookups without the registry lock.
+  // Written only beside the maps above, under the registry lock.
+  RegistryIndex<ID3D12GraphicsCommandList*, List> list_index;
+  RegistryIndex<ID3D12Resource*, Resource> resource_index;
   std::unordered_map<SIZE_T, View> rtvs;
   std::unordered_map<SIZE_T, DXGI_FORMAT> dsvs;
   TaxiButtonRoutes routes;
@@ -370,6 +447,24 @@ struct Registry {
   // Monotonic negative filter: retirement never clears shared bits. False
   // positives take the exact registry lookup; a tracked display cannot vanish.
   std::array<std::atomic<std::uint64_t>, 16> display_filter{};
+  // The same for RTV handles: a bit is set before any view is stored under its
+  // handle in rtvs and never cleared, so a miss proves the handle maps nothing.
+  std::array<std::atomic<std::uint64_t>, 256> rtv_filter{};
+  static unsigned rtv_filter_bit(SIZE_T handle) noexcept {
+    auto x = static_cast<std::uint64_t>(handle);
+    x ^= x >> 29;
+    x *= 0xbf58476d1ce4e5b9ull;
+    x ^= x >> 32;
+    return static_cast<unsigned>(x) & (256 * 64 - 1);
+  }
+  void remember_rtv(SIZE_T handle) noexcept {
+    const auto bit = rtv_filter_bit(handle);
+    rtv_filter[bit / 64].fetch_or(1ull << (bit % 64), std::memory_order_release);
+  }
+  bool may_track_rtv(SIZE_T handle) const noexcept {
+    const auto bit = rtv_filter_bit(handle);
+    return (rtv_filter[bit / 64].load(std::memory_order_acquire) & (1ull << (bit % 64))) != 0;
+  }
 };
 Registry& registry() {
   static auto* r = new Registry;
@@ -384,11 +479,52 @@ void defer_handoff_retirement(std::uint64_t key, std::uint64_t handle) noexcept 
   r.deferred_lifecycle.fetch_add(1, std::memory_order_relaxed);
   r.deferred_handoff.push({key, handle});
 }
+// How long each source line held the registry, for the bridge log. Nested
+// recursive holds are reported separately and overlap their outer hold.
+LockHoldStats& registry_lock_holds() noexcept {
+  static LockHoldStats stats;
+  return stats;
+}
 // Bounded registry acquisition for simulator threads. The registry is recursive,
 // so an owning thread always succeeds; only cross-thread contention can expire.
 struct RegistryLock : BoundedLock<std::recursive_mutex> {
-  RegistryLock(Registry& r, std::uint32_t budget_us, ContentionSite site) noexcept
-      : BoundedLock(r.mutex, budget_us, &r.contention[static_cast<unsigned>(site)]) {}
+  RegistryLock(Registry& r, std::uint32_t budget_us, ContentionSite site, std::uint32_t line = __builtin_LINE()) noexcept
+      : BoundedLock(r.mutex, budget_us, &r.contention[static_cast<unsigned>(site)]), line_(line), start_(__rdtsc()) {}
+  ~RegistryLock() {
+    if (owns_lock()) {
+      const auto held = __rdtsc() - start_;
+      unlock();
+      registry_lock_holds().record(line_, held);
+    }
+  }
+  RegistryLock(const RegistryLock&) = delete;
+  RegistryLock& operator=(const RegistryLock&) = delete;
+
+ private:
+  std::uint32_t line_;
+  std::uint64_t start_;
+};
+// Blocking registry acquisition for the bridge's own worker threads. A marked
+// worker runs above normal while it holds the lock (lock_holder_priority).
+struct WorkerRegistryLock {
+  explicit WorkerRegistryLock(Registry& r, std::uint32_t line = __builtin_LINE()) : mutex_(r.mutex), line_(line) {
+    lock_holder_priority::enter();
+    mutex_.lock();
+    start_ = __rdtsc();
+  }
+  ~WorkerRegistryLock() {
+    const auto held = __rdtsc() - start_;
+    mutex_.unlock();
+    lock_holder_priority::leave();
+    registry_lock_holds().record(line_, held);
+  }
+  WorkerRegistryLock(const WorkerRegistryLock&) = delete;
+  WorkerRegistryLock& operator=(const WorkerRegistryLock&) = delete;
+
+ private:
+  std::recursive_mutex& mutex_;
+  std::uint32_t line_;
+  std::uint64_t start_ = 0;
 };
 void count_contention(ContentionSite site) noexcept {
   registry().contention[static_cast<unsigned>(site)].fetch_add(1, std::memory_order_relaxed);
@@ -460,6 +596,7 @@ void replace_view(Registry& r, SIZE_T handle, const View& supplied) {
   if (old != r.rtvs.end())
     account_view(old->second, false);
   if (view.resource && (old != r.rtvs.end() || r.rtvs.size() < 65536)) {
+    r.remember_rtv(handle);
     r.rtvs[handle] = view;
     account_view(view, true);
   } else if (old != r.rtvs.end())
@@ -880,6 +1017,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
           item->display_shape = item->display_shape || profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height,
                                                                                  desc.MipLevels, static_cast<UINT>(desc.Format));
         r.resources[native] = item;
+        r.resource_index.assign(native, item);
         for (const auto* profile : profiles::Catalog)
           if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels,
                                         static_cast<UINT>(desc.Format))) {
@@ -917,6 +1055,8 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
 // resource; every caller treats null as "no proof" and skips.
 std::shared_ptr<Resource> resource(ID3D12Resource* p) {
   auto& r = registry();
+  if (auto item = r.resource_index.find(p))
+    return item;
   const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
   if (!lock)
     return nullptr;
@@ -1025,12 +1165,20 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
       if (diagnostics)
         r.list_cache_hits.fetch_add(1, std::memory_order_relaxed);
     }
+  // The mirror serves every registered list without the registry lock.
+  if (!item && (item = r.list_index.find(p))) {
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+    if (!bypass_known_list_cache)
+#endif
+      known_lists.remember(item);
+  }
   if (!item) {
 #ifdef TAXI_METADATA_BATCH_VALIDATION
     ++registry_lookup_calls;
 #endif
     if (diagnostics)
       r.list_registry_lookups.fetch_add(1, std::memory_order_relaxed);
+    r.list_misses.fetch_add(1, std::memory_order_relaxed);
     const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
     if (!lock) {
       contended_lists.remember(p);
@@ -1779,6 +1927,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     if (const auto found = r.lists.find(native); found != r.lists.end()) {
       if (found->second->alive.load(std::memory_order_acquire))
         return found->second;
+      r.list_index.erase(native, found->second.get());
       r.lists.erase(found);
     }
     if (r.lists.size() >= 4096 || r.next_id == UINT64_MAX) {
@@ -1796,6 +1945,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     item->submission_proof.reset(item->recording, observed);
     item->raw_om_known = observed;
     r.lists[native] = item;
+    r.list_index.assign(native, item);
     r.live_bind.clear(native);
   }
   const auto hooked = boundary::register_list(native, item->id, Boundaries);
@@ -1880,6 +2030,7 @@ void plan_display_submission(void*,
   runtime::QueuePatchSnapshot patches;
   runtime::try_snapshot_queue_patches(r.key, generation, patches);
   const std::unique_lock lock(r.mutex, std::try_to_lock);
+  const HoldTimer hold(registry_lock_holds(), __LINE__, lock.owns_lock());
   if (!lock.owns_lock()) {
     outcome(DisplaySubmissionOutcome::registry_busy);
     return;
@@ -2409,10 +2560,19 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     // Demand cannot change between qualifying this native Reset and publishing
     // its PFD-state proof. Source state remains continuously observed separately.
     // Without the lock the recording is simply unobserved until the next Reset.
-    const BoundedLock observation_lock(registry().observation_mutex, wait_budget::recording_us,
-                                       &registry().contention[static_cast<unsigned>(ContentionSite::observation_recording)]);
+    // An even (idle) epoch can never qualify a recording: recording_observed
+    // needs an odd current epoch equal to the stored one, and a session floor
+    // raised after it only exceeds it. So an idle Reset needs no lock; every
+    // simulator thread resets many lists per frame and would contend on it.
+    const bool idle_epoch = (observation_epoch & 1u) == 0;
+    std::optional<BoundedLock<std::mutex>> observation_lock;
+    if (!idle_epoch)
+      observation_lock.emplace(registry().observation_mutex, wait_budget::recording_us,
+                               &registry().contention[static_cast<unsigned>(ContentionSite::observation_recording)]);
     item->observation_epoch =
-        observation_lock && observation_epoch == registry().observation_epoch.load(std::memory_order_acquire) ? observation_epoch : 0;
+        (idle_epoch || *observation_lock) && observation_epoch == registry().observation_epoch.load(std::memory_order_acquire)
+            ? observation_epoch
+            : 0;
     item->pfd_dirty = false;
     item->pending_pfds = {};
     item->pending_rt = {};
@@ -2590,6 +2750,28 @@ struct Targets {
     l.raw_rtv_count = 0;
     l.raw_has_dsv = depth != nullptr;
     l.raw_dsv = {};
+    // Only tracked views give a binding draw activity, source effects or a PFD
+    // draw, and rtv_filter proves none of the bound handles maps one. The depth
+    // format and descriptor snapshots are read only for a binding with a
+    // tracked selected target or a pending PFD draw (pending_rt): a recording
+    // Reset while idle can never have either, and an observed one without a
+    // pending draw would snapshot nothing. The locked lookup would then bind
+    // nothing, so those bindings skip the registry lock every thread shares.
+    // Live, observed recordings took it 8-20k times a second with cameras on.
+    const bool pending = std::any_of(l.pending_rt.begin(), l.pending_rt.end(), [](bool side) { return side; });
+    if ((!recording_observed(l) || !pending) && !r.live_backfill.load(std::memory_order_relaxed) &&
+        !r.views_stale.load(std::memory_order_acquire) && count <= 8 && (!count || handles) &&
+        !(contiguous && count && handles[0].ptr > SIZE_MAX - SIZE_T{count - 1} * r.rtv_stride)) {
+      bool tracked = false;
+      for (UINT i = 0; i < count && !tracked; ++i) {
+        const auto handle = contiguous ? handles[0].ptr + SIZE_T{i} * r.rtv_stride : handles[i].ptr;
+        tracked = !handle || r.may_track_rtv(handle);
+      }
+      if (!tracked) {
+        l.count = count;
+        return;
+      }
+    }
     const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
     if (!lock || r.views_stale.load(std::memory_order_acquire)) {
       // Untracked binding: nothing in this recording may be written through it,
@@ -3170,9 +3352,72 @@ bool graphics_admission_halted() noexcept {
 bool graphics_armed() noexcept {
   return registry().armed.load(std::memory_order_acquire);
 }
+void lock_hold_report(char* out, std::size_t size) noexcept {
+  if (!out || !size)
+    return;
+  out[0] = 0;
+  // TSC ticks per microsecond over this interval, from QueryPerformanceCounter.
+  static std::uint64_t previous_tsc = 0, previous_us = 0, previous_misses = 0;
+  const auto tsc = __rdtsc();
+  const auto us = hook_timing::now_us();
+  const auto misses = registry().list_misses.load(std::memory_order_relaxed);
+  const bool first = !previous_us || us <= previous_us || tsc <= previous_tsc;
+  const double per_us = first ? 1.0 : static_cast<double>(tsc - previous_tsc) / static_cast<double>(us - previous_us);
+  const double seconds = first ? 0.0 : static_cast<double>(us - previous_us) / 1e6;
+  const auto miss_delta = misses - previous_misses;
+  previous_tsc = tsc;
+  previous_us = us;
+  previous_misses = misses;
+  std::array<LockHoldStats::Entry, LockHoldStats::Slots + 1> registry_entries{}, manager_entries{};
+  const auto registry_count = registry_lock_holds().drain(registry_entries.data(), static_cast<unsigned>(registry_entries.size()));
+  const auto manager_count = manager_lock_holds().drain(manager_entries.data(), static_cast<unsigned>(manager_entries.size()));
+  if (first)
+    return;  // The first call only establishes the interval baseline.
+  static const auto module_base = [] {
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&lock_hold_report), &module);
+    return reinterpret_cast<std::uintptr_t>(module);
+  }();
+  std::size_t used = 0;
+  const auto append = [&](auto... values) {
+    if (used >= size)
+      return;
+    const int written = std::snprintf(out + used, size - used, values...);
+    used = written > 0 && static_cast<std::size_t>(written) < size - used ? used + static_cast<std::size_t>(written) : size;
+  };
+  // Largest total first, then always the longest single hold if it was not listed.
+  const auto list = [&](const char* name, LockHoldStats::Entry* entries, unsigned count, bool addresses) {
+    std::sort(entries, entries + count, [](const auto& a, const auto& b) { return a.ticks > b.ticks; });
+    unsigned longest = 0;
+    for (unsigned i = 1; i < count; ++i)
+      if (entries[i].max_ticks > entries[longest].max_ticks)
+        longest = i;
+    append(" %s:", name);
+    constexpr unsigned Shown = 8;
+    for (unsigned i = 0; i < count; ++i) {
+      if (i >= Shown && i != longest)
+        continue;
+      const auto& e = entries[i];
+      const auto total_us = static_cast<double>(e.ticks) / per_us, max_us = static_cast<double>(e.max_ticks) / per_us;
+      if (!addresses || e.site == LockHoldStats::OverflowSite)
+        append(" %s%llu=%llu/%.0f/%.0f", addresses ? "other" : "L", addresses ? 0ull : static_cast<unsigned long long>(e.site),
+               static_cast<unsigned long long>(e.count), total_us, max_us);
+      else
+        append(" +0x%llx=%llu/%.0f/%.0f", static_cast<unsigned long long>(e.site >= module_base ? e.site - module_base : e.site),
+               static_cast<unsigned long long>(e.count), total_us, max_us);
+    }
+  };
+  append("Lock holds (site=count/total_us/max_us) interval_ms=%.0f list_misses=%llu (%.0f/s);", seconds * 1000,
+         static_cast<unsigned long long>(miss_delta), seconds > 0 ? static_cast<double>(miss_delta) / seconds : 0.0);
+  list("registry", registry_entries.data(), registry_count, false);
+  append("%s", ";");
+  list("manager", manager_entries.data(), manager_count, true);
+  out[size - 1] = 0;
+}
 GraphicsStatus graphics_status() noexcept {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   GraphicsStatus result{r.ready,
                         r.key,
                         r.resources.size(),
@@ -3267,7 +3512,7 @@ std::vector<PfdTargetObservation> pfd_inventory() {
   std::vector<PfdTargetObservation> result;
   {
     auto& r = registry();
-    const std::lock_guard lock(r.mutex);
+    const WorkerRegistryLock lock(r);
     result = pfd_inventory_locked(r);
   }
   // The numeric snapshot owns no native references; UI ranking does not need
@@ -3277,7 +3522,7 @@ std::vector<PfdTargetObservation> pfd_inventory() {
 }
 void service_live_backfill(std::uint64_t now, std::size_t) noexcept {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   if (!r.live_backfill.load(std::memory_order_relaxed))
     return;
   // The registry, not the previous UI snapshot, decides whether the set exists.
@@ -3304,7 +3549,7 @@ void service_display_patches() noexcept {
   auto& r = registry();
   runtime::QueuePatchConfig config;
   {
-    const std::lock_guard lock(r.mutex);
+    const WorkerRegistryLock lock(r);
     if (!r.ready)
       return;
     refresh_selected(r);
@@ -3329,7 +3574,7 @@ void service_display_patches() noexcept {
 }
 bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   const bool separate = profiles::separate_lower_texture(*r.profile);
   if (!separate)
     lower = 0;
@@ -3368,26 +3613,26 @@ bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower
 }
 void set_calibration(unsigned mask, unsigned budget) noexcept {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   r.calibration_mask = mask & profiles::side_mask(*r.profile);
   refresh_selected(r);
   r.calibration_budget.set_limit(budget);
 }
 void set_target_mask(unsigned mask) noexcept {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   r.active_mask = mask & profiles::side_mask(*r.profile);
   refresh_selected(r);
 }
 void set_waiting_mask(unsigned mask) noexcept {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   r.waiting_mask = mask & profiles::side_mask(*r.profile);
   refresh_selected(r);
 }
 std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   return r.routes.targets;
 }
 void reset_display_session() noexcept {
@@ -3403,7 +3648,7 @@ void reset_display_session() noexcept {
   r.observation_epoch.store(next, std::memory_order_release);
   r.session_recording_floor.store(next ? next : UINT64_MAX, std::memory_order_release);
   r.observation_invalidations.fetch_add(1, std::memory_order_relaxed);
-  const std::lock_guard lock(r.mutex);
+  const WorkerRegistryLock lock(r);
   r.active_mask = r.calibration_mask = 0;
   r.routes.reset();
   r.detector.reset();
@@ -3430,7 +3675,7 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
     return;
   auto& r = registry();
   {
-    const std::lock_guard lock(r.mutex);
+    const WorkerRegistryLock lock(r);
     r.active_mask = r.calibration_mask = 0;
     // This entry point starts an explicit aircraft/profile session, including a
     // reload of the same adapter. Ordinary texture replacement uses forget().
@@ -3503,7 +3748,7 @@ void drain_deferred_lifecycle(Registry& r) {
 void discover_pfds(std::uint64_t now) noexcept {
   observe_safely([&] {
     auto& r = registry();
-    const std::lock_guard lock(r.mutex);
+    const WorkerRegistryLock lock(r);
     drain_deferred_lifecycle(r);
     for (auto i = r.resources.begin(); i != r.resources.end();) {
       if (!i->second->alive) {
@@ -3514,6 +3759,8 @@ void discover_pfds(std::uint64_t now) noexcept {
     }
     std::erase_if(r.roots, [](const auto& p) { return !p.second->alive; });
     std::erase_if(r.lists, [](const auto& p) { return !p.second->alive; });
+    r.list_index.erase_retired();
+    r.resource_index.erase_retired();
     for (auto i = r.rtvs.begin(); i != r.rtvs.end();) {
       if (!i->second.resource || !i->second.resource->alive) {
         account_view(i->second, false);

@@ -3,6 +3,7 @@
 #include "../hooks/queue_submit_observer.hpp"
 #include "../shared/bounded_lock.hpp"
 #include "../shared/camera_rate.hpp"
+#include "../shared/lock_hold_stats.hpp"
 #include "owned_gpu_timing.hpp"
 #include "pfd_submission_pool.hpp"
 #include "scene_capture_d3d12.hpp"
@@ -16,6 +17,8 @@
 #include <unordered_map>
 
 namespace taxi_camera {
+// Hold times of every SceneCaptureManager mutex_, drained by the bridge log.
+LockHoldStats& manager_lock_holds() noexcept;
 
 // Process-lifetime manager. Register all native DIRECT queues with callbacks()
 // before admitting recorded captures/consumers. A failed queue observation must
@@ -116,6 +119,8 @@ class SceneCaptureManager {
     std::uint64_t captures = 0, submissions = 0, resets = 0;
     std::uint64_t display_copies = 0;
     std::uint64_t completed = 0, skipped = 0, quarantined = 0, bytes = 0;
+    // Snapshot textures created. Steady captures reuse packets of their shape.
+    std::uint64_t allocations = 0;
     std::uint64_t render_target_writes = 0, render_target_rewrites = 0;
     std::array<RenderTargetDiagnostic, 3> render_targets{};
     std::uint64_t copy_writes = 0, copy_rewrites = 0;
@@ -449,7 +454,9 @@ class SceneCaptureManager {
   // contention and returns false; the caller defers or skips its own work.
   // Nothing global is invalidated. Success first drains the deferred ring so
   // a skipped Reset or earlier evidence on the same list precedes this call.
-  bool evidence_lock(std::unique_lock<std::mutex>& lock, std::uint32_t budget_us, std::atomic<std::uint64_t>& counter) noexcept;
+  // mutex_ reports how long each site held it (manager_lock_holds()).
+  using ManagerMutex = TimedMutex<std::mutex>;
+  bool evidence_lock(std::unique_lock<ManagerMutex>& lock, std::uint32_t budget_us, std::atomic<std::uint64_t>& counter) noexcept;
   void defer(const DeferredWork&) noexcept;
   void publish_source_uncertainty(std::uint32_t origin, std::uint32_t devices) noexcept;
   void escape_unordered(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
@@ -488,8 +495,23 @@ class SceneCaptureManager {
   unsigned rearm_source_states_locked() noexcept;
   void collect() noexcept;
   SourceCandidate* source_candidate(ID3D12Resource*) noexcept;
+  // Lock-free, exact: a blocked Bloom filter rejects most targets, and a hit is
+  // confirmed against the live candidate handles. A bit shared with a busy
+  // application target (0.9.56 logs: ~80k draws/s) no longer takes mutex_.
   bool may_be_source(ID3D12Resource*) const noexcept;
+  struct SourceFilterBits {
+    std::size_t word = 0;
+    std::uint64_t mask = 0;
+  };
+  static SourceFilterBits source_filter_bits(const void* resource) noexcept;
+  // Under mutex_: the filter from live candidates only, after retirements.
+  void rebuild_source_filter() noexcept;
   bool prepare_tail(Packet&, Device&) noexcept;
+  // Packet slots in the order a new capture should try them: idle packets
+  // already holding this device's texture shape, then empty slots, then the
+  // rest. First-fit released and recreated a texture under mutex_ whenever
+  // feeds of different sizes alternated.
+  std::array<std::uint8_t, MaximumPackets> reuse_order(std::uint64_t device_key, const D3D12_RESOURCE_DESC&) const noexcept;
   // Records and closes this receipt's private tail captures under mutex_ and
   // returns them for the caller to Execute after releasing it.
   void record_queue_tail(Transaction&, TailBatch&) noexcept;
@@ -510,7 +532,7 @@ class SceneCaptureManager {
   bool finish_transaction(std::uint64_t, bool refused, bool fatal = true) noexcept;
 
   SceneHandoff& handoff_;
-  mutable std::mutex mutex_;
+  mutable ManagerMutex mutex_{manager_lock_holds()};
   std::mutex submission_mutex_;
   std::array<Device, MaximumDevices> devices_{};
   std::array<List, MaximumLists> lists_{};
@@ -535,7 +557,10 @@ class SceneCaptureManager {
   std::array<Packet, MaximumPackets> packets_{};
   std::array<SourceCandidate, MaximumDevices * 128> sources_{};
   std::array<std::atomic<std::uint64_t>, MaximumDevices * 128> source_handles_{}, source_generations_{}, source_device_keys_{};
-  std::array<std::atomic<std::uint64_t>, 16> source_filter_{};
+  static constexpr std::size_t SourceFilterWords = 256;
+  std::array<std::atomic<std::uint64_t>, SourceFilterWords> source_filter_{};
+  // One past the highest candidate slot ever used; bounds the exact check.
+  std::atomic<std::size_t> source_slots_used_{0};
   bool source_tracking_ = false;
   bool draining_ = false;  // apply_deferred_work is running on the lock holder; nested calls return.
   bool capture_enabled_ = true;

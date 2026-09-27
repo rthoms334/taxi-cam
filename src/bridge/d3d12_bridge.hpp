@@ -171,6 +171,10 @@ bool graphics_ready() noexcept;
 void set_graphics_observation_demand(bool enabled) noexcept;
 void set_graphics_diagnostics_enabled(bool enabled) noexcept;
 GraphicsStatus graphics_status() noexcept;
+// One bridge.log line: registry and capture-manager lock holds since the last
+// call (count, total and longest per source line or acquiring address) and
+// per-thread list-cache misses. Worker thread only.
+void lock_hold_report(char* out, std::size_t size) noexcept;
 // Presentation pulse: every hooked ExecuteCommandLists on a registered direct
 // queue and every hooked Close. Lock-free; readable from any thread.
 std::uint64_t frame_pulse() noexcept;

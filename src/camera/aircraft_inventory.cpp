@@ -68,12 +68,27 @@ bool normalize(const Inventory& image, std::uint64_t base, std::uint64_t address
 struct Observation {
   std::uint64_t address = 0;
   std::uint32_t size = 0;
+  std::int32_t span = -1;  // Served from this span, or -1 for its own read.
   std::array<std::uint8_t, 16> bytes{};
+};
+
+// One exact read of a record whose fields this walk goes on to capture (a
+// handle's control record, an adjacent count and array pointer, a pointer
+// array). Fields inside it are served from that read; the recheck rereads each
+// span once and compares only the bytes each field observed.
+constexpr std::uint32_t kSpanBytes = 64;
+constexpr std::size_t kMaximumSpans = 32;
+struct SpanRead {
+  std::uint64_t address = 0;
+  std::uint32_t size = 0;
+  std::array<std::uint8_t, kSpanBytes> bytes{};
 };
 
 struct Trace {
   std::array<Observation, 512> fields{};
   std::size_t size = 0;
+  std::array<SpanRead, kMaximumSpans> spans{};
+  std::size_t span_count = 0;
 };
 
 class BoundedReader {
@@ -86,23 +101,50 @@ class BoundedReader {
       result_.error = "A fixed object field has a null or overflowing address.";
       return false;
     }
-    if (size > kAircraftObjectReadBudget - result_.object_bytes || (trace != nullptr && trace->size == trace->fields.size())) {
+    const auto address = object + offset;
+    const auto served = trace != nullptr ? covering(*trace, address, size) : -1;
+    if ((served < 0 && size > kAircraftObjectReadBudget - result_.object_bytes) ||
+        (trace != nullptr && trace->size == trace->fields.size())) {
       result_.error = "The bounded object-read or consistency-check budget was exhausted.";
       return false;
     }
-    const auto address = object + offset;
-    result_.object_bytes += size;
-    if (!source_.read(address, output, size)) {
-      ++result_.read_failures;
-      result_.error = "A required fixed object field could not be read exactly.";
+    if (served >= 0) {
+      const auto& span = trace->spans[static_cast<std::size_t>(served)];
+      std::copy_n(span.bytes.begin() + (address - span.address), size, output);
+    } else if (!read(address, size, output)) {
       return false;
     }
     if (trace != nullptr) {
       auto& observation = trace->fields[trace->size++];
       observation.address = address;
       observation.size = size;
+      observation.span = served;
       std::copy_n(output, size, observation.bytes.begin());
     }
+    return true;
+  }
+
+  // Reads [object+offset, +size) once for fields captured next from the same
+  // record. A range an earlier span already covers is reused.
+  bool span(std::uint64_t object, std::uint64_t offset, std::uint32_t size, Trace& trace) {
+    if (object == 0 || offset > std::numeric_limits<std::uint64_t>::max() - object || size == 0 || size > kSpanBytes ||
+        size > std::numeric_limits<std::uint64_t>::max() - (object + offset)) {
+      result_.error = "A fixed object field has a null or overflowing address.";
+      return false;
+    }
+    const auto address = object + offset;
+    if (covering(trace, address, size) >= 0)
+      return true;
+    if (trace.span_count == trace.spans.size()) {
+      result_.error = "The bounded object-read or consistency-check budget was exhausted.";
+      return false;
+    }
+    auto& value = trace.spans[trace.span_count];
+    if (!read(address, size, value.bytes.data()))
+      return false;
+    value.address = address;
+    value.size = size;
+    ++trace.span_count;
     return true;
   }
 
@@ -134,8 +176,9 @@ class BoundedReader {
       ++result_.null_handles;
       return true;
     }
+    // Payload at +0 and generation at +28 of the control record in one read.
     std::uint32_t generation = 0;
-    if (!dword(control, 28, generation, &trace))
+    if (!span(control, 0, 32, trace) || !dword(control, 28, generation, &trace))
       return false;
     if (generation != u32(bytes.data() + 8)) {
       ++result_.stale_handles;
@@ -148,18 +191,56 @@ class BoundedReader {
     return true;
   }
 
+  // Repeats the capture in order. A span is reread once, at its first served
+  // field; every other field is reread on its own.
   bool recheck(const Trace& trace) {
+    std::uint64_t reread = 0;
+    std::array<std::array<std::uint8_t, kSpanBytes>, kMaximumSpans> spans;
     for (std::size_t i = 0; i < trace.size; ++i) {
       const auto& field_value = trace.fields[i];
       std::array<std::uint8_t, 16> bytes{};
-      if (!field(field_value.address, 0, field_value.size, bytes.data()))
+      if (field_value.span >= 0) {
+        const auto index = static_cast<std::size_t>(field_value.span);
+        const auto& span = trace.spans[index];
+        if (!(reread & (std::uint64_t{1} << index))) {
+          if (!read(span.address, span.size, spans[index].data()))
+            return false;
+          reread |= std::uint64_t{1} << index;
+        }
+        std::copy_n(spans[index].begin() + (field_value.address - span.address), field_value.size, bytes.begin());
+      } else if (!field(field_value.address, 0, field_value.size, bytes.data())) {
         return false;
+      }
       if (!std::equal(bytes.begin(), bytes.begin() + field_value.size, field_value.bytes.begin())) {
         result_.error = "A field in the selected object chain changed during the bounded capture.";
         return false;
       }
     }
     return true;
+  }
+
+ private:
+  // One exact read, charged to the object budget.
+  bool read(std::uint64_t address, std::uint32_t size, std::uint8_t* output) {
+    if (size > kAircraftObjectReadBudget - result_.object_bytes) {
+      result_.error = "The bounded object-read or consistency-check budget was exhausted.";
+      return false;
+    }
+    result_.object_bytes += size;
+    if (!source_.read(address, output, size)) {
+      ++result_.read_failures;
+      result_.error = "A required fixed object field could not be read exactly.";
+      return false;
+    }
+    return true;
+  }
+  static std::int32_t covering(const Trace& trace, std::uint64_t address, std::uint32_t size) {
+    for (std::size_t index = 0; index < trace.span_count; ++index) {
+      const auto& span = trace.spans[index];
+      if (address >= span.address && size <= span.size && address - span.address <= span.size - size)
+        return static_cast<std::int32_t>(index);
+    }
+    return -1;
   }
 
  private:
@@ -257,7 +338,8 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
   BoundedReader source(objects, result);
   Trace container_trace;
   result.stage = "world_count";
-  if (!count(source, container, 20, result.world_count, container_trace, result))
+  // The count at +20 and the array pointer at +24 in one read.
+  if (!source.span(container, 20, 12, container_trace) || !count(source, container, 20, result.world_count, container_trace, result))
     return result;
   if (result.world_count == 0)
     return unavailable(result, "no_worlds");
@@ -287,7 +369,8 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
       continue;
     std::uint32_t viewport_count = 0;
     result.stage = "viewport_count";
-    if (!source.dword(node, 120, viewport_count, &candidate))
+    // The count at +120 and the storage selector at +124 in one read.
+    if (!source.span(node, 120, 8, candidate) || !source.dword(node, 120, viewport_count, &candidate))
       return result;
     if (viewport_count == 0)
       continue;
@@ -534,7 +617,9 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
         if (collection == 0)
           return unavailable(result, "component_collection_unavailable");
         result.stage = "component_count";
-        if (!count(source, collection, 36, result.component_count, selected_trace, result))
+        // The count at +36 and the array pointer at +40 in one read.
+        if (!source.span(collection, 36, 12, selected_trace) ||
+            !count(source, collection, 36, result.component_count, selected_trace, result))
           return result;
         if (result.component_count == 0)
           return unavailable(result, "no_components");
@@ -546,6 +631,11 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
           return unavailable(result, "component_array_unavailable");
 
         std::uint64_t component = 0;
+        // Up to the first eight component pointers in one read; later ones are
+        // read individually only if the walk reaches them.
+        result.stage = "component_pointer";
+        if (!source.span(component_array, 0, static_cast<std::uint32_t>(std::min(result.component_count, 8)) * 8, selected_trace))
+          return result;
         for (std::int32_t index = 0; index < result.component_count; ++index) {
           std::uint64_t candidate = 0;
           result.stage = "component_pointer";

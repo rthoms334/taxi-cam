@@ -33,6 +33,10 @@ struct ProbePerformance {
   // creation, cleanup and resize work. AA measures recurring pulse preparation;
   // initial AA setup remains in lifecycle. Unclassified overhead remains in total.
   std::array<double, static_cast<std::size_t>(ProbeStage::count)> stage_ms{};
+  // Kernel memory calls inside each stage: ReadProcessMemory reads, and region
+  // or working-set queries (query_calls below counts both kinds too).
+  std::array<std::uint32_t, static_cast<std::size_t>(ProbeStage::count)> stage_reads{};
+  std::array<std::uint32_t, static_cast<std::size_t>(ProbeStage::count)> stage_queries{};
   std::uint64_t query_calls = 0;
   std::uint64_t query_allocation_calls = 0;
   std::uint64_t query_page_calls = 0;
@@ -45,6 +49,16 @@ struct ProbePerformance {
   double read_ms = 0;
   std::uint32_t entry_count = 0;
   std::uint32_t bucket_count = 0;
+};
+
+// Slowest camera-manager update (simulator main thread) since the previous
+// take_observer_peak(). pre_ms runs from entry to the serviced start (or to
+// the return when throttled or idle); stages cover only that serviced update.
+struct ObserverPeak {
+  double total_ms = 0;
+  double pre_ms = 0;
+  bool serviced = false;
+  ProbePerformance performance;
 };
 
 struct ProbeSnapshot {
@@ -72,6 +86,7 @@ struct ProbeSnapshot {
   std::uint64_t created_total = 0;
   std::uint32_t requested_rate = kDefaultCameraRate;
   std::uint32_t requested_feeds = 2;
+  bool requested_nose_priority = false;
   // Last native activation requests, not a measured rendered-frame rate.
   std::array<bool, kMaxCameraFeeds> gates{};
   std::array<std::uint64_t, kMaxCameraFeeds> activation_counts{};
@@ -134,14 +149,18 @@ std::uint64_t request_scene_session_reset(std::uint32_t id) noexcept;
 void request_scene_stop(bool keep_telemetry = false) noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
-// Limits activation opportunities to 5..60 per second per selected feed.
+// Limits activation opportunities to 1..60 per second per selected feed (the
+// moving minimum of 5 applies to the saved rate; parked floors go lower).
+// nose_priority skips every other turn of the non-nose feeds.
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
-void request_scene_rate(unsigned rate, unsigned feeds = 2) noexcept;
+void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;
 bool request_scene_mounts(const MountPair& mounts) noexcept;
 ProbeSnapshot scene_snapshot();
+// Diagnostics only; the worker logs one peak per status interval.
+ObserverPeak take_observer_peak() noexcept;
 
 }  // namespace taxi_camera::native_camera

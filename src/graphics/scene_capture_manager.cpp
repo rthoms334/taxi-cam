@@ -59,15 +59,21 @@ void SceneCaptureManager::publish_source_uncertainty(std::uint32_t origin, std::
   deferred_origins_.fetch_or(origin, std::memory_order_release);
   deferred_sources_.fetch_or(devices, std::memory_order_release);
 }
-bool SceneCaptureManager::evidence_lock(std::unique_lock<std::mutex>& lock,
-                                        std::uint32_t budget_us,
-                                        std::atomic<std::uint64_t>& counter) noexcept {
+LockHoldStats& manager_lock_holds() noexcept {
+  static LockHoldStats stats;
+  return stats;
+}
+// Out of line so the hold is attributed to the hook that asked for evidence.
+__attribute__((noinline)) bool SceneCaptureManager::evidence_lock(std::unique_lock<ManagerMutex>& lock,
+                                                                  std::uint32_t budget_us,
+                                                                  std::atomic<std::uint64_t>& counter) noexcept {
   BoundedLock bounded(mutex_, budget_us, &counter);
   contended_call = !bounded;
   if (!bounded)
     return false;
   bounded.release();
-  lock = std::unique_lock<std::mutex>(mutex_, std::adopt_lock);
+  mutex_.attribute(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
+  lock = std::unique_lock<ManagerMutex>(mutex_, std::adopt_lock);
   apply_deferred_work();
   return true;
 }
@@ -403,7 +409,7 @@ bool SceneCaptureManager::register_list(ID3D12GraphicsCommandList* native,
                                         bool observed) noexcept {
   // A skipped registration publishes nothing: the list stays unknown, and an
   // unknown list in a batch already invalidates the model at submission.
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::lifecycle_us, contended_lifecycle_))
     return false;
   auto* owner = device(key);
@@ -552,15 +558,17 @@ void SceneCaptureManager::apply_recording_refusal(std::uint32_t effects, bool fa
 }
 void SceneCaptureManager::apply_deferred() noexcept {
   apply_deferred_work();
-  if (deferred_recordings_.exchange(false, std::memory_order_acq_rel))
+  // Every lock holder drains these. Read before exchanging so the common empty
+  // case does not write lines that recording threads set.
+  if (deferred_recordings_.load(std::memory_order_acquire) && deferred_recordings_.exchange(false, std::memory_order_acq_rel))
     for (auto& published : published_lists_) {
       auto word = published.effects.load();
       const auto marks = word & (EscapedRecording | BoundedEscapedRecording);
       if (marks && published.effects.compare_exchange_strong(word, word & ~marks))
         apply_recording_refusal(static_cast<std::uint32_t>(word), (marks & EscapedRecording) != 0);
     }
-  const auto failed = deferred_uncertain_.exchange(0, std::memory_order_acq_rel);
-  const auto sources = deferred_sources_.exchange(0, std::memory_order_acq_rel);
+  const auto failed = deferred_uncertain_.load(std::memory_order_acquire) ? deferred_uncertain_.exchange(0, std::memory_order_acq_rel) : 0u;
+  const auto sources = deferred_sources_.load(std::memory_order_acquire) ? deferred_sources_.exchange(0, std::memory_order_acq_rel) : 0u;
   const auto origins = sources ? deferred_origins_.exchange(0, std::memory_order_acq_rel) : 0u;
   for (std::size_t index = 0; index < devices_.size(); ++index) {
     auto& owner = devices_[index];
@@ -671,9 +679,41 @@ SceneCaptureManager::SourceCandidate* SceneCaptureManager::source_candidate(ID3D
       return &sources_[index];
   return nullptr;
 }
-bool SceneCaptureManager::may_be_source(ID3D12Resource* resource) const noexcept {
+SceneCaptureManager::SourceFilterBits SceneCaptureManager::source_filter_bits(const void* resource) noexcept {
+  // Fibonacci hashing mixes into the high bits: word from the top 8, two bits
+  // in that word from the next 12.
   const auto hash = (reinterpret_cast<std::uint64_t>(resource) >> 4) * 0x9e3779b97f4a7c15ull;
-  return resource && (source_filter_[(hash >> 6) & 15].load(std::memory_order_acquire) & (1ull << (hash & 63)));
+  static_assert(SourceFilterWords == 256);
+  return {static_cast<std::size_t>(hash >> 56), (1ull << ((hash >> 50) & 63)) | (1ull << ((hash >> 44) & 63))};
+}
+bool SceneCaptureManager::may_be_source(ID3D12Resource* resource) const noexcept {
+  if (!resource)
+    return false;
+  const auto bits = source_filter_bits(resource);
+  if ((source_filter_[bits.word].load(std::memory_order_acquire) & bits.mask) != bits.mask)
+    return false;
+  // Registration publishes the handle and generation, then the slot bound,
+  // then the filter bits; the acquire above makes all of them visible here.
+  const auto handle = reinterpret_cast<std::uint64_t>(resource);
+  const auto used = std::min(source_slots_used_.load(std::memory_order_acquire), sources_.size());
+  for (std::size_t index = 0; index < used; ++index)
+    if (source_handles_[index].load(std::memory_order_relaxed) == handle && source_generations_[index].load(std::memory_order_acquire))
+      return true;
+  return false;
+}
+void SceneCaptureManager::rebuild_source_filter() noexcept {
+  // Every live candidate's bits are set in both the old and the new word, so a
+  // concurrent reader never misses one; only retired candidates' bits clear.
+  // Registration also holds mutex_, so no new bit can be lost.
+  std::array<std::uint64_t, SourceFilterWords> words{};
+  for (const auto& source : sources_)
+    if (source.native) {
+      const auto bits = source_filter_bits(source.native);
+      words[bits.word] |= bits.mask;
+    }
+  for (std::size_t word = 0; word < words.size(); ++word)
+    if (source_filter_[word].load(std::memory_order_relaxed) != words[word])
+      source_filter_[word].store(words[word], std::memory_order_release);
 }
 unsigned SceneCaptureManager::rearm_source_states_locked() noexcept {
   unsigned restored = 0;
@@ -706,7 +746,7 @@ void SceneCaptureManager::stop_source_tracking() noexcept {
 }
 void SceneCaptureManager::set_source_rate(std::uint32_t rate) noexcept {
   const std::lock_guard lock(mutex_);
-  source_rate_ = rate < kMinimumCameraRate ? kMinimumCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
+  source_rate_ = rate < kMinimumParkedCameraRate ? kMinimumParkedCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
 }
 void SceneCaptureManager::set_gpu_timing_enabled(bool enabled) noexcept {
   const std::lock_guard lock(mutex_);
@@ -730,7 +770,7 @@ bool SceneCaptureManager::register_source_candidate(std::uint64_t key,
       (desc.Format != DXGI_FORMAT_R11G11B10_FLOAT && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
        desc.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT))
     return false;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::lifecycle_us, contended_lifecycle_))
     return false;
   auto* owner = device(key);
@@ -749,8 +789,10 @@ bool SceneCaptureManager::register_source_candidate(std::uint64_t key,
     source_device_keys_[index].store(key, std::memory_order_relaxed);
     source_handles_[index].store(reinterpret_cast<std::uint64_t>(resource), std::memory_order_relaxed);
     source_generations_[index].store(generation, std::memory_order_release);
-    const auto hash = (reinterpret_cast<std::uint64_t>(resource) >> 4) * 0x9e3779b97f4a7c15ull;
-    source_filter_[(hash >> 6) & 15].fetch_or(1ull << (hash & 63), std::memory_order_release);
+    if (source_slots_used_.load(std::memory_order_relaxed) <= index)
+      source_slots_used_.store(index + 1, std::memory_order_release);
+    const auto bits = source_filter_bits(resource);
+    source_filter_[bits.word].fetch_or(bits.mask, std::memory_order_release);
     ++stats_.source_candidates;
     return true;
   }
@@ -767,7 +809,8 @@ void SceneCaptureManager::unregister_source_candidate(std::uint64_t key, ID3D12R
     auto expected = generation;
     source_generations_[index].compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
   }
-  // Rejection-only filter bits remain set; retirement can never hide a new key.
+  // Filter bits remain set until collect() retires the slot and rebuilds the
+  // filter under mutex_; retirement can never hide a live key.
 }
 void SceneCaptureManager::stage_source_draw(ID3D12GraphicsCommandList* native,
                                             std::uint64_t generation,
@@ -782,7 +825,7 @@ void SceneCaptureManager::stage_source_draw(ID3D12GraphicsCommandList* native,
     candidate_present |= may_be_source(targets[n]);
   if (!candidate_present)
     return;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_))
     return;
   auto* item = list(native);
@@ -803,7 +846,7 @@ void SceneCaptureManager::after_source_draw(ID3D12GraphicsCommandList* native, s
   source_stage = {};
   if (!stage.count)
     return;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_))
     return;
   auto* item = list(native);
@@ -818,7 +861,10 @@ void SceneCaptureManager::observe_source_draw_after(ID3D12GraphicsCommandList* n
                                                     ID3D12Resource* const* targets,
                                                     const std::uint64_t* generations,
                                                     bool allowed) noexcept {
-  source_stage = {};
+  // Runs after every observed draw. Only stage_source_draw sets owner, after
+  // clearing the stage, so an ownerless stage is already empty.
+  if (source_stage.owner)
+    source_stage = {};
   if (!native || !generation || !count || count > 8 || !targets || !generations)
     return;
   bool candidate_present = false;
@@ -826,7 +872,7 @@ void SceneCaptureManager::observe_source_draw_after(ID3D12GraphicsCommandList* n
     candidate_present |= may_be_source(targets[n]);
   if (!candidate_present)
     return;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_))
     return;
   auto* item = list(native);
@@ -865,7 +911,7 @@ void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList*
                                                       std::uint32_t reasons) noexcept {
   if (source_stage.owner == this && source_stage.list == native)
     source_stage = {};
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_)) {
     DeferredWork work;
     work.kind = DeferredWork::Kind::recording_report;
@@ -944,7 +990,17 @@ void SceneCaptureManager::invalidate_source_targets(ID3D12GraphicsCommandList* n
   if (!count)
     return;
   const bool truncated = count > 8 || !targets || !generations;
-  std::unique_lock<std::mutex> lock;
+  if (!truncated) {
+    // Only a registered camera source can take a scoped effect, and the filter
+    // never clears a registered key's bit. With no possible source the report
+    // would append nothing, so ordinary passes need not take the lock at all.
+    bool candidate_present = false;
+    for (UINT index = 0; index < count; ++index)
+      candidate_present |= may_be_source(targets[index]);
+    if (!candidate_present)
+      return;
+  }
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_)) {
     DeferredWork work;
     work.kind = DeferredWork::Kind::target_report;
@@ -989,7 +1045,7 @@ void SceneCaptureManager::observe_source_legacy(ID3D12GraphicsCommandList* nativ
   if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_ALIASING &&
       (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !may_be_source(barrier.Transition.pResource)))
     return;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_)) {
     DeferredWork work;
     work.kind = DeferredWork::Kind::legacy_barrier;
@@ -1038,7 +1094,7 @@ void SceneCaptureManager::observe_source_enhanced(ID3D12GraphicsCommandList* nat
                                                   const D3D12_TEXTURE_BARRIER& barrier) noexcept {
   if (!may_be_source(barrier.pResource))
     return;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_)) {
     DeferredWork work;
     work.kind = DeferredWork::Kind::enhanced_barrier;
@@ -1076,7 +1132,7 @@ void SceneCaptureManager::successful_reset(ID3D12GraphicsCommandList* native, st
   // Every recording thread resets lists many times per frame, so this uses the
   // per-command budget rather than the creation/destruction one. A missed lock
   // defers the retirement, which the next holder applies before any evidence.
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_lifecycle_)) {
     // Retired by the next lock holder before any later evidence on this list
     // or any transaction; nothing global is invalidated for it.
@@ -1089,14 +1145,18 @@ void SceneCaptureManager::successful_reset(ID3D12GraphicsCommandList* native, st
   }
   auto* item = list(native);
   if (item && item->object_generation == generation) {
+    // Only a retired packet gives this Reset anything to collect. Every packet
+    // assignment, submission and worker poll still collects first.
+    const bool had_packets = item->packets != 0;
     retire_native_list(*item, false);
-    collect();
+    if (had_packets)
+      collect();
   }
 }
 void SceneCaptureManager::destroy_command_list(ID3D12GraphicsCommandList* native, std::uint64_t generation) noexcept {
   // Runs from the D3D12 private-data release, on whichever thread drops the
   // last reference and possibly under runtime-internal locks. Never park it.
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::lifecycle_us, contended_lifecycle_)) {
     DeferredWork work;
     work.kind = DeferredWork::Kind::destroy;
@@ -1161,7 +1221,7 @@ bool SceneCaptureManager::record_copy(ID3D12GraphicsCommandList* native,
       (!handoff_.may_match_resource(reinterpret_cast<std::uint64_t>(source)) &&
        !handoff_.may_match_resource(reinterpret_cast<std::uint64_t>(destination))))
     return false;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_))
     return false;
   auto* item = list(native);
@@ -1199,7 +1259,7 @@ bool SceneCaptureManager::record_render_target_before_transition(ID3D12GraphicsC
                                                                  std::uint64_t object_generation) noexcept {
   if (!native || !target || !proven_legacy_render_target || !handoff_.may_match_resource(reinterpret_cast<std::uint64_t>(target)))
     return false;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_))
     return false;
   auto* item = list(native);
@@ -1218,7 +1278,7 @@ bool SceneCaptureManager::record_render_target_before_enhanced_transition(ID3D12
                                                                           std::uint64_t object_generation) noexcept {
   if (!native || !target || !proven_enhanced_render_target || !handoff_.may_match_resource(reinterpret_cast<std::uint64_t>(target)))
     return false;
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<ManagerMutex> lock;
   if (!evidence_lock(lock, wait_budget::recording_us, contended_evidence_))
     return false;
   auto* item = list(native);
@@ -1315,7 +1375,7 @@ bool SceneCaptureManager::capture_source(List& item,
   collect();
   if (!owner.active || owner.failed)
     return false;
-  for (std::size_t index = 0; index < packets_.size(); ++index) {
+  for (const auto index : reuse_order(owner.key, desc)) {
     auto& packet = packets_[index];
     if (required_packet && &packet != required_packet)
       continue;
@@ -1343,6 +1403,7 @@ bool SceneCaptureManager::capture_source(List& item,
         continue;
       }
       stats_.bytes += packet.gpu.allocation_bytes();
+      ++stats_.allocations;
       packet.description = desc;
       packet.device_key = owner.key;
     }
@@ -1372,6 +1433,23 @@ bool SceneCaptureManager::capture_source(List& item,
   }
   ++stats_.skipped;
   return false;
+}
+
+std::array<std::uint8_t, SceneCaptureManager::MaximumPackets> SceneCaptureManager::reuse_order(
+    std::uint64_t device_key,
+    const D3D12_RESOURCE_DESC& desc) const noexcept {
+  std::array<std::uint8_t, MaximumPackets> order{};
+  std::size_t used = 0;
+  for (unsigned rank = 0; rank < 3; ++rank)
+    for (std::size_t index = 0; index < packets_.size(); ++index) {
+      const auto& packet = packets_[index];
+      const auto state = packet.gpu.state();
+      const bool fits =
+          state == SceneCaptureD3D12::State::idle && packet.device_key == device_key && same_description(packet.description, desc);
+      if ((fits ? 0u : state == SceneCaptureD3D12::State::empty ? 1u : 2u) == rank)
+        order[used++] = static_cast<std::uint8_t>(index);
+    }
+  return order;
 }
 
 bool SceneCaptureManager::prepare_tail(Packet& packet, Device& owner) noexcept {
@@ -1469,7 +1547,8 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
       continue;
     }
     stats_.tail_status = "tail_packet_unavailable";
-    for (auto& packet : packets_) {
+    for (const auto index : reuse_order(owner.key, leased_source->GetDesc())) {
+      auto& packet = packets_[index];
       if (!prepare_tail(packet, owner))
         continue;
       List private_recording;
@@ -1601,14 +1680,14 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   // Genuine recorded GPU ownership still requires ordering, but this is the
   // application's submit or Present thread: wait only within the budget, then
   // escape like a contended batch. Never park it on the bridge worker.
-  const auto ordered_lock = [&](std::mutex& mutex, std::unique_lock<std::mutex>& lock) noexcept {
+  const auto ordered_lock = [&](auto& mutex, auto& lock) noexcept {
     BoundedLock bounded(mutex, wait_budget::submit_us, &contended_submissions_);
     if (!bounded) {
       escape_unordered(queue, count, native_lists);
       return false;
     }
     bounded.release();
-    lock = std::unique_lock<std::mutex>(mutex, std::adopt_lock);
+    lock = std::remove_reference_t<decltype(lock)>(mutex, std::adopt_lock);
     return true;
   };
   {
@@ -1890,6 +1969,7 @@ void SceneCaptureManager::abort_private_submission(std::uint64_t receipt) noexce
 
 void SceneCaptureManager::collect() noexcept {
   apply_deferred();
+  bool retired = false;
   for (std::size_t index = 0; index < sources_.size(); ++index) {
     auto& source = sources_[index];
     if (!source.native || source_generations_[index].load(std::memory_order_acquire))
@@ -1898,7 +1978,10 @@ void SceneCaptureManager::collect() noexcept {
       owner->source_states.unregister_source({reinterpret_cast<std::uint64_t>(source.native), source.generation});
     source = {};
     --stats_.source_candidates;
+    retired = true;
   }
+  if (retired)
+    rebuild_source_filter();
   for (auto& packet : packets_) {
     packet.tail_timing.poll();
     if (!packet.assigned || packet.quarantined)

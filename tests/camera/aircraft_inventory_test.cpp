@@ -104,6 +104,9 @@ struct SparseMemory {
     integer(address, control);
     integer(address + 8, generation);
     if (control != 0) {
+      // The whole 32-byte control record exists; the walk reads it in one span.
+      for (unsigned i = 8; i < 28; ++i)
+        bytes.emplace(control + i, 0);
       integer(control, payload);
       integer(control + 28, generation, 4);
     }
@@ -149,7 +152,10 @@ struct Objects final : AircraftObjectReader {
   SparseMemory memory;
   bool renderer_byte_allowed = false;
   bool read(std::uint64_t address, void* output, std::size_t size) override {
-    require(size == 4 || size == 8 || size == 16 || (renderer_byte_allowed && size == 1 && address == Renderer + 2800),
+    // Fields are 4, 8 or 16 bytes. Spans read a handle's 32-byte control
+    // record, a 12-byte count and array pointer, or up to eight pointers.
+    require(size == 4 || size == 8 || size == 16 || size == 12 || size == 32 || (size % 8 == 0 && size <= 64) ||
+                (renderer_byte_allowed && size == 1 && address == Renderer + 2800),
             "An object read used an unapproved size or byte address");
     require(memory.attempted + size <= kAircraftObjectReadBudget, "Core exceeded its attempted object-read budget");
     return memory.read(address, output, size);
@@ -288,7 +294,8 @@ struct Fixture {
                                                                                    : expected == 0 ? 24u
                                                                                                    : 32u),
             "Image read accounting mismatch");
-    require(result.object_bytes == objects.memory.attempted && result.object_bytes <= 8192, "Object read accounting mismatch");
+    require(result.object_bytes == objects.memory.attempted && result.object_bytes <= kAircraftObjectReadBudget,
+            "Object read accounting mismatch");
     return result;
   }
 };
@@ -303,8 +310,12 @@ void valid_paths() {
                 result.user_count == 1 && result.viewport_id == 23 && result.facade_vtable_rva == Vtable &&
                 result.method_slot_rva == Vtable + kAircraftFacadeMethodOffset && result.method_rva == Method && result.read_failures == 0,
             "Valid first-world facade metadata was not resolved");
-    for (const auto address : {Container + 20, Container + 24, Worlds, world_control(0), world_control(0) + 28, world(0) + 40,
-                               node_control(0), node_control(0) + 28, UserArray, UserControl, UserControl + 28, User + 448, Facade}) {
+    // Spans (count+array, control records) are read once and reread once; the
+    // fields they serve are never read on their own.
+    for (const auto address : {Container + 24, world_control(0) + 28, node_control(0) + 28, node(0) + 124, UserControl + 28})
+      require(fixture.objects.memory.occurrences.count(address) == 0, "A span-served field was read on its own");
+    for (const auto address : {Container + 20, Worlds, world_control(0), world(0) + 40, node_control(0), node(0) + 120, UserArray,
+                               UserControl, User + 448, Facade}) {
       require(fixture.objects.memory.occurrences[address] == 2, "Selected chain field was not reread exactly once");
     }
   }
@@ -438,9 +449,10 @@ void bounds_and_read_failures() {
     const auto result = fixture.run();
     require(!result.valid && result.read_failures == 1 && !result.available, "Image read failure was ignored");
   }
-  for (const auto address : {Container + 20, Container + 24, Worlds, world_control(0) + 28, world_control(0), world(0) + 40,
-                             node_control(0) + 28, node_control(0), node(0) + 120, node(0) + 124, node(0) + 80, world(0) + 736,
-                             world(0) + 784, UserArray, UserControl + 28, UserControl, User + 448, Facade}) {
+  // Every exact read, including each span that serves count/array and control
+  // fields (Container + 24, control + 28 and node + 124 come from those spans).
+  for (const auto address : {Container + 20, Worlds, world_control(0), world(0) + 40, node_control(0), node(0) + 120, node(0) + 80,
+                             world(0) + 736, world(0) + 784, UserArray, UserControl, User + 448, Facade}) {
     Fixture fixture;
     fixture.objects.memory.failed_address = address;
     const auto result = fixture.run();
@@ -546,7 +558,7 @@ void accessor_extension() {
     fixture.add_accessor_object();
     const auto result = fixture.run();
     require(result.valid && result.available && !result.object_present && result.object_vtable_rva == 0 && result.object_method_rva == 0 &&
-                result.image_bytes == 24 && result.object_bytes == 272 &&
+                result.image_bytes == 24 && result.object_bytes == 392 &&
                 fixture.objects.memory.occurrences[Facade + kAircraftAccessorObjectOffset] == 0 &&
                 fixture.image.memory.occurrences[ObjectVtable + kAircraftAccessorMethodOffset] == 0,
             "Default mode gained accessor-object reads");
@@ -557,7 +569,7 @@ void accessor_extension() {
     const auto result = fixture.run(Base, kAircraftExpectedFacadeVtableRva);
     require(result.valid && result.available && result.object_present && result.object_vtable_rva == ObjectVtable &&
                 result.object_method_slot_rva == ObjectVtable + kAircraftAccessorMethodOffset && result.object_method_rva == ObjectMethod &&
-                result.image_bytes == 32 && result.object_bytes == 304 && result.read_failures == 0 &&
+                result.image_bytes == 32 && result.object_bytes == 424 && result.read_failures == 0 &&
                 fixture.objects.memory.occurrences[Facade + kAircraftAccessorObjectOffset] == 2 &&
                 fixture.objects.memory.occurrences[AccessorObject] == 2,
             "Fixed accessor metadata was not resolved and rechecked with exact budgets");
@@ -643,13 +655,15 @@ void selected_object_extension() {
                 result.selected_object_index == (flag == 1 ? 0 : 63) && result.selected_object_vtable_rva == SelectedVtable &&
                 result.selected_object_method_slot_rva == SelectedVtable + kAircraftSelectedMethodOffset &&
                 result.selected_object_method_rva == SelectedMethod && result.image_bytes == 56 &&
-                result.object_bytes == (flag == 1 ? 458u : 466u) &&
+                result.object_bytes == (flag == 1 ? 658u : 666u) &&
                 fixture.objects.memory.occurrences[AccessorObject + 672] == (flag == 1 ? 0u : 2u) &&
                 fixture.image.memory.occurrences[kAircraftRendererGlobalRva] == 2,
             "Selected-object path did not follow exact renderer-byte/index behavior and metadata bounds");
-    for (const auto address : {AccessorObject + 676, Renderer + 2800, AccessorObject + 296, OwnerControl, OwnerControl + 28, Owner + 752,
-                               SelectedControl, SelectedControl + 28, SelectedObject})
+    for (const auto address :
+         {AccessorObject + 676, Renderer + 2800, AccessorObject + 296, OwnerControl, Owner + 752, SelectedControl, SelectedObject})
       require(fixture.objects.memory.occurrences[address] == 2, "Selected-object chain field was not rechecked");
+    for (const auto address : {OwnerControl + 28, SelectedControl + 28})
+      require(fixture.objects.memory.occurrences.count(address) == 0, "A control-record span field was read on its own");
   }
   for (const auto expected : {0u, kAircraftExpectedFacadeVtableRva}) {
     Fixture fixture;
@@ -717,8 +731,9 @@ void selected_object_extension() {
                 result.read_failures == 0,
             "Unavailable or stale selected-object path resolved a method");
   }
-  for (const auto address : {AccessorObject + 676, Renderer + 2800, AccessorObject + 672, AccessorObject + 296, OwnerControl,
-                             OwnerControl + 28, Owner + 752, SelectedArray + 32, SelectedControl, SelectedControl + 28, SelectedObject}) {
+  // Control records are read as spans starting at OwnerControl/SelectedControl.
+  for (const auto address : {AccessorObject + 676, Renderer + 2800, AccessorObject + 672, AccessorObject + 296, OwnerControl, Owner + 752,
+                             SelectedArray + 32, SelectedControl, SelectedObject}) {
     for (const bool changes : {false, true}) {
       Fixture fixture;
       fixture.add_selected_object(0, 2);
@@ -771,7 +786,7 @@ void selected_object_extension() {
   for (unsigned i = 0; i < 64; ++i)
     largest.add_world(i, i == 63 ? 77 : -1, 10);
   const auto result = largest.run(Base, kAircraftExpectedFacadeVtableRva, true);
-  require(result.valid && result.available && result.object_bytes == 5270 && result.image_bytes == 56 &&
+  require(result.valid && result.available && result.object_bytes == 7990 && result.image_bytes == 56 &&
               result.selected_object_index == 63 && largest.objects.memory.occurrences[SelectedArray + 62 * 16] == 0 &&
               largest.objects.memory.occurrences[SelectedArray + 64 * 16] == 0,
           "Largest selected-object fixture exceeded the budget or read other array entries");
@@ -786,8 +801,11 @@ void component_extension() {
     const auto result = fixture.run(Base, kAircraftExpectedFacadeVtableRva, true, true);
     require(result.valid && result.available && result.aircraft_present && result.component_present && result.component_count == 1 &&
                 result.selected_component_index == 0 && result.aircraft_vtable_rva == AircraftVtable &&
-                result.component_vtable_rva == ComponentVtable && result.object_bytes == 618 && result.image_bytes == 56,
+                result.component_vtable_rva == ComponentVtable && result.object_bytes == 858 && result.image_bytes == 56,
             "Fixed aircraft/component metadata did not resolve with exact bounded reads");
+    // The camera pose walks this path every pulse: control records and adjacent
+    // count/array fields are one read each (82 reads before spans).
+    require(fixture.objects.memory.reads.size() == 64, "Per-pulse aircraft walk read count changed");
   }
   for (unsigned profile = 0; profile < 3; ++profile) {
     Fixture fixture;
@@ -858,9 +876,10 @@ void component_extension() {
                 fixture.objects.memory.occurrences[ComponentCollection + 40] == 0,
             "Invalid signed component count was used to access an array");
   }
-  for (const auto address : {SelectedObject + 368, AircraftControl + 28, AircraftControl, Aircraft, Aircraft + 19272,
-                             ComponentCollection + 36, ComponentCollection + 40, ComponentArray, FirstComponent + 32, ComponentArray + 8,
-                             FirstComponent + 0x1000 + 32, FirstComponent + 0x1000}) {
+  // Spans at AircraftControl, ComponentCollection + 36 and ComponentArray serve
+  // the control generation, the array pointer and the second component pointer.
+  for (const auto address : {SelectedObject + 368, AircraftControl, Aircraft, Aircraft + 19272, ComponentCollection + 36, ComponentArray,
+                             FirstComponent + 32, FirstComponent + 0x1000 + 32, FirstComponent + 0x1000}) {
     for (const bool changes : {false, true}) {
       Fixture fixture;
       fixture.add_components(2, 1);
@@ -900,7 +919,7 @@ void component_extension() {
     largest.add_world(i, i == 63 ? 77 : -1, 10);
   const auto result = largest.run(Base, kAircraftExpectedFacadeVtableRva, true, true);
   require(result.valid && result.available && result.worlds_examined == 64 && result.selected_component_index == 63 &&
-              result.object_bytes == 6934 && result.image_bytes == 56 && largest.objects.memory.occurrences[ComponentArray + 64 * 8] == 0,
+              result.object_bytes == 9694 && result.image_bytes == 56 && largest.objects.memory.occurrences[ComponentArray + 64 * 8] == 0,
           "Maximum world/component traversal exceeded its read/trace cap or touched a later component");
   std::printf("Component maximum fixture: %u object bytes and %u image bytes, including all prior component choices.\n",
               result.object_bytes, result.image_bytes);
@@ -912,7 +931,7 @@ void camera_key_extension() {
     fixture.add_camera_keys(2);
     const auto result = fixture.run(Base, kAircraftExpectedFacadeVtableRva, true, true);
     require(result.valid && result.available && !result.camera_keys_inspected && result.camera_key_count == 0 &&
-                result.first_tail_match_index == -1 && result.first_gear_match_index == -1 && result.object_bytes == 618 &&
+                result.first_tail_match_index == -1 && result.first_gear_match_index == -1 && result.object_bytes == 858 &&
                 fixture.objects.memory.occurrences[FirstComponent + 108] == 0 &&
                 fixture.objects.memory.occurrences[FirstComponent + 112] == 0,
             "Disabled camera-key extension gained new reads or changed defaults");
@@ -939,7 +958,7 @@ void camera_key_extension() {
     require(result.valid && result.available && result.camera_keys_inspected && result.camera_key_count == count &&
                 result.tail_matches == 0 && result.gear_matches == 0 && result.first_tail_match_index == -1 &&
                 result.first_gear_match_index == -1 && result.image_bytes == 56 &&
-                result.object_bytes == 626 + (count == 0 ? 0 : 16 + count * 48),
+                result.object_bytes == 866 + (count == 0 ? 0 : 16 + count * 48),
             "Empty, unmatched or maximum key collection did not complete within exact read bounds");
     require(fixture.objects.memory.occurrences[FirstComponent + 112] == (count == 0 ? 0u : 2u) &&
                 fixture.objects.memory.occurrences[CameraKeyArray + count * 8] == 0,
@@ -1033,8 +1052,8 @@ void camera_key_extension() {
     for (unsigned i = 0; i < 64; ++i)
       fixture.add_world(i, i == 63 ? 77 : -1, 10);
     const auto result = fixture.run(Base, kAircraftExpectedFacadeVtableRva, true, true, true);
-    require(!result.valid && !result.available && !result.camera_keys_inspected && result.object_bytes <= 8192 &&
-                result.object_bytes > 8176 && result.error.find("budget") != std::string::npos,
+    require(!result.valid && !result.available && !result.camera_keys_inspected && result.object_bytes <= kAircraftObjectReadBudget &&
+                result.object_bytes > kAircraftObjectReadBudget - 16 && result.error.find("budget") != std::string::npos,
             "Combined maximum world/component/key graph exceeded the hard attempted-read cap or claimed completeness");
     std::printf("Combined maximum graph refused at %u attempted object bytes.\n", result.object_bytes);
   }

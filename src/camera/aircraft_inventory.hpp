@@ -7,7 +7,10 @@ namespace taxi_camera::discovery {
 
 inline constexpr std::uint32_t kAircraftGlobalRva = native_camera::observed_store_layout().aircraft_worlds_global;
 inline constexpr std::uint32_t kAircraftFacadeMethodOffset = 1256;
-inline constexpr std::uint32_t kAircraftObjectReadBudget = 8192;
+// Attempted object bytes per inspection, rereads included. Handles read their
+// whole 32-byte control record in one span, so the largest accepted graph
+// (64 worlds, 64 components) needs about 9.5 KiB where it needed 6.8 KiB.
+inline constexpr std::uint32_t kAircraftObjectReadBudget = 11264;
 inline constexpr std::uint32_t kAircraftExpectedFacadeVtableRva = native_camera::observed_store_layout().aircraft_facade_vtable;
 inline constexpr std::uint32_t kAircraftExpectedFacadeMethodRva = native_camera::observed_store_layout().aircraft_facade_method;
 inline constexpr std::uint32_t kAircraftAccessorObjectOffset = 1648;
@@ -43,7 +46,7 @@ struct AircraftInventory {
   std::string error;
   // Attempted bytes, including failed reads. At most 24 image bytes by default,
   // 32 with the accessor extension or 56 with selected-object inspection.
-  // At most 8192 object bytes per invocation, including failed attempts.
+  // At most kAircraftObjectReadBudget object bytes per invocation, including failed attempts.
   std::uint32_t image_bytes = 0;
   std::uint32_t object_bytes = 0;
   std::uint32_t read_failures = 0;
@@ -110,7 +113,7 @@ struct AircraftInventory {
 // record's 16 bytes at+72. Compares two fixed config-GUID byte-array candidates;
 // output is counts/first indices only, never keys or pointers. Null records
 // refuse completeness. Count0 completes without reading the array pointer.
-// Every pointer/key joins the bounded 512-field trace and the 8192-byte cap.
+// Every pointer/key joins the bounded 512-field trace and the object-byte cap.
 // verified_source is optional internal adapter output, never serialized/logged.
 // A nonnull output requires inspect_component=true and is zeroed before any
 // validation. Only full success publishes the borrowed aircraft payload address

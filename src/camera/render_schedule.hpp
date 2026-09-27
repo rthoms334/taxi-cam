@@ -13,11 +13,17 @@ namespace taxi_camera::native_camera {
 // apply every returned state through freshly validated owned engine entries.
 class RenderSchedule {
  public:
-  void configure(unsigned rate, unsigned feeds = 2) noexcept {
-    rate_ = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate);
+  // Parked floors go below the moving minimum; see kMinimumParkedCameraRate.
+  // nose_priority turns every other turn of feeds 1 and 2 into an idle slot
+  // (NosePriorityPolicy); feed 0 keeps its cadence.
+  void configure(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept {
+    rate_ = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate);
     feeds_ = std::clamp(feeds, 1u, kMaxCameraFeeds);
     if (next_feed_ >= feeds_)
       next_feed_ = 0;
+    if (!nose_priority)
+      skip_turn_ = {};
+    nose_priority_ = nose_priority;
   }
 
   // Only reset after the previous owned entries have been removed. Configuration
@@ -30,10 +36,15 @@ class RenderSchedule {
     previous_time_ = 0;
     last_any_ = 0;
     next_feed_ = 0;
+    skip_turn_ = {};
+    skipped_ = false;
   }
 
   std::array<bool, kMaxCameraFeeds> tick(std::uint64_t now_ms, bool suspended = false) noexcept {
-    bool was_active = false;
+    // A skipped turn is followed by a closed update exactly like a pulse, so
+    // the idle slot removes a whole render opportunity, not just its opening.
+    bool was_active = skipped_;
+    skipped_ = false;
     for (bool on : active_)
       was_active = was_active || on;
     active_ = {};
@@ -60,6 +71,18 @@ class RenderSchedule {
       any_seen = any_seen || seen_[i];
     if ((any_seen && now_ms - last_any_ < between_ms) || (seen_[next_feed_] && now_ms - last_[next_feed_] < per_feed_ms))
       return active_;
+    if (nose_priority_ && next_feed_ != 0) {
+      // Each non-nose feed alternates served and skipped turns, starting with
+      // a served one. A skipped turn consumes the aggregate interval like a
+      // pulse and leaves that feed's own deadline untouched.
+      skip_turn_[next_feed_] = !skip_turn_[next_feed_];
+      if (!skip_turn_[next_feed_]) {
+        skipped_ = true;
+        last_any_ = now_ms;
+        next_feed_ = (next_feed_ + 1) % feeds_;
+        return active_;
+      }
+    }
     active_[next_feed_] = true;
     seen_[next_feed_] = true;
     last_[next_feed_] = now_ms;
@@ -70,11 +93,15 @@ class RenderSchedule {
 
   unsigned rate() const noexcept { return rate_; }
   unsigned feeds() const noexcept { return feeds_; }
+  bool nose_priority() const noexcept { return nose_priority_; }
 
  private:
   unsigned rate_ = kDefaultCameraRate;
   unsigned feeds_ = 2;
   unsigned next_feed_ = 0;
+  bool nose_priority_ = false;
+  bool skipped_ = false;
+  std::array<bool, kMaxCameraFeeds> skip_turn_{};
   bool have_time_ = false;
   std::uint64_t previous_time_ = 0;
   std::uint64_t last_any_ = 0;
