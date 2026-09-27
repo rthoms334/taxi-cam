@@ -436,6 +436,51 @@ void ui_checks() {
   require(current.manual_mask == 2 && current.aircraft_session_epoch == 11 && current.follow_taxi && current.taxi_selected_mask == 2,
           "A shortcut synchronizes a new flight before setting its session-scoped request");
 }
+void button_ui_checks() {
+  using win::CameraButton;
+  constexpr CameraButton quadrant{0x044f, 0x0405, 5};
+  const auto editor = shortcut_fixture();
+  require(
+      GetDlgItem(editor, 670) && GetDlgItem(editor, 675) && GetDlgItem(editor, 683) && GetDlgItem(editor, 693) && !GetDlgItem(editor, 684),
+      "Shortcut editor exposes a controller button for Left, Right, Both and SD");
+  wchar_t text[256]{};
+  GetDlgItemTextW(editor, 670, text, 256);
+  require(std::wstring(text) == L"No button" && button_saved == win::CameraButtons{}, "Controller buttons start unbound");
+  shortcut_command(editor, 681);
+  require(button_capture == 1 && button_input.enabled(), "Set button listens for the next controller press");
+  GetDlgItemTextW(editor, 671, text, 256);
+  require(std::wstring(text).find(L"Press a controller button") == 0, "The editor asks for a controller press");
+  const auto mask = current.manual_mask;
+  camera_button_pressed(quadrant);
+  require(button_capture == -1 && button_draft[1] == quadrant && !button_saved[1].button && current.manual_mask == mask,
+          "The captured press becomes an unsaved binding and toggles nothing");
+  require(!button_input.enabled(), "UI preview stops listening once the press is captured");
+  GetDlgItemTextW(editor, 671, text, 256);
+  require(std::wstring(text).find(L"Button 5 · ") == 0, "The captured binding names its button");
+  shortcut_command(editor, 680);
+  camera_button_pressed(quadrant);
+  shortcut_command(editor, IDOK);
+  GetDlgItemTextW(editor, 660, text, 256);
+  require(std::wstring(text).find(L"different controller button") != std::wstring::npos && button_saved == win::CameraButtons{},
+          "One button on two actions shows an error and saves nothing");
+  shortcut_command(editor, 690);
+  shortcut_command(editor, IDOK);
+  win::CameraButtons loaded;
+  require(button_saved[1] == quadrant && !button_saved[0].button && button_draft == button_saved &&
+              win::load_camera_buttons(loaded, win::settings_override) && loaded == button_saved,
+          "Save persists controller buttons in the application preferences folder");
+  require(!button_input.enabled(), "UI preview never listens for saved controller buttons");
+  camera_button_pressed(quadrant);
+  require(current.manual_mask == mask, "UI preview presses cannot toggle a camera");
+  shortcut_command(editor, 682);
+  shortcut_command(editor, 692);
+  require(button_capture == -1 && !button_draft[2].button && !button_input.enabled(), "Clear cancels a pending button capture");
+  shortcut_command(editor, 693);
+  shortcut_command(editor, 681);
+  DestroyWindow(editor);
+  require(button_draft == button_saved && button_capture == -1 && !button_input.enabled() && button_saved[1] == quadrant,
+          "Closing the editor discards unsaved button changes and stops waiting for a press");
+}
 void native_registration_checks() {
   using namespace win;
   // Reserve an unusual combination briefly; never synthesize user keystrokes or
@@ -461,6 +506,21 @@ void native_registration_checks() {
   require(PeekMessageW(&message, window, WM_HOTKEY, WM_HOTKEY, PM_REMOVE), "Hidden window receives the hotkey action message");
   DispatchMessageW(&message);
   require(!IsWindowVisible(window) && current.manual_mask == 1, "Hidden companion dispatches the registered left action");
+  const win::CameraButtons buttons{{{0x1234, 0xbead, 1}, {0x044f, 0x0405, 5}, {}, {}}};
+  button_saved = button_draft = buttons;
+  update_camera_button_input();
+  require(button_input.enabled(), "Saved controller buttons listen in the background");
+  camera_button_pressed(buttons[1]);
+  require(current.manual_mask == 3, "A bound controller button dispatches its action");
+  camera_button_pressed(buttons[1]);
+  require(current.manual_mask == 3, "Switch bounce does not toggle the display straight back");
+  camera_button_pressed(buttons[0]);
+  require(current.manual_mask == 2, "Another action's button is not held back by the repeat window");
+  camera_button_pressed({0x044f, 0x0405, 6});
+  require(current.manual_mask == 2, "Unbound controller buttons do nothing");
+  button_saved = button_draft = {};
+  update_camera_button_input();
+  require(!button_input.enabled(), "Removing every button stops controller input");
   hotkey_saved = hotkey_draft = fixture;
   const auto dialog = shortcut_fixture();
   const auto editor = GetDlgItem(dialog, 620);
@@ -506,6 +566,7 @@ int main() {
     manual_intent_checks();
     aircraft_hotkey_intent_checks();
     ui_checks();
+    button_ui_checks();
     native_registration_checks();
     hotkey_registration.clear();
     DestroyWindow(window);
@@ -517,9 +578,11 @@ int main() {
     }
     DeleteFileW((win::settings_override + L"\\settings.ini").c_str());
     DeleteFileW((win::settings_override + L"\\hotkeys.ini").c_str());
+    DeleteFileW((win::settings_override + L"\\buttons.ini").c_str());
     RemoveDirectoryW((win::settings_override + L"\\profiles").c_str());
     RemoveDirectoryW(win::settings_override.c_str());
-    std::printf("PASS camera shortcuts: %u registration, persistence, hidden-window and manual-control checks.\n", checks);
+    std::printf("PASS camera shortcuts: %u registration, persistence, hidden-window, controller-button and manual-control checks.\n",
+                checks);
     return 0;
   } catch (const std::exception& error) {
     hotkey_registration.clear();

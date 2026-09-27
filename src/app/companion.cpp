@@ -20,6 +20,7 @@
 #include "settings_store.hpp"
 #include "startup_state.hpp"
 #include "camera_hotkeys.hpp"
+#include "camera_buttons.hpp"
 #include "bug_report.hpp"
 #include "../shared/manual_camera_intent.hpp"
 #include "../shared/profile_selection.hpp"
@@ -70,6 +71,10 @@ win::ConnectCommandQueue connect_commands;
 win::CameraHotkeys hotkey_draft = win::DefaultCameraHotkeys, hotkey_saved = win::DefaultCameraHotkeys;
 win::CameraHotkeyRegistration hotkey_registration;
 bool hotkey_editor_focused{}, hotkeys_closing{};
+win::CameraButtons button_draft{}, button_saved{};
+win::CameraButtonInput button_input;
+win::CameraButtonRepeatGuard button_repeat;
+int button_capture = -1;  // Action waiting for a controller button in the editor.
 win::Updater updater;
 ULONGLONG next_update_check{};
 bool update_prompt{};
@@ -398,6 +403,19 @@ void refresh_shortcut_status() {
                        : hotkey_editor_focused            ? std::wstring(L"Editing — shortcuts paused until you leave the field")
                                                           : hotkey_registration.status(i);
     SetDlgItemTextW(shortcut_window, 650 + i, state.c_str());
+    const auto binding = button_draft[i];
+    const auto device = binding.button ? win::CameraButtonInput::device_name(binding.vendor, binding.product) : std::wstring();
+    const bool capturing = button_capture == static_cast<int>(i);
+    SetDlgItemTextW(shortcut_window, 670 + i,
+                    capturing ? L"Press a controller button…" : win::describe_camera_button(binding, device).c_str());
+    const auto button_state = capturing                    ? std::wstring(L"Waiting — press the button to use, or Clear to cancel")
+                              : binding != button_saved[i] ? std::wstring(L"Unsaved — select Save changes to apply")
+                              : !binding.button            ? std::wstring(L"Disabled")
+                              : preview_ui                 ? std::wstring(L"Preview only — button not active")
+                              : !button_input.enabled()    ? L"Unavailable — Windows error " + std::to_wstring(button_input.error())
+                              : device.empty()             ? std::wstring(L"Controller not connected")
+                                                           : std::wstring(L"Ready — works while Taxi Cam is hidden");
+    SetDlgItemTextW(shortcut_window, 675 + i, button_state.c_str());
   }
 }
 void register_camera_hotkeys() {
@@ -405,6 +423,27 @@ void register_camera_hotkeys() {
     hotkey_registration.clear();
   else
     hotkey_registration.configure(window, hotkey_saved, preview_ui);
+}
+// Raw Input runs only while a saved button can act or the editor is waiting
+// for one, so controller reports cost nothing when no button is bound.
+void update_camera_button_input() {
+  if (!hotkeys_closing && (button_capture >= 0 || (!preview_ui && win::any_camera_button(button_saved))))
+    button_input.enable(window);
+  else
+    button_input.disable();
+}
+void toggle_camera_from_hotkey(unsigned action);
+void camera_button_pressed(win::CameraButton press) {
+  if (button_capture >= 0) {
+    button_draft[button_capture] = press;
+    button_capture = -1;
+    update_camera_button_input();
+    refresh_shortcut_status();
+    return;
+  }
+  const int action = win::camera_button_action(button_saved, press);
+  if (action >= 0 && !preview_ui && button_repeat.accept(static_cast<size_t>(action), GetTickCount64()))
+    toggle_camera_from_hotkey(static_cast<unsigned>(action));
 }
 LRESULT CALLBACK shortcut_editor(HWND control, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
   if (message == WM_SETFOCUS) {
@@ -466,27 +505,39 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   if (message == WM_INITDIALOG) {
     shortcut_window = hwnd;
     hotkey_draft = hotkey_saved;
-    place_dialog(hwnd, L"Taxi Cam — Flight-deck keyboard shortcuts", 680, 510);
+    button_draft = button_saved;
+    button_capture = -1;
+    place_dialog(hwnd, L"Taxi Cam — Flight-deck shortcuts and buttons", 940, 568);
     const auto make = [&](const wchar_t* type, const wchar_t* label, int id, int x, int y, int width, int height, DWORD style = 0,
                           HFONT font = nullptr) { return dialog_control(hwnd, type, label, id, x, y, width, height, style, font); };
-    make(L"STATIC", L"Flight-deck keyboard shortcuts", -1, 20, 17, 640, 28, 0, heading);
-    make(L"STATIC", L"Use Ctrl or Alt with a letter, number or function key. Clear disables a shortcut.", -1, 20, 51, 640, 27, 0, small);
+    make(L"STATIC", L"Flight-deck shortcuts and buttons", -1, 20, 17, 900, 28, 0, heading);
+    make(L"STATIC",
+         L"Use Ctrl or Alt with a letter, number or function key, or set a joystick, button box or gamepad button. "
+         L"Clear disables it.",
+         -1, 20, 51, 900, 27, 0, small);
+    make(L"STATIC", L"Keyboard", -1, 205, 86, 275, 22, 0, small);
+    make(L"STATIC", L"Controller button", -1, 500, 86, 420, 22, 0, small);
     for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
-      const int y = 90 + static_cast<int>(i) * 78;
-      make(L"STATIC", win::CameraHotkeyNames[i], -1, 20, y + 5, 190, 26);
-      auto field = make(HOTKEY_CLASSW, L"", 620 + i, 220, y, 330, 32, WS_TABSTOP | WS_BORDER);
+      const int y = 112 + static_cast<int>(i) * 84;
+      make(L"STATIC", win::CameraHotkeyNames[i], -1, 20, y + 5, 180, 26);
+      auto field = make(HOTKEY_CLASSW, L"", 620 + i, 205, y, 195, 32, WS_TABSTOP | WS_BORDER);
       SendMessageW(field, HKM_SETHOTKEY, win::hotkey_control_value(hotkey_draft[i]), 0);
       SetWindowSubclass(field, shortcut_editor, 1, 0);
-      make(L"BUTTON", L"Clear", 630 + i, 568, y, 92, 32, WS_TABSTOP | BS_PUSHBUTTON);
-      make(L"STATIC", L"", 650 + i, 20, y + 38, 640, 25, 0, small);
+      make(L"BUTTON", L"Clear", 630 + i, 408, y, 72, 32, WS_TABSTOP | BS_PUSHBUTTON);
+      make(L"STATIC", L"", 650 + i, 205, y + 36, 275, 40, 0, small);
+      make(L"STATIC", L"", 670 + i, 500, y, 240, 32, WS_BORDER | SS_CENTERIMAGE | SS_ENDELLIPSIS);
+      make(L"BUTTON", L"Set button", 680 + i, 748, y, 92, 32, WS_TABSTOP | BS_PUSHBUTTON);
+      make(L"BUTTON", L"Clear", 690 + i, 848, y, 72, 32, WS_TABSTOP | BS_PUSHBUTTON);
+      make(L"STATIC", L"", 675 + i, 500, y + 36, 420, 40, 0, small);
     }
     make(L"STATIC",
-         L"Both turns the captain and first-officer displays on; press again to turn both off. SD is the lower ECAM or, on the\n"
-         L"PMDG 777, the lower DU. Shortcuts apply to all aircraft and work while Taxi Cam is hidden.",
-         660, 20, 400, 640, 45, 0, small);
-    make(L"BUTTON", L"Reset shortcuts", 640, 20, 457, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
-    make(L"BUTTON", L"Save changes", IDOK, 400, 457, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
-    make(L"BUTTON", L"Close", IDCANCEL, 562, 457, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+         L"Both turns the captain and first-officer displays on; press again to turn both off. SD is the lower ECAM or, on the PMDG 777, "
+         L"the lower DU. Shortcuts and buttons apply to all aircraft and work while Taxi Cam is hidden. MSFS also receives controller "
+         L"buttons, so leave a button you set here unassigned in the simulator.",
+         660, 20, 450, 900, 56, 0, small);
+    make(L"BUTTON", L"Reset shortcuts", 640, 20, 514, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"BUTTON", L"Save changes", IDOK, 660, 514, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", L"Close", IDCANCEL, 822, 514, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
     refresh_shortcut_status();
     return TRUE;
   }
@@ -509,9 +560,28 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       refresh_shortcut_status();
       return TRUE;
     }
+    if (id >= 680 && id < 680 + static_cast<int>(win::CameraHotkeyNames.size())) {
+      button_capture = id - 680;
+      update_camera_button_input();
+      if (!button_input.enabled()) {
+        button_capture = -1;
+        const auto error = L"Could not listen for controller buttons (Windows error " + std::to_wstring(button_input.error()) + L").";
+        SetDlgItemTextW(hwnd, 660, error.c_str());
+      }
+      refresh_shortcut_status();
+      return TRUE;
+    }
+    if (id >= 690 && id < 690 + static_cast<int>(win::CameraHotkeyNames.size())) {
+      if (button_capture == id - 690)
+        button_capture = -1;
+      button_draft[id - 690] = {};
+      update_camera_button_input();
+      refresh_shortcut_status();
+      return TRUE;
+    }
     if (id == IDOK) {
       std::wstring error;
-      if (!win::valid_camera_hotkeys(hotkey_draft, &error)) {
+      if (!win::valid_camera_hotkeys(hotkey_draft, &error) || !win::valid_camera_buttons(button_draft, &error)) {
         SetDlgItemTextW(hwnd, 660, error.c_str());
         return TRUE;
       }
@@ -520,12 +590,22 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
         return TRUE;
       }
       hotkey_saved = hotkey_draft;
+      button_capture = -1;
+      // buttons.ini is created only once a button has been set.
+      const bool buttons_saved = button_draft == button_saved || win::save_camera_buttons(button_draft, win::settings_directory());
+      if (buttons_saved)
+        button_saved = button_draft;
       register_camera_hotkeys();
+      update_camera_button_input();
       refresh_shortcut_status();
       SetDlgItemTextW(hwnd, 660,
-                      hotkey_registration.conflicts()
+                      !buttons_saved
+                          ? L"Keyboard shortcuts saved. Could not save controller buttons. Check access to the local settings folder."
+                      : hotkey_registration.conflicts()
                           ? L"Saved. Unavailable shortcuts need a different combination. The other shortcuts remain active."
-                          : L"Shortcuts saved for all aircraft. Camera settings and unfinished edits are unchanged.");
+                      : win::any_camera_button(button_saved) && !preview_ui && !button_input.enabled()
+                          ? L"Saved. Controller buttons are unavailable; see the status below each button."
+                          : L"Shortcuts and buttons saved for all aircraft. Camera settings and unfinished edits are unchanged.");
       return TRUE;
     }
     if (id == IDCANCEL) {
@@ -541,14 +621,17 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     shortcut_window = nullptr;
     hotkey_editor_focused = false;
     hotkey_draft = hotkey_saved;
+    button_draft = button_saved;
+    button_capture = -1;
     register_camera_hotkeys();
+    update_camera_button_input();
   }
   return FALSE;
 }
 void edit_camera_hotkeys() {
   const DialogTemplate layout;
   if (DialogBoxIndirectParamW(instance, &layout.dialog, window, shortcut_dialog, 0) == -1) {
-    notice = L"Could not open the keyboard shortcut editor.";
+    notice = L"Could not open the shortcut and button editor.";
     InvalidateRect(window, nullptr, FALSE);
   }
 }
@@ -861,7 +944,7 @@ void build_controls() {
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     toggle(pmdg_cam_control(s) ? L"CAM button" : L"TAXI buttons", 221, s.follow_taxi && !manual, 800, 412, 180);
     EnableWindow(GetDlgItem(window, 221), !manual);
-    button(L"Keyboard shortcuts…", 645, 580, 412, 205);
+    button(L"Shortcuts and buttons…", 645, 580, 412, 205);
     edit(s.camera_rate, 200, 855, 528, 100);
   } else if (page == 1) {
     const auto* profile = profiles::find(s.profile);
@@ -1086,7 +1169,7 @@ void draw_page(HDC dc) {
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     const bool cam = profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
     text(dc,
-         manual ? L"Use Keyboard shortcuts or PFD routing previews for this aircraft."
+         manual ? L"Use Shortcuts and buttons or PFD routing previews for this aircraft."
          : cam  ? L"Select L INBD, R INBD or LWR CTR, then press CAM. Press CAM again with that display selected to turn it off."
                 : L"Left and right EFIS TAXI buttons activate their own PFD.",
          264, 446, 530, 40, small, Muted, DT_LEFT | DT_WORDBREAK);
@@ -1611,8 +1694,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
       taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
       register_camera_hotkeys();
+      update_camera_button_input();
       if (hotkey_registration.conflicts())
         notice = L"Some shortcuts are unavailable. Check Overview > Flight-deck control.";
+      else if (win::any_camera_button(button_saved) && !preview_ui && !button_input.enabled())
+        notice = L"Controller buttons are unavailable. Check Overview > Flight-deck control.";
       build_controls();
       tray(true);
       SetTimer(hwnd, 1, 250, nullptr);
@@ -1632,6 +1718,19 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_camera_from_hotkey(static_cast<unsigned>(action));
       return 0;
     }
+    case WM_INPUT:
+      for (const auto press : button_input.read(reinterpret_cast<HRAWINPUT>(l))) {
+        const bool capturing = button_capture >= 0;
+        camera_button_pressed(press);
+        if (capturing)
+          break;  // Other buttons pressed with the captured one do not act.
+      }
+      break;  // DefWindowProc releases foreground Raw Input.
+    case WM_INPUT_DEVICE_CHANGE:
+      if (w == GIDC_REMOVAL)
+        button_input.remove(reinterpret_cast<HANDLE>(l));
+      refresh_shortcut_status();
+      return 0;
     case WM_GETMINMAXINFO: {
       auto* info = reinterpret_cast<MINMAXINFO*>(l);
       info->ptMinTrackSize = {scale(1055), scale(795)};
@@ -2084,6 +2183,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case WM_DESTROY:
       hotkeys_closing = true;
       hotkey_registration.clear();
+      button_input.disable();
       if (sidebar_tooltip) {
         DestroyWindow(sidebar_tooltip);
         sidebar_tooltip = nullptr;
@@ -2149,6 +2249,9 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
     notice = L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.";
   hotkey_draft = hotkey_saved;
+  if (!win::load_camera_buttons(button_saved, win::settings_directory()))
+    notice = L"Saved controller buttons were invalid and disabled. Configure them in Overview > Flight-deck control.";
+  button_draft = button_saved;
   INITCOMMONCONTROLSEX common{sizeof(common), ICC_STANDARD_CLASSES | ICC_HOTKEY_CLASS};
   InitCommonControlsEx(&common);
   WNDCLASSEXW type{};

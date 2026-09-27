@@ -65,7 +65,7 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')) {
     $resource = Join-Path $out 'app.res.o'
     & $windres '-I' $generated '-I' (Join-Path $taskRoot 'src/app') '-i' (Join-Path $taskRoot 'src/app/app.rc') '-O' 'coff' '-o' $resource
     if ($LASTEXITCODE -ne 0) { throw 'Windows application manifest compilation failed.' }
-    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'src/app/companion.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-cam.exe')
+    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'src/app/companion.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-cam.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Windows companion build failed.' }
     $binaryVersion = (Get-Item -LiteralPath (Join-Path $out 'taxi-cam.exe')).VersionInfo
     if ($binaryVersion.FileVersion -ne $version -or $binaryVersion.ProductVersion -ne $version -or
@@ -377,15 +377,20 @@ if ($Validate) {
         }
     }
     $diagnosticsTest = Join-Path $out 'companion-diagnostics-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-o' $diagnosticsTest
+    & $compiler @common (Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-o' $diagnosticsTest
     if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls compilation failed.' }
     & $diagnosticsTest
     if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls validation failed.' }
     $hotkeysTest = Join-Path $out 'camera-hotkeys-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-o' $hotkeysTest
+    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-o' $hotkeysTest
     if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls compilation failed.' }
     & $hotkeysTest
     if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls validation failed.' }
+    $buttonsTest = Join-Path $out 'camera-buttons-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_buttons_test.cpp') '-lhid' '-o' $buttonsTest
+    if ($LASTEXITCODE -ne 0) { throw 'Controller button bindings compilation failed.' }
+    & $buttonsTest
+    if ($LASTEXITCODE -ne 0) { throw 'Controller button bindings validation failed.' }
     & (Join-Path $taskRoot 'tests/installer/exe_xml_test.ps1')
     $updaterTest = Join-Path $out 'updater-test.exe'
     & $compiler @common (Join-Path $taskRoot 'tests/app/updater_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lbcrypt' '-lshell32' '-o' $updaterTest
