@@ -162,7 +162,7 @@ Each session gets one background attempt. Shader preparation and native camera/c
 
 `Prewarm phase` reports preparation, rendering, a parked pause or the final outcome, with elapsed time, retained entry IDs, cumulative native creation count, output availability and GPU-completed warmup pairs. Ordinary OFF/ON cycles should reuse the same IDs. The recurring `Camera retention` line also reports `created_total`, owned `snapshot_bytes`, `snapshot_allocations` (capture textures created since bridge start; once each feed size has a packet, it rises only when a feed changes size), quarantined packet count and the warmup phase. These counters help detect unwanted recreation and snapshot-pool growth; they do not measure all simulator heap or VRAM use.
 
-The recurring `Camera draw distance` line reports `pose_proven` (the aircraft controller has passed its public pose match this flight session), `follow_main` (above 60 knots), the number of far-distance writes, the last refusal, and `near/far/default` in metres for the main view and each feed. `GPU memory (MB): local=usage/budget non_local=usage/budget` is the simulator process's video memory against its Windows budget, on the hardware adapter with the most dedicated memory. It may name the wrong adapter on systems with several GPUs.
+The recurring `Camera draw distance` line reports `pose_proven` (the aircraft controller has passed its public pose match this flight session), `follow_main` (above 60 knots), the number of far-distance writes, the last refusal, and `near/far/default` in metres for the main view and each feed.
 
 ## PFD-copy diagnostics
 
@@ -309,7 +309,7 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 | Captures increase, no compositions | Both feeds, current scene identity and GPU completion |
 | Compositions increase, no PFD draws | Assigned targets, active side, recording-end/query/state admission, `close_forward_refused` and the `Command-list Close endpoint` log line |
 | PFD draws increase, wrong display | Target identification, left/right assignment and display layer |
-| View loses the ground after take-off | Camera draw distance line: ollow_main=1 and each feed's far equal to the main view's |
+| View loses the ground after take-off | Camera draw distance line: `follow_main=1` and each feed's far equal to the main view's |
 
 Status also contains the active side mask, target IDs, hook failures, applied exposure and GS. A status GS of −1 means unavailable. The candidate list contains up to 16 IDs, cumulative draw counts, dimensions, mip counts and formats for the selected profile.
 

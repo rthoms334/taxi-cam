@@ -42,15 +42,11 @@ extern "C" {
 void validation_invoke(Invocation*, void**);
 void validation_target();
 void validation_observer(void*) noexcept;
-void validation_after_observer(void*) noexcept;
 void taxi_engine_hook_thunk();
 extern const unsigned char taxi_hook_after_push_rbp;
 extern const unsigned char taxi_hook_after_push_flags;
 extern const unsigned char taxi_hook_after_alloc;
 extern const unsigned char taxi_hook_after_frame;
-extern const unsigned char taxi_hook_after_body_alloc;
-extern const unsigned char taxi_hook_after_original;
-extern const unsigned char taxi_hook_before_epilogue;
 extern const unsigned char taxi_hook_before_restore_flags;
 extern const unsigned char taxi_hook_after_restore_push;
 extern const unsigned char taxi_hook_after_restore_flags;
@@ -60,9 +56,6 @@ extern const unsigned char taxi_hook_after_frame_restore;
 
 std::uint64_t observer_calls = 0;
 void* last_rcx = nullptr;
-std::uint64_t after_calls = 0;
-void* last_after_rcx = nullptr;
-bool after_saw_original = false;
 bool unwind_seen = false;
 DWORD64 invoke_begin = 0;
 DWORD64 invoke_end = 0;
@@ -119,18 +112,14 @@ void prepare(Invocation& invocation, std::uint64_t seed) {
     state.stack[i] = 0xfedcba9876543210 ^ (seed + i * 97);
 }
 
-// through_thunk: the original was called by the hook, so its entry RSP differs
-// (the hook copies the caller's stack arguments into its own frame).
-void verify(const Invocation& invocation, bool through_thunk = false) {
+void verify(const Invocation& invocation) {
   const auto& wanted = invocation.requested;
   const auto& actual = invocation.observed;
   require(invocation.calls == 1, "The original target did not execute exactly once");
   require(std::memcmp(&wanted, &actual, 7 * sizeof(std::uint64_t)) == 0, "A volatile GPR argument was changed");
   require(((wanted.flags ^ actual.flags) & 0x8d5) == 0, "Arithmetic RFLAGS were changed before the original target");
   require(wanted.xmm == actual.xmm, "An XMM0..5 argument was changed");
-  require(wanted.stack == actual.stack, "Stack arguments were changed");
-  require(through_thunk || wanted.rsp == actual.rsp, "The original entry RSP changed without the hook");
-  require(!through_thunk || (actual.rsp & 15) == 8, "The hook called the original with a misaligned stack");
+  require(wanted.stack == actual.stack && wanted.rsp == actual.rsp, "Stack arguments or the original entry RSP were changed");
   require(wanted.mxcsr == actual.mxcsr, "MXCSR status or control bits were changed");
   require(invocation.returned_rax == 0x1020304050607080 &&
               invocation.returned_xmm0 == std::array<std::uint64_t, 2>{0x8899aabbccddeeff, 0x0011223344556677},
@@ -152,12 +141,9 @@ void verify_virtual_unwind() {
       Site{&taxi_hook_after_push_flags, 16, false},
       Site{&taxi_hook_after_alloc, 232, false},
       Site{&taxi_hook_after_frame, 232, true},
-      Site{&taxi_hook_after_body_alloc, 392, true},
-      Site{&taxi_hook_before_restore_flags, 392, true},
-      Site{&taxi_hook_after_restore_push, 400, true},
-      Site{&taxi_hook_after_restore_flags, 392, true},
-      Site{&taxi_hook_after_original, 392, true},
-      Site{&taxi_hook_before_epilogue, 392, true},
+      Site{&taxi_hook_before_restore_flags, 232, true},
+      Site{&taxi_hook_after_restore_push, 240, true},
+      Site{&taxi_hook_after_restore_flags, 232, true},
       Site{&taxi_hook_after_stack_restore, 8, true},
       Site{&taxi_hook_after_frame_restore, 0, false},
   };
@@ -182,13 +168,6 @@ void verify_virtual_unwind() {
   }
 }
 }  // namespace
-
-extern "C" void validation_after_body(void* original_rcx) noexcept {
-  ++after_calls;
-  last_after_rcx = original_rcx;
-  // RCX is the Invocation: the original must already have run exactly once.
-  after_saw_original = static_cast<const Invocation*>(original_rcx)->calls == 1;
-}
 
 extern "C" void validation_observer_body(void* original_rcx) noexcept {
   ++observer_calls;
@@ -235,7 +214,7 @@ int main() {
     require(entry != nullptr, "Mock invocation has no unwind metadata");
     invoke_begin = image_base + entry->BeginAddress;
     invoke_end = image_base + entry->EndAddress;
-    const auto installed = install(table.slot, original, &validation_observer, nullptr, &validation_after_observer);
+    const auto installed = install(table.slot, original, &validation_observer);
     require(installed.status == Status::installed && installed.pointer_changed && installed.protection_restored,
             "Expected-original installation failed");
     require(protection(table.slot) == PAGE_READONLY && *table.slot != original,
@@ -245,14 +224,10 @@ int main() {
       Invocation invocation;
       prepare(invocation, seed * 97);
       const auto before = observer_calls;
-      const auto before_after = after_calls;
       unwind_seen = false;
-      after_saw_original = false;
       validation_invoke(&invocation, table.slot);
-      verify(invocation, true);
+      verify(invocation);
       require(observer_calls == before + 1 && last_rcx == &invocation, "Observer did not receive original RCX exactly once");
-      require(after_calls == before_after + 1 && last_after_rcx == &invocation && after_saw_original,
-              "The after-observer did not run exactly once, after the original, with the original RCX");
       require(unwind_seen, "A real stack capture failed to unwind across the observer thunk to its caller");
     }
 
@@ -262,13 +237,10 @@ int main() {
     prepare(inner, 0xbeef);
     nested = &inner;
     const auto before_nested = observer_calls;
-    const auto before_nested_after = after_calls;
     validation_invoke(&outer, table.slot);
-    verify(outer, true);
-    verify(inner, true);
+    verify(outer);
+    verify(inner);
     require(observer_calls == before_nested + 1 && last_rcx == &outer, "Reentrant observation was not suppressed");
-    require(after_calls == before_nested_after + 1 && last_after_rcx == &outer,
-            "A nested after-observer ran inside the observer, or the outer one did not run");
 
     const auto thunk = *table.slot;
     table.replace_for_test(original);
@@ -285,13 +257,12 @@ int main() {
     Invocation after;
     prepare(after, 0x321);
     const auto before_after = observer_calls;
-    const auto before_after_after = after_calls;
     validation_invoke(&after, table.slot);
     verify(after);
-    require(observer_calls == before_after && after_calls == before_after_after, "An observer ran through the restored slot");
+    require(observer_calls == before_after, "Observer ran through the restored slot");
     std::puts(
-        "PASS: readonly-slot install/refusal/removal; 128 Win64/SSE/MXCSR register-stack-return cases through a calling hook; before and "
-        "after observers with original RCX; reentry; 13 unwind sites and real stack captures.");
+        "PASS: readonly-slot install/refusal/removal; 128 Win64/SSE/MXCSR register-stack-return cases; original RCX; reentry; 10 unwind "
+        "sites and real stack captures.");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());

@@ -112,33 +112,6 @@ validation_observer:
   retq
 .seh_endproc
 
-.p2align 4
-.globl validation_after_observer
-.seh_proc validation_after_observer
-validation_after_observer:
-  subq $40, %rsp
-  .seh_stackalloc 40
-  .seh_endprologue
-  call validation_after_body
-  /* Disturb the original's return registers and FP status: the hook must
-     restore RAX/RDX/XMM0/XMM1/MXCSR after this returns. */
-  movl $0x1fbf, 32(%rsp)
-  ldmxcsr 32(%rsp)
-  pcmpeqd %xmm0, %xmm0
-  pcmpeqd %xmm1, %xmm1
-  pcmpeqd %xmm2, %xmm2
-  pcmpeqd %xmm3, %xmm3
-  movabsq $0x0badf00d0badf00d, %rax
-  movq %rax, %rcx
-  movq %rax, %rdx
-  movq %rax, %r8
-  movq %rax, %r9
-  movq %rax, %r10
-  movq %rax, %r11
-  addq $40, %rsp
-  retq
-.seh_endproc
-
 .section .rdata,"dr"
 .p2align 4
 validation_return_vector:

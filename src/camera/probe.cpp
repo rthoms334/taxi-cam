@@ -11,13 +11,10 @@
 #include "camera_contract.hpp"
 #include "local_memory.hpp"
 #include "manager_inspection.hpp"
-#include "node_link.hpp"
 #include "node_mount.hpp"
 #include "owned_entry_inventory.hpp"
 #include "owned_view.hpp"
-#include "pose_lead.hpp"
 #include "pose_source_cache.hpp"
-#include "pose_trace.hpp"
 #include "probe_inspection_gate.hpp"
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
@@ -118,30 +115,10 @@ struct Runtime {
   // Proven aircraft controller for the camera pose (observer thread). A session
   // reset from any thread advances pose_source_resets, which retires it.
   PoseSourceCache pose_source;
-  // Leads the mount pose by the model's per-frame movement on aircraft whose
-  // transform lags the rendered frame (observer thread).
-  PoseLead pose_lead;
-  // Camera-manager update clock (seconds) and the interval between the last
-  // two updates, the duration of the frame being drawn (observer thread).
-  double update_s = 0, update_frame_s = 0;
-  LONGLONG previous_update_qpc = 0;
-  // Diagnostics: per-update model transform windows (PoseTrace), and the led
-  // origin mount_pose produced on update led_update.
-  PoseTrace pose_trace;
-  // After-update placement (after_observer): the feeds whose gates this update's
-  // observer opened, placed without a lead on the transform the update synced.
-  // Only that same update, only open gates, and only views whose identity matches.
-  std::uint64_t post_pose_update = 0;
-  unsigned post_pose_feeds = 0;
-  std::array<ec::EntryId, kMaxCameraFeeds> post_pose_ids{};
-  std::array<std::uint64_t, kMaxCameraFeeds> post_pose_views{}, post_pose_nodes{}, post_pose_cameras{};
-  std::uint64_t post_applied = 0, post_refused = 0;
-  const char* post_error = "";
-  Vector3 post_origin{};
-  std::uint64_t post_origin_update = 0;
-  // Diagnostics: the model origin read before this update (pose trace).
-  Vector3 pre_trace_origin{};
-  std::uint64_t pre_trace_update = 0;
+  // The aircraft scene read by the last successful capture_pose. Its model
+  // Node is used only in the update that read it (mount_scene_update).
+  AircraftScenePose mount_scene{};
+  std::uint64_t mount_scene_update = 0;
   // Camera Nodes attached to the aircraft model Node (node_mount.hpp), per
   // feed (observer thread). Empty when the parent contract did not resolve.
   std::array<FeedMount, kMaxCameraFeeds> feed_mounts{};
@@ -149,13 +126,6 @@ struct Runtime {
   const char* mount_error = "";
   // Set once with the contract, before the observer is installed.
   std::string mount_contract_error;
-  // Diagnostics (node_link.hpp): main view, aircraft object camera and Taxi
-  // Cam's nose camera, sampled at the calibration latch; the own sample waits
-  // for the next nose pose.
-  std::array<NodeLinkReport, 3> node_links{};
-  bool node_link_own_pending = false;
-  Vector3 led_origin{};
-  std::uint64_t led_update = 0;
   std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
@@ -524,17 +494,6 @@ CameraClip current_main_clip(const Runtime& runtime) noexcept {
              ? runtime.main_clip
              : CameraClip{};
 }
-// The scene pose the cameras are mounted on: led by the aircraft profile's
-// pose_lead_frames of the model's per-frame movement (PoseLead). The public
-// plausibility check keeps using the pose as read.
-BodyPose mount_pose(Runtime& runtime, const BodyPose& scene) noexcept {
-  const auto led = runtime.pose_lead.lead(scene, runtime.updates, runtime.update_s, get_aircraft_session_readiness().epoch,
-                                          runtime.pose_source_resets.load(std::memory_order_acquire),
-                                          runtime.aircraft_profile ? runtime.aircraft_profile->pose_lead_frames : 0);
-  runtime.led_origin = led.origin;
-  runtime.led_update = runtime.updates;
-  return led;
-}
 // The full aircraft walk to the active controller and the scene transform it
 // leads to. False (pose_busy, message set) when no stable active aircraft is
 // found; otherwise user is the controller and scene its read, complete or not.
@@ -604,7 +563,7 @@ std::optional<bool> capture_trusted_pose(Runtime& runtime, std::string& memory_d
     return std::nullopt;
   }
   if (!scene.complete ||
-      !make_mounted_pair(mount_pose(runtime, scene.pose), runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+      !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
     // The proven aircraft mid-update or briefly unreadable: wait, keep the proof.
     runtime.pose_source.forget();
     runtime.pose_busy = true;
@@ -614,6 +573,8 @@ std::optional<bool> capture_trusted_pose(Runtime& runtime, std::string& memory_d
     return false;
   }
   runtime.pose_source.refresh(user, now, epoch, resets);
+  runtime.mount_scene = scene;
+  runtime.mount_scene_update = runtime.updates;
   runtime.pose_captured = true;
   return true;
 }
@@ -626,10 +587,8 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
   runtime.stale_local_calibration = false;
   runtime.calibration_pending = false;
   runtime.mounted_poses = {};
+  runtime.mount_scene_update = 0;
   std::string memory_detail;
-  // Diagnostics (node_link.hpp): the main view's and aircraft object camera's
-  // Nodes seen by calibration in this call, checked after the scene read below.
-  std::uint64_t main_view_node = 0, object_camera_node = 0;
   auto body = sample_body_pose(GetTickCount64());
   if (!body.valid && std::strcmp(body.error, "camera_world_values") == 0) {
     // This is a received invalid WORLD value, not a missing/stale callback.
@@ -693,13 +652,10 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
       objects.reset_budget();
       const auto camera = inspected(runtime, [&] { return inspect_source_pose(objects, source, &position); }, &memory_detail);
       aircraft_camera = camera.complete ? "mismatched" : "unusable";
-      if (camera.complete)
-        object_camera_node = camera.node_address;
       if (camera.complete && public_camera_matches(position, camera.fov, GetTickCount64(), &aircraft_match)) {
         matched = true;
         matched_fov = camera.fov;
         aircraft_camera = "matched";
-        main_view_node = camera.node_address;
         note_main_view_clip(runtime, camera.camera_address);
       }
     }
@@ -734,7 +690,6 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
           position = translation;
           matched_fov = chosen.fov;
           matched = true;
-          main_view_node = chosen.node_address;
           note_main_view_clip(runtime, chosen.camera_address);
         }
       }
@@ -796,7 +751,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
       runtime.pose_source.prove(user, now, epoch, resets);
   }
   if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose) ||
-      !make_mounted_pair(mount_pose(runtime, scene.pose), runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+      !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
     runtime.pose_source.forget();
     runtime.pose_busy = true;
     runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") +
@@ -805,15 +760,8 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
       runtime.message += " " + memory_detail;
     return false;
   }
-  if (main_view_node || object_camera_node) {
-    // Read-only: is the main view parented to the aircraft? Same update as the
-    // calibration that produced these Nodes; numbers and flags only.
-    LocalMemoryReader links;
-    const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
-    runtime.node_links[0] = inspect_node_link(links, main_view_node, scene.node, user, node_vtable);
-    runtime.node_links[1] = inspect_node_link(links, object_camera_node, scene.node, user, node_vtable);
-    runtime.node_link_own_pending = true;
-  }
+  runtime.mount_scene = scene;
+  runtime.mount_scene_update = runtime.updates;
   runtime.pose_captured = true;
   return true;
 }
@@ -1081,12 +1029,6 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
 void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsigned feed) noexcept {
   if (feed >= kMaxCameraFeeds)
     return;
-  if (feed == 0 && runtime.node_link_own_pending) {
-    // Read-only comparison sample of Taxi Cam's own (unparented) nose camera.
-    LocalMemoryReader links;
-    runtime.node_links[2] = inspect_node_link(links, view.node_address, 0, 0, runtime.base + runtime.contract.layout.scene_node_vtable);
-    runtime.node_link_own_pending = false;
-  }
   if (runtime.clip_cameras[feed] != view.camera_address) {
     CameraClip own;
     if (!read_camera_clip(view.camera_address, own) || !plausible_camera_clip(own)) {
@@ -1298,6 +1240,38 @@ bool restore_mount(Runtime& runtime, ec::EntryId id) noexcept {
     }
   }
   return proceed;
+}
+
+// Mounting needs the parent contract and a running, ready flight session.
+bool mounting_allowed(const Runtime& runtime) noexcept {
+  const auto session = get_aircraft_session_readiness();
+  return parenting_available(runtime) && !session.paused && !session.loading && session.ready && session_work_allowed(runtime);
+}
+
+// Places the feeds this update opens on the pose capture_pose read in it. A
+// feed's camera Node is mounted on that aircraft's model Node on its first
+// pulse; from then on its mount is stored relative to the aircraft and aimed
+// far ahead (far_aim), so the engine carries it with the aircraft. A lost
+// mount, or one on another aircraft's Node, is never placed.
+void place_feeds(Runtime& runtime,
+                 const std::array<ec::EntryId, kMaxCameraFeeds>& ids,
+                 const std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds>& views,
+                 const std::array<bool, kMaxCameraFeeds>& desired) noexcept {
+  const auto& scene = runtime.mount_scene;
+  const bool mounting = mounting_allowed(runtime) && runtime.mount_scene_update == runtime.updates && scene.complete;
+  for (unsigned i = 0; i < desired.size(); ++i) {
+    if (!desired[i])
+      continue;
+    const auto& mount = runtime.feed_mounts[i];
+    auto mounted = mounting                                            ? current_mount(runtime, i, views[i])
+                   : mount.node && mount.node == views[i].node_address ? MountState::lost
+                                                                       : MountState::none;
+    if (mounted == MountState::none && mounting && mount_on_aircraft(runtime, i, ids[i], views[i], scene))
+      mounted = MountState::attached;
+    if (mounted == MountState::lost || (mounted == MountState::attached && runtime.feed_mounts[i].parent != scene.node))
+      continue;
+    apply_pose(runtime, views[i], mounted == MountState::attached ? far_aim(runtime.mounted_poses[i]) : runtime.mounted_poses[i], i);
+  }
 }
 
 void apply_gates(Runtime& runtime,
@@ -1984,68 +1958,6 @@ void record_observer_peak(Runtime& runtime, LARGE_INTEGER entered, LARGE_INTEGER
   } catch (...) {
   }
 }
-// Diagnostics (PoseTrace), from the after-update observer: the model transform
-// and the main view's camera as the update left them, and the origin the views
-// were placed on this update.
-void sample_pose_trace(Runtime& runtime) noexcept {
-  // Diagnostics (PoseTrace): the model transform on every update while the
-  // aircraft moves, only for a session-proven controller and only while a
-  // trace window wants this update. No camera or engine state changes.
-  if (session_work_allowed(runtime) && runtime.pose_trace.wants(runtime.pose_lead.speed())) {
-    const auto trace_readiness = get_aircraft_session_readiness();
-    const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
-    if (const auto user = trace_readiness.ready ? runtime.pose_source.session_proven(trace_readiness.epoch, resets) : 0) {
-      PoseTraceEntry entry;
-      entry.update = runtime.updates;
-      entry.time_s = runtime.update_s;
-      entry.frame_s = runtime.update_frame_s;
-      LocalMemoryReader objects;
-      const auto scene =
-          inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); });
-      if (scene.complete) {
-        entry.read = scene.pose.origin;
-        entry.flags |= kPoseTraceRead;
-        // Other copies of the aircraft position near its model (0.9.67).
-        LocalMemoryReader scan;
-        scan_position_candidates(scan, scene.node, 1024, 1, scene.pose.origin, entry);
-        std::uint64_t attached = 0;
-        if (scan.read(scene.node + 256, &attached, sizeof(attached)))
-          scan_position_candidates(scan, attached, 4096, 2, scene.pose.origin, entry);
-        scan_position_candidates(scan, user, 2048, 3, scene.pose.origin, entry);
-      }
-      if (runtime.pre_trace_update == runtime.updates) {
-        entry.pre = runtime.pre_trace_origin;
-        entry.flags |= kPoseTracePre;
-      }
-      // The aircraft object camera through the full aircraft walk (about 1 ms,
-      // only while a trace window is open): its Node's world translation.
-      LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-      LocalMemoryReader walk;
-      std::uint64_t source = 0;
-      const auto aircraft = inspected(runtime, [&] {
-        return discovery::inspect_aircraft_metadata(image, walk, runtime.image, runtime.base,
-                                                    runtime.contract.layout.aircraft_facade_vtable, true, true, false, &source, nullptr,
-                                                    runtime.contract.layout);
-      });
-      if (aircraft.valid && aircraft.available && source) {
-        walk.reset_budget();
-        Vector3 main{};
-        const auto camera = inspected(runtime, [&] { return inspect_source_pose(walk, source, &main); });
-        if (camera.complete) {
-          entry.main = main;
-          entry.flags |= kPoseTraceMain;
-        }
-      }
-      if (runtime.led_update == runtime.updates) {
-        entry.applied = runtime.led_origin;
-        entry.flags |= kPoseTraceApplied;
-        entry.lead_m = runtime.pose_lead.lead_metres();
-      }
-      runtime.pose_trace.record(entry, runtime.pose_lead.speed());
-    }
-  }
-}
-
 void observer(void* manager) noexcept {
   auto& runtime = state();
   if (!runtime.enabled.load(std::memory_order_acquire) || runtime.observing.test_and_set(std::memory_order_acquire))
@@ -2070,31 +1982,11 @@ void observer(void* manager) noexcept {
   ScopedLocalMemoryMetrics memory_scope(memory_metrics);
   try {
     ++runtime.updates;
-    if (!runtime.counter_frequency.QuadPart)
-      QueryPerformanceFrequency(&runtime.counter_frequency);
-    if (runtime.counter_frequency.QuadPart > 0 && entered.QuadPart > 0) {
-      const double tick_s = 1.0 / static_cast<double>(runtime.counter_frequency.QuadPart);
-      runtime.update_frame_s = runtime.previous_update_qpc && entered.QuadPart > runtime.previous_update_qpc
-                                   ? static_cast<double>(entered.QuadPart - runtime.previous_update_qpc) * tick_s
-                                   : 0;
-      runtime.update_s = static_cast<double>(entered.QuadPart) * tick_s;
-      runtime.previous_update_qpc = entered.QuadPart;
-    }
-    // Diagnostics (pose trace): the model origin before the update, to compare
-    // with the after-update read in the same entry.
-    if (session_work_allowed(runtime) && runtime.pose_trace.wants(runtime.pose_lead.speed())) {
-      const auto trace_readiness = get_aircraft_session_readiness();
-      const auto trace_resets = runtime.pose_source_resets.load(std::memory_order_acquire);
-      if (const auto user = trace_readiness.ready ? runtime.pose_source.session_proven(trace_readiness.epoch, trace_resets) : 0) {
-        LocalMemoryReader objects;
-        const auto scene =
-            inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); });
-        if (scene.complete) {
-          runtime.pre_trace_origin = scene.pose.origin;
-          runtime.pre_trace_update = runtime.updates;
-        }
-      }
-    }
+    // Mounts come off the aircraft while paused or not in a ready flight, every
+    // update, so quitting or ending a flight never unloads an aircraft that
+    // still holds a camera Node (return_all_mounts).
+    if (parenting_available(runtime) && !mounting_allowed(runtime))
+      return_all_mounts(runtime);
     const auto before = runtime.pair.snapshot();
     const auto now = GetTickCount64();
     const auto settings = runtime.requested_settings.load(std::memory_order_acquire);
@@ -2616,21 +2508,10 @@ void observer(void* manager) noexcept {
             }
           }
           if (pose_ready && aa_ready) {
-            // The views are placed only after the original update returns, on the
-            // aircraft transform it synced (after_observer); capture_pose above only
-            // proved a pose is available before these gates open.
-            if (needs_pose) {
-              runtime.post_pose_update = runtime.updates;
-              runtime.post_pose_feeds = 0;
-              for (unsigned i = 0; i < desired.size(); ++i)
-                if (desired[i]) {
-                  runtime.post_pose_feeds |= 1u << i;
-                  runtime.post_pose_ids[i] = pair.owned_ids[i];
-                  runtime.post_pose_views[i] = views[i].view_address;
-                  runtime.post_pose_nodes[i] = views[i].node_address;
-                  runtime.post_pose_cameras[i] = views[i].camera_address;
-                }
-            }
+            // Position changes happen only inside the validated observer phase,
+            // before the original manager update can consume a newly opened gate.
+            if (needs_pose)
+              timed(runtime, ProbeStage::pose, [&] { place_feeds(runtime, pair.owned_ids, views, desired); });
             if (needs_pose && runtime.retained_recalibration) {
               // The retained pair now carries the arrival pose. Reopen its scene
               // like a retained profile resume; the next inspection republishes.
@@ -2861,10 +2742,6 @@ void observer(void* manager) noexcept {
       const auto main_clip = current_main_clip(runtime);
       runtime.published.main_clip = {main_clip.near_plane, main_clip.far_plane, main_clip.default_far};
       runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
-      runtime.published.pose_speed = runtime.pose_lead.speed();
-      runtime.published.post_applied = runtime.post_applied;
-      runtime.published.post_refused = runtime.post_refused;
-      runtime.published.post_error = runtime.post_error;
       for (unsigned i = 0; i < kMaxCameraFeeds; ++i) {
         const auto& mount = runtime.feed_mounts[i];
         runtime.published.mount_state[i] = !mount.node ? 0 : mount.lost ? 2 : 1;
@@ -2879,9 +2756,6 @@ void observer(void* manager) noexcept {
       runtime.published.flight_change_fallbacks = runtime.flight_change_fallbacks;
       runtime.published.sim_paused = get_aircraft_session_readiness().paused;
       runtime.published.mount_contract_error = runtime.mount_contract_error;
-      runtime.published.node_links = runtime.node_links;
-      runtime.published.pose_step_m = runtime.pose_lead.step_metres();
-      runtime.published.pose_lead_m = runtime.pose_lead.lead_metres();
       runtime.published.pose_session_proven =
           runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
                                              runtime.pose_source_resets.load(std::memory_order_acquire)) != 0;
@@ -2890,112 +2764,6 @@ void observer(void* manager) noexcept {
     } catch (...) {
       runtime.pair.request_disable();
     }
-  }
-}
-
-// Runs once the original manager update returns (observer_thunk.S), on the
-// same thread and update. The update syncs the aircraft model to its latest
-// physics step and places the main camera on it; views placed before it trail
-// by one or two steps (0.9.65 trace: the main camera sat 25.73 m ahead of the
-// same update's model read at every speed). The feeds whose gates this update's
-// observer opened are placed here, on the synced transform, without a lead.
-// Each view is re-inspected and must be the same view, Node and Camera with its
-// gate still open; anything else is refused and keeps its previous placement.
-void after_observer(void* manager) noexcept {
-  auto& runtime = state();
-  if (!runtime.enabled.load(std::memory_order_acquire) || runtime.observing.test_and_set(std::memory_order_acquire))
-    return;
-  struct Guard {
-    Runtime& runtime;
-    ~Guard() { runtime.observing.clear(std::memory_order_release); }
-  } guard{runtime};
-  const hook_timing::Scope timing(hook_timing::camera_manager);
-  try {
-    const unsigned feeds = runtime.post_pose_update == runtime.updates ? runtime.post_pose_feeds : 0;
-    runtime.post_pose_feeds = 0;
-    // Mounts come off the aircraft while paused or not in a ready flight, every
-    // update, so quitting or ending a flight never unloads an aircraft that
-    // still holds a camera Node (return_all_mounts).
-    const auto session = get_aircraft_session_readiness();
-    const bool mounting =
-        parenting_available(runtime) && !session.paused && !session.loading && session.ready && session_work_allowed(runtime);
-    if (parenting_available(runtime) && !mounting)
-      return_all_mounts(runtime);
-    const auto refuse = [&](const char* error) {
-      ++runtime.post_refused;
-      runtime.post_error = error;
-    };
-    if (feeds) {
-      const auto readiness = get_aircraft_session_readiness();
-      const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
-      const auto pair = runtime.pair.snapshot();
-      std::uint64_t user = 0;
-      if (reinterpret_cast<std::uint64_t>(manager) != runtime.manager)
-        refuse("post_manager_changed");
-      else if (!session_work_allowed(runtime) || !readiness.ready)
-        refuse("post_session_not_ready");
-      else if (!(user = runtime.pose_source.session_proven(readiness.epoch, resets)))
-        refuse("post_pose_not_proven");
-      else {
-        LocalMemoryReader objects;
-        const auto scene =
-            inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); });
-        // poses: led world placement; held: the mount as read, for cameras whose
-        // Node is attached to the aircraft (the engine moves those with it).
-        std::array<MountedPose, kMaxCameraFeeds> poses{}, held{};
-        if (!scene.complete)
-          refuse("post_scene_unavailable");
-        else if (!make_mounted_pair(mount_pose(runtime, scene.pose), runtime.mounts, poses, runtime.schedule.feeds()) ||
-                 !make_mounted_pair(scene.pose, runtime.mounts, held, runtime.schedule.feeds()))
-          refuse("post_mount_failed");
-        else {
-          bool placed = false;
-          for (unsigned i = 0; i < kMaxCameraFeeds; ++i) {
-            if (!(feeds & (1u << i)))
-              continue;
-            if (!runtime.gates[i] || pair.owned_ids[i] != runtime.post_pose_ids[i]) {
-              refuse("post_gate_or_pair_changed");
-              continue;
-            }
-            const auto view = inspect_entry(runtime, runtime.post_pose_ids[i]);
-            if (!view.complete || !view.ready || view.view_address != runtime.post_pose_views[i] ||
-                view.node_address != runtime.post_pose_nodes[i] || view.camera_address != runtime.post_pose_cameras[i]) {
-              refuse("post_view_changed");
-              continue;
-            }
-            // Mounted on the aircraft Node (first pulse attaches): the mount is
-            // stored relative to the aircraft and aimed far ahead (far_aim).
-            // Not mounting: a mount still held here could not be returned and
-            // is placed like a lost one (never).
-            auto mounted = mounting ? current_mount(runtime, i, view)
-                           : runtime.feed_mounts[i].node && runtime.feed_mounts[i].node == view.node_address ? MountState::lost
-                                                                                                             : MountState::none;
-            if (mounted == MountState::none && mounting && mount_on_aircraft(runtime, i, runtime.post_pose_ids[i], view, scene))
-              mounted = MountState::attached;
-            if (mounted == MountState::lost) {
-              refuse("post_mount_lost");
-              continue;
-            }
-            if (mounted == MountState::attached && runtime.feed_mounts[i].parent != scene.node) {
-              refuse("post_mount_other_aircraft");
-              continue;
-            }
-            apply_pose(runtime, view, mounted == MountState::attached ? far_aim(held[i]) : poses[i], i);
-            ++runtime.post_applied;
-            placed = true;
-          }
-          if (placed) {
-            runtime.post_origin = runtime.led_origin;
-            runtime.post_origin_update = runtime.updates;
-          }
-        }
-      }
-    }
-    sample_pose_trace(runtime);
-  } catch (...) {
-    // Keep the previous placement; never disturb the simulator's update.
-    ++runtime.post_refused;
-    runtime.post_error = "post_exception";
   }
 }
 }  // namespace
@@ -3055,7 +2823,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
       const engine_hook::ImageDataSlotProof image_data{reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, section->rva,
                                                        section->size};
       const auto hook = engine_hook::install(reinterpret_cast<void**>(runtime.base + update_slot),
-                                             reinterpret_cast<void*>(runtime.base + update), observer, &image_data, after_observer);
+                                             reinterpret_cast<void*>(runtime.base + update), observer, &image_data);
       runtime.hooked.store(hook.pointer_changed, std::memory_order_release);
       runtime.protection_ready = hook.protection_restored;
       if (!hook.pointer_changed || !hook.protection_restored) {
@@ -3214,11 +2982,6 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
 void suspend_scene_rendering(bool suspended) noexcept {
   auto& runtime = state();
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
-}
-
-bool take_pose_trace(PoseTraceSink sink, void* context) noexcept {
-  return state().pose_trace.take(
-      [&](unsigned window, const PoseTraceEntry* entries, std::size_t count) { sink(window, entries, count, context); });
 }
 
 void request_scene_main_far(bool follow) noexcept {

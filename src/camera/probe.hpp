@@ -3,8 +3,6 @@
 #include "../shared/camera_rate.hpp"
 #include "aircraft_mounts.hpp"
 #include "entry_pair.hpp"
-#include "node_link.hpp"
-#include "pose_trace.hpp"
 #include "scene_recovery.hpp"
 
 #include <array>
@@ -99,17 +97,11 @@ struct ProbeSnapshot {
   std::array<std::array<float, 3>, kMaxCameraFeeds> draw_clip{};
   std::array<float, 3> main_clip{};
   bool follow_main_far = false;
-  // PoseLead at the last pose read: smoothed model speed (m/s), its movement
-  // during the frame being drawn and the lead applied to the mounts (metres).
-  double pose_speed = 0, pose_step_m = 0, pose_lead_m = 0;
-  // After-update placement on the synced transform: feeds placed, refusals and
-  // the last refusal reason ("" when none).
-  std::uint64_t post_applied = 0, post_refused = 0;
-  const char* post_error = "";
   // Camera mount on the aircraft Node (node_mount.hpp): whether this image's
   // parent contract resolved (and why not), per-feed state (0 world placement,
-  // 1 attached, 2 lost), attach/restore/refusal counts, cameras taken back to the world root after
-  // their aircraft Node went away (rehomes), and the last refusal.
+  // 1 attached, 2 lost), attach/restore/refusal counts, cameras taken back to
+  // the world root after their aircraft Node went away (rehomes), and the last
+  // refusal.
   bool mount_available = false, sim_paused = false;
   // Flight changes that kept the camera pair, and kept pairs that failed
   // revalidation and took the full reset instead (begin_flight_change).
@@ -118,9 +110,6 @@ struct ProbeSnapshot {
   std::array<std::uint8_t, kMaxCameraFeeds> mount_state{};
   std::uint64_t mount_attaches = 0, mount_restores = 0, mount_refused = 0, mount_rehomes = 0;
   const char* mount_error = "";
-  // Diagnostics: main view, aircraft object camera and own nose camera Node
-  // parent links (node_link.hpp), from the last calibration latch.
-  std::array<NodeLinkReport, 3> node_links{};
   // This flight session's aircraft passed its public pose match; its scene
   // transform places the cameras without the local calibration from then on.
   bool pose_session_proven = false;
@@ -195,10 +184,6 @@ void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = 
 // Taxi Cam's views the main view's far distances (above 60 kt, so they keep
 // drawing the ground after take-off); false restores each camera's own far.
 void request_scene_main_far(bool follow) noexcept;
-// Diagnostics: hands each completed PoseTrace window to sink once (bridge
-// worker; no engine access). False when none is ready.
-using PoseTraceSink = void (*)(unsigned window, const PoseTraceEntry* entries, std::size_t count, void* context);
-bool take_pose_trace(PoseTraceSink sink, void* context) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;

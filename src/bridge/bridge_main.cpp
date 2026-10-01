@@ -23,7 +23,6 @@
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
 #include "freeze_watchdog.hpp"
-#include "gpu_memory.hpp"
 #include "native_hooks.hpp"
 
 namespace {
@@ -46,44 +45,6 @@ void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noe
   if (!notifications_enabled.load(std::memory_order_acquire) || !admit_toast(limiter, event, now))
     return;
   notification_log.publish(event, now);
-}
-// Diagnostics: a completed PoseTrace window as pose-trace-<pid>-<window>.csv
-// beside bridge.log (window 0 from taxi speed, 1 from take-off speed).
-void write_pose_trace(unsigned window, const native_camera::PoseTraceEntry* entries, std::size_t count, void*) noexcept {
-  try {
-    wchar_t directory[32768]{};
-    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
-    if (!n || n >= 32700)
-      return;
-    std::wstring path(directory);
-    path += L"\\Taxi Cam";
-    CreateDirectoryW(path.c_str(), nullptr);
-    path += L"\\pose-trace-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(window) + L".csv";
-    FILE* file = _wfopen(path.c_str(), L"wb");
-    if (!file)
-      return;
-    std::fputs(
-        "update,time_s,frame_ms,read_ok,read_x,read_y,read_z,applied,applied_x,applied_y,applied_z,lead_m,main_ok,main_x,main_y,main_z,"
-        "pre_ok,pre_x,pre_y,pre_z,candidates\r\n",
-        file);
-    for (std::size_t i = 0; i < count; ++i) {
-      const auto& e = entries[i];
-      std::fprintf(file, "%llu,%.6f,%.3f,%u,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.3f,%u,%.4f,%.4f,%.4f",
-                   static_cast<unsigned long long>(e.update), e.time_s, e.frame_s * 1000.0,
-                   (e.flags & native_camera::kPoseTraceRead) ? 1u : 0u, e.read[0], e.read[1], e.read[2],
-                   (e.flags & native_camera::kPoseTraceApplied) ? 1u : 0u, e.applied[0], e.applied[1], e.applied[2], e.lead_m,
-                   (e.flags & native_camera::kPoseTraceMain) ? 1u : 0u, e.main[0], e.main[1], e.main[2]);
-      // The pre-update read, then the candidates as object:offset:x:y:z.
-      std::fprintf(file, ",%u,%.4f,%.4f,%.4f,", (e.flags & native_camera::kPoseTracePre) ? 1u : 0u, e.pre[0], e.pre[1], e.pre[2]);
-      for (std::uint32_t c = 0; c < e.candidate_count && c < e.candidates.size(); ++c)
-        std::fprintf(file, "%s%u:%u:%.4f:%.4f:%.4f", c ? " " : "", e.candidates[c].object, e.candidates[c].offset, e.candidates[c].value[0],
-                     e.candidates[c].value[1], e.candidates[c].value[2]);
-      std::fputs("\r\n", file);
-    }
-    std::fclose(file);
-  } catch (...) {
-    // Diagnostics must not interrupt bridge operation.
-  }
 }
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
@@ -422,7 +383,6 @@ DWORD run_impl() {
   std::array<std::array<double, 6>, 3> applied_mounts{};
   // Camera views draw as far as the main view above 60 kt (view_clip).
   bool far_follows_main = false;
-  win::GpuMemoryProbe gpu_memory;
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -862,8 +822,6 @@ DWORD run_impl() {
     // Atomic only; the observer applies it before each pose refresh.
     far_follows_main = native_camera::follow_main_far(far_follows_main, speed.valid, speed.knots);
     native_camera::request_scene_main_far(far_follows_main);
-    // Diagnostics: write each completed per-update pose trace once.
-    native_camera::take_pose_trace(write_pose_trace, nullptr);
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
       for (unsigned i = 0; i < mounts.size(); ++i) {
@@ -1372,18 +1330,14 @@ DWORD run_impl() {
       log_status(status, retention_detail);
       // Per camera and for the main view: near plane / culling far / default far, metres.
       char clip_detail[448];
-      std::snprintf(clip_detail, sizeof(clip_detail),
-                    "Camera draw distance: pose_proven=%d post=%llu/%llu post_error=%s speed_mps=%.1f step_m=%.2f lead_m=%.2f "
-                    "follow_main=%d writes=%llu "
-                    "error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
-                    scene.pose_session_proven ? 1 : 0, static_cast<unsigned long long>(scene.post_applied),
-                    static_cast<unsigned long long>(scene.post_refused), scene.post_error && *scene.post_error ? scene.post_error : "none",
-                    scene.pose_speed, scene.pose_step_m, scene.pose_lead_m, scene.follow_main_far ? 1 : 0,
-                    static_cast<unsigned long long>(scene.draw_clip_writes),
-                    scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0],
-                    scene.main_clip[1], scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2],
-                    scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
-                    scene.draw_clip[2][2]);
+      std::snprintf(
+          clip_detail, sizeof(clip_detail),
+          "Camera draw distance: pose_proven=%d follow_main=%d writes=%llu "
+          "error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
+          scene.pose_session_proven ? 1 : 0, scene.follow_main_far ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
+          scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0], scene.main_clip[1],
+          scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2], scene.draw_clip[1][0],
+          scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1], scene.draw_clip[2][2]);
       log_status(status, clip_detail);
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
@@ -1399,31 +1353,6 @@ DWORD run_impl() {
           scene.mount_contract_error.empty() ? "ok" : scene.mount_contract_error.c_str(),
           static_cast<unsigned long long>(scene.flight_change_holds), static_cast<unsigned long long>(scene.flight_change_fallbacks));
       log_status(status, mount_detail);
-      // Diagnostics: is the main view parented to the aircraft? s=sampled r=read
-      // p=+368 set n=it is a Node a=it is the aircraft model c=it is the
-      // controller g=its +368 is the aircraft; stored/world metres.
-      if (scene.node_links[0].sampled || scene.node_links[1].sampled) {
-        char links_detail[512];
-        int used = std::snprintf(links_detail, sizeof(links_detail), "Node links:");
-        constexpr const char* names[]{"main", "object_camera", "own_nose"};
-        for (unsigned i = 0; i < scene.node_links.size() && used > 0 && static_cast<std::size_t>(used) < sizeof(links_detail); ++i) {
-          const auto& l = scene.node_links[i];
-          used += std::snprintf(links_detail + used, sizeof(links_detail) - static_cast<std::size_t>(used),
-                                " %s=s%d r%d p%d n%d a%d c%d g%d stored=%.1f world=%.1f diff=%.1f", names[i], l.sampled, l.read, l.parent,
-                                l.parent_is_node, l.parent_is_aircraft, l.parent_is_controller, l.grandparent_is_aircraft, l.stored_norm,
-                                l.world_norm, l.stored_to_world);
-        }
-        log_status(status, links_detail);
-      }
-      // The simulator process's video memory against its Windows budget, MB.
-      if (const auto memory = gpu_memory.sample(); memory.valid) {
-        char memory_detail[192];
-        std::snprintf(memory_detail, sizeof(memory_detail), "GPU memory (MB): local=%llu/%llu non_local=%llu/%llu",
-                      static_cast<unsigned long long>(memory.local_usage >> 20), static_cast<unsigned long long>(memory.local_budget >> 20),
-                      static_cast<unsigned long long>(memory.nonlocal_usage >> 20),
-                      static_cast<unsigned long long>(memory.nonlocal_budget >> 20));
-        log_status(status, memory_detail);
-      }
       if (graphics_diagnostics) {
         char graphics_detail[512];
         std::snprintf(
