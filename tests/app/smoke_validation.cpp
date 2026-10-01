@@ -102,7 +102,7 @@ int wmain(int argc, wchar_t** argv) {
     owner.unlock();
     require(reader.lock(100), "Read mailbox lock");
     require(reader.data()->settings.camera_rate == 60, "Settings exchange");
-    require(ProtocolVersion == 16 && reader.data()->settings.notifications == 1 &&
+    require(ProtocolVersion == 17 && reader.data()->settings.notifications == 1 &&
                 reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
                 reader.data()->settings.tail_upper == std::array<float, 2>{0.25f, 0.625f} &&
                 reader.data()->settings.tail_corner == std::array<float, 2>{0.1875f, 0.75f} &&

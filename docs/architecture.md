@@ -255,7 +255,7 @@ The control loop checks companion heartbeat, aircraft telemetry, display identit
 
 | Condition | Response |
 | --- | --- |
-| Ground speed exceeds 60 knots | Inhibit cameras and send TAXI push events to switch active buttons off; wait for OFF acknowledgement |
+| Ground speed exceeds 60 knots | Inhibit cameras and send TAXI push events to switch active buttons off; wait for OFF acknowledgement. Skipped entirely, with any pending OFF cleared, when the global **60 kt cutoff** setting (`settings.ini` `[service] speed_cutoff`) is off |
 | TAXI telemetry briefly disappears | Hold the last accepted button state for a bounded interval; continue checking camera-pose freshness separately |
 | Camera output changes identity | Discard the old image pairing and wait for current captures |
 | Capture stalls while source draws continue | Retain the camera pair and wait for fresh, ordered GPU-state evidence |

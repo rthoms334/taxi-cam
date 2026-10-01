@@ -97,6 +97,28 @@ void odd_values_read_as_flags() {
   patch(path, L"notifications", L"off");
   require(loaded().notifications == 0, "Non-numeric text reads as off, matching the protocol 10 reader");
 }
+
+// settings.ini [service] speed_cutoff is the global 60-knot cutoff switch.
+std::wstring cutoff_key(const std::wstring& path) {
+  wchar_t value[64]{};
+  GetPrivateProfileStringW(L"service", L"speed_cutoff", L"<missing>", value, 64, path.c_str());
+  return value;
+}
+
+void speed_cutoff_default_and_roundtrip() {
+  const auto path = select_fixture(L"speed-cutoff");
+  require(Settings{}.speed_cutoff == 1 && valid_settings(Settings{}), "Speed cutoff defaults on");
+  auto value = loaded();
+  require(value.speed_cutoff == 1 && cutoff_key(path) == L"<missing>", "Missing key keeps the cutoff on and is not written by a load");
+  value.speed_cutoff = 0;
+  require(save_settings(value), "Save speed cutoff off");
+  require(cutoff_key(path) == L"0" && loaded().speed_cutoff == 0, "Off persists");
+  value.speed_cutoff = 1;
+  require(save_settings(value), "Save speed cutoff on");
+  require(cutoff_key(path) == L"1" && loaded().speed_cutoff == 1, "On persists");
+  value.speed_cutoff = 2;
+  require(!valid_settings(value), "Speed cutoff outside 0/1 is rejected");
+}
 }  // namespace
 
 int main() {
@@ -114,6 +136,7 @@ int main() {
     new_key_wins_over_legacy();
     save_and_reload_roundtrip();
     odd_values_read_as_flags();
+    speed_cutoff_default_and_roundtrip();
     settings_override.clear();
     std::printf("PASS: %u notification settings migration checks (CPU/file fixtures only).\n", checks);
     return 0;

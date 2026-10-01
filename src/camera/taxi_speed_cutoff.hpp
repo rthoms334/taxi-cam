@@ -19,7 +19,17 @@ class TaxiSpeedCutoff {
                   unsigned on,
                   std::uint64_t button_sample,
                   double limit_knots = 60.0,
-                  bool aircraft_buttons = true) noexcept {
+                  bool aircraft_buttons = true,
+                  bool enabled = true) noexcept {
+    // The user switched the cutoff off: drop any crossing and pending OFF so
+    // nothing is inhibited or commanded. Turning it back on above the limit
+    // re-latches from the next valid speed sample.
+    if (!enabled) {
+      over_ = false;
+      pending_ = 0;
+      waiting_ = {};
+      return 0;
+    }
     if (speed_valid && std::isfinite(knots) && knots >= 0)
       over_ = knots > limit_knots;
     // A manual-only aircraft has no latch to command or acknowledge. Keep the

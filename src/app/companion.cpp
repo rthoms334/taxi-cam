@@ -960,6 +960,7 @@ void build_controls() {
     EnableWindow(GetDlgItem(window, 221), !manual);
     button(L"Shortcuts and buttons…", 645, 580, 412, 205);
     edit(s.camera_rate, 200, 855, 528, 100);
+    toggle(L"60 kt cutoff", 236, s.speed_cutoff, 800, 626, 180);
   } else if (page == 1) {
     const auto* profile = profiles::find(s.profile);
     const int feed_count = profile && profile->composition.split_bottom != 0 ? 3 : 2;
@@ -1190,7 +1191,10 @@ void draw_page(HDC dc) {
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
     text(dc, L"Range 5–60 per camera; install default 10. Parked aircraft run at the 5 fps floor.", 264, 564, 560, 24, small, Muted);
-    text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
+    text(dc,
+         draft().speed_cutoff ? L"Cameras and TAXI buttons turn off above 60 knots."
+                              : L"Cutoff off: cameras stay on above 60 knots; TAXI buttons are not turned off.",
+         250, 630, 540, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
     const auto* profile = profiles::find(draft().profile);
@@ -1681,6 +1685,8 @@ bool is_on(int id, const win::Settings& s) {
       return s.single_camera;
     case 235:
       return s.dynamic_tail;
+    case 236:
+      return s.speed_cutoff;
     case 229:
       return s.scene_test;
     default:
@@ -2049,7 +2055,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_connection();
         return 0;
       }
-      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235) {
+      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235 || id == 236) {
         if (!apply(false))
           return 0;
         auto s = draft();
@@ -2084,6 +2090,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           s.single_camera = !s.single_camera;
         if (id == 235)
           s.dynamic_tail = !s.dynamic_tail;
+        if (id == 236)
+          s.speed_cutoff = !s.speed_cutoff;
         if (id == 229)
           s.scene_test = !s.scene_test;
         publish(s);

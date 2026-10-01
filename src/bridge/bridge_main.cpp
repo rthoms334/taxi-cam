@@ -445,6 +445,7 @@ DWORD run_impl() {
     const bool connected = control.connected(now);
     bridge_connected.store(connected && settings.enabled != 0, std::memory_order_release);
     notifications_enabled.store(settings.notifications != 0, std::memory_order_release);
+    native_camera::set_speed_cutoff_enabled(settings.speed_cutoff != 0);
     SimEventInputs sim_inputs;
     sim_inputs.connected = connected && settings.enabled;
     // Watchdog trip: the gate is already closed on every hook; this iteration

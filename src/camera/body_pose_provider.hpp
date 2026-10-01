@@ -138,6 +138,9 @@ struct TaxiCutoffStatus {
   const char* status = "below_speed_limit";
 };
 TaxiCutoffStatus get_taxi_cutoff() noexcept;
+// Companion "speed cutoff" setting. False stops the ground-speed inhibit and
+// the automatic TAXI OFF; the worker applies it on its next iteration.
+void set_speed_cutoff_enabled(bool enabled) noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;

@@ -99,6 +99,8 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   reset_guide_settings(value, *profile);
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, (settings_directory() + L"\\settings.ini").c_str());
   value.notifications = load_notification_preference(settings_directory() + L"\\settings.ini");
+  // Global like notifications; absent means the cutoff stays on.
+  value.speed_cutoff = GetPrivateProfileIntW(L"service", L"speed_cutoff", 1, (settings_directory() + L"\\settings.ini").c_str()) ? 1u : 0u;
   const auto destination = settings_path(value);
   auto path = destination;
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -255,7 +257,8 @@ inline bool save_settings(const Settings& s) {
   const auto selection = settings_directory() + L"\\settings.ini";
   const bool saved = WritePrivateProfileStringW(L"aircraft", L"profile", profile_text, selection.c_str()) &&
                      WritePrivateProfileStringW(L"aircraft", L"automatic", s.auto_profile ? L"1" : L"0", selection.c_str()) &&
-                     WritePrivateProfileStringW(L"messages", L"notifications", s.notifications ? L"1" : L"0", selection.c_str());
+                     WritePrivateProfileStringW(L"messages", L"notifications", s.notifications ? L"1" : L"0", selection.c_str()) &&
+                     WritePrivateProfileStringW(L"service", L"speed_cutoff", s.speed_cutoff ? L"1" : L"0", selection.c_str());
   if (saved)
     WritePrivateProfileStringW(L"messages", L"in_simulator", nullptr, selection.c_str());  // Legacy protocol 10 key.
   return saved;

@@ -1,6 +1,7 @@
 #include "../../src/camera/taxi_button_command.hpp"
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include "../../src/camera/taxi_speed_cutoff.hpp"
 
@@ -192,6 +193,33 @@ void lifecycle_and_failures() {
   require(!cutoff.update(1099, true, 55, true, 1, 1099) && cutoff.inhibited(), "Rejected cutoff retains inhibition and retry delay");
   require(cutoff.update(1100, true, 55, true, 1, 1100) == 1, "Rejected cutoff permits bounded OFF retry");
 }
+void cutoff_disabled() {
+  TaxiSpeedCutoff cutoff;
+  require(cutoff.update(100, true, 61, true, 1, 100, 60.0, true, false) == 0 && !cutoff.inhibited() && !cutoff.pending(),
+          "Disabled cutoff sends no OFF and never inhibits above the limit");
+  require(cutoff.update(200, true, 150, true, 3, 200, 60.0, false, false) == 0 && !cutoff.inhibited(),
+          "Disabled cutoff also stays quiet for a manual-only aircraft");
+  require(cutoff.update(300, true, 61, true, 1, 300) == 1 && cutoff.inhibited(), "Re-enabling above the limit latches and commands OFF");
+  cutoff.sent(0, true);
+  require(cutoff.update(400, true, 61, true, 1, 400, 60.0, true, false) == 0 && !cutoff.inhibited() && !cutoff.pending(),
+          "Disabling mid-crossing clears the pending OFF and the inhibit");
+  require(cutoff.update(2000, true, 55, true, 1, 2000) == 0 && !cutoff.inhibited(), "No stale OFF is replayed after re-enabling below the limit");
+
+  // With the cutoff off the dispatcher gets an unbounded limit, so a user
+  // request to turn TAXI on is not refused for speed.
+  TaxiButtonCommand p;
+  update(p, request(1, 1, 1), 100);
+  auto c = context(101, 100, 0);
+  c.speed_knots = 140;
+  c.speed_limit = std::numeric_limits<double>::infinity();
+  const auto d = p.step(c);
+  require(d.send_mask == 1 && d.desired_mask == 1 && !p.status().failed, "TAXI ON is permitted above 60 knots when the cutoff is off");
+  TaxiButtonCommand q;
+  update(q, request(1, 1, 1), 100);
+  c = context(101, 100, 0);
+  c.speed_knots = 140;
+  require(!q.step(c).send_mask && q.status().failed, "TAXI ON is still refused above 60 knots with the cutoff on");
+}
 }  // namespace
 int main() {
   try {
@@ -200,6 +228,7 @@ int main() {
     permission_and_cutoff();
     unavailable_and_timeout();
     lifecycle_and_failures();
+    cutoff_disabled();
     std::printf("PASS TAXI button commands: %u acknowledgement, reversal, cutoff, lifecycle and failure checks.\n", checks);
     return 0;
   } catch (const std::exception& error) {

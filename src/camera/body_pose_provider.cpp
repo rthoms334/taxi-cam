@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <utility>
 #include "../profiles/catalog.hpp"
 #include "body_pose_math.hpp"
@@ -89,6 +90,8 @@ struct State {
 };
 State state;
 std::atomic<std::uint32_t> profile_id{1};
+// Companion setting; on until the bridge reports otherwise.
+std::atomic<bool> speed_cutoff_enabled{true};
 std::atomic<std::uint64_t> session_epoch{0};
 // Bit0: callback notification; bit1: reset serviced. Fresh telemetry is needed
 // before returning to0. Repeated invalid samples cannot churn epochs.
@@ -753,9 +756,11 @@ DWORD WINAPI worker(void*) noexcept {
     const auto speed = get_ground_speed();
     const auto buttons = get_taxi_buttons();
     const auto command_now = GetTickCount64();
+    const bool cutoff_enabled = speed_cutoff_enabled.load(std::memory_order_acquire);
+    const double cutoff_limit = cutoff_enabled ? profile.speed_cutoff_knots : std::numeric_limits<double>::infinity();
     AcquireSRWLockExclusive(&state.lock);
     const auto commands = state.speed_cutoff.update(command_now, speed.valid, speed.knots, buttons.valid, buttons.mask(), buttons.sample_ms,
-                                                    profile.speed_cutoff_knots, commandable);
+                                                    cutoff_limit, commandable, cutoff_enabled);
     state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
                           : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
                                                            : "below_speed_limit";
@@ -764,7 +769,7 @@ DWORD WINAPI worker(void*) noexcept {
     const auto decision = state.button_commands.step(
         {command_now, epoch, buttons.sample_ms, profile.id, buttons.mask(), commands,
          readiness_locked(command_now).ready && identity.fresh && identity.detected_profile == profile.id, buttons.valid, speed.valid,
-         state.speed_cutoff.inhibited(), commandable, speed.knots, profile.speed_cutoff_knots});
+         state.speed_cutoff.inhibited(), commandable, speed.knots, cutoff_limit});
     ReleaseSRWLockExclusive(&state.lock);
     for (unsigned side = 0; side < profile.sides; ++side) {
       if (!(decision.send_mask & (1u << side)))
@@ -1189,6 +1194,9 @@ LightingSample get_lighting() noexcept {
   const auto out = lighting_locked(GetTickCount64());
   ReleaseSRWLockShared(&state.lock);
   return out;
+}
+void set_speed_cutoff_enabled(bool enabled) noexcept {
+  speed_cutoff_enabled.store(enabled, std::memory_order_release);
 }
 TaxiCutoffStatus get_taxi_cutoff() noexcept {
   AcquireSRWLockShared(&state.lock);
