@@ -109,6 +109,10 @@ struct Runtime {
   // Leads the mount pose by the model's per-frame movement on aircraft whose
   // transform lags the rendered frame (observer thread).
   PoseLead pose_lead;
+  // Camera-manager update clock (seconds) and the interval between the last
+  // two updates, the duration of the frame being drawn (observer thread).
+  double update_s = 0, update_frame_s = 0;
+  LONGLONG previous_update_qpc = 0;
   std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
@@ -436,7 +440,7 @@ CameraClip current_main_clip(const Runtime& runtime) noexcept {
 // pose_lead_frames of the model's per-frame movement (PoseLead). The public
 // plausibility check keeps using the pose as read.
 BodyPose mount_pose(Runtime& runtime, const BodyPose& scene) noexcept {
-  return runtime.pose_lead.lead(scene, runtime.updates, get_aircraft_session_readiness().epoch,
+  return runtime.pose_lead.lead(scene, runtime.update_s, runtime.update_frame_s, get_aircraft_session_readiness().epoch,
                                 runtime.pose_source_resets.load(std::memory_order_acquire),
                                 runtime.aircraft_profile ? runtime.aircraft_profile->pose_lead_frames : 0);
 }
@@ -1629,6 +1633,16 @@ void observer(void* manager) noexcept {
   ScopedLocalMemoryMetrics memory_scope(memory_metrics);
   try {
     ++runtime.updates;
+    if (!runtime.counter_frequency.QuadPart)
+      QueryPerformanceFrequency(&runtime.counter_frequency);
+    if (runtime.counter_frequency.QuadPart > 0 && entered.QuadPart > 0) {
+      const double tick_s = 1.0 / static_cast<double>(runtime.counter_frequency.QuadPart);
+      runtime.update_frame_s = runtime.previous_update_qpc && entered.QuadPart > runtime.previous_update_qpc
+                                   ? static_cast<double>(entered.QuadPart - runtime.previous_update_qpc) * tick_s
+                                   : 0;
+      runtime.update_s = static_cast<double>(entered.QuadPart) * tick_s;
+      runtime.previous_update_qpc = entered.QuadPart;
+    }
     const auto before = runtime.pair.snapshot();
     const auto now = GetTickCount64();
     const auto settings = runtime.requested_settings.load(std::memory_order_acquire);
@@ -2381,6 +2395,7 @@ void observer(void* manager) noexcept {
       const auto main_clip = current_main_clip(runtime);
       runtime.published.main_clip = {main_clip.near_plane, main_clip.far_plane, main_clip.default_far};
       runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
+      runtime.published.pose_speed = runtime.pose_lead.speed();
       runtime.published.pose_step_m = runtime.pose_lead.step_metres();
       runtime.published.pose_lead_m = runtime.pose_lead.lead_metres();
       runtime.published.pose_session_proven =

@@ -97,9 +97,9 @@ struct ProbeSnapshot {
   std::array<std::array<float, 3>, kMaxCameraFeeds> draw_clip{};
   std::array<float, 3> main_clip{};
   bool follow_main_far = false;
-  // PoseLead: metres the aircraft model moved per frame at the last pose read,
-  // and the lead applied to the camera mounts (0 on aircraft without a lead).
-  double pose_step_m = 0, pose_lead_m = 0;
+  // PoseLead at the last pose read: smoothed model speed (m/s), its movement
+  // during the frame being drawn and the lead applied to the mounts (metres).
+  double pose_speed = 0, pose_step_m = 0, pose_lead_m = 0;
   // This flight session's aircraft passed its public pose match; its scene
   // transform places the cameras without the local calibration from then on.
   bool pose_session_proven = false;
