@@ -129,6 +129,9 @@ struct Runtime {
   const char* post_error = "";
   Vector3 post_origin{};
   std::uint64_t post_origin_update = 0;
+  // Diagnostics: the model origin read before this update (pose trace).
+  Vector3 pre_trace_origin{};
+  std::uint64_t pre_trace_update = 0;
   // Diagnostics (node_link.hpp): main view, aircraft object camera and Taxi
   // Cam's nose camera, sampled at the calibration latch; the own sample waits
   // for the next nose pose.
@@ -1678,6 +1681,17 @@ void sample_pose_trace(Runtime& runtime) noexcept {
       if (scene.complete) {
         entry.read = scene.pose.origin;
         entry.flags |= kPoseTraceRead;
+        // Other copies of the aircraft position near its model (0.9.67).
+        LocalMemoryReader scan;
+        scan_position_candidates(scan, scene.node, 1024, 1, scene.pose.origin, entry);
+        std::uint64_t attached = 0;
+        if (scan.read(scene.node + 256, &attached, sizeof(attached)))
+          scan_position_candidates(scan, attached, 4096, 2, scene.pose.origin, entry);
+        scan_position_candidates(scan, user, 2048, 3, scene.pose.origin, entry);
+      }
+      if (runtime.pre_trace_update == runtime.updates) {
+        entry.pre = runtime.pre_trace_origin;
+        entry.flags |= kPoseTracePre;
       }
       // The aircraft object camera through the full aircraft walk (about 1 ms,
       // only while a trace window is open): its Node's world translation.
@@ -1741,6 +1755,21 @@ void observer(void* manager) noexcept {
                                    : 0;
       runtime.update_s = static_cast<double>(entered.QuadPart) * tick_s;
       runtime.previous_update_qpc = entered.QuadPart;
+    }
+    // Diagnostics (pose trace): the model origin before the update, to compare
+    // with the after-update read in the same entry.
+    if (session_work_allowed(runtime) && runtime.pose_trace.wants(runtime.pose_lead.speed())) {
+      const auto trace_readiness = get_aircraft_session_readiness();
+      const auto trace_resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+      if (const auto user = trace_readiness.ready ? runtime.pose_source.session_proven(trace_readiness.epoch, trace_resets) : 0) {
+        LocalMemoryReader objects;
+        const auto scene =
+            inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); });
+        if (scene.complete) {
+          runtime.pre_trace_origin = scene.pose.origin;
+          runtime.pre_trace_update = runtime.updates;
+        }
+      }
     }
     const auto before = runtime.pair.snapshot();
     const auto now = GetTickCount64();
@@ -2561,7 +2590,7 @@ void after_observer(void* manager) noexcept {
         std::array<MountedPose, kMaxCameraFeeds> poses{};
         if (!scene.complete)
           refuse("post_scene_unavailable");
-        else if (!make_mounted_pair(scene.pose, runtime.mounts, poses, runtime.schedule.feeds()))
+        else if (!make_mounted_pair(mount_pose(runtime, scene.pose), runtime.mounts, poses, runtime.schedule.feeds()))
           refuse("post_mount_failed");
         else {
           bool placed = false;
@@ -2583,7 +2612,7 @@ void after_observer(void* manager) noexcept {
             placed = true;
           }
           if (placed) {
-            runtime.post_origin = scene.pose.origin;
+            runtime.post_origin = runtime.led_origin;
             runtime.post_origin_update = runtime.updates;
           }
         }

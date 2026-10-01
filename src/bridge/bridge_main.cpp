@@ -63,15 +63,22 @@ void write_pose_trace(unsigned window, const native_camera::PoseTraceEntry* entr
     if (!file)
       return;
     std::fputs(
-        "update,time_s,frame_ms,read_ok,read_x,read_y,read_z,applied,applied_x,applied_y,applied_z,lead_m,main_ok,main_x,main_y,main_z\r\n",
+        "update,time_s,frame_ms,read_ok,read_x,read_y,read_z,applied,applied_x,applied_y,applied_z,lead_m,main_ok,main_x,main_y,main_z,"
+        "pre_ok,pre_x,pre_y,pre_z,candidates\r\n",
         file);
     for (std::size_t i = 0; i < count; ++i) {
       const auto& e = entries[i];
-      std::fprintf(file, "%llu,%.6f,%.3f,%u,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.3f,%u,%.4f,%.4f,%.4f\r\n",
+      std::fprintf(file, "%llu,%.6f,%.3f,%u,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.3f,%u,%.4f,%.4f,%.4f",
                    static_cast<unsigned long long>(e.update), e.time_s, e.frame_s * 1000.0,
                    (e.flags & native_camera::kPoseTraceRead) ? 1u : 0u, e.read[0], e.read[1], e.read[2],
                    (e.flags & native_camera::kPoseTraceApplied) ? 1u : 0u, e.applied[0], e.applied[1], e.applied[2], e.lead_m,
                    (e.flags & native_camera::kPoseTraceMain) ? 1u : 0u, e.main[0], e.main[1], e.main[2]);
+      // The pre-update read, then the candidates as object:offset:x:y:z.
+      std::fprintf(file, ",%u,%.4f,%.4f,%.4f,", (e.flags & native_camera::kPoseTracePre) ? 1u : 0u, e.pre[0], e.pre[1], e.pre[2]);
+      for (std::uint32_t c = 0; c < e.candidate_count && c < e.candidates.size(); ++c)
+        std::fprintf(file, "%s%u:%u:%.4f:%.4f:%.4f", c ? " " : "", e.candidates[c].object, e.candidates[c].offset, e.candidates[c].value[0],
+                     e.candidates[c].value[1], e.candidates[c].value[2]);
+      std::fputs("\r\n", file);
     }
     std::fclose(file);
   } catch (...) {

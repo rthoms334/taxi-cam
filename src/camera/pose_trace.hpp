@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "aircraft_mounts.hpp"
+#include "memory_reader.hpp"
 
 namespace taxi_camera::native_camera {
 
@@ -25,10 +26,53 @@ struct PoseTraceEntry {
   Vector3 read{};     // Model origin read on this update (zero when the read failed).
   Vector3 applied{};  // Led origin the cameras were placed on this update.
   Vector3 main{};     // Aircraft object camera's world position (zero when not read).
+  Vector3 pre{};      // Model origin read before the update (zero when not read).
+  // 0.9.67: position-like doubles near the aircraft (see scan_position_candidates).
+  struct Candidate {
+    std::uint16_t object = 0, offset = 0;  // object 1 model Node, 2 attached model, 3 controller.
+    Vector3 value{};
+  };
+  std::array<Candidate, 8> candidates{};
+  std::uint32_t candidate_count = 0;
   std::uint32_t flags = 0;
   double lead_m = 0;
 };
-inline constexpr std::uint32_t kPoseTraceRead = 1, kPoseTraceApplied = 2, kPoseTraceMain = 4;
+inline constexpr std::uint32_t kPoseTraceRead = 1, kPoseTraceApplied = 2, kPoseTraceMain = 4, kPoseTracePre = 8;
+
+// Diagnostics (0.9.67): the cameras still jumped when placed on the synced model
+// transform, so the aircraft is presumably drawn at an interpolated position.
+// Looks for other copies of the aircraft position: three consecutive 8-byte
+// aligned doubles within kCandidateRadius of origin on every axis, in
+// [object, object + size), read in 256-byte chunks so an unreadable chunk only
+// skips itself. Appends to entry.candidates until full. Read-only.
+inline constexpr double kCandidateRadius = 100;
+inline void scan_position_candidates(engine_camera::MemoryReader& reader,
+                                     std::uint64_t object,
+                                     std::uint32_t size,
+                                     std::uint16_t object_id,
+                                     const Vector3& origin,
+                                     PoseTraceEntry& entry) noexcept {
+  if (!object || (object & 7) || object > UINT64_MAX - size)
+    return;
+  constexpr std::uint32_t chunk = 256;
+  std::array<double, chunk / 8 + 2> words{};
+  for (std::uint32_t base = 0; base < size && entry.candidate_count < entry.candidates.size(); base += chunk) {
+    // Two extra doubles let a triple straddle the chunk end.
+    const std::uint32_t bytes = base + chunk + 16 <= size ? chunk + 16 : size - base;
+    if (bytes < 24 || !reader.read(object + base, words.data(), bytes))
+      continue;
+    for (std::uint32_t i = 0; i + 3 <= bytes / 8 && i < chunk / 8 && entry.candidate_count < entry.candidates.size(); ++i) {
+      bool near = true;
+      for (unsigned axis = 0; axis < 3 && near; ++axis) {
+        const double d = words[i + axis] - origin[axis];
+        near = d == d && d > -kCandidateRadius && d < kCandidateRadius;
+      }
+      if (near)
+        entry.candidates[entry.candidate_count++] = {
+            object_id, static_cast<std::uint16_t>(base + i * 8), {words[i], words[i + 1], words[i + 2]}};
+    }
+  }
+}
 
 class PoseTrace {
  public:

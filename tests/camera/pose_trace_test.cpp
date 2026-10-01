@@ -1,6 +1,7 @@
 #include "../../src/camera/pose_trace.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -56,8 +57,42 @@ int main() {
   ok &= require(!trace.wants(100), "A finished trace wanted more updates");
   trace.record(entry(update++), 100);
   ok &= require(!trace.take(sink), "A finished trace recorded again");
+  // Candidate scan: position-like double triples near the origin, in chunks.
+  struct Memory final : taxi_camera::engine_camera::MemoryReader {
+    std::uint64_t base = 0x40000;
+    std::array<double, 600> words{};  // 4800 bytes
+    bool read(std::uint64_t address, void* destination, std::size_t size) override {
+      if (address < base || address - base + size > sizeof(words))
+        return false;
+      std::memcpy(destination, reinterpret_cast<const unsigned char*>(words.data()) + (address - base), size);
+      return true;
+    }
+  } memory;
+  const taxi_camera::native_camera::Vector3 origin{4079673.7, 1425314.4, 4675524.2};
+  memory.words[4] = origin[0] + 0.5;  // A copy 0.5/1/-2 m away at offset 32.
+  memory.words[5] = origin[1] + 1;
+  memory.words[6] = origin[2] - 2;
+  memory.words[31] = origin[0];  // Straddles the 256-byte chunk end (offset 248).
+  memory.words[32] = origin[1];
+  memory.words[33] = origin[2];
+  memory.words[100] = origin[0] + 500;  // Too far on one axis.
+  memory.words[101] = origin[1];
+  memory.words[102] = origin[2];
+  PoseTraceEntry scanned;
+  taxi_camera::native_camera::scan_position_candidates(memory, memory.base, 4096, 2, origin, scanned);
+  ok &= require(scanned.candidate_count == 2 && scanned.candidates[0].object == 2 && scanned.candidates[0].offset == 32 &&
+                    scanned.candidates[0].value[2] == origin[2] - 2 && scanned.candidates[1].offset == 248,
+                "The candidate scan missed a copy, the chunk-straddling copy, or accepted a distant triple");
+  // An object running past readable memory only loses its unreadable chunks.
+  PoseTraceEntry partial;
+  taxi_camera::native_camera::scan_position_candidates(memory, memory.base, 8192, 1, origin, partial);
+  ok &= require(partial.candidate_count == 2, "An unreadable tail chunk lost the readable candidates");
+  PoseTraceEntry none;
+  taxi_camera::native_camera::scan_position_candidates(memory, 0, 4096, 1, origin, none);
+  taxi_camera::native_camera::scan_position_candidates(memory, memory.base + 4, 4096, 1, origin, none);
+  ok &= require(none.candidate_count == 0, "A null or misaligned object was scanned");
   if (!ok)
     return 1;
-  std::printf("PASS pose trace: %u checks; taxi and take-off windows, full-only handover, taken once.\n", checks);
+  std::printf("PASS pose trace: %u checks; taxi and take-off windows, full-only handover, taken once, candidate scan.\n", checks);
   return 0;
 }

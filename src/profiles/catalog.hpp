@@ -98,9 +98,10 @@ struct AircraftProfile {
   // rendered frame. Live 2026-10-01 the cameras trailed their mounts to a
   // degree on every aircraft the user flew, most visibly the iniBuilds A350's
   // fin-mounted tail camera on take-off. 0 places the cameras on the
-  // transform as read. 0.9.66 places the views after the manager update on the
-  // transform it synced, so no lead is applied; PoseLead still measures.
-  double pose_lead_frames = 0;
+  // transform as read. 0.9.66 placed the views after the manager update on the
+  // transform it synced without a lead: no better, since the update does not
+  // change that transform. The smoothed lead is back (0.9.67).
+  double pose_lead_frames = 1;
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
