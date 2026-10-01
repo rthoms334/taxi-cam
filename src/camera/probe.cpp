@@ -446,7 +446,7 @@ CameraClip current_main_clip(const Runtime& runtime) noexcept {
 // pose_lead_frames of the model's per-frame movement (PoseLead). The public
 // plausibility check keeps using the pose as read.
 BodyPose mount_pose(Runtime& runtime, const BodyPose& scene) noexcept {
-  const auto led = runtime.pose_lead.lead(scene, runtime.update_s, runtime.update_frame_s, get_aircraft_session_readiness().epoch,
+  const auto led = runtime.pose_lead.lead(scene, runtime.updates, runtime.update_s, get_aircraft_session_readiness().epoch,
                                           runtime.pose_source_resets.load(std::memory_order_acquire),
                                           runtime.aircraft_profile ? runtime.aircraft_profile->pose_lead_frames : 0);
   runtime.led_origin = led.origin;
