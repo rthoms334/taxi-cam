@@ -11,6 +11,8 @@ struct AircraftScenePose {
   bool complete = false;
   const char* error = "unavailable";
   BodyPose pose{};
+  // The model Node read, for diagnostics in the same update only (never retained).
+  std::uint64_t node = 0;
   std::uint32_t read_bytes = 0;
 };
 
@@ -149,6 +151,7 @@ inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader
       return result;
   }
   result.pose = candidate;
+  result.node = node;
   result.complete = true;
   result.error = "";
   return result;

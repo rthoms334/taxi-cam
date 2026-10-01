@@ -11,6 +11,7 @@
 #include "camera_contract.hpp"
 #include "local_memory.hpp"
 #include "manager_inspection.hpp"
+#include "node_link.hpp"
 #include "owned_entry_inventory.hpp"
 #include "owned_view.hpp"
 #include "pose_lead.hpp"
@@ -117,6 +118,11 @@ struct Runtime {
   // Diagnostics: per-update model transform windows (PoseTrace), and the led
   // origin mount_pose produced on update led_update.
   PoseTrace pose_trace;
+  // Diagnostics (node_link.hpp): main view, aircraft object camera and Taxi
+  // Cam's nose camera, sampled at the calibration latch; the own sample waits
+  // for the next nose pose.
+  std::array<NodeLinkReport, 3> node_links{};
+  bool node_link_own_pending = false;
   Vector3 led_origin{};
   std::uint64_t led_update = 0;
   std::atomic<std::uint64_t> pose_source_resets{0};
@@ -545,6 +551,9 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
   runtime.calibration_pending = false;
   runtime.mounted_poses = {};
   std::string memory_detail;
+  // Diagnostics (node_link.hpp): the main view's and aircraft object camera's
+  // Nodes seen by calibration in this call, checked after the scene read below.
+  std::uint64_t main_view_node = 0, object_camera_node = 0;
   auto body = sample_body_pose(GetTickCount64());
   if (!body.valid && std::strcmp(body.error, "camera_world_values") == 0) {
     // This is a received invalid WORLD value, not a missing/stale callback.
@@ -608,10 +617,13 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
       objects.reset_budget();
       const auto camera = inspected(runtime, [&] { return inspect_source_pose(objects, source, &position); }, &memory_detail);
       aircraft_camera = camera.complete ? "mismatched" : "unusable";
+      if (camera.complete)
+        object_camera_node = camera.node_address;
       if (camera.complete && public_camera_matches(position, camera.fov, GetTickCount64(), &aircraft_match)) {
         matched = true;
         matched_fov = camera.fov;
         aircraft_camera = "matched";
+        main_view_node = camera.node_address;
         note_main_view_clip(runtime, camera.camera_address);
       }
     }
@@ -646,6 +658,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
           position = translation;
           matched_fov = chosen.fov;
           matched = true;
+          main_view_node = chosen.node_address;
           note_main_view_clip(runtime, chosen.camera_address);
         }
       }
@@ -715,6 +728,15 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
     if (!memory_detail.empty())
       runtime.message += " " + memory_detail;
     return false;
+  }
+  if (main_view_node || object_camera_node) {
+    // Read-only: is the main view parented to the aircraft? Same update as the
+    // calibration that produced these Nodes; numbers and flags only.
+    LocalMemoryReader links;
+    const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
+    runtime.node_links[0] = inspect_node_link(links, main_view_node, scene.node, user, node_vtable);
+    runtime.node_links[1] = inspect_node_link(links, object_camera_node, scene.node, user, node_vtable);
+    runtime.node_link_own_pending = true;
   }
   runtime.pose_captured = true;
   return true;
@@ -983,6 +1005,12 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
 void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsigned feed) noexcept {
   if (feed >= kMaxCameraFeeds)
     return;
+  if (feed == 0 && runtime.node_link_own_pending) {
+    // Read-only comparison sample of Taxi Cam's own (unparented) nose camera.
+    LocalMemoryReader links;
+    runtime.node_links[2] = inspect_node_link(links, view.node_address, 0, 0, runtime.base + runtime.contract.layout.scene_node_vtable);
+    runtime.node_link_own_pending = false;
+  }
   if (runtime.clip_cameras[feed] != view.camera_address) {
     CameraClip own;
     if (!read_camera_clip(view.camera_address, own) || !plausible_camera_clip(own)) {
@@ -2431,6 +2459,7 @@ void observer(void* manager) noexcept {
       runtime.published.main_clip = {main_clip.near_plane, main_clip.far_plane, main_clip.default_far};
       runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
       runtime.published.pose_speed = runtime.pose_lead.speed();
+      runtime.published.node_links = runtime.node_links;
       runtime.published.pose_step_m = runtime.pose_lead.step_metres();
       runtime.published.pose_lead_m = runtime.pose_lead.lead_metres();
       runtime.published.pose_session_proven =

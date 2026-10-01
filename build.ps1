@@ -361,6 +361,7 @@ if ($Validate) {
         @{Name='pose-source-cache'; Sources=@('tests/camera/pose_source_cache_test.cpp')},
         @{Name='pose-lead'; Sources=@('tests/camera/pose_lead_test.cpp')},
         @{Name='pose-trace'; Sources=@('tests/camera/pose_trace_test.cpp')},
+        @{Name='node-link'; Sources=@('tests/camera/node_link_test.cpp')},
         @{Name='view-clip'; Sources=@('tests/camera/view_clip_test.cpp','src/camera/view_clip.cpp','src/camera/local_memory.cpp')},
         @{Name='sim-messages'; Sources=@('tests/app/sim_messages_test.cpp')},
         @{Name='scene-handoff'; Sources=@('tests/graphics/scene_handoff_test.cpp','src/graphics/scene_handoff.cpp')},

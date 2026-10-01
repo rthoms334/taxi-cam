@@ -1348,6 +1348,22 @@ DWORD run_impl() {
                     scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
                     scene.draw_clip[2][2]);
       log_status(status, clip_detail);
+      // Diagnostics: is the main view parented to the aircraft? s=sampled r=read
+      // p=+368 set n=it is a Node a=it is the aircraft model c=it is the
+      // controller g=its +368 is the aircraft; stored/world metres.
+      if (scene.node_links[0].sampled || scene.node_links[1].sampled) {
+        char links_detail[512];
+        int used = std::snprintf(links_detail, sizeof(links_detail), "Node links:");
+        constexpr const char* names[]{"main", "object_camera", "own_nose"};
+        for (unsigned i = 0; i < scene.node_links.size() && used > 0 && static_cast<std::size_t>(used) < sizeof(links_detail); ++i) {
+          const auto& l = scene.node_links[i];
+          used += std::snprintf(links_detail + used, sizeof(links_detail) - static_cast<std::size_t>(used),
+                                " %s=s%d r%d p%d n%d a%d c%d g%d stored=%.1f world=%.1f diff=%.1f", names[i], l.sampled, l.read, l.parent,
+                                l.parent_is_node, l.parent_is_aircraft, l.parent_is_controller, l.grandparent_is_aircraft, l.stored_norm,
+                                l.world_norm, l.stored_to_world);
+        }
+        log_status(status, links_detail);
+      }
       // The simulator process's video memory against its Windows budget, MB.
       if (const auto memory = gpu_memory.sample(); memory.valid) {
         char memory_detail[192];

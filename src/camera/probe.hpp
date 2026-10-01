@@ -3,6 +3,7 @@
 #include "../shared/camera_rate.hpp"
 #include "aircraft_mounts.hpp"
 #include "entry_pair.hpp"
+#include "node_link.hpp"
 #include "pose_trace.hpp"
 #include "scene_recovery.hpp"
 
@@ -101,6 +102,9 @@ struct ProbeSnapshot {
   // PoseLead at the last pose read: smoothed model speed (m/s), its movement
   // during the frame being drawn and the lead applied to the mounts (metres).
   double pose_speed = 0, pose_step_m = 0, pose_lead_m = 0;
+  // Diagnostics: main view, aircraft object camera and own nose camera Node
+  // parent links (node_link.hpp), from the last calibration latch.
+  std::array<NodeLinkReport, 3> node_links{};
   // This flight session's aircraft passed its public pose match; its scene
   // transform places the cameras without the local calibration from then on.
   bool pose_session_proven = false;
