@@ -13,6 +13,7 @@
 #include "manager_inspection.hpp"
 #include "owned_entry_inventory.hpp"
 #include "owned_view.hpp"
+#include "pose_lead.hpp"
 #include "pose_source_cache.hpp"
 #include "probe_inspection_gate.hpp"
 #include "render_schedule.hpp"
@@ -105,6 +106,9 @@ struct Runtime {
   // Proven aircraft controller for the camera pose (observer thread). A session
   // reset from any thread advances pose_source_resets, which retires it.
   PoseSourceCache pose_source;
+  // Leads the mount pose by the model's per-frame movement on aircraft whose
+  // transform lags the rendered frame (observer thread).
+  PoseLead pose_lead;
   std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
@@ -428,6 +432,14 @@ CameraClip current_main_clip(const Runtime& runtime) noexcept {
              ? runtime.main_clip
              : CameraClip{};
 }
+// The scene pose the cameras are mounted on: led by the aircraft profile's
+// pose_lead_frames of the model's per-frame movement (PoseLead). The public
+// plausibility check keeps using the pose as read.
+BodyPose mount_pose(Runtime& runtime, const BodyPose& scene) noexcept {
+  return runtime.pose_lead.lead(scene, runtime.updates, get_aircraft_session_readiness().epoch,
+                                runtime.pose_source_resets.load(std::memory_order_acquire),
+                                runtime.aircraft_profile ? runtime.aircraft_profile->pose_lead_frames : 0);
+}
 // The full aircraft walk to the active controller and the scene transform it
 // leads to. False (pose_busy, message set) when no stable active aircraft is
 // found; otherwise user is the controller and scene its read, complete or not.
@@ -496,7 +508,8 @@ std::optional<bool> capture_trusted_pose(Runtime& runtime, std::string& memory_d
     memory_detail.clear();
     return std::nullopt;
   }
-  if (!scene.complete || !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+  if (!scene.complete ||
+      !make_mounted_pair(mount_pose(runtime, scene.pose), runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
     // The proven aircraft mid-update or briefly unreadable: wait, keep the proof.
     runtime.pose_source.forget();
     runtime.pose_busy = true;
@@ -681,7 +694,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
       runtime.pose_source.prove(user, now, epoch, resets);
   }
   if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose) ||
-      !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+      !make_mounted_pair(mount_pose(runtime, scene.pose), runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
     runtime.pose_source.forget();
     runtime.pose_busy = true;
     runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") +
@@ -2368,6 +2381,8 @@ void observer(void* manager) noexcept {
       const auto main_clip = current_main_clip(runtime);
       runtime.published.main_clip = {main_clip.near_plane, main_clip.far_plane, main_clip.default_far};
       runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
+      runtime.published.pose_step_m = runtime.pose_lead.step_metres();
+      runtime.published.pose_lead_m = runtime.pose_lead.lead_metres();
       runtime.published.pose_session_proven =
           runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
                                              runtime.pose_source_resets.load(std::memory_order_acquire)) != 0;
