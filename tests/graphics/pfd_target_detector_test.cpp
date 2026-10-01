@@ -89,9 +89,12 @@ void submission_activity() {
     add(10, 9, 0);
     assert(observe(1000 + window * 1000).valid == (window == 3));
   }
-  values[1].id = 21;  // Replacement is a new incarnation, never inherited activity.
+  // A recreated target (one confirmed texture gone, one new) takes over its
+  // role at once without inheriting activity: nothing is ranked or counted.
+  values[1].id = 21;
   add(10, 9, 0);
-  assert(!observe(5000).valid && detector.snapshot().stable_windows == 0);
+  const auto& recreated = observe(5000);
+  assert(recreated.valid && recreated.replaced && (recreated.targets == std::array<std::uint64_t, 2>{21, 10}));
   values[1].id = 10;
   assert(!observe(5100).valid && std::strcmp(detector.snapshot().status, "duplicate_id") == 0);
 
@@ -203,18 +206,30 @@ void a350_power_up() {
       add(126, 126, 100);
       detector.observe(values.data(), values.size(), 1000 + window * 1000);
     }
+    // A recreated target (200 retired, 201 new) takes over its side at once.
+    // Its counter is not ranked or inherited: the role comes from the swap.
     values[5].id = 201;
-    values[5].draws = 9000000;  // A new incarnation cannot inherit past confirmation.
-    assert(!detector.observe(values.data(), values.size(), 4100).valid);
-    assert(std::strcmp(detector.snapshot().status, "candidate_disappeared") == 0 && detector.snapshot().stable_windows == 0);
-    // The first whole window after replacement establishes the new baseline.
+    values[5].draws = 9000000;
+    const auto& recreated = detector.observe(values.data(), values.size(), 4100);
+    assert(recreated.valid && recreated.replaced && (recreated.targets == std::array<std::uint64_t, 2>{201, 100}));
+    // Later windows keep it; the first whole window starts the new baseline.
     detector.observe(values.data(), values.size(), 5000);
     for (unsigned window = 1; window <= 3; ++window) {
       for (auto& value : values)
         value.draws += value.id == 201 || value.id == 100 ? 126 : value.id == 900 ? 100 : 0;
-      assert(detector.observe(values.data(), values.size(), 5000 + window * 1000).valid == (window == 3));
+      detector.observe(values.data(), values.size(), 5000 + window * 1000);
     }
     assert((detector.snapshot().targets == std::array<std::uint64_t, 2>{201, 100}));
+    // A different texture appearing while a target disappears together with
+    // another new one is not a clean replacement: the slow path decides.
+    initialize();
+    for (unsigned window = 1; window <= 3; ++window) {
+      add(126, 126, 100);
+      detector.observe(values.data(), values.size(), 1000 + window * 1000);
+    }
+    values[5].id = 202;
+    values[4].id = 950;
+    assert(!detector.observe(values.data(), values.size(), 4100).valid);
 
     // Near-UINT64_MAX activity must retain exact lead/comparability decisions
     // without multiplying large counters or overflowing a scaled threshold.
@@ -365,11 +380,24 @@ void a350_submitted_exits() {
       initialize();
       observe(0);
       confirms(0);
+      // A recreated EFIS surface takes over its role at once (47 -> 48 is the
+      // left); the recreated unselected third (75 -> 76) leaves both targets.
       values[replacement.first].id = replacement.second;
       values[replacement.first].submission_activity = 100000;
-      assert(!observe(3100).valid && std::strcmp(detector.snapshot().status, "a350_group_changed") == 0);
-      confirms(3100, {replacement.first == 4 ? 48u : 47u, 45});
+      const std::array<std::uint64_t, 2> pair{replacement.first == 4 ? 48u : 47u, 45};
+      const auto& recreated = observe(3100);
+      assert(recreated.valid && recreated.replaced && recreated.targets == pair && std::strcmp(recreated.status, "replaced") == 0);
+      add();
+      assert(observe(4100).valid && detector.snapshot().targets == pair);
     }
+    // Two group members recreated at once is a changed group: re-confirm.
+    initialize();
+    observe(0);
+    confirms(0);
+    values[4].id = 48;
+    values[5].id = 76;
+    assert(!observe(3100).valid && std::strcmp(detector.snapshot().status, "a350_group_changed") == 0);
+    confirms(3100, {48, 45});
     initialize();
     observe(1000);
     confirms(1000);
@@ -480,13 +508,45 @@ void ini_a380_group() {
   reason("ini_group_incomplete");
 
   confirm();
-  values[0].id = 99;  // Unselected-member replacement also invalidates the pair.
-  observe(3100);
-  reason("ini_group_changed");
+  // A recreated unselected member (100 -> 99) is a clean replacement: the
+  // pair keeps its roles instead of being invalidated and re-ranked.
+  const auto confirmed_pair = detector.snapshot().targets;
+  values[0].id = 99;
+  assert(observe(3100).valid && detector.snapshot().replaced && detector.snapshot().targets == confirmed_pair);
   for (unsigned window = 1; window <= 3; ++window) {
     add();
-    assert(observe(3100 + window * 1000).valid == (window == 3));
+    assert(observe(3100 + window * 1000).valid && detector.snapshot().targets == confirmed_pair);
   }
+  // A recreated LEFT (the highest id, 114 -> 120) keeps LEFT although the new
+  // id would also be last; RIGHT stays.
+  confirm();
+  values[7].id = 120;
+  assert(observe(3100).valid && detector.snapshot().replaced &&
+         (detector.snapshot().targets == std::array<std::uint64_t, 2>{120, confirmed_pair[1]}));
+  // A recreated RIGHT gets an id above LEFT; allocation order would now name
+  // it LEFT, but the replaced roles hold in later windows.
+  confirm();
+  values[5].id = 130;
+  assert(observe(3100).valid && (detector.snapshot().targets == std::array<std::uint64_t, 2>{confirmed_pair[0], 130}));
+  for (unsigned window = 1; window <= 3; ++window) {
+    add();
+    assert(observe(3100 + window * 1000).valid && (detector.snapshot().targets == std::array<std::uint64_t, 2>{confirmed_pair[0], 130}));
+  }
+  // The old LEFT retired one observation before its replacement exists: the
+  // incomplete group invalidates, then the replacement restores the roles
+  // against the last confirmed group.
+  confirm();
+  observe(3100, 7);
+  reason("ini_group_incomplete");
+  values[7].id = 140;
+  assert(observe(3200).valid && detector.snapshot().replaced &&
+         (detector.snapshot().targets == std::array<std::uint64_t, 2>{140, confirmed_pair[1]}));
+  // Two members changed at once is a changed group.
+  confirm();
+  values[0].id = 99;
+  values[1].id = 97;
+  observe(3100);
+  reason("ini_group_changed");
   confirm();
   values[0].draws = 0;
   observe(3100);
@@ -503,6 +563,7 @@ void ini_a380_group() {
   reason("stale_window", false);
   confirm();
   values[0].id = 99;  // A stale clock must not hide membership loss.
+  values[1].id = 97;
   observe(8001);
   reason("ini_group_changed");
   confirm();

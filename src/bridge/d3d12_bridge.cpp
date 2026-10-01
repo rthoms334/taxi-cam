@@ -3839,8 +3839,10 @@ void discover_pfds(std::uint64_t now) noexcept {
           r.routes.adopt_single(detection.targets[0], separate_lower);
           if (separate_lower)
             r.routes.adopt_lower(detection.targets[1]);
-        } else
-          r.routes.adopt_detected(detection.targets);
+        } else if (!r.routes.adopt_detected(detection.targets) && detection.replaced)
+          // A recreated texture took over its role after the group evidence had
+          // already dropped both detected targets; explicit sides still refuse.
+          r.routes.replace_detected(detection.targets);
       } else if (ranked_group && detection.invalidates_targets)
         r.routes.forget_detected();
       if (!ranked_group && !single_display && !r.routes.targets[0] && !r.routes.targets[1]) {

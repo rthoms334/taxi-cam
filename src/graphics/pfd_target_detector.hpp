@@ -26,6 +26,9 @@ enum class PfdTargetConfidence { none, stabilizing, confirmed };
 struct PfdTargetDetection {
   bool valid = false;
   bool invalidates_targets = false;
+  // A confirmed texture was recreated and its replacement took over its role;
+  // the caller adopts it even where an earlier invalidation dropped targets.
+  bool replaced = false;
   std::array<std::uint64_t, 2> targets{};  // Left, right.
   unsigned stable_windows = 0;
   PfdTargetConfidence confidence = PfdTargetConfidence::none;
@@ -54,7 +57,9 @@ class PfdTargetDetector {
     previous_count_ = 0;
     baseline_valid_ = false;
     submission_mode_ = false;
-    confirmed_single_ = confirmed_lower_ = 0;
+    confirmed_count_ = 0;
+    confirmed_targets_ = {};
+    roles_from_replacement_ = false;
     clear("warming_up");
   }
 
@@ -132,6 +137,9 @@ class PfdTargetDetector {
       if (group_count != 3)
         return reject(group_count < 3 ? "a350_group_incomplete" : "a350_group_ambiguous");
       current_count = group_count;
+      // A recreated group member is a clean replacement, not a changed group.
+      if (replace_recreated(current_count, now_ms))
+        return detection_;
       // Even replacement of the third (unselected) surface starts a new
       // complete group baseline, never an artificially uncontested pair.
       if (baseline_valid_ && !changed_source) {
@@ -145,6 +153,13 @@ class PfdTargetDetector {
         }
       }
     }
+    if (replace_recreated(current_count, now_ms))
+      return detection_;
+    return remember(dispatch(current_count, now_ms, changed_source), current_count);
+  }
+
+ private:
+  const PfdTargetDetection& dispatch(std::size_t current_count, std::uint64_t now_ms, bool changed_source) noexcept {
     if (changed_source) {
       clear("activity_source_changed", profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group);
       seed(current_count, now_ms);
@@ -224,6 +239,67 @@ class PfdTargetDetector {
     std::uint32_t levels = 0;
   };
 
+  // A valid detection records its targets and the matching inventory it was
+  // made from, for replace_recreated.
+  const PfdTargetDetection& remember(const PfdTargetDetection& result, std::size_t count) noexcept {
+    if (result.valid) {
+      confirmed_targets_ = result.targets;
+      for (std::size_t i = 0; i < count; ++i)
+        confirmed_ids_[i] = current_[i].id;
+      confirmed_count_ = count;
+    }
+    return result;
+  }
+
+  // An aircraft can recreate a display texture mid-flight (live PMDG 777,
+  // 2026-10-01: the display every 3-5 s, and the lower texture once). When,
+  // against the inventory of the last valid detection, exactly one texture is
+  // gone and exactly one texture of the same shape is new, the new one takes
+  // over the gone one's role (left/right, display/lower) at once; a gone
+  // texture that was no target leaves the targets as they were. The baseline
+  // and confirmation windows are for a first detection, and the id-order and
+  // allocation-order rules would misplace a new incarnation (it has the
+  // highest id). Incarnation ids are not reused. Anything less clear-cut
+  // (none, two or more changes) takes the policy's own path.
+  bool replace_recreated(std::size_t count, std::uint64_t now_ms) noexcept {
+    if (!confirmed_count_ || !confirmed_targets_[0])
+      return false;
+    std::uint64_t gone = 0, created = 0;
+    unsigned gone_count = 0, created_count = 0;
+    std::size_t i = 0, j = 0;
+    while (i < confirmed_count_ || j < count) {
+      if (j == count || (i < confirmed_count_ && confirmed_ids_[i] < current_[j].id)) {
+        gone = confirmed_ids_[i++];
+        ++gone_count;
+      } else if (i == confirmed_count_ || current_[j].id < confirmed_ids_[i]) {
+        created = current_[j++].id;
+        ++created_count;
+      } else {
+        ++i;
+        ++j;
+      }
+    }
+    if (gone_count != 1 || created_count != 1)
+      return false;
+    auto targets = confirmed_targets_;
+    for (auto& target : targets)
+      if (target == gone)
+        target = created;
+    clear("replaced");
+    seed(count, now_ms);
+    const bool single = profile_->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    pending_ = single ? std::array<std::uint64_t, 2>{targets[0], 0} : targets;
+    roles_from_replacement_ = true;
+    detection_.valid = true;
+    detection_.replaced = true;
+    detection_.stable_windows = required_windows;
+    detection_.confidence = PfdTargetConfidence::confirmed;
+    detection_.targets = targets;
+    detection_.status = "replaced";
+    remember(detection_, count);
+    return true;
+  }
+
   const PfdTargetDetection& confirm(const std::array<std::uint64_t, 2>& pair) noexcept {
     if (pair != pending_) {
       clear("stabilizing");
@@ -259,12 +335,16 @@ class PfdTargetDetector {
     }
     if (!baseline_valid_)
       return reject("warming_up", false);
-    if (previous_count_ != count)
+    if (previous_count_ != count) {
+      roles_from_replacement_ = false;
       return reject("ini_group_changed");
+    }
     bool active = true;
     for (std::size_t i = 0; i < count; ++i) {
-      if (previous_[i].id != current_[i].id || previous_[i].format != current_[i].format)
+      if (previous_[i].id != current_[i].id || previous_[i].format != current_[i].format) {
+        roles_from_replacement_ = false;
         return reject("ini_group_changed");
+      }
       if (current_[i].draws < previous_[i].draws)
         return reject("counter_reset");
       active &= current_[i].draws > previous_[i].draws;
@@ -278,15 +358,18 @@ class PfdTargetDetector {
       clear("ini_group_inactive");
       return detection_;
     }
-    return confirm({current_[count - 1].id, current_[count - 3].id});
+    // A replacement keeps the roles it took over: the new incarnation's id
+    // no longer reflects the allocation order.
+    return confirm(roles_from_replacement_ ? confirmed_targets_
+                                           : std::array<std::uint64_t, 2>{current_[count - 1].id, current_[count - 3].id});
   }
 
   // One destination texture. observe() already ordered matches by resource id,
   // which is the routing dropdown order. The last entry is the navigation
   // display for this profile; the first entry is not. The confirmed pair is
   // {id, 0}; routing copies that id onto both inboard rectangles.
-  // A changed last id starts a new baseline, except a replacement of a
-  // confirmed display. Draw count does not rank them.
+  // A changed last id starts a new baseline; a recreated confirmed texture is
+  // handled before this (replace_recreated). Draw count does not rank them.
   const PfdTargetDetection& observe_single_display(std::size_t count, std::uint64_t now_ms) noexcept {
     if (count == 0) {
       clear("no_candidates");
@@ -294,39 +377,6 @@ class PfdTargetDetector {
       return detection_;
     }
     const auto chosen = current_[count - 1].id;
-    // The aircraft recreated one of its confirmed display textures: exactly
-    // one confirmed texture (display or lower guess) is gone and exactly one
-    // texture of the same shape is new since the last observation. The new one
-    // takes over that display at once; the baseline and three confirmations
-    // are for a first detection. Live PMDG 777 (2026-10-01) recreated the
-    // display every 3-5 s in flight, faster than that wait, and in another
-    // flight recreated the lower texture, whose new id was then the highest,
-    // which the id-order rule below would take for the display. Incarnation
-    // ids are not reused. Anything less clear-cut takes the slow path.
-    if (confirmed_single_) {
-      const bool display_gone = !contains(count, confirmed_single_);
-      const bool lower_gone = confirmed_lower_ && !contains(count, confirmed_lower_);
-      std::uint64_t created = 0;
-      unsigned created_count = 0;
-      for (std::size_t i = 0; i < count; ++i)
-        if (!contains_previous(current_[i].id)) {
-          created = current_[i].id;
-          ++created_count;
-        }
-      if (display_gone != lower_gone && created_count == 1) {
-        clear("replaced");
-        seed(count, now_ms);
-        pending_ = {display_gone ? created : confirmed_single_, 0};
-        detection_.stable_windows = required_windows;
-        detection_.valid = true;
-        detection_.confidence = PfdTargetConfidence::confirmed;
-        detection_.targets = {pending_[0], lower_gone ? created : confirmed_lower_};
-        detection_.status = "replaced";
-        confirmed_single_ = detection_.targets[0];
-        confirmed_lower_ = detection_.targets[1];
-        return detection_;
-      }
-    }
     if (!baseline_valid_ || now_ms < baseline_ms_ || now_ms - baseline_ms_ > maximum_window_ms) {
       clear(!baseline_valid_ ? "warming_up" : now_ms < baseline_ms_ ? "clock_reset" : "stale_window");
       seed(count, now_ms);
@@ -347,7 +397,6 @@ class PfdTargetDetector {
   const PfdTargetDetection& single_display_confirmed(std::size_t count) noexcept {
     if (!detection_.valid)
       return detection_;
-    confirmed_single_ = detection_.targets[0];
     // Unverified lower-texture guess for a profile whose side 2 is a separate
     // texture, reported beside the confirmed display without affecting its
     // stability: the next-highest id. One PMDG 777 session log listed five
@@ -355,7 +404,6 @@ class PfdTargetDetector {
     // EICASCDU, was the next-highest id. Routing can override it.
     if (profiles::separate_lower_texture(*profile_) && count >= 2)
       detection_.targets[1] = current_[count - 2].id;
-    confirmed_lower_ = detection_.targets[1];
     return detection_;
   }
 
@@ -364,13 +412,6 @@ class PfdTargetDetector {
                                         [](const Counter& value, std::uint64_t key) { return value.id < key; });
     return found != current_.begin() + count && found->id == id;
   }
-  // In the inventory of the last observation (seed keeps it sorted by id).
-  bool contains_previous(std::uint64_t id) const noexcept {
-    const auto found = std::lower_bound(previous_.begin(), previous_.begin() + previous_count_, id,
-                                        [](const Counter& value, std::uint64_t key) { return value.id < key; });
-    return found != previous_.begin() + previous_count_ && found->id == id;
-  }
-
   void clear(const char* status, bool invalidates = false) noexcept {
     detection_ = {};
     detection_.invalidates_targets = invalidates;
@@ -392,10 +433,14 @@ class PfdTargetDetector {
   bool baseline_valid_ = false;
   bool submission_mode_ = false;
   std::array<std::uint64_t, 2> pending_{};
-  // Single-display policy: the last confirmed display id and lower guess; a
-  // clear-cut replacement of either is followed without a new baseline.
-  // reset() forgets them.
-  std::uint64_t confirmed_single_ = 0, confirmed_lower_ = 0;
+  // The last valid detection's targets and the sorted matching inventory it was
+  // made from (replace_recreated). reset() forgets them.
+  std::array<std::uint64_t, 2> confirmed_targets_{};
+  std::array<std::uint64_t, capacity> confirmed_ids_{};
+  std::size_t confirmed_count_ = 0;
+  // Allocation group: targets keep the roles a replacement gave them until the
+  // group changes in a way that is not a clean replacement.
+  bool roles_from_replacement_ = false;
   PfdTargetDetection detection_{};
 };
 
