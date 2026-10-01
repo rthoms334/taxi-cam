@@ -72,8 +72,7 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
   }
   if (sample.heartbeat) {
     out << "Bridge: graphics_ready=" << sample.graphics_ready << "; scene_ready=" << sample.scene_ready << '\n';
-    out << "TAXI_mask=" << sample.taxi_mask << "; speed_inhibited=" << sample.speed_inhibited << "; speed_knots=" << sample.speed
-        << "; applied_EV=" << sample.exposure << '\n';
+    out << "TAXI_mask=" << sample.taxi_mask << "; speed_knots=" << sample.speed << "; applied_EV=" << sample.exposure << '\n';
     out << "Rate_in_use=" << sample.effective_rate << "; useful_rate=" << sample.useful_rate << "; rate_limits=" << sample.rate_limits
         << "; parked=" << sample.parked << '\n';
     out << "PFDs=" << sample.left_id << '/' << sample.right_id << '/' << sample.lower_id << "; candidates=" << sample.candidate_count

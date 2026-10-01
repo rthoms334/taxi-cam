@@ -139,12 +139,6 @@ TaxiButtonSample get_taxi_buttons() noexcept;
 // Permission must be refreshed; false consumes/cancels the current request.
 void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted) noexcept;
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept;
-struct TaxiCutoffStatus {
-  bool inhibited = false;
-  unsigned pending_off = 0;
-  const char* status = "below_speed_limit";
-};
-TaxiCutoffStatus get_taxi_cutoff() noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;

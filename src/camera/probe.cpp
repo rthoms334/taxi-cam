@@ -20,6 +20,7 @@
 #include "scene_session_reset.hpp"
 #include "source_view.hpp"
 #include "view_aa.hpp"
+#include "view_clip.hpp"
 #include "view_creation_wait.hpp"
 #include "view_output.hpp"
 #include "view_readiness_wait.hpp"
@@ -50,6 +51,8 @@ struct Runtime {
   std::atomic<bool> enabled{false};
   std::atomic<bool> suspended{false};
   std::atomic<unsigned> requested_settings{kDefaultCameraRate | (2u << 8)};
+  // True above 60 kt: the views draw as far as the main view (view_clip).
+  std::atomic<bool> follow_main_far{false};
   // Protected by mutex; never used directly by a native engine call.
   MountPair requested_mounts = default_mounts();
   const profiles::AircraftProfile* requested_profile = &profiles::A380;
@@ -81,6 +84,15 @@ struct Runtime {
   double observer_last_ms = 0;
   double observer_max_ms = 0;
   ProbePerformance performance;
+  // Camera far distance (view_clip), observer thread. main_clip is the main
+  // view's camera as read at the last calibration match. own_clips holds each
+  // feed camera's values as first observed, so following the main view can be
+  // undone; clip_cameras is the camera they belong to.
+  CameraClip main_clip{};
+  std::array<std::uint64_t, kMaxCameraFeeds> clip_cameras{};
+  std::array<CameraClip, kMaxCameraFeeds> own_clips{}, last_clips{};
+  std::uint64_t clip_writes = 0;
+  const char* clip_error = "";
   // Slowest update since the worker's last take_observer_peak(). peak_local_ms
   // is observer-thread only; peak is guarded by mutex and written only when an
   // update sets a new maximum, so ordinary updates take no lock for it.
@@ -392,6 +404,14 @@ std::array<std::uint64_t, kMaxCameraFeeds> view_addresses(const std::array<ec::O
     out[i] = views[i].complete && views[i].ready ? views[i].view_address : 0;
   return out;
 }
+// The camera just matched to CameraGet's current view is the main view. Its
+// far distances are kept as numbers only; the address is not retained. An
+// implausible or unreadable camera keeps the previous values.
+void note_main_view_clip(Runtime& runtime, std::uint64_t camera_address) noexcept {
+  CameraClip clip;
+  if (read_camera_clip(camera_address, clip) && plausible_camera_clip(clip))
+    runtime.main_clip = clip;
+}
 // fresh_views: view addresses of the owned pair from the caller's current
 // inspection, indexed like owned_ids. Only calibration reads them, to exclude
 // the retained pair from the pool scan.
@@ -467,6 +487,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
         matched = true;
         matched_fov = camera.fov;
         aircraft_camera = "matched";
+        note_main_view_clip(runtime, camera.camera_address);
       }
     }
     ViewMatchScan scan;
@@ -500,6 +521,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
           position = translation;
           matched_fov = chosen.fov;
           matched = true;
+          note_main_view_clip(runtime, chosen.camera_address);
         }
       }
     }
@@ -852,7 +874,35 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
   return true;
 }
 
-void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose) noexcept {
+// Before update_view rebuilds the frustum: the main view's far distances above
+// 60 kt, otherwise the camera's own. A refusal leaves the camera as it was;
+// the pose still applies.
+void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsigned feed) noexcept {
+  if (feed >= kMaxCameraFeeds)
+    return;
+  if (runtime.clip_cameras[feed] != view.camera_address) {
+    CameraClip own;
+    if (!read_camera_clip(view.camera_address, own) || !plausible_camera_clip(own)) {
+      runtime.clip_error = "clip_implausible_camera";
+      return;
+    }
+    runtime.clip_cameras[feed] = view.camera_address;
+    runtime.own_clips[feed] = own;
+  }
+  CameraClip target;
+  if (!camera_far_target(runtime.own_clips[feed], runtime.main_clip, runtime.follow_main_far.load(std::memory_order_acquire), target)) {
+    runtime.clip_error = "clip_implausible_target";
+    return;
+  }
+  const auto clip = apply_camera_far(view.camera_address, target);
+  runtime.last_clips[feed] = clip.complete ? clip.after : clip.before;
+  if (clip.complete && clip.write_attempted)
+    ++runtime.clip_writes;
+  if (!clip.complete)
+    runtime.clip_error = clip.error;
+}
+
+void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose, unsigned feed) noexcept {
   if (!session_work_allowed(runtime))
     return;
   using SetVector = void (*)(void*, const double*);
@@ -860,6 +910,7 @@ void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const Mount
   function<SetVector>(runtime, runtime.contract.functions.set_up)(reinterpret_cast<void*>(view.camera_address), pose.up.data());
   function<SetVector>(runtime, runtime.contract.functions.set_target)(reinterpret_cast<void*>(view.camera_address), pose.target.data());
   function<void (*)(void*, float)>(runtime, runtime.contract.functions.set_fov)(reinterpret_cast<void*>(view.camera_address), pose.fov);
+  apply_camera_clip(runtime, view, feed);
   function<void (*)(void*)>(runtime, runtime.contract.functions.update_view)(reinterpret_cast<void*>(view.view_address));
 }
 
@@ -1164,7 +1215,7 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
       runtime.creation_valid = false;
       return id;
     }
-    apply_pose(runtime, view, runtime.mounted_poses[runtime.creations - 1]);
+    apply_pose(runtime, view, runtime.mounted_poses[runtime.creations - 1], runtime.creations - 1);
     ViewDimensions desired{};
     if (!plan_view_resize(view.dimensions, runtime.creations - 1, desired, runtime.allocation_panes)) {
       runtime.creation_valid = false;
@@ -1624,7 +1675,7 @@ void observer(void* manager) noexcept {
     } else if (park_initial_scene(suspended, before.owned_ids[0] || before.owned_ids[1] || before.owned_ids[2])) {
       // OFF also parks an unfinished background creation request. Keep its
       // mailbox request for an explicit resume; never create behind a lost
-      // heartbeat, cutoff or expired prewarm budget, and never erase a pair.
+      // heartbeat or expired prewarm budget, and never erase a pair.
       report.pair = before;
       report.message = "Initial camera creation parked until render demand resumes.";
     } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !start_body.valid && !start_body.calibration_required) {
@@ -2003,7 +2054,7 @@ void observer(void* manager) noexcept {
               timed(runtime, ProbeStage::pose, [&] {
                 for (unsigned i = 0; i < desired.size(); ++i)
                   if (desired[i])
-                    apply_pose(runtime, views[i], runtime.mounted_poses[i]);
+                    apply_pose(runtime, views[i], runtime.mounted_poses[i], i);
               });
             if (needs_pose && runtime.retained_recalibration) {
               // The retained pair now carries the arrival pose. Reopen its scene
@@ -2228,6 +2279,14 @@ void observer(void* manager) noexcept {
       runtime.published.performance = runtime.performance;
       runtime.published.gates = runtime.gates;
       runtime.published.activation_counts = runtime.activation_counts;
+      for (unsigned i = 0; i < kMaxCameraFeeds; ++i) {
+        const auto& clip = runtime.last_clips[i];
+        runtime.published.draw_clip[i] = {clip.near_plane, clip.far_plane, clip.default_far};
+      }
+      runtime.published.main_clip = {runtime.main_clip.near_plane, runtime.main_clip.far_plane, runtime.main_clip.default_far};
+      runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
+      runtime.published.draw_clip_writes = runtime.clip_writes;
+      runtime.published.draw_clip_error = runtime.clip_error;
     } catch (...) {
       runtime.pair.request_disable();
     }
@@ -2445,6 +2504,10 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
 void suspend_scene_rendering(bool suspended) noexcept {
   auto& runtime = state();
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
+}
+
+void request_scene_main_far(bool follow) noexcept {
+  state().follow_main_far.store(follow, std::memory_order_release);
 }
 
 void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {

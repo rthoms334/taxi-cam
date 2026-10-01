@@ -5,6 +5,7 @@
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
+#include "../camera/view_clip.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
@@ -59,12 +60,12 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
     const auto length = std::snprintf(
         line, sizeof(line),
         "%llu pid=%lu tid=%lu native=%u scene=%u mask=%u left=%llu right=%llu lower=%llu captured=%llu composed=%llu stamps=%llu "
-        "hooks_failed=%llu cutoff=%u | %s | %s\r\n",
+        "hooks_failed=%llu | %s | %s\r\n",
         static_cast<unsigned long long>(GetTickCount64()), GetCurrentProcessId(), GetCurrentThreadId(), s.graphics_ready, s.scene_ready,
         s.taxi_mask, static_cast<unsigned long long>(s.left_id), static_cast<unsigned long long>(s.right_id),
         static_cast<unsigned long long>(s.lower_id), static_cast<unsigned long long>(s.captures),
         static_cast<unsigned long long>(s.composed), static_cast<unsigned long long>(s.stamps),
-        static_cast<unsigned long long>(s.hook_failures), s.speed_inhibited, s.message, detail);
+        static_cast<unsigned long long>(s.hook_failures), s.message, detail);
     if (length > 0 && static_cast<size_t>(length) < sizeof(line))
       win::append_rotating_log(path, std::string_view(line, static_cast<std::size_t>(length)), win::BridgeLogBytes);
   } catch (...) {
@@ -380,6 +381,8 @@ DWORD run_impl() {
   };
   std::uint64_t last_stop_sequence{};
   std::array<std::array<double, 6>, 3> applied_mounts{};
+  // Camera views draw as far as the main view above 60 kt (view_clip).
+  bool far_follows_main = false;
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -671,18 +674,17 @@ DWORD run_impl() {
     const bool commandable = profile && profiles::commandable_buttons(*profile);
     const bool selected_profile_separate_lower = profile && profiles::separate_lower_texture(*profile);
     const auto buttons = native_camera::get_taxi_buttons();
-    const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.mask());
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
-    const unsigned mask = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() &&
-                                  !cutoff.inhibited && !degraded
-                              ? (pmdg_dsp ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
-                                 : settings.follow_taxi && !manual_only ? desired.buttons
-                                                                        : settings.manual_mask) &
-                                    sides
-                              : 0;
-    const bool test_scene = connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test &&
-                            !cutoff.inhibited && !degraded;
+    const unsigned mask =
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() && !degraded
+            ? (pmdg_dsp                               ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
+               : settings.follow_taxi && !manual_only ? desired.buttons
+                                                      : settings.manual_mask) &
+                  sides
+            : 0;
+    const bool test_scene =
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test && !degraded;
     const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
@@ -713,7 +715,6 @@ DWORD run_impl() {
           settings.enabled != 0,
           native_camera::aircraft_matches_profile() && aircraft.fresh && aircraft.detected_profile == settings.profile,
           win::graphics_ready(),
-          native_camera::get_taxi_cutoff().inhibited,
           manual_only || native_camera::get_taxi_buttons().valid,
           pose.valid || pose.calibration_required,
           ground.valid,
@@ -754,9 +755,7 @@ DWORD run_impl() {
     const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup && !degraded);
     unsigned active = demand.stamp_mask;
     const unsigned calibration =
-        connected && session_settings && session.ready && settings.enabled && aircraft_matches && !cutoff.inhibited && !degraded
-            ? settings.calibration_mask
-            : 0;
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && !degraded ? settings.calibration_mask : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
@@ -794,6 +793,11 @@ DWORD run_impl() {
       native_camera::request_scene_rate(rate, feeds, nose_priority);
       scene_runtime::manager().set_source_rate(rate);
     }
+    // Taxiing, the views keep their own 1000 m far; from the take-off roll on
+    // they draw as far as the main view so the ground stays visible in flight.
+    // Atomic only; the observer applies it before each pose refresh.
+    far_follows_main = native_camera::follow_main_far(far_follows_main, speed.valid, speed.knots);
+    native_camera::request_scene_main_far(far_follows_main);
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
       for (unsigned i = 0; i < mounts.size(); ++i) {
@@ -816,7 +820,7 @@ DWORD run_impl() {
       log_startup(status, startup, "targets_ready");
     }
     // Background warmup has zero display demand and closes after three GPU-completed
-    // pairs or its bounded budget. Otherwise OFF, cutoff, pause and heartbeat
+    // pairs or its bounded budget. Otherwise OFF, pause and heartbeat
     // loss close the render gates immediately.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
@@ -980,7 +984,6 @@ DWORD run_impl() {
     status.hook_failures = graphics.hook_failures;
     status.scene_ready = scene.ready[0] && scene.ready[1] && (!scene.pair.owned_ids[2] || scene.ready[2]);
     status.taxi_mask = active;
-    status.speed_inhibited = cutoff.inhibited;
     status.left_id = targets[0];
     status.right_id = targets[1];
     status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
@@ -1068,7 +1071,6 @@ DWORD run_impl() {
             ? "Native hook failures exceeded the safe rate; Taxi Cam is disarmed for this simulator session. Restart MSFS to re-enable it."
         : degraded          ? "Presentation stalled: cameras disarmed so the simulator can keep running; they re-arm when frames resume."
         : !aircraft_matches ? aircraft_message
-        : cutoff.inhibited  ? (!commandable ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
         : failed            ? scene.message.c_str()
         : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
@@ -1110,7 +1112,6 @@ DWORD run_impl() {
     sim_inputs.simulator_unsupported =
         scene.pair.state == engine_camera::State::blocked || scene.stop_reason == native_camera::SceneStopReason::identity_refused;
     sim_inputs.degraded = degraded;
-    sim_inputs.speed_cutoff = cutoff.inhibited;
     sim_inputs.aircraft_mismatch = !aircraft_matches && identity.fresh;
     sim_inputs.camera_startup_failed =
         (failed && requested) || (stopped_camera != nullptr && !native_camera::retryable_scene_stop(scene.stop_reason));
@@ -1119,9 +1120,9 @@ DWORD run_impl() {
     const bool changed = !logged || connected != last_connected || requested != last_requested || degraded != last_degraded ||
                          status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
                          status.right_id != last_logged.right_id || status.lower_id != last_logged.lower_id ||
-                         status.speed_inhibited != last_logged.speed_inhibited || scene.stop_sequence != last_stop_sequence ||
-                         output.output != last_output || scene.view_wait_count != last_view_wait_count ||
-                         status.effective_rate != last_logged.effective_rate || status.parked != last_logged.parked;
+                         scene.stop_sequence != last_stop_sequence || output.output != last_output ||
+                         scene.view_wait_count != last_view_wait_count || status.effective_rate != last_logged.effective_rate ||
+                         status.parked != last_logged.parked;
     loop_max_ms = std::max(loop_max_ms, GetTickCount64() - now);
     if (changed || now >= next_log) {
       if (!logged || status.active_profile != last_logged.active_profile || status.detected_profile != last_logged.detected_profile ||
@@ -1303,6 +1304,17 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(scene.aa_restore_failures), scene.aa_cleared_pending, scene.output_slots[0],
                     scene.output_slots[1], scene.rt_record_refusals, static_cast<unsigned long long>(scene.rt_record_holds));
       log_status(status, retention_detail);
+      // Per camera and for the main view: near plane / culling far / default far, metres.
+      char clip_detail[448];
+      std::snprintf(clip_detail, sizeof(clip_detail),
+                    "Camera draw distance: follow_main=%d writes=%llu error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g "
+                    "feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
+                    scene.follow_main_far ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
+                    scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0],
+                    scene.main_clip[1], scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2],
+                    scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
+                    scene.draw_clip[2][2]);
+      log_status(status, clip_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];
         std::snprintf(

@@ -57,7 +57,7 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 
 Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the cameras. The page also returns while the camera image is missing or more than a second old. The text uses the ground-speed colour on the Airbus aircraft and is white on the PMDG 777.
 
-The cameras switch off above **60 knots**. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
+The cameras stay on at any speed, including in flight, and Taxi Cam never turns the TAXI buttons off by itself. While taxiing, the camera views draw up to 1,000 m away. Above **60 knots** they draw as far as the main view, so the ground stays visible after take-off. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 
 Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. On the A340-600 and A340-300, **Ctrl + Shift + D** toggles the lower ECAM (SD). In **Settings → Overview → Flight-deck control**, select **Shortcuts and buttons…** to configure or disable them. The same editor can also assign a joystick, button box or gamepad button to each action. On aircraft with working TAXI buttons, shortcuts and controller buttons also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard shortcuts and controller buttons](docs/keyboard-shortcuts.md) for details.
 

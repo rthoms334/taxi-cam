@@ -161,7 +161,7 @@ inline bool scene_body_matches_public(const BodyPose& scene, const BodyPose& pub
     return false;
   const Vector3 delta{scene.origin[0] - public_pose.origin[0], scene.origin[1] - public_pose.origin[1],
                       scene.origin[2] - public_pose.origin[2]};
-  // Existing telemetry freshness is <=500ms and taxi cutoff is independent.
+  // Existing telemetry freshness is <=500ms.
   // Allow render/telemetry phase differences, never accept a distant model or
   // incompatible orientation. A failure keeps both render gates closed.
   constexpr double minimum_dot = 0.9659258262890683;  // 15 degrees

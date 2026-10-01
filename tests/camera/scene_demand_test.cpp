@@ -71,7 +71,7 @@ void button_sequence(unsigned rate) {
   phase(false, 8000);   // Observed OFF interval before right TAXI.
   phase(true, 30000);   // Right TAXI must reuse both scene views.
   for (unsigned i = 0; i < 100; ++i) {
-    phase(false, 1000);  // Also used for cutoff, service pause and lost heartbeat.
+    phase(false, 1000);  // Also used for service pause and lost heartbeat.
     phase(true, 1000);   // Either or both PFDs use the same nose/tail pair.
   }
   require(starts == 1 && engine.creates == 2 && engine.erases == 0, "Display demand performed native reallocation");
@@ -117,7 +117,7 @@ void discovery_sequence() {
 }
 void prewarm_readiness() {
   using taxi_camera::standalone::ScenePrewarmReadiness;
-  const ScenePrewarmReadiness ready{true, true, true, true, true, false, true, true, true, true, true, false, 0, true};
+  const ScenePrewarmReadiness ready{true, true, true, true, true, true, true, true, true, true, false, 0, true};
   require(ready.eligible(), "A matched grounded ready session was refused");
   for (auto member : {&ScenePrewarmReadiness::connected, &ScenePrewarmReadiness::session_settings, &ScenePrewarmReadiness::enabled,
                       &ScenePrewarmReadiness::matching_identity, &ScenePrewarmReadiness::graphics_ready,
@@ -127,11 +127,9 @@ void prewarm_readiness() {
     unavailable.*member = false;
     require(!unavailable.eligible(), "Missing background safety evidence admitted prewarm");
   }
-  for (auto member : {&ScenePrewarmReadiness::cutoff, &ScenePrewarmReadiness::diagnostics_active}) {
-    auto prohibited = ready;
-    prohibited.*member = true;
-    require(!prohibited.eligible(), "Cutoff/calibration diagnostic admitted prewarm");
-  }
+  auto diagnostics = ready;
+  diagnostics.diagnostics_active = true;
+  require(!diagnostics.eligible(), "Calibration diagnostic admitted prewarm");
   for (double speed : {-1.0, 0.50001, 60.0, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
     auto moving = ready;
     moving.speed_knots = speed;

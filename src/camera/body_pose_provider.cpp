@@ -11,7 +11,6 @@
 #include "../profiles/catalog.hpp"
 #include "body_pose_math.hpp"
 #include "pmdg_display_select.hpp"
-#include "taxi_speed_cutoff.hpp"
 
 namespace taxi_camera::native_camera {
 namespace {
@@ -74,9 +73,7 @@ struct State {
   const char* flow_error = "flow_not_subscribed";
   std::uint64_t taxi_ms = 0;
   const char* taxi_error = "not_initialized";
-  TaxiSpeedCutoff speed_cutoff;
   TaxiButtonCommand button_commands;
-  const char* cutoff_status = "below_speed_limit";
   double ambient = 0, brightness = 0;
   std::uint64_t lighting_ms = 0;
   const char* lighting_error = "not_initialized";
@@ -117,9 +114,7 @@ void reset_session_locked() noexcept {
   state.timing.last_sample_ms = state.timing.last_interval_ms = 0;
   state.taxi_left = state.taxi_right = state.taxi_sd = false;
   state.pmdg_dsp.reset();
-  state.speed_cutoff = {};
   state.button_commands.reset_session();
-  state.cutoff_status = "below_speed_limit";
   state.calibrated = false;
   state.calibration_samples = 0;
   state.calibration_camera_ms = 0;
@@ -757,7 +752,6 @@ DWORD WINAPI worker(void*) noexcept {
           if (taxi_command_packets[side] && taxi_command_packets[side] == exception[4]) {
             AcquireSRWLockExclusive(&state.lock);
             state.button_commands.rejected(side);
-            state.speed_cutoff.rejected(side);
             ReleaseSRWLockExclusive(&state.lock);
             taxi_command_packets[side] = 0;
           }
@@ -769,21 +763,14 @@ DWORD WINAPI worker(void*) noexcept {
     }
     if (reconnect)
       break;
-    const auto speed = get_ground_speed();
     const auto buttons = get_taxi_buttons();
     const auto command_now = GetTickCount64();
     AcquireSRWLockExclusive(&state.lock);
-    const auto commands = state.speed_cutoff.update(command_now, speed.valid, speed.knots, buttons.valid, buttons.mask(), buttons.sample_ms,
-                                                    profile.speed_cutoff_knots, commandable);
-    state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
-                          : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
-                                                           : "below_speed_limit";
     const auto epoch = state.aircraft_session.epoch();
     const auto identity = state.identity.sample(command_now);
     const auto decision = state.button_commands.step(
-        {command_now, epoch, buttons.sample_ms, profile.id, buttons.mask(), commands,
-         readiness_locked(command_now).ready && identity.fresh && identity.detected_profile == profile.id, buttons.valid, speed.valid,
-         state.speed_cutoff.inhibited(), commandable, speed.knots, profile.speed_cutoff_knots});
+        {command_now, epoch, buttons.sample_ms, profile.id, buttons.mask(),
+         readiness_locked(command_now).ready && identity.fresh && identity.detected_profile == profile.id, buttons.valid, commandable});
     ReleaseSRWLockExclusive(&state.lock);
     for (unsigned side = 0; side < profile.sides; ++side) {
       if (!(decision.send_mask & (1u << side)))
@@ -810,10 +797,6 @@ DWORD WINAPI worker(void*) noexcept {
         last_packet(session, &taxi_command_packets[side]);
       AcquireSRWLockExclusive(&state.lock);
       state.button_commands.sent(decision, side, accepted, GetTickCount64());
-      if (decision.cutoff_mask & (1u << side)) {
-        state.speed_cutoff.sent(side, accepted);
-        state.cutoff_status = accepted ? "waiting_for_taxi_off" : "taxi_off_event_unavailable";
-      }
       ReleaseSRWLockExclusive(&state.lock);
     }
   }
@@ -909,9 +892,7 @@ bool stop_provider_locked() noexcept {
   state.lighting_error = "not_initialized";
   state.taxi_left = state.taxi_right = state.taxi_sd = false;
   state.pmdg_dsp.reset();
-  state.speed_cutoff = {};
   state.button_commands.reset_session();
-  state.cutoff_status = "below_speed_limit";
   state.calibrated = false;
   state.calibration_samples = 0;
   state.calibration_camera_ms = 0;
@@ -1208,12 +1189,6 @@ TaxiButtonRequestStatus get_taxi_button_request_status() noexcept {
 LightingSample get_lighting() noexcept {
   AcquireSRWLockShared(&state.lock);
   const auto out = lighting_locked(GetTickCount64());
-  ReleaseSRWLockShared(&state.lock);
-  return out;
-}
-TaxiCutoffStatus get_taxi_cutoff() noexcept {
-  AcquireSRWLockShared(&state.lock);
-  const TaxiCutoffStatus out{state.speed_cutoff.inhibited(), state.speed_cutoff.pending(), state.cutoff_status};
   ReleaseSRWLockShared(&state.lock);
   return out;
 }

@@ -51,8 +51,8 @@ void toast_policy() {
   constexpr Row rows[]{
       {SimEvent::bridge_connected, false},     {SimEvent::cameras_ready, false},       {SimEvent::connection_stopped, false},
       {SimEvent::simulator_unsupported, true}, {SimEvent::presentation_stalled, true}, {SimEvent::cameras_disarmed, false},
-      {SimEvent::presentation_resumed, false}, {SimEvent::speed_cutoff, false},        {SimEvent::aircraft_mismatch, false},
-      {SimEvent::camera_startup_failed, true}, {SimEvent::capture_paused, false},      {SimEvent::hook_storm, true},
+      {SimEvent::presentation_resumed, false}, {SimEvent::aircraft_mismatch, false},   {SimEvent::camera_startup_failed, true},
+      {SimEvent::capture_paused, false},       {SimEvent::hook_storm, true},
   };
   static_assert(sizeof(rows) / sizeof(rows[0]) == static_cast<unsigned>(SimEvent::count), "Classify every SimEvent in the toast table");
   unsigned toasting = 0;
@@ -109,7 +109,7 @@ void limiter() {
   require(admitted <= SimMessageLimiter::WindowBudget, "Flapping state exceeded the window budget");
   require(flap.suppressed() > 0 && flap.admitted() == admitted, "Limiter statistics disagree with its decisions");
   // The next window admits again.
-  require(flap.admit(SimEvent::speed_cutoff, 100000 + SimMessageLimiter::WindowMs + 61000), "Fresh window refused a notice");
+  require(flap.admit(SimEvent::aircraft_mismatch, 100000 + SimMessageLimiter::WindowMs + 61000), "Fresh window refused a notice");
   // Watchdog events keep a shorter interval than routine ones and are never starved by them.
   SimMessageLimiter dog;
   require(dog.admit(SimEvent::presentation_stalled, 1000) && !dog.admit(SimEvent::presentation_stalled, 5000) &&
@@ -141,15 +141,15 @@ void tracker() {
   require(count == 1 && has(count, SimEvent::bridge_connected), "Connect edge not announced once");
   require(observe(track, in) == 0, "Steady connection repeated its notice");
   in.cameras_ready = true;
-  in.speed_cutoff = true;
+  in.capture_paused = true;
   count = observe(track, in);
-  require(count == 2 && has(count, SimEvent::cameras_ready) && has(count, SimEvent::speed_cutoff), "Level edges not announced");
+  require(count == 2 && has(count, SimEvent::cameras_ready) && has(count, SimEvent::capture_paused), "Level edges not announced");
   require(observe(track, in) == 0, "Level inputs repeated their notices");
-  in.speed_cutoff = false;
+  in.capture_paused = false;
   require(observe(track, in) == 0, "Clearing a level produced a notice");
-  in.speed_cutoff = true;
+  in.capture_paused = true;
   count = observe(track, in);
-  require(count == 1 && has(count, SimEvent::speed_cutoff), "Re-asserted level not announced");
+  require(count == 1 && has(count, SimEvent::capture_paused), "Re-asserted level not announced");
   // Watchdog degraded path: announced once while connected, resumed once when lifted.
   in.degraded = true;
   count = observe(track, in);
@@ -174,15 +174,15 @@ void tracker() {
   require(count == 1 && has(count, SimEvent::presentation_resumed), "Recovery while disconnected not announced");
   in.connected = true;
   count = observe(track, in);
-  require(count == 3 && has(count, SimEvent::bridge_connected) && has(count, SimEvent::cameras_ready) && has(count, SimEvent::speed_cutoff),
-          "Reconnect did not repeat per-connection notices");
+  require(
+      count == 3 && has(count, SimEvent::bridge_connected) && has(count, SimEvent::cameras_ready) && has(count, SimEvent::capture_paused),
+      "Reconnect did not repeat per-connection notices");
   in.simulator_unsupported = true;
   in.camera_startup_failed = true;
   in.aircraft_mismatch = true;
-  in.capture_paused = true;
   count = observe(track, in);
-  require(count == 4 && has(count, SimEvent::simulator_unsupported) && has(count, SimEvent::camera_startup_failed) &&
-              has(count, SimEvent::aircraft_mismatch) && has(count, SimEvent::capture_paused),
+  require(count == 3 && has(count, SimEvent::simulator_unsupported) && has(count, SimEvent::camera_startup_failed) &&
+              has(count, SimEvent::aircraft_mismatch),
           "Fault levels not announced");
   // A failure storm is announced once for the process, even across reconnects.
   in.hook_storm = true;
@@ -197,7 +197,7 @@ void tracker() {
   // Bounded output: a small buffer truncates instead of overflowing.
   SimEventTracker small;
   SimEventInputs burst;
-  burst.connected = burst.cameras_ready = burst.speed_cutoff = burst.aircraft_mismatch = true;
+  burst.connected = burst.cameras_ready = burst.capture_paused = burst.aircraft_mismatch = true;
   std::array<SimEvent, 2> two{};
   require(small.observe(burst, two.data(), two.size()) == 2, "Tracker overflowed its output buffer");
 }
@@ -214,11 +214,11 @@ void notifications() {
   require(reader.take(wire, 1000, out.data(), out.size()) == 0 && reader.last_serial() == 0, "Empty log produced events");
   log.publish(SimEvent::bridge_connected, 1000);
   log.publish(SimEvent::cameras_ready, 1200);
-  log.publish(SimEvent::speed_cutoff, 1300);
+  log.publish(SimEvent::aircraft_mismatch, 1300);
   require(log.published() == 3, "Publish count");
   log.snapshot(wire);
   auto count = reader.take(wire, 1500, out.data(), out.size());
-  require(count == 3 && out[0] == SimEvent::bridge_connected && out[1] == SimEvent::cameras_ready && out[2] == SimEvent::speed_cutoff,
+  require(count == 3 && out[0] == SimEvent::bridge_connected && out[1] == SimEvent::cameras_ready && out[2] == SimEvent::aircraft_mismatch,
           "Events not delivered oldest first");
   require(reader.take(wire, 1600, out.data(), out.size()) == 0, "Unchanged log replayed its events");
   // The slot layout does not matter to the reader; only serials do.

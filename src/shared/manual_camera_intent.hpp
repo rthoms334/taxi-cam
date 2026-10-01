@@ -17,7 +17,7 @@ inline unsigned toggle_sides(unsigned mask, unsigned affected) noexcept {
   return (mask & affected) == affected ? mask & ~affected : mask | affected;
 }
 // Only changes session-scoped intent. The bridge still owns service, aircraft
-// identity, flight-session, telemetry and speed-cutoff checks.
+// identity, flight-session and telemetry checks.
 inline void toggle_manual_camera(Settings& settings, unsigned action, std::uint32_t automatic_mask = 0) noexcept {
   const auto* profile = profiles::find(settings.profile);
   const auto affected = profile ? camera_action_sides(*profile, action) : 0u;

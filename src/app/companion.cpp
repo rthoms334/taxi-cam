@@ -1190,7 +1190,7 @@ void draw_page(HDC dc) {
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
     text(dc, L"Range 5–60 per camera; install default 10. Parked aircraft run at the 5 fps floor.", 264, 564, 560, 24, small, Muted);
-    text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
+    text(dc, L"Cameras stay on at any speed. Above 60 knots they draw as far as the main view.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
     const auto* profile = profiles::find(draft().profile);
