@@ -714,9 +714,31 @@ int main() {
   assert(!inboard.observe(reversed.data(), reversed.size(), 2000).valid);
   const auto& tail = inboard.observe(reversed.data(), reversed.size(), 3000);
   assert(tail.valid && tail.targets[0] == 90 && tail.targets[1] == 50);
+  // The aircraft recreated its display (live PMDG 777, every 3-5 s in flight):
+  // the confirmed 90 is gone and a newer 91 is last. Follow it at once, even
+  // long after the last observation (the detector idles while routed).
   reversed[0].id = 91;
-  assert(!inboard.observe(reversed.data(), reversed.size(), 4000).valid);
+  const auto& replaced = inboard.observe(reversed.data(), reversed.size(), 60000);
+  assert(replaced.valid && replaced.targets[0] == 91 && replaced.targets[1] == 50 && std::strcmp(replaced.status, "replaced") == 0);
+  reversed[0].id = 95;
+  assert(inboard.observe(reversed.data(), reversed.size(), 63000).valid && inboard.snapshot().targets[0] == 95);
+  // Not a replacement: the confirmed display is still present.
+  std::array<PfdTargetObservation, 4> extra{reversed[0], reversed[1], reversed[2], one};
+  extra[3].id = 99;
+  assert(!inboard.observe(extra.data(), extra.size(), 64000).valid);
+  // Not a replacement: the confirmed display is gone but nothing newer exists.
+  std::array<PfdTargetObservation, 2> older{reversed[1], reversed[2]};
+  inboard.reset();
+  assert(!inboard.observe(reversed.data(), reversed.size(), 0).valid);
+  assert(!inboard.observe(reversed.data(), reversed.size(), 1000).valid);
+  assert(!inboard.observe(reversed.data(), reversed.size(), 2000).valid);
+  assert(inboard.observe(reversed.data(), reversed.size(), 3000).valid && inboard.snapshot().targets[0] == 95);
+  assert(!inboard.observe(older.data(), older.size(), 4000).valid);
   assert(std::strcmp(inboard.snapshot().status, "candidate_disappeared") == 0 && inboard.snapshot().targets[0] == 0);
+  // reset() (device or session change) forgets the confirmed display.
+  inboard.reset();
+  reversed[0].id = 96;
+  assert(!inboard.observe(reversed.data(), reversed.size(), 5000).valid);
 
   // Aerosoft A346: both NDs are rectangles on one 4096 $GAUGES_UNIFIED texture.
   // A 2048 PMDG-sized texture is not a candidate for this profile.

@@ -54,6 +54,7 @@ class PfdTargetDetector {
     previous_count_ = 0;
     baseline_valid_ = false;
     submission_mode_ = false;
+    confirmed_single_ = 0;
     clear("warming_up");
   }
 
@@ -284,7 +285,8 @@ class PfdTargetDetector {
   // which is the routing dropdown order. The last entry is the navigation
   // display for this profile; the first entry is not. The confirmed pair is
   // {id, 0}; routing copies that id onto both inboard rectangles.
-  // A changed last id starts a new baseline. Draw count does not rank them.
+  // A changed last id starts a new baseline, except a replacement of the
+  // confirmed display. Draw count does not rank them.
   const PfdTargetDetection& observe_single_display(std::size_t count, std::uint64_t now_ms) noexcept {
     if (count == 0) {
       clear("no_candidates");
@@ -292,6 +294,23 @@ class PfdTargetDetector {
       return detection_;
     }
     const auto chosen = current_[count - 1].id;
+    // The confirmed display texture was retired and a newer incarnation of the
+    // same shape is now last: the aircraft recreated its display. Follow it at
+    // once; the baseline and three confirmations are for a first detection.
+    // Live PMDG 777 (2026-10-01) recreated it every 3-5 s in flight, faster
+    // than that wait, so the display never came back. Incarnation ids are not
+    // reused, so a newer id is a newly created texture.
+    if (confirmed_single_ && chosen > confirmed_single_ && !contains(count, confirmed_single_)) {
+      clear("replaced");
+      seed(count, now_ms);
+      pending_ = {chosen, 0};
+      detection_.stable_windows = required_windows;
+      detection_.valid = true;
+      detection_.confidence = PfdTargetConfidence::confirmed;
+      detection_.targets = pending_;
+      detection_.status = "replaced";
+      return single_display_confirmed(count);
+    }
     if (!baseline_valid_ || now_ms < baseline_ms_ || now_ms - baseline_ms_ > maximum_window_ms) {
       clear(!baseline_valid_ ? "warming_up" : now_ms < baseline_ms_ ? "clock_reset" : "stale_window");
       seed(count, now_ms);
@@ -306,12 +325,19 @@ class PfdTargetDetector {
       return detection_;
     seed(count, now_ms);
     confirm({chosen, 0});
+    return single_display_confirmed(count);
+  }
+
+  const PfdTargetDetection& single_display_confirmed(std::size_t count) noexcept {
+    if (!detection_.valid)
+      return detection_;
+    confirmed_single_ = detection_.targets[0];
     // Unverified lower-texture guess for a profile whose side 2 is a separate
     // texture, reported beside the confirmed display without affecting its
     // stability: the next-highest id. One PMDG 777 session log listed five
     // 2048 x 2048 textures; the busiest non-DUS texture, consistent with
     // EICASCDU, was the next-highest id. Routing can override it.
-    if (detection_.valid && profiles::separate_lower_texture(*profile_) && count >= 2)
+    if (profiles::separate_lower_texture(*profile_) && count >= 2)
       detection_.targets[1] = current_[count - 2].id;
     return detection_;
   }
@@ -343,6 +369,9 @@ class PfdTargetDetector {
   bool baseline_valid_ = false;
   bool submission_mode_ = false;
   std::array<std::uint64_t, 2> pending_{};
+  // Single-display policy: the last confirmed display id; a newer replacement
+  // of it is followed without a new baseline. reset() forgets it.
+  std::uint64_t confirmed_single_ = 0;
   PfdTargetDetection detection_{};
 };
 

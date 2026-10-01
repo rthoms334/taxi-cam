@@ -23,6 +23,7 @@
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
 #include "freeze_watchdog.hpp"
+#include "gpu_memory.hpp"
 #include "native_hooks.hpp"
 
 namespace {
@@ -383,6 +384,7 @@ DWORD run_impl() {
   std::array<std::array<double, 6>, 3> applied_mounts{};
   // Camera views draw as far as the main view above 60 kt (view_clip).
   bool far_follows_main = false;
+  win::GpuMemoryProbe gpu_memory;
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -759,8 +761,9 @@ DWORD run_impl() {
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
-    // Before the target mask: a newly admitted side starts on the waiting page.
-    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active));
+    // Before the target mask: a newly admitted side starts on the waiting page,
+    // unless it stayed requested (mask) and only briefly lost its recreated texture.
+    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
@@ -1315,6 +1318,15 @@ DWORD run_impl() {
           scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2], scene.draw_clip[1][0],
           scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1], scene.draw_clip[2][2]);
       log_status(status, clip_detail);
+      // The simulator process's video memory against its Windows budget, MB.
+      if (const auto memory = gpu_memory.sample(); memory.valid) {
+        char memory_detail[192];
+        std::snprintf(memory_detail, sizeof(memory_detail), "GPU memory (MB): local=%llu/%llu non_local=%llu/%llu",
+                      static_cast<unsigned long long>(memory.local_usage >> 20), static_cast<unsigned long long>(memory.local_budget >> 20),
+                      static_cast<unsigned long long>(memory.nonlocal_usage >> 20),
+                      static_cast<unsigned long long>(memory.nonlocal_budget >> 20));
+        log_status(status, memory_detail);
+      }
       if (graphics_diagnostics) {
         char graphics_detail[512];
         std::snprintf(
