@@ -108,11 +108,12 @@ struct ProbeSnapshot {
   const char* post_error = "";
   // Camera mount on the aircraft Node (node_mount.hpp): whether this image's
   // parent contract resolved (and why not), per-feed state (0 world placement,
-  // 1 attached, 2 lost), attach/restore/refusal counts and the last refusal.
+  // 1 attached, 2 lost), attach/restore/refusal counts, cameras taken back to the world root after
+  // their aircraft Node went away (rehomes), and the last refusal.
   bool mount_available = false;
   std::string mount_contract_error;
   std::array<std::uint8_t, kMaxCameraFeeds> mount_state{};
-  std::uint64_t mount_attaches = 0, mount_restores = 0, mount_refused = 0;
+  std::uint64_t mount_attaches = 0, mount_restores = 0, mount_refused = 0, mount_rehomes = 0;
   const char* mount_error = "";
   // Diagnostics: main view, aircraft object camera and own nose camera Node
   // parent links (node_link.hpp), from the last calibration latch.

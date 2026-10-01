@@ -1366,10 +1366,10 @@ DWORD run_impl() {
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
       char mount_detail[384];
       std::snprintf(mount_detail, sizeof(mount_detail),
-                    "Camera mount: available=%d feeds=%u/%u/%u attaches=%llu restores=%llu refused=%llu error=%s contract=%s",
+                    "Camera mount: available=%d feeds=%u/%u/%u attaches=%llu restores=%llu rehomes=%llu refused=%llu error=%s contract=%s",
                     scene.mount_available ? 1 : 0, scene.mount_state[0], scene.mount_state[1], scene.mount_state[2],
                     static_cast<unsigned long long>(scene.mount_attaches), static_cast<unsigned long long>(scene.mount_restores),
-                    static_cast<unsigned long long>(scene.mount_refused),
+                    static_cast<unsigned long long>(scene.mount_rehomes), static_cast<unsigned long long>(scene.mount_refused),
                     scene.mount_error && *scene.mount_error ? scene.mount_error : "none",
                     scene.mount_contract_error.empty() ? "ok" : scene.mount_contract_error.c_str());
       log_status(status, mount_detail);
