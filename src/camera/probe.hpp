@@ -102,6 +102,10 @@ struct ProbeSnapshot {
   // PoseLead at the last pose read: smoothed model speed (m/s), its movement
   // during the frame being drawn and the lead applied to the mounts (metres).
   double pose_speed = 0, pose_step_m = 0, pose_lead_m = 0;
+  // After-update placement on the synced transform: feeds placed, refusals and
+  // the last refusal reason ("" when none).
+  std::uint64_t post_applied = 0, post_refused = 0;
+  const char* post_error = "";
   // Diagnostics: main view, aircraft object camera and own nose camera Node
   // parent links (node_link.hpp), from the last calibration latch.
   std::array<NodeLinkReport, 3> node_links{};

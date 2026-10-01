@@ -10,7 +10,7 @@
         "New: above 60 knots the camera views draw as far as the main view, so the ground stays in view after take-off. While taxiing they keep their shorter 1,000 m draw distance.",
         "The cameras keep working for the whole flight. Before, they stopped about 10 km after departure.",
         "When an aircraft recreates one of its cockpit displays mid-flight (the PMDG 777 did this repeatedly, both the inboard and the lower display), Taxi Cam switches to the new display straight away instead of re-detecting it from scratch, and without showing PLEASE WAIT again. This applies to every aircraft.",
-        "The cameras stay at their mounts at speed on every aircraft. Before, they trailed the aircraft slightly and the view wandered back and forth, also while taxiing; on the iniBuilds A350 the tail camera showed the fin after take-off.",
+        "The cameras stay fixed to the aircraft at speed on every aircraft. Before, they trailed it slightly and jumped back and forth, also while taxiing; on the iniBuilds A350 the tail camera showed the fin after take-off. Taxi Cam now places its cameras after the simulator has moved the aircraft for the frame, as the simulator does for its own cockpit view.",
         "Setup can now turn on automatic startup when MSFS is installed from the Microsoft Store on a drive other than C:. Windows protects the simulator's startup file there, and Setup previously stopped with \"access denied\" and left Taxi Cam to be started from the Start menu. Run Setup again to turn on automatic startup."
       ]
     },

@@ -53,7 +53,14 @@ struct ImageDataSlotProof {
 // slot and original, and owns all module/slot/observer lifetime guarantees.
 // A null observer is a no-op. Saved observer/original never change after a
 // successful exchange; enable requests inside the observer's own state.
-Result install(void** slot, void* expected_original, Observer observer = nullptr, const ImageDataSlotProof* image_data = nullptr) noexcept;
+// observer runs before the original; after_observer once it returns (the
+// thunk calls the original with the caller's stack arguments copied). Neither
+// runs nested inside the other on the same thread.
+Result install(void** slot,
+               void* expected_original,
+               Observer observer = nullptr,
+               const ImageDataSlotProof* image_data = nullptr,
+               Observer after_observer = nullptr) noexcept;
 
 // Exchanges only our thunk for the original. Does not wait for in-flight calls,
 // erase callback state, or permit another installation. A foreign replacement

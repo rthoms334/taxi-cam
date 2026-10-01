@@ -1343,10 +1343,13 @@ DWORD run_impl() {
       // Per camera and for the main view: near plane / culling far / default far, metres.
       char clip_detail[448];
       std::snprintf(clip_detail, sizeof(clip_detail),
-                    "Camera draw distance: pose_proven=%d speed_mps=%.1f step_m=%.2f lead_m=%.2f follow_main=%d writes=%llu "
+                    "Camera draw distance: pose_proven=%d post=%llu/%llu post_error=%s speed_mps=%.1f step_m=%.2f lead_m=%.2f "
+                    "follow_main=%d writes=%llu "
                     "error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
-                    scene.pose_session_proven ? 1 : 0, scene.pose_speed, scene.pose_step_m, scene.pose_lead_m,
-                    scene.follow_main_far ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
+                    scene.pose_session_proven ? 1 : 0, static_cast<unsigned long long>(scene.post_applied),
+                    static_cast<unsigned long long>(scene.post_refused), scene.post_error && *scene.post_error ? scene.post_error : "none",
+                    scene.pose_speed, scene.pose_step_m, scene.pose_lead_m, scene.follow_main_far ? 1 : 0,
+                    static_cast<unsigned long long>(scene.draw_clip_writes),
                     scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0],
                     scene.main_clip[1], scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2],
                     scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],

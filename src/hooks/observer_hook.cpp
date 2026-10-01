@@ -18,6 +18,8 @@ using namespace taxi_camera::engine_hook;
 
 SRWLOCK control_lock = SRWLOCK_INIT;
 std::atomic<Observer> saved_observer{nullptr};
+// Runs after the original update returns (observer_thunk.S); null is a no-op.
+std::atomic<Observer> saved_after_observer{nullptr};
 void** saved_slot = nullptr;
 void** pending_protection_slot = nullptr;
 DWORD pending_protection = 0;
@@ -217,6 +219,17 @@ Result exchange_slot(void** slot, void* expected, void* replacement, DWORD writa
 }
 }  // namespace
 
+// The before and after observers share the reentrancy guard: neither runs
+// nested inside the other on the same thread.
+extern "C" void taxi_engine_hook_after(void* original_rcx) noexcept {
+  const auto observer = saved_after_observer.load(std::memory_order_acquire);
+  if (observer == nullptr || observing)
+    return;
+  observing = true;
+  observer(original_rcx);
+  observing = false;
+}
+
 extern "C" void taxi_engine_hook_observe(void* original_rcx) noexcept {
   const auto observer = saved_observer.load(std::memory_order_acquire);
   if (observer == nullptr || observing)
@@ -228,7 +241,11 @@ extern "C" void taxi_engine_hook_observe(void* original_rcx) noexcept {
 
 namespace taxi_camera::engine_hook {
 
-Result install(void** slot, void* expected_original, Observer observer, const ImageDataSlotProof* image_data) noexcept {
+Result install(void** slot,
+               void* expected_original,
+               Observer observer,
+               const ImageDataSlotProof* image_data,
+               Observer after_observer) noexcept {
   const Lock lock;
   DWORD error = ERROR_SUCCESS;
   if (!restore_pending_protection(error))
@@ -241,7 +258,8 @@ Result install(void** slot, void* expected_original, Observer observer, const Im
   DWORD writable_protection = 0;
   if (!slot_memory(slot, image_data, writable_protection))
     return {Status::invalid_slot_memory};
-  if (!code_pointer(expected_original) || (observer != nullptr && !code_pointer(reinterpret_cast<const void*>(observer))))
+  if (!code_pointer(expected_original) || (observer != nullptr && !code_pointer(reinterpret_cast<const void*>(observer))) ||
+      (after_observer != nullptr && !code_pointer(reinterpret_cast<const void*>(after_observer))))
     return {Status::invalid_code_pointer};
   if (slot_value(slot) != expected_original)
     return {Status::original_mismatch};
@@ -250,6 +268,7 @@ Result install(void** slot, void* expected_original, Observer observer, const Im
   // first successful exchange until the caller establishes unload quiescence.
   taxi_engine_hook_original = reinterpret_cast<std::uintptr_t>(expected_original);
   saved_observer.store(observer, std::memory_order_release);
+  saved_after_observer.store(after_observer, std::memory_order_release);
   saved_slot = slot;
   saved_image_data = image_data != nullptr ? *image_data : ImageDataSlotProof{};
   has_image_data = image_data != nullptr;
