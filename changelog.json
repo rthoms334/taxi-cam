@@ -9,7 +9,8 @@
         "Changed: the cameras no longer switch off above 60 knots, and Taxi Cam no longer turns the TAXI buttons off. Turn them off yourself when you no longer need them.",
         "New: above 60 knots the camera views draw as far as the main view, so the ground stays in view after take-off. While taxiing they keep their shorter 1,000 m draw distance.",
         "The cameras keep working for the whole flight. Before, they stopped about 10 km after departure.",
-        "PMDG 777: when the aircraft recreates its display, as it did repeatedly in flight, Taxi Cam switches to the new display straight away instead of re-detecting it from scratch, and without showing PLEASE WAIT again."
+        "PMDG 777: when the aircraft recreates its display, as it did repeatedly in flight, Taxi Cam switches to the new display straight away instead of re-detecting it from scratch, and without showing PLEASE WAIT again.",
+        "Setup can now turn on automatic startup when MSFS is installed from the Microsoft Store on a drive other than C:. Windows protects the simulator's startup file there, and Setup previously stopped with \"access denied\" and left Taxi Cam to be started from the Start menu. Run Setup again to turn on automatic startup."
       ]
     },
     {

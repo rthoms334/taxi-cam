@@ -106,7 +106,13 @@ function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$Ex
         }
         if ($encrypted) {
             $operation = 'Encrypt startup replacement'
-            [IO.File]::Encrypt($temporary)
+            # Store app data on a secondary drive (WpSystem) encrypts new files
+            # with Windows-managed "Application Protected" keys. File.Encrypt
+            # needs a personal EFS certificate there, so only encrypt a
+            # replacement that did not inherit protection when it was created.
+            if (([IO.File]::GetAttributes($temporary) -band [IO.FileAttributes]::Encrypted) -eq 0) {
+                [IO.File]::Encrypt($temporary)
+            }
             if (([IO.File]::GetAttributes($temporary) -band [IO.FileAttributes]::Encrypted) -eq 0) {
                 throw 'Could not preserve exe.xml encryption on the replacement file.'
             }
