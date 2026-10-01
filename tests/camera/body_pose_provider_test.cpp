@@ -258,9 +258,28 @@ void session_readiness_regressions(Check check) {
   check(get_aircraft_session_epoch() == epoch + 3 && !testing::session_readiness_at(now).ready);
   supply();
   check(testing::session_readiness_at(now).ready);
+  // One invalid WORLD response keeps the session and the last valid sample,
+  // which still expires on its freshness bound (issue 105).
   const double invalid = std::numeric_limits<double>::quiet_NaN();
-  std::memcpy(camera.data() + 12, &invalid, sizeof(invalid));
-  check(testing::accept_camera_packet(camera.data(), camera.size(), now));
+  const auto camera_at = [&](const double& latitude, std::uint64_t at) {
+    std::memcpy(camera.data() + 12, &latitude, sizeof(latitude));
+    return testing::accept_camera_packet(camera.data(), camera.size(), at);
+  };
+  check(camera_at(invalid, now));
+  check(get_aircraft_session_epoch() == epoch + 3 && testing::session_readiness_at(now).ready);
+  status = testing::session_readiness_at(now + 501);
+  check(!status.ready && !status.loading && std::strcmp(status.error, "camera_world_values_pending") == 0);
+  // Two invalid responses a full interval apart are still too few, and a valid
+  // response restarts the run.
+  check(camera_at(invalid, now + InvalidCameraWorldResetMs));
+  check(get_aircraft_session_epoch() == epoch + 3);
+  check(camera_at(cv[0], now + InvalidCameraWorldResetMs));
+  check(std::strcmp(testing::session_readiness_at(now + InvalidCameraWorldResetMs).error, "camera_world_values_pending") != 0);
+  const auto run = now + InvalidCameraWorldResetMs + 1;
+  check(camera_at(invalid, run) && camera_at(invalid, run + 1) && camera_at(invalid, run + InvalidCameraWorldResetMs - 1));
+  check(get_aircraft_session_epoch() == epoch + 3);
+  // Enough invalid responses spanning the full interval reset the session.
+  check(camera_at(invalid, run + InvalidCameraWorldResetMs));
   check(get_aircraft_session_epoch() == epoch + 4 && !testing::session_readiness_at(now).ready);
   std::memcpy(camera.data() + 12, cv.data(), sizeof(cv));
   const DWORD documented_camera_id = 41;

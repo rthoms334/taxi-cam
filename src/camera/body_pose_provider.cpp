@@ -56,6 +56,9 @@ struct State {
   body_math::Telemetry aircraft{};
   CameraData camera{};
   std::uint64_t aircraft_ms = 0, camera_ms = 0;
+  // Unbroken run of invalid WORLD camera responses since the last valid one.
+  std::uint64_t invalid_camera_first_ms = 0;
+  unsigned invalid_camera_samples = 0;
   BodyTelemetryTiming timing{};
   double ground_speed_knots = 0;
   std::uint64_t ground_speed_ms = 0;
@@ -107,6 +110,8 @@ bool fresh(std::uint64_t sample, std::uint64_t now) noexcept;
 void reset_session_locked() noexcept {
   state.identity = {};
   state.aircraft_ms = state.camera_ms = state.ground_speed_ms = state.taxi_ms = state.lighting_ms = 0;
+  state.invalid_camera_first_ms = 0;
+  state.invalid_camera_samples = 0;
   state.on_ground_ms = 0;
   state.on_ground_error = "aircraft_session_changed";
   state.timing.last_sample_ms = state.timing.last_interval_ms = 0;
@@ -179,11 +184,12 @@ AircraftSessionReadiness readiness_locked(std::uint64_t now) noexcept {
     out.ready = invalid_world.compare_exchange_strong(serviced, 0, std::memory_order_acq_rel) || serviced == 0;
     out.loading = !out.ready;
   }
-  out.error = state.aircraft_session.loading()    ? "aircraft_session_loading"
-              : out.loading                       ? "camera_world_revalidation"
-              : !state.aircraft_session.running() ? "simulator_stopped"
-              : !telemetry                        ? "aircraft_session_telemetry_pending"
-                                                  : state.flow_error;
+  out.error = state.aircraft_session.loading()             ? "aircraft_session_loading"
+              : out.loading                                ? "camera_world_revalidation"
+              : !state.aircraft_session.running()          ? "simulator_stopped"
+              : !telemetry && state.invalid_camera_samples ? "camera_world_values_pending"
+              : !telemetry                                 ? "aircraft_session_telemetry_pending"
+                                                           : state.flow_error;
   return out;
 }
 bool accept_camera_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) noexcept {
@@ -195,17 +201,30 @@ bool accept_camera_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms)
     return false;
   CameraData value{};
   std::memcpy(&value, static_cast<const unsigned char*>(raw) + 12, sizeof(value));
-  if (value.position_reference != 2 || !std::isfinite(value.fov) || value.fov <= 0 || value.fov >= 3.2 ||
-      !std::isfinite(value.position[0]) || !std::isfinite(value.position[1]) || !std::isfinite(value.position[2]) ||
-      std::abs(value.position[0]) > 90 || std::abs(value.position[1]) > 180 || std::abs(value.position[2]) > 100000) {
+  const bool valid = value.position_reference == 2 && std::isfinite(value.fov) && value.fov > 0 && value.fov < 3.2 &&
+                     std::isfinite(value.position[0]) && std::isfinite(value.position[1]) && std::isfinite(value.position[2]) &&
+                     std::abs(value.position[0]) <= 90 && std::abs(value.position[1]) <= 180 && std::abs(value.position[2]) <= 100000;
+  AcquireSRWLockExclusive(&state.lock);
+  bool reset = false;
+  if (valid) {
+    state.camera = value;
+    state.camera_ms = sample_ms;
+    state.invalid_camera_first_ms = 0;
+    state.invalid_camera_samples = 0;
+  } else {
+    // Keep the last valid sample; it ages out on its own freshness bound.
+    if (!state.invalid_camera_samples || sample_ms < state.invalid_camera_first_ms)
+      state.invalid_camera_first_ms = sample_ms;
+    if (state.invalid_camera_samples < InvalidCameraWorldResetSamples)
+      ++state.invalid_camera_samples;
+    reset = state.invalid_camera_samples >= InvalidCameraWorldResetSamples &&
+            sample_ms - state.invalid_camera_first_ms >= InvalidCameraWorldResetMs;
+  }
+  ReleaseSRWLockExclusive(&state.lock);
+  if (reset) {
     notify_invalid_camera_world();
     service_world_invalidation();
-    return true;
   }
-  AcquireSRWLockExclusive(&state.lock);
-  state.camera = value;
-  state.camera_ms = sample_ms;
-  ReleaseSRWLockExclusive(&state.lock);
   return true;
 }
 void on_ground_failure(const char* text) noexcept {
@@ -877,6 +896,8 @@ bool stop_provider_locked() noexcept {
   }
   AcquireSRWLockExclusive(&state.lock);
   state.aircraft_ms = state.camera_ms = 0;
+  state.invalid_camera_first_ms = 0;
+  state.invalid_camera_samples = 0;
   state.identity = {};
   state.ground_speed_ms = 0;
   state.ground_speed_error = "not_initialized";

@@ -76,6 +76,13 @@ struct AircraftSessionReadiness {
 // this every control tick, and a one-tick refusal closes and reopens the cameras.
 AircraftSessionReadiness get_aircraft_session_readiness() noexcept;
 inline constexpr std::uint64_t ReadinessCacheMaxAgeMs = 250;
+// One invalid public WORLD camera response keeps the last valid sample, which
+// still expires on the normal 500 ms freshness bound. Only an unbroken run of
+// invalid responses, at least this many and spanning at least this long,
+// resets the flight session; a single glitch must not discard discovery and
+// calibration (issue 105).
+inline constexpr unsigned InvalidCameraWorldResetSamples = 3;
+inline constexpr std::uint64_t InvalidCameraWorldResetMs = 1000;
 // Native callbacks may report an actually invalid WORLD sample (not merely old
 // telemetry). This atomically gates readiness; the telemetry worker owns reset
 // and fresh-sample recovery. No SDK call, lock or wait occurs here.
