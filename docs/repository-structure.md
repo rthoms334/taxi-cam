@@ -19,13 +19,13 @@ Supporting files are kept separate:
 | `tests/` | App, camera, graphics, hook, installer and diagnostic tests; shared fixtures are in `tests/support/` |
 | `tools/diagnostics/` | Optional interface-inventory, pose, material and telemetry tools for development |
 | `installer/` | Inno Setup definition, package/build/bootstrap scripts and embedded install/uninstall helpers |
-| `ci/` | Semantic version calculation, pinned toolchain helpers and release publication |
+| `ci/` | Release version lookup, pinned toolchain helpers and release publication |
 | `.github/workflows/` | GitHub Actions PR test-build and gated Windows release workflows |
 | `docs/` | Architecture, integration contracts and development documentation |
 | `licenses/` | Required third-party source/runtime notices |
 | `LICENSE` | Project copyright notice and GNU GPLv3-only terms |
 | `build/` | Ignored binaries, toolchains, packages, validation results and historical captures |
-| `version.json` | Version baseline; kept at the repository root so its Git history remains the version source |
+| `changelog.json` | What's new notes; its newest entry is the release version every build uses |
 | `dependencies.json` | Compiler and installer dependency pins |
 | `taxi-camera-mounts.cfg` | Default mount configuration included in the runtime package |
 

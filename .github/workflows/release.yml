@@ -14,7 +14,7 @@ on:
       - 'build.ps1'
       - 'smoke-test.ps1'
       - 'dependencies.json'
-      - 'version.json'
+      - 'changelog.json'
       - 'taxi-camera-mounts.cfg'
       - 'licenses/native-runtime-notices.txt'
       - 'LICENSE'
@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Test semantic version progression
+      - name: Test changelog release version
         run: ./ci/version_test.ps1
 
       - name: Test release note rollup

@@ -1,6 +1,6 @@
 #pragma once
 
-// Generated from version.json and Git history by build.ps1.
+// Generated from the newest changelog.json entry by build.ps1.
 #include "taxi-cam-version.hpp"
 
 #define TAXI_CAM_WIDEN_IMPL(value) L##value

@@ -51,6 +51,14 @@ Assert-True ((Get-TaxiLastMainReleaseTag -Repository $fixture -Commit $unpublish
 Assert-True ((Get-TaxiNextPublishTag -Repository $fixture -Commit $unpublished -Version '0.9.9') -ceq 'v0.9.9-build.39') `
     'Publish creates the next tag from the last tag on main, using this commit version.'
 
+foreach ($stale in @('0.9.8','0.9.7','0.8.99')) {
+    $rejected = $false
+    try { $null = Get-TaxiNextPublishTag -Repository $fixture -Commit $unpublished -Version $stale } catch { $rejected = $true }
+    Assert-True $rejected "Publishing $stale after v0.9.8-build.38 must require a higher changelog version."
+}
+Assert-True ((Get-TaxiNextPublishTag -Repository $fixture -Commit $unpublished -Version '0.10.0') -ceq 'v0.10.0-build.39') `
+    'Versions compare numerically, so 0.10.0 is higher than 0.9.8.'
+
 $null = Invoke-TestGit @('switch','--quiet','-c','feature')
 'branch' | Set-Content -LiteralPath (Join-Path $fixture 'app.txt') -Encoding ascii
 Commit-Fixture 'Feature work'
@@ -106,4 +114,4 @@ Assert-TextContains $updater 'api\.github\.com/repos/\$script:Repository/release
 Assert-TextAbsent $updater 'windows-pr-test-build-' 'Auto-update must not read PR artifacts.'
 Assert-TextAbsent $updater 'windows-release-' 'Auto-update must not read untagged main-build artifacts.'
 
-Write-Output "PASS publish tags on main: $checks checks for last-tag baseline, next publish tag, and no tags from PR/main-build."
+Write-Output "PASS publish tags on main: $checks checks for last-tag baseline, next publish tag, version advance, and no tags from PR/main-build."
