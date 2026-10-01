@@ -85,10 +85,13 @@ struct Runtime {
   double observer_max_ms = 0;
   ProbePerformance performance;
   // Camera far distance (view_clip), observer thread. main_clip is the main
-  // view's camera as read at the last calibration match. own_clips holds each
-  // feed camera's values as first observed, so following the main view can be
-  // undone; clip_cameras is the camera they belong to.
+  // view's camera as read at the last calibration match, valid only for the
+  // aircraft session epoch and reset generation it was read in
+  // (current_main_clip). own_clips holds each feed camera's values as first
+  // observed, so following the main view can be undone; clip_cameras is the
+  // camera they belong to.
   CameraClip main_clip{};
+  std::uint64_t main_clip_epoch = 0, main_clip_resets = 0;
   std::array<std::uint64_t, kMaxCameraFeeds> clip_cameras{};
   std::array<CameraClip, kMaxCameraFeeds> own_clips{}, last_clips{};
   std::uint64_t clip_writes = 0;
@@ -405,12 +408,25 @@ std::array<std::uint64_t, kMaxCameraFeeds> view_addresses(const std::array<ec::O
   return out;
 }
 // The camera just matched to CameraGet's current view is the main view. Its
-// far distances are kept as numbers only; the address is not retained. An
-// implausible or unreadable camera keeps the previous values.
+// far distances are kept as numbers only, bound to the current aircraft
+// session epoch and reset generation; the address is not retained. An
+// implausible or unreadable camera clears them, so the views keep their own.
 void note_main_view_clip(Runtime& runtime, std::uint64_t camera_address) noexcept {
   CameraClip clip;
-  if (read_camera_clip(camera_address, clip) && plausible_camera_clip(clip))
-    runtime.main_clip = clip;
+  if (!read_camera_clip(camera_address, clip) || !plausible_camera_clip(clip))
+    clip = {};
+  runtime.main_clip = clip;
+  runtime.main_clip_epoch = get_aircraft_session_readiness().epoch;
+  runtime.main_clip_resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+}
+// The main view's far distances read in this aircraft session and reset
+// generation, or zeros (implausible: each view keeps its own far). A new
+// flight, aircraft or session reset needs a fresh calibration match.
+CameraClip current_main_clip(const Runtime& runtime) noexcept {
+  const auto epoch = get_aircraft_session_readiness().epoch;
+  return epoch && epoch == runtime.main_clip_epoch && runtime.main_clip_resets == runtime.pose_source_resets.load(std::memory_order_acquire)
+             ? runtime.main_clip
+             : CameraClip{};
 }
 // The full aircraft walk to the active controller and the scene transform it
 // leads to. False (pose_busy, message set) when no stable active aircraft is
@@ -951,7 +967,8 @@ void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsi
     runtime.own_clips[feed] = own;
   }
   CameraClip target;
-  if (!camera_far_target(runtime.own_clips[feed], runtime.main_clip, runtime.follow_main_far.load(std::memory_order_acquire), target)) {
+  if (!camera_far_target(runtime.own_clips[feed], current_main_clip(runtime), runtime.follow_main_far.load(std::memory_order_acquire),
+                         target)) {
     runtime.clip_error = "clip_implausible_target";
     return;
   }
@@ -2348,7 +2365,8 @@ void observer(void* manager) noexcept {
         const auto& clip = runtime.last_clips[i];
         runtime.published.draw_clip[i] = {clip.near_plane, clip.far_plane, clip.default_far};
       }
-      runtime.published.main_clip = {runtime.main_clip.near_plane, runtime.main_clip.far_plane, runtime.main_clip.default_far};
+      const auto main_clip = current_main_clip(runtime);
+      runtime.published.main_clip = {main_clip.near_plane, main_clip.far_plane, main_clip.default_far};
       runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
       runtime.published.pose_session_proven =
           runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
