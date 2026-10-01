@@ -26,6 +26,7 @@ class RetainedProfileTransition {
     owner_ = pair.owner;
     ids_ = pair.owned_ids;
     dimensions_ = dimensions;
+    resizing_ = false;
     state_ = Decision::wait;
     if (!id || pair.request_pending || pair.creation_pending)
       state_ = Decision::refused;
@@ -68,7 +69,7 @@ class RetainedProfileTransition {
         return state_ = Decision::wait;
       if (view.status != engine_camera::OwnedViewStatus::ready || view.mode != 2 || !view.resource_present || !view.resource_address ||
           !view.view_address || !view.node_address || !view.camera_address || view.view_index < 0 || view.view_index >= 8 ||
-          view.dimensions != dimensions_[i] || view.output_dimensions != dimensions_[i][0])
+          view.dimensions != dimensions_[i] || (!resizing_ && view.output_dimensions != dimensions_[i][0]))
         return state_ = Decision::refused;
       open |= (view.flags[0] & 1u) == 0;
     }
@@ -80,6 +81,14 @@ class RetainedProfileTransition {
     return state_ = open ? Decision::close : Decision::ready;
   }
   bool matches(const Pair& pair) const noexcept { return valid_pair(pair) && pair.owner == owner_ && pair.owned_ids == ids_; }
+  // The kept pair is being resized in place for another aircraft's panes: the
+  // views must carry the new dimensions, while their new output may still be
+  // pending until resized() (resize_kept_panes).
+  void rebase(const Dimensions& dimensions) noexcept {
+    dimensions_ = dimensions;
+    resizing_ = true;
+  }
+  void resized() noexcept { resizing_ = false; }
   bool can_resume(const Pair& pair) const noexcept { return ready() && matches(pair); }
   void refuse() noexcept {
     awaiting_pair_ = false;
@@ -110,7 +119,7 @@ class RetainedProfileTransition {
   engine_camera::ManagerToken owner_{};
   std::array<engine_camera::EntryId, 3> ids_{};
   Dimensions dimensions_{};
-  bool awaiting_pair_ = false;
+  bool awaiting_pair_ = false, resizing_ = false;
   Decision state_ = Decision::wait;
 };
 }  // namespace taxi_camera::native_camera

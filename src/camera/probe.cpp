@@ -71,6 +71,11 @@ struct Runtime {
   // its resume or by a full reset. holds/fallbacks count them for bridge.log.
   bool flight_change_hold = false;
   std::uint64_t flight_change_holds = 0, flight_change_fallbacks = 0;
+  // Kept pairs resized in place for another aircraft's panes (resize_kept_panes):
+  // updates spent awaiting the new output, completed resizes and refusals.
+  unsigned kept_resize_waits = 0;
+  std::uint64_t kept_resizes = 0, kept_resize_failures = 0;
+  bool kept_resize_refused = false;
   std::atomic<std::uint64_t> scene_session_epoch{0};
   bool retained_restart_requested = false;
   profiles::CameraPanes allocation_panes = profiles::A380.camera_panes;
@@ -1330,6 +1335,69 @@ void apply_gates(Runtime& runtime,
 
 // Runs only in the verified observer phase. Reuses the existing gate operation;
 // profile changes never call the native erase, create, resize or pose setters.
+enum class ResizeOutcome { failed, output_pending, complete };
+ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true);
+
+// Feeds a profile renders: a split bottom display has a camera per half.
+unsigned profile_feeds(const profiles::AircraftProfile& profile) noexcept {
+  return profile.composition.split_bottom != 0 ? 3u : 2u;
+}
+
+enum class KeptPanes { ready, pending, failed };
+
+// A kept pair taken to an aircraft with other camera panes: each feed that
+// aircraft renders is resized in place, gate closed, by the closed-gate resize
+// a new view gets right after creation (dimensions, projection, then the
+// engine's output routine replaces the output at the new size). Repeats are
+// idempotent: written dimensions return unchanged and only the output is
+// awaited, for at most ViewResizeWarmup::MaximumOutputWaits updates. A feed
+// the aircraft does not render (the third, after the PMDG 777) keeps its size
+// and stays closed. Session work must be allowed (the resume was requested).
+KeptPanes resize_kept_panes(Runtime& runtime, const ec::Snapshot& pair) {
+  const auto& profile = *runtime.requested_profile;
+  const unsigned feeds = profile_feeds(profile);
+  bool differs = false;
+  for (unsigned i = 0; i < feeds; ++i)
+    differs = differs || (pair.owned_ids[i] && runtime.allocation_panes[i] != profile.camera_panes[i]);
+  if (!differs && !runtime.kept_resize_waits)
+    return KeptPanes::ready;
+  if (!session_work_allowed(runtime))
+    return KeptPanes::pending;
+  for (unsigned i = 0; i < feeds; ++i) {
+    if (!pair.owned_ids[i])
+      continue;
+    ViewDimensions desired{};
+    if (!plan_view_resize(runtime.resized_dimensions[i], i, desired, profile.camera_panes)) {
+      runtime.stage_error = "The kept camera cannot be planned for the new aircraft's pane.";
+      return KeptPanes::failed;
+    }
+    runtime.allocation_panes[i] = profile.camera_panes[i];
+    runtime.resized_dimensions[i] = desired;
+  }
+  KeptPanes overall = KeptPanes::ready;
+  for (unsigned i = 0; i < feeds; ++i) {
+    if (!pair.owned_ids[i])
+      continue;
+    const auto part = resize_closed_entry(runtime, pair.owned_ids[i], i, true);
+    if (part == ResizeOutcome::failed)
+      return KeptPanes::failed;
+    if (part == ResizeOutcome::output_pending)
+      overall = KeptPanes::pending;
+  }
+  if (overall == KeptPanes::ready) {
+    if (runtime.kept_resize_waits)
+      ++runtime.kept_resizes;
+    runtime.kept_resize_waits = 0;
+    return overall;
+  }
+  if (++runtime.kept_resize_waits > ViewResizeWarmup::MaximumOutputWaits) {
+    runtime.stage_error = "The kept camera's new output did not appear within the bounded wait.";
+    runtime.kept_resize_waits = 0;
+    return KeptPanes::failed;
+  }
+  return overall;
+}
+
 void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& report) {
   RetainedProfileTransition transition;
   std::uint64_t token, start_revision;
@@ -1402,12 +1470,32 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   // A prior ready acknowledgement never authorizes resume after a failed fresh
   // manager inspection. Missing telemetry/calibration keeps this hold active.
   const auto resume_epoch = get_aircraft_session_epoch();
-  const bool pose_ready = validated && resume_requested && session_work_allowed(runtime) && aircraft_matches_profile() &&
+  // Another aircraft's panes: resize the kept views before they resume.
+  auto panes = KeptPanes::ready;
+  if (validated && resume_requested && session_work_allowed(runtime) && !transition.failed()) {
+    const auto before = runtime.resized_dimensions;
+    panes = timed(runtime, ProbeStage::lifecycle, [&] { return resize_kept_panes(runtime, pair); });
+    if (panes == KeptPanes::failed) {
+      ++runtime.kept_resize_failures;
+      runtime.kept_resize_refused = true;
+      transition.refuse();
+      validated = false;
+    } else if (panes == KeptPanes::pending || runtime.resized_dimensions != before) {
+      transition.rebase(runtime.resized_dimensions);
+      if (panes == KeptPanes::ready)
+        transition.resized();
+    }
+  }
+  if (panes == KeptPanes::ready && validated)
+    transition.resized();
+  const bool pose_ready = validated && panes == KeptPanes::ready && resume_requested && session_work_allowed(runtime) &&
+                          aircraft_matches_profile() &&
                           timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime, retained_views); });
   report.outputs_matched = false;
-  report.pose_waiting = resume_requested && validated && !pose_ready;
+  report.pose_waiting = resume_requested && validated && panes == KeptPanes::ready && !pose_ready;
   report.message = transition.failed() ? "Aircraft change paused: retained camera identity could not be validated. Restart MSFS to resume."
                    : !validated        ? "Waiting for complete retained camera views before changing aircraft profile."
+                   : panes == KeptPanes::pending     ? "Resizing the kept cameras for the new aircraft's displays."
                    : resume_requested && !pose_ready ? "Retained cameras are closed; waiting for fresh aircraft pose calibration."
                                                      : "Camera pair retained with gates closed; ready for the new aircraft profile.";
   const std::lock_guard lock(runtime.mutex);
@@ -1610,13 +1698,11 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
   return id;
 }
 
-enum class ResizeOutcome { failed, output_pending, complete };
-
 // Both paths end with the same proof: the closed view carries the requested
 // pane in all three size pairs AND its output chain resolves to a resource
 // whose Bitmap has that pane. The output routine's return address alone never
 // established an allocation; a view without that proof may not open a gate.
-ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true) {
+ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output) {
   if (!session_work_allowed(runtime))
     return ResizeOutcome::failed;
   const auto view = inspect_entry(runtime, id);
@@ -2024,9 +2110,11 @@ void observer(void* manager) noexcept {
       const std::lock_guard lock(runtime.mutex);
       if (!before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !before.creation_pending)
         runtime.aircraft_profile = runtime.requested_profile;
-      if (runtime.flight_change_hold && runtime.profile_transition.failed()) {
-        // The kept pair could not be revalidated: the full reset retires it.
+      if ((runtime.flight_change_hold || runtime.kept_resize_refused) && runtime.profile_transition.failed()) {
+        // The kept pair could not be revalidated or resized: the full reset
+        // retires it and creates a new one.
         ++runtime.flight_change_fallbacks;
+        runtime.kept_resize_refused = false;
         begin_session_reset(runtime, *runtime.requested_profile);
       }
       if (!runtime.session_reset.holding() && !runtime.flight_change_hold &&

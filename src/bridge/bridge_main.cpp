@@ -536,6 +536,22 @@ DWORD run_impl() {
     native_camera::update_taxi_button_request(
         {settings.taxi_request, settings.aircraft_session_epoch, settings.profile, settings.taxi_selected_mask, settings.taxi_desired_mask},
         command_context);
+    // A flight or aircraft change keeps the native camera pair (and with it the
+    // GPU capture session) when the pair already has a camera for every feed
+    // the aircraft renders: the same profile, another profile with the same
+    // feed count (in-place pane resize if its panes differ), or one with fewer
+    // feeds (the extra camera stays closed). Otherwise it is retired and a new
+    // pair is created, the step every RenderThreadProc CTD followed.
+    const auto pair_can_be_kept = [&](std::uint32_t profile_id) {
+      if (profile_id == applied_profile)
+        return true;
+      const auto* next = profiles::find(profile_id);
+      if (!next)
+        return false;
+      const auto owned = native_camera::scene_snapshot().pair.owned_ids;
+      const unsigned have = (owned[0] ? 1u : 0u) + (owned[1] ? 1u : 0u) + (owned[2] ? 1u : 0u);
+      return have >= (next->composition.split_bottom != 0 ? 3u : 2u);
+    };
     if (connected && settings.enabled &&
         (changing_profile || connection.started || connection.generation != applied_connection || settings.profile != applied_profile ||
          settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch)) {
@@ -557,7 +573,7 @@ DWORD run_impl() {
           // and with it the GPU capture session: its output textures are never
           // created again, so their state could not be established afresh.
           win::reset_display_session();
-          pending_gpu_generation = settings.profile != applied_profile ? scene_runtime::reset_session(key) : 0;
+          pending_gpu_generation = pair_can_be_kept(settings.profile) ? 0 : scene_runtime::reset_session(key);
         }
         pending_full_reset = full_reset;
         pending_profile = settings.profile;
@@ -571,7 +587,7 @@ DWORD run_impl() {
         route_request = 0;
       }
       native_camera::suspend_scene_rendering(true);
-      const bool keep_pair = pending_full_reset && pending_profile == applied_profile;
+      const bool keep_pair = pending_full_reset && pair_can_be_kept(pending_profile);
       if (pending_full_reset && !keep_pair && !pending_gpu_generation)
         pending_gpu_generation = scene_runtime::reset_session(key);
       // A new flight, airport or teleport with the same profile resets display
