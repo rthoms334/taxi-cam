@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "0.9.50",
+      "date": "2026-10-01",
+      "changes": [
+        "New: turn off the 60 knot cutoff. In Overview, switch off 60 kt cutoff and the cameras stay on above 60 knots, and Taxi Cam no longer turns the TAXI buttons off automatically. It is on by default, so nothing changes unless you turn it off."
+      ]
+    },
+    {
       "version": "0.9.47",
       "date": "2026-09-27",
       "changes": [
