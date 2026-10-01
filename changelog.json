@@ -4,7 +4,8 @@
       "version": "0.9.50",
       "date": "2026-10-01",
       "changes": [
-        "When camera images are ready but another graphics hook, such as ReShade or an overlay, stops Taxi Cam drawing on the PFDs, the status now names that hook's DLL instead of waiting indefinitely. bridge.log records the same DLL name when the simulator starts, so include it in bug reports."
+        "When camera images are ready but another graphics hook, such as ReShade or an overlay, stops Taxi Cam drawing on the PFDs, the status now names that hook's DLL instead of waiting indefinitely. bridge.log records the same DLL name when the simulator starts, so include it in bug reports.",
+        "A single unreadable camera position from the simulator no longer restarts the cameras and makes them find the displays again. Taxi Cam keeps the last good position and restarts only if the simulator keeps reporting unreadable positions for a second."
       ]
     },
     {
