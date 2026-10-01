@@ -13,15 +13,22 @@ namespace taxi_camera::native_camera {
 // while the aircraft moves and records two windows: one from taxi speed and
 // one from take-off speed. The bridge writes each completed window to a CSV
 // beside bridge.log. Nothing here changes camera placement.
+//
+// 0.9.65: the main view is not parented to the aircraft (Node links log:
+// +368 is a common scene node, stored == world), so it must follow a smoothed
+// aircraft position. Each entry also records the aircraft object camera's
+// world position (the main view while the pilot is in the cockpit view), to
+// compare its motion with the stepped model transform and fit the smoothing.
 struct PoseTraceEntry {
   std::uint64_t update = 0;
   double time_s = 0, frame_s = 0;
   Vector3 read{};     // Model origin read on this update (zero when the read failed).
   Vector3 applied{};  // Led origin the cameras were placed on this update.
+  Vector3 main{};     // Aircraft object camera's world position (zero when not read).
   std::uint32_t flags = 0;
   double lead_m = 0;
 };
-inline constexpr std::uint32_t kPoseTraceRead = 1, kPoseTraceApplied = 2;
+inline constexpr std::uint32_t kPoseTraceRead = 1, kPoseTraceApplied = 2, kPoseTraceMain = 4;
 
 class PoseTrace {
  public:

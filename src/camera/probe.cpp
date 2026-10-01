@@ -2424,6 +2424,25 @@ void observer(void* manager) noexcept {
           entry.read = scene.pose.origin;
           entry.flags |= kPoseTraceRead;
         }
+        // The aircraft object camera through the full aircraft walk (about 1 ms,
+        // only while a trace window is open): its Node's world translation.
+        LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+        LocalMemoryReader walk;
+        std::uint64_t source = 0;
+        const auto aircraft = inspected(runtime, [&] {
+          return discovery::inspect_aircraft_metadata(image, walk, runtime.image, runtime.base,
+                                                      runtime.contract.layout.aircraft_facade_vtable, true, true, false, &source, nullptr,
+                                                      runtime.contract.layout);
+        });
+        if (aircraft.valid && aircraft.available && source) {
+          walk.reset_budget();
+          Vector3 main{};
+          const auto camera = inspected(runtime, [&] { return inspect_source_pose(walk, source, &main); });
+          if (camera.complete) {
+            entry.main = main;
+            entry.flags |= kPoseTraceMain;
+          }
+        }
         if (runtime.led_update == runtime.updates) {
           entry.applied = runtime.led_origin;
           entry.flags |= kPoseTraceApplied;

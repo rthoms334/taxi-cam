@@ -62,12 +62,16 @@ void write_pose_trace(unsigned window, const native_camera::PoseTraceEntry* entr
     FILE* file = _wfopen(path.c_str(), L"wb");
     if (!file)
       return;
-    std::fputs("update,time_s,frame_ms,read_ok,read_x,read_y,read_z,applied,applied_x,applied_y,applied_z,lead_m\r\n", file);
+    std::fputs(
+        "update,time_s,frame_ms,read_ok,read_x,read_y,read_z,applied,applied_x,applied_y,applied_z,lead_m,main_ok,main_x,main_y,main_z\r\n",
+        file);
     for (std::size_t i = 0; i < count; ++i) {
       const auto& e = entries[i];
-      std::fprintf(file, "%llu,%.6f,%.3f,%u,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.3f\r\n", static_cast<unsigned long long>(e.update), e.time_s,
-                   e.frame_s * 1000.0, (e.flags & native_camera::kPoseTraceRead) ? 1u : 0u, e.read[0], e.read[1], e.read[2],
-                   (e.flags & native_camera::kPoseTraceApplied) ? 1u : 0u, e.applied[0], e.applied[1], e.applied[2], e.lead_m);
+      std::fprintf(file, "%llu,%.6f,%.3f,%u,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.3f,%u,%.4f,%.4f,%.4f\r\n",
+                   static_cast<unsigned long long>(e.update), e.time_s, e.frame_s * 1000.0,
+                   (e.flags & native_camera::kPoseTraceRead) ? 1u : 0u, e.read[0], e.read[1], e.read[2],
+                   (e.flags & native_camera::kPoseTraceApplied) ? 1u : 0u, e.applied[0], e.applied[1], e.applied[2], e.lead_m,
+                   (e.flags & native_camera::kPoseTraceMain) ? 1u : 0u, e.main[0], e.main[1], e.main[2]);
     }
     std::fclose(file);
   } catch (...) {
