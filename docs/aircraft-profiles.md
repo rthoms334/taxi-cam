@@ -12,7 +12,7 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 | iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | Nose 774 x 251 / tail 774 x 496 |
 | iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | Nose 774 x 251 / tail 774 x 496 |
 | iniBuilds A380 | `ini-a380` | 768 x 1024, one mip; supported RGBA/BGRA views | Nose 736 x 251 / tail 736 x 496 |
-| PMDG 777-200ER | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard`. Lower DU: `DU_Lower` on `EICASCDU`, 2048 x 2048 | Nose 736 x 268 / left and right wing 360 x 360 |
+| PMDG 777-200ER | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard`. Lower DU: `DU_Lower` on `EICASCDU`, 2048 x 2048 | Nose 736 x 211 / left and right wing 368 x 434 |
 | PMDG 777-300ER | `pmdg-777-300er` | Same `DUS` and `EICASCDU` layout as 200ER | Same pane sizes; nose forward **22** m |
 | PMDG 777F | `pmdg-777f` | Same `DUS` and `EICASCDU` layout as 200ER | Same pane sizes; nose mount copied from 200ER |
 | Aerosoft A340-600 | `aerosoft-a346` | Shared `$GAUGES_UNIFIED`, 4096 x 4096; gauges `CaptPFD`, `CoPFD` and `ECAM_LOWER` (750 x 750) | Nose 736 x 251 / tail 736 x 496 |
@@ -43,7 +43,7 @@ The profile defines accepted texture dimensions, mip policy and formats. Resourc
 
 ## Shared rendering contract
 
-The renderer captures independently sized scene textures (two feeds for most profiles; three when `split_bottom` is set). It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's inner content rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. Native sources match the pane sizes: 736 pixels wide on A380 and 774 on A350, with nose and tail heights of 251 and 496 pixels. The PMDG 777 uses 736 x 268 for the nose feed and 360 x 360 for each wing feed. The visible divider on non-split profiles covers working rows 251 through 262, a 12-pixel band; reducing this band leaves the source dimensions and pane positions unchanged. The border is drawn by the existing PFD shader, without an additional GPU pass.
+The renderer captures independently sized scene textures (two feeds for most profiles; three when `split_bottom` is set). It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's inner content rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. Native sources match the pane sizes: 736 pixels wide on A380 and 774 on A350, with nose and tail heights of 251 and 496 pixels. The PMDG 777 uses 736 x 211 for the nose feed and 368 x 434 for each wing feed. The visible divider on non-split profiles covers working rows 251 through 262, a 12-pixel band; reducing this band leaves the source dimensions and pane positions unchanged. The border is drawn by the existing PFD shader, without an additional GPU pass.
 
 Profiles supply the pane division, visible separator, reference dot/bracket coordinates and default colour. Both A380 and A350 use 14-by-14-pixel nose squares and default to magenta markings. Both retain their existing tail brackets. **Marking colour** on **Reference guides** changes the nose squares and tail brackets together, with a separate saved RGB colour for each aircraft profile. On A380 and A350, the ground-speed panel is inset from the camera edges, with internal padding and a width that fits the current value. The PMDG 777 keeps ground speed and reference guides off. The same composed page applies to both sides of a profile. Panel layout belongs to the aircraft profile. The ground-speed text has its own saved RGB colour, editable on **Display** when the profile draws GS; changing it does not change exposure or the reference marks. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
 
@@ -85,10 +85,12 @@ The picture is the navigation display, not a flight PFD. A live scan of the open
 
 Taxi Cam does not copy a camera page the simulator already drew. It keeps **three** viewpoints — nose looking forward over the nose gear, and separate left- and right-wing mounts looking aft at each wing — and composes them into the shared 768 x 763 working image (`split_bottom`), then stamps that image into each inboard gauge rectangle on `DUS`. Layout in that working image:
 
-- nose picture **280** px tall from y = 0 (full width), with a **10** px black frame on the left, right and bottom edges before the T;
-- T divider from y **280** to **318** (**38** px, ~4/5 of the **48** px gap) in colour **`#1C1B22`**, including the vertical gap between the bottom panes. The T is written like PMDG's own UI colours, so an sRGB view stores it as about `#5D5C66`, as it stores those colours (inferred);
-- equal **360 x 360** square bottom panes from y **318** to **678** (camera feeds 360 x 360) with **10** px black borders on the top and sides only (no bottom border), and a single **24** px round at the T junction (left pane top-right, right pane top-left); other corners stay square. Rows below the squares stay black.
-- Horizontal T bar keeps **`#1C1B22`** with **10** px black only at its left and right ends (not along the whole bar).
+- nose picture **220** px tall from y = 0 (full width), with an **8** px black frame on the left, right and bottom edges before the T;
+- T bar from y **220** to **244** (**24** px) and a **32** px vertical stem between the bottom panes, both in colour **`#1C1B22`**. The T is written like PMDG's own UI colours, so an sRGB view stores it as about `#5D5C66`, as it stores those colours (inferred);
+- equal **368 x 434** bottom panes from y **244** to **678** (camera feeds 368 x 434, taller than wide) with **8** px black borders on the top and sides only (no bottom border), and a single **24** px round at the T junction (left pane top-right, right pane top-left); other corners stay square. Rows below the panes stay black.
+- Horizontal T bar keeps **`#1C1B22`** with **8** px black only at its left and right ends (not along the whole bar).
+
+These proportions were measured from a photograph of a real 777 camera page attached to issue 96: nose picture about 28% of the display width, T bar about 3%, stem about 4%, black frames about 1%, and bottom panes about 0.85 as wide as they are tall. The photograph was taken at an angle, so the figures are approximate. Wing and nose framing with the taller wing panes and shorter nose picture has not been checked in the simulator.
 
 An **85** px top inset (`camera_padding` top; bottom inset 0; L/R 0) moves the stamped block down on the 958 x 971 ND so the black band above the nose picture is larger without shortening the nose picture. Other profiles leave `split_bottom` off, so their full-width tail is unchanged.
 

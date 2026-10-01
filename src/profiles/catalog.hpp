@@ -28,8 +28,12 @@ struct Composition {
   // feeds with bottom_gap working-image pixels of black between them.
   float split_bottom = 0;
   float bottom_gap = 0;
+  // Split-bottom only: pane height in working-image pixels (0 keeps square
+  // panes) and the black frame width around the nose and bottom panes.
+  float bottom_pane_height = 0;
+  float frame_border = 10;
 };
-static_assert(sizeof(Composition) == 27 * sizeof(float));
+static_assert(sizeof(Composition) == 29 * sizeof(float));
 // pmdg_dsp_cam reads the glareshield Display Select Panel. Nothing is written.
 enum class TaxiControl { push_event, lvar_off, manual_only, pmdg_dsp_cam };
 enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group, single_display };
@@ -239,24 +243,27 @@ inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // Both navigation displays are rectangles on one destination texture. Taxi Cam
 // owns three viewpoints: nose on top, and independent left/right wing cameras
 // on the split bottom. Pixels outside the two inboard gauges stay untouched.
-// Working-image layout matched to the reference ND photo on a nearly square
-// 958x971 gauge. Nose picture height stays 280 px from y=0 so the default GS
-// font sample rect still sees camera pixels (not layout chrome). Bottom panes
-// are equal 360 px squares seated directly under a 38 px T (~4/5 of the gap).
-// Leftover rows below the squares are black. Extra black above the stamped
-// block on the ND comes from camera_padding top. L/R padding stay 0.
-inline constexpr unsigned Pmdg777NosePictureHeight = 280;
-inline constexpr unsigned Pmdg777BottomGap = 48;
-inline constexpr unsigned Pmdg777BottomPane = (768 - Pmdg777BottomGap) / 2;
-inline constexpr unsigned Pmdg777DividerThickness = (Pmdg777BottomGap * 4 + 2) / 5;
+// Working-image layout matched to a real 777 camera page photo (issue 96) on a
+// nearly square 958x971 gauge: a short nose picture (~28% of the width), a thin
+// T (~3% bar, ~4% stem), thin black frames and tall bottom panes (~0.85 wide to
+// tall). The nose stays taller than the default GS panel so the GS font
+// fixture still sees camera pixels around it. Bottom panes fill the rows down
+// to the old pane bottom (678); the 85 rows below stay black. Extra black above
+// the stamped block on the ND comes from camera_padding top. L/R padding stay 0.
+inline constexpr unsigned Pmdg777NosePictureHeight = 220;
+inline constexpr unsigned Pmdg777BottomGap = 32;
+inline constexpr unsigned Pmdg777FrameBorder = 8;
+inline constexpr unsigned Pmdg777BottomPaneWidth = (768 - Pmdg777BottomGap) / 2;
+inline constexpr unsigned Pmdg777DividerThickness = 24;
 inline constexpr unsigned Pmdg777DividerTop = Pmdg777NosePictureHeight;
 inline constexpr unsigned Pmdg777DividerBottom = Pmdg777DividerTop + Pmdg777DividerThickness;
 inline constexpr unsigned Pmdg777TailTop = Pmdg777DividerBottom;
 inline constexpr unsigned Pmdg777TopPadding = 85;
-static_assert(Pmdg777BottomPane == 360);
-static_assert(Pmdg777DividerThickness == 38);
-static_assert(Pmdg777TailTop == 318);
-static_assert(Pmdg777TailTop + Pmdg777BottomPane + Pmdg777TopPadding == 763);
+inline constexpr unsigned Pmdg777BottomPaneHeight = 763 - Pmdg777TopPadding - Pmdg777TailTop;
+static_assert(Pmdg777BottomPaneWidth == 368);
+static_assert(Pmdg777TailTop == 244);
+static_assert(Pmdg777BottomPaneHeight == 434);
+static_assert(Pmdg777NosePictureHeight > 12 + 56 + Pmdg777FrameBorder, "Nose stays taller than the default GS panel");
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
   c.nose_height = static_cast<float>(Pmdg777NosePictureHeight);
@@ -265,6 +272,8 @@ inline constexpr Composition Pmdg777Composition = [] {
   c.tail_top = static_cast<float>(Pmdg777TailTop);
   c.split_bottom = 1;
   c.bottom_gap = static_cast<float>(Pmdg777BottomGap);
+  c.bottom_pane_height = static_cast<float>(Pmdg777BottomPaneHeight);
+  c.frame_border = static_cast<float>(Pmdg777FrameBorder);
   return c;
 }();
 // Nose: forward/down over the nose gear. Bottom-left/right: outside each side of
@@ -278,11 +287,11 @@ inline constexpr std::array<std::array<double, 6>, 3> Pmdg777300Mounts{
     {{0, -2, 22, -18, 0, 1}, Pmdg777Mounts[1], Pmdg777Mounts[2]}};
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777FMounts{
     {Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
-// Nose matches the 280 px picture; each bottom feed is a square half-pane.
+// Nose matches the 220 px picture; each bottom feed fills its tall half-pane.
 inline constexpr CameraPanes Pmdg777Panes{
     {{736, static_cast<std::int32_t>((Pmdg777NosePictureHeight * 736 + 384) / 768)},
-     {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)},
-     {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)}}};
+     {static_cast<std::int32_t>(Pmdg777BottomPaneWidth), static_cast<std::int32_t>(Pmdg777BottomPaneHeight)},
+     {static_cast<std::int32_t>(Pmdg777BottomPaneWidth), static_cast<std::int32_t>(Pmdg777BottomPaneHeight)}}};
 inline constexpr auto make_pmdg_777 =
     [](std::uint32_t id, std::string_view key, const wchar_t* name, std::string_view marker, std::array<std::array<double, 6>, 3> mounts) {
       AircraftProfile p{id,

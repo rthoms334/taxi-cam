@@ -531,12 +531,13 @@ int main() {
         assert(outer.right - outer.left == 958 && outer.bottom - outer.top == 971);
         assert(content.bottom - content.top == 886);
       }
-      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 268);
-      assert(profile->camera_panes[1][0] == 360 && profile->camera_panes[1][1] == 360);
-      assert(profile->camera_panes[2][0] == 360 && profile->camera_panes[2][1] == 360);
-      assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 48.f);
-      assert(profile->composition.nose_height == 280.f && profile->composition.tail_top == 318.f);
-      assert(profile->composition.divider_top == 280.f && profile->composition.divider_bottom == 318.f);
+      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 211);
+      assert(profile->camera_panes[1][0] == 368 && profile->camera_panes[1][1] == 434);
+      assert(profile->camera_panes[2][0] == 368 && profile->camera_panes[2][1] == 434);
+      assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 32.f);
+      assert(profile->composition.bottom_pane_height == 434.f && profile->composition.frame_border == 8.f);
+      assert(profile->composition.nose_height == 220.f && profile->composition.tail_top == 244.f);
+      assert(profile->composition.divider_top == 220.f && profile->composition.divider_bottom == 244.f);
       assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 85 && profile->camera_padding.right == 0 &&
              profile->camera_padding.bottom == 0);
       if (profile->id == profiles::Pmdg777300ER.id) {
@@ -642,8 +643,8 @@ int main() {
 
   for (const auto* profile : profiles::Catalog) {
     if (std::strcmp(profile->display_texture, profiles::Pmdg777Texture) == 0) {
-      assert(profile->composition.divider_top == 280 && profile->composition.divider_bottom == 318);
-      assert(profile->composition.nose_height == 280 && profile->composition.tail_top == 318);
+      assert(profile->composition.divider_top == 220 && profile->composition.divider_bottom == 244);
+      assert(profile->composition.nose_height == 220 && profile->composition.tail_top == 244);
       continue;
     }
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);

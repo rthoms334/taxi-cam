@@ -361,8 +361,8 @@ class CameraCompositorD3D12 {
       UINT ground_speed_valid;
       profiles::Composition composition;
     } display{hdr, std::exp2(exposure_ev_), reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
-    static_assert(sizeof(display) == 32 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 32, &display, 0);
+    static_assert(sizeof(display) == 34 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 34, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -488,7 +488,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 32;
+    parameters[1].Constants.Num32BitValues = 34;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -558,7 +558,7 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; float SplitBottom; float BottomGap; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -742,6 +742,8 @@ float sd_round_rect(float2 p, float2 bmin, float2 bmax, float4 radii) {
   float2 d = abs(q) - half_size + r;
   return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
 }
+// Split-bottom pane height; 0 keeps the square half-width pane.
+float split_pane_height(float pane) { return BottomPaneHeight > 0 ? BottomPaneHeight : pane; }
 float4 split_bottom_t() {
   // #1C1B22 is authored like aircraft UI: an overlay colour, not a camera code.
   // An sRGB view stores it as about #5D5C66, as it does PMDG's own UI tapes.
@@ -758,23 +760,22 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   }
   if (position.y >= DividerTop && position.y < DividerBottom) {
     if (SplitBottom != 0) {
-      // Horizontal T bar: same 10 px black as the other edges, only at the
-      // left and right ends — not a black strip along the whole bar.
-      const float edge = 10;
-      if (position.x < edge || position.x >= 768.0 - edge) return ui_pixel(float3(0, 0, 0));
+      // Horizontal T bar: same black frame width as the other edges, only at
+      // the left and right ends — not a black strip along the whole bar.
+      if (position.x < FrameBorder || position.x >= 768.0 - FrameBorder) return ui_pixel(float3(0, 0, 0));
       return split_bottom_t();
     }
     return ui_pixel(float3(0, 0, 0));
   }
   if (SplitBottom != 0 && position.y >= TailTop) {
     float pane = (768 - BottomGap) * 0.5;
-    // Square pane height matches half-width; leftover rows under the squares stay black.
-    float pane_h = pane;
+    // Leftover rows under the panes stay black.
+    float pane_h = split_pane_height(pane);
     if (position.y >= TailTop + pane_h) return ui_pixel(float3(0, 0, 0));
     if (position.x >= pane && position.x < pane + BottomGap) return split_bottom_t();
     // Black frame on top + sides only (no bottom border). One 24 px round:
     // left pane top-right, right pane top-left. Other three corners stay square.
-    const float pane_border = 10;
+    const float pane_border = FrameBorder;
     const float radius = 24;
     const float inner_radius = max(radius - pane_border, 0);
     const bool left_pane = position.x < pane;
@@ -801,7 +802,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   if (position.y < NoseHeight) {
     // Split-bottom nose frame: bottom edge always; left/right only when GS is
     // hidden so the font fixture's padded-panel surroundings stay camera pixels.
-    const float nose_border = 10;
+    const float nose_border = FrameBorder;
     const bool side_borders = SplitBottom != 0 && GroundSpeedValid == 2;
     if (SplitBottom != 0 && position.y >= NoseHeight - nose_border) return ui_pixel(float3(0, 0, 0));
     if (side_borders && (position.x < nose_border || position.x >= 768.0 - nose_border))
@@ -815,8 +816,8 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   if (position.y < TailTop) return ui_pixel(float3(0, 0, 0));
   if (SplitBottom != 0) {
     float pane = (768 - BottomGap) * 0.5;
-    const float pane_border = 10;
-    float pane_h = pane;
+    const float pane_border = FrameBorder;
+    float pane_h = split_pane_height(pane);
     if (position.y >= TailTop + pane_h) return ui_pixel(float3(0, 0, 0));
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
