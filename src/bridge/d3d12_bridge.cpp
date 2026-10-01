@@ -8,6 +8,7 @@
 #include <cwchar>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <tuple>
 #include <type_traits>
@@ -2501,20 +2502,24 @@ void describe_close_endpoint(Registry& r, const void* address) noexcept {
     r.close_endpoint_location = "non_image";
     return;
   }
-  wchar_t path[MAX_PATH]{}, system[MAX_PATH]{};
-  const DWORD length = GetModuleFileNameW(owner, path, MAX_PATH);
-  if (!length || length >= MAX_PATH) {
+  // Long-path aware: an add-on DLL can live deeper than MAX_PATH. Heap, not
+  // stack, and nothrow under noexcept; the Windows path limit bounds it.
+  constexpr DWORD path_capacity = 32768;
+  const std::unique_ptr<wchar_t[]> path(new (std::nothrow) wchar_t[path_capacity]);
+  wchar_t system[MAX_PATH]{};
+  const DWORD length = path ? GetModuleFileNameW(owner, path.get(), path_capacity) : 0;
+  if (!length || length >= path_capacity) {
     std::snprintf(r.close_endpoint_module, sizeof(r.close_endpoint_module), "%s", "unknown");
     return;
   }
-  const wchar_t* slash = std::wcsrchr(path, L'\\');
-  const wchar_t* name = slash ? slash + 1 : path;
+  const wchar_t* slash = std::wcsrchr(path.get(), L'\\');
+  const wchar_t* name = slash ? slash + 1 : path.get();
   std::snprintf(r.close_endpoint_module, sizeof(r.close_endpoint_module), "%ls", name);
   const UINT system_length = GetSystemDirectoryW(system, MAX_PATH);
-  const auto directory_length = static_cast<std::size_t>(name - path);
+  const auto directory_length = static_cast<std::size_t>(name - path.get());
   r.close_endpoint_location =
       system_length && system_length < MAX_PATH && directory_length == system_length + 1u &&
-              CompareStringOrdinal(path, static_cast<int>(system_length), system, static_cast<int>(system_length), TRUE) == CSTR_EQUAL
+              CompareStringOrdinal(path.get(), static_cast<int>(system_length), system, static_cast<int>(system_length), TRUE) == CSTR_EQUAL
           ? "system"
           : "other";
 }
