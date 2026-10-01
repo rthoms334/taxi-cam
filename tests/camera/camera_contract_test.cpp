@@ -211,7 +211,10 @@ struct Fixture : discovery::ImageReader {
       static_cast<std::uint8_t*>(destination)[it->first - at] = it->second;
     return true;
   }
-  CameraContractResolution run() { return resolve_camera_contract(*this, image, base); }
+  // The release contract's evidence checks count reads of one resolution.
+  CameraContractResolution run() { return resolve_release_camera_contract(*this, image, base); }
+  // With the parenting extension, which this synthetic image does not hold.
+  CameraContractResolution run_with_parenting() { return resolve_camera_contract(*this, image, base); }
 };
 bool empty(const CameraContract& contract) {
   const CameraContract zero{};
@@ -224,6 +227,13 @@ void refused(const CameraContractResolution& result, const char* error) {
 }
 void complete_resolution() {
   for (const auto shift : {0u, 0x1000u}) {
+    // An image without the attach/detach bodies keeps the release contract,
+    // unchanged, with parenting unavailable and the reason reported.
+    Fixture parent_fixture(shift, Fixture::Base + std::uint64_t(shift) * 0x40000);
+    const auto parented = parent_fixture.run_with_parenting();
+    require(parented.valid && parented.error.empty() && !parented.parent_error.empty() && !parented.contract.functions.attach_child &&
+                !parented.contract.functions.detach_node && parented.contract.functions == parent_fixture.expected_functions,
+            "A release-only image did not keep its contract without parenting");
     Fixture fixture(shift, Fixture::Base + std::uint64_t(shift) * 0x40000);
     const auto result = fixture.run();
     require(result.valid && result.error.empty() && result.matched_ranges == camera_release_contract::model().code.size(),

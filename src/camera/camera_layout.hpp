@@ -24,6 +24,7 @@ struct CameraImageLayout {
   std::uint32_t activation_disable_mask = 0;
   std::uint32_t view_flag_clear_override = 0;
   std::uint32_t view_flag_set_override = 0;
+  bool operator==(const CameraImageLayout&) const = default;
 };
 
 // Legacy diagnostic/test compatibility. These observations are not a resolver

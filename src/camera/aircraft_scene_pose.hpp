@@ -11,8 +11,12 @@ struct AircraftScenePose {
   bool complete = false;
   const char* error = "unavailable";
   BodyPose pose{};
-  // The model Node read, for diagnostics in the same update only (never retained).
+  // The model Node read, valid in the same update only, and the controller+336
+  // generation handle that resolved it ({control, generation}). The camera
+  // mount (node_mount.hpp) keeps the handle to tell when that Node goes away.
   std::uint64_t node = 0;
+  std::uint64_t node_control = 0;
+  std::uint32_t node_generation = 0;
   std::uint32_t read_bytes = 0;
 };
 
@@ -152,6 +156,8 @@ inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader
   }
   result.pose = candidate;
   result.node = node;
+  result.node_control = handle[0];
+  result.node_generation = generation;
   result.complete = true;
   result.error = "";
   return result;

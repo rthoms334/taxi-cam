@@ -1362,6 +1362,17 @@ DWORD run_impl() {
                     scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
                     scene.draw_clip[2][2]);
       log_status(status, clip_detail);
+      // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
+      // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
+      char mount_detail[384];
+      std::snprintf(mount_detail, sizeof(mount_detail),
+                    "Camera mount: available=%d feeds=%u/%u/%u attaches=%llu restores=%llu refused=%llu error=%s contract=%s",
+                    scene.mount_available ? 1 : 0, scene.mount_state[0], scene.mount_state[1], scene.mount_state[2],
+                    static_cast<unsigned long long>(scene.mount_attaches), static_cast<unsigned long long>(scene.mount_restores),
+                    static_cast<unsigned long long>(scene.mount_refused),
+                    scene.mount_error && *scene.mount_error ? scene.mount_error : "none",
+                    scene.mount_contract_error.empty() ? "ok" : scene.mount_contract_error.c_str());
+      log_status(status, mount_detail);
       // Diagnostics: is the main view parented to the aircraft? s=sampled r=read
       // p=+368 set n=it is a Node a=it is the aircraft model c=it is the
       // controller g=its +368 is the aircraft; stored/world metres.

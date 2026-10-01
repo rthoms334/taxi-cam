@@ -2,6 +2,7 @@
 
 #include "activation_mask.hpp"
 #include "camera_contract_model.hpp"
+#include "camera_parent_contract.hpp"
 #include "camera_release_contract.hpp"
 #include "code_contract.hpp"
 #include "rtti_vtables.hpp"
@@ -101,7 +102,10 @@ struct RuntimeFunction {
   bool operator==(const RuntimeFunction&) const = default;
 };
 
-bool boundaries(discovery::ImageReader& reader, const discovery::Inventory& image, const std::vector<std::uint32_t>& symbols) {
+bool boundaries(discovery::ImageReader& reader,
+                const discovery::Inventory& image,
+                const std::vector<camera_contract_model::FunctionBoundary>& reviewed,
+                const std::vector<std::uint32_t>& symbols) {
   if (!image.exception_size || image.exception_size % sizeof(RuntimeFunction) || image.exception_size > 8 * 1024 * 1024 ||
       !section(image, image.exception_rva, image.exception_size, false))
     return false;
@@ -115,7 +119,7 @@ bool boundaries(discovery::ImageReader& reader, const discovery::Inventory& imag
       return false;
     previous = entry.end;
   }
-  for (const auto& expected : camera_release_contract::boundaries()) {
+  for (const auto& expected : reviewed) {
     if (expected.symbol >= symbols.size() || !expected.bytes)
       return false;
     const auto begin64 = std::int64_t(symbols[expected.symbol]) + expected.begin_addend;
@@ -239,9 +243,16 @@ bool verify_renderer_release_methods(discovery::ImageReader& reader,
          exact(reader, rva + 104, &again[0], 8) && exact(reader, rva + 120, &again[1], 8) && methods == again;
 }
 
-CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
-                                                 const discovery::Inventory& image,
-                                                 std::uint64_t loaded_image_base) {
+namespace {
+
+// One complete resolution of a model that extends the release contract. With
+// parenting, the model also declares the attach/detach bodies and binds them.
+CameraContractResolution resolve_model(discovery::ImageReader& source,
+                                       const discovery::Inventory& image,
+                                       std::uint64_t loaded_image_base,
+                                       const relocatable::ContractModel& model,
+                                       const std::vector<camera_contract_model::FunctionBoundary>& reviewed,
+                                       bool parenting) {
   CameraContractResolution result;
   ContractReader reader(source);
   const auto fail = [&](std::string message) {
@@ -256,7 +267,6 @@ CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
   limits.metadata_bytes = 8192;
   if (!same_image(image, discovery::inspect_image(reader, limits)))
     return fail("Fresh main-image headers differ from the selected image.");
-  const auto& model = camera_release_contract::model();
   const auto resolved = relocatable::resolve_contract(reader, image, model, {}, loaded_image_base);
   result.scanned_bytes = resolved.scanned_bytes;
   if (!resolved.valid)
@@ -268,6 +278,10 @@ CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
     return fail("The resolved camera contract is incomplete.");
   contract.functions.release_view = resolved.symbols[base_count];
   contract.functions.drain_views = resolved.symbols[base_count + 1];
+  if (parenting) {
+    contract.functions.attach_child = resolved.symbols[camera_parent_contract::kAttachChildSymbol];
+    contract.functions.detach_node = resolved.symbols[camera_parent_contract::first_symbol() + camera_parent_contract::kDetachNodeOffset];
+  }
   std::vector<CodeRange> ranges;
   for (const auto& code : model.code)
     ranges.push_back({resolved.symbols[code.symbol], static_cast<std::uint32_t>(code.bytes.size())});
@@ -305,7 +319,7 @@ CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
     if (!same_relocations(checked))
       return fail("The relocation directory changed between verification batches.");
   }
-  if (!boundaries(reader, image, resolved.symbols))
+  if (!boundaries(reader, image, reviewed, resolved.symbols))
     return fail("The discovered instructions do not match their reviewed function boundaries.");
   const auto& layout = contract.layout;
   if (!layout.scene_node_vtable || !layout.scene_model_vtable)
@@ -342,6 +356,38 @@ CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
   result.valid = true;
   result.contract = contract;
   result.matched_ranges = static_cast<std::uint32_t>(ranges.size());
+  return result;
+}
+
+}  // namespace
+
+CameraContractResolution resolve_release_camera_contract(discovery::ImageReader& source,
+                                                         const discovery::Inventory& image,
+                                                         std::uint64_t loaded_image_base) {
+  return resolve_model(source, image, loaded_image_base, camera_release_contract::model(), camera_release_contract::boundaries(), false);
+}
+
+CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
+                                                 const discovery::Inventory& image,
+                                                 std::uint64_t loaded_image_base) {
+  auto result = resolve_release_camera_contract(source, image, loaded_image_base);
+  if (!result.valid)
+    return result;
+  // Parenting is additive: a second, complete resolution that also declares the
+  // attach/detach bodies. It is adopted only when every other binding agrees;
+  // an image whose shapes differ keeps world placement and reports why.
+  const auto parented =
+      resolve_model(source, image, loaded_image_base, camera_parent_contract::model(), camera_parent_contract::boundaries(), true);
+  result.scanned_bytes += parented.scanned_bytes;
+  auto shared = parented.contract.functions;
+  shared.attach_child = shared.detach_node = 0;
+  if (!parented.valid)
+    result.parent_error = parented.error.empty() ? "unresolved" : parented.error;
+  else if (shared != result.contract.functions || !(parented.contract.layout == result.contract.layout) ||
+           !parented.contract.functions.attach_child || !parented.contract.functions.detach_node)
+    result.parent_error = "The parent contract disagrees with the release contract.";
+  else
+    result.contract.functions = parented.contract.functions;
   return result;
 }
 
