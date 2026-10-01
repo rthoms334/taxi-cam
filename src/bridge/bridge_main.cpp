@@ -927,7 +927,7 @@ DWORD run_impl() {
     if (now >= next_recovery) {
       const bool eligible = (mask || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
                             scene.requested_feeds >= 2 && !scene.pose_waiting && !scene.view_waiting &&
-                            native_camera::sample_body_pose(now).valid;
+                            (scene.pose_session_proven || native_camera::sample_body_pose(now).valid);
       if (eligible && output.frames != last_frames)
         native_camera::note_scene_capture_progress(now);
       last_frames = output.frames;
@@ -1306,14 +1306,14 @@ DWORD run_impl() {
       log_status(status, retention_detail);
       // Per camera and for the main view: near plane / culling far / default far, metres.
       char clip_detail[448];
-      std::snprintf(clip_detail, sizeof(clip_detail),
-                    "Camera draw distance: follow_main=%d writes=%llu error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g "
-                    "feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
-                    scene.follow_main_far ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
-                    scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0],
-                    scene.main_clip[1], scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2],
-                    scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
-                    scene.draw_clip[2][2]);
+      std::snprintf(
+          clip_detail, sizeof(clip_detail),
+          "Camera draw distance: pose_proven=%d follow_main=%d writes=%llu error=%s main=%.3g/%.6g/%.6g "
+          "feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
+          scene.pose_session_proven ? 1 : 0, scene.follow_main_far ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
+          scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0], scene.main_clip[1],
+          scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2], scene.draw_clip[1][0],
+          scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1], scene.draw_clip[2][2]);
       log_status(status, clip_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];

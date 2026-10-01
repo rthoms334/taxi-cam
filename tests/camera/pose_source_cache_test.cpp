@@ -35,8 +35,30 @@ int main() {
   ok &= require(!cache.reuse(Proven + 1, Epoch, Resets), "A null controller was offered");
   cache.prove(User + 8, Proven + 2000, Epoch, Resets);
   ok &= require(cache.reuse(Proven + 2500, Epoch, Resets) == User + 8, "Proving again did not replace the controller and its time");
+
+  // Session proof: a public match trusts the controller for the whole session.
+  PoseSourceCache session;
+  ok &= require(!session.session_proven(Epoch, Resets) && !session.refresh(User, Proven, Epoch, Resets),
+                "An unproven session trusted a controller");
+  session.prove(User, Proven, Epoch, Resets);
+  ok &= require(session.session_proven(Epoch, Resets) == User, "A public match did not prove the session");
+  ok &= require(session.session_proven(Epoch, Resets) == User && !session.reuse(Proven + 60000, Epoch, Resets),
+                "The session proof aged out with the one-second reuse");
+  session.forget();
+  ok &= require(session.session_proven(Epoch, Resets) == User, "A failed scene read cost the session proof");
+  ok &= require(!session.refresh(User + 8, Proven + 60000, Epoch, Resets) && !session.reuse(Proven + 60001, Epoch, Resets),
+                "A different controller was trusted without a public match");
+  ok &= require(session.refresh(User, Proven + 60000, Epoch, Resets) && session.reuse(Proven + 60500, Epoch, Resets) == User,
+                "The proven controller found again did not restart the one-second reuse");
+  ok &= require(!session.session_proven(Epoch + 1, Resets) && !session.refresh(User, Proven + 70000, Epoch + 1, Resets),
+                "A new aircraft session kept the previous proof");
+  ok &= require(!session.session_proven(Epoch, Resets + 1) && !session.refresh(User, Proven + 70000, Epoch, Resets + 1),
+                "A session reset kept the previous proof");
+  session.prove(User, Proven, 0, Resets);
+  ok &= require(!session.session_proven(0, Resets), "A controller proven before session readiness was trusted");
   if (!ok)
     return 1;
-  std::printf("PASS pose source cache: %u checks; one-second reuse within a session epoch and reset generation.\n", checks);
+  std::printf("PASS pose source cache: %u checks; one-second reuse and session proof within a session epoch and reset generation.\n",
+              checks);
   return 0;
 }

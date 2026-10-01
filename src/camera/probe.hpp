@@ -97,6 +97,9 @@ struct ProbeSnapshot {
   std::array<std::array<float, 3>, kMaxCameraFeeds> draw_clip{};
   std::array<float, 3> main_clip{};
   bool follow_main_far = false;
+  // This flight session's aircraft passed its public pose match; its scene
+  // transform places the cameras without the local calibration from then on.
+  bool pose_session_proven = false;
   std::uint64_t draw_clip_writes = 0;
   const char* draw_clip_error = "";
   std::uint32_t thread_id = 0;

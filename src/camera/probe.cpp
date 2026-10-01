@@ -412,6 +412,87 @@ void note_main_view_clip(Runtime& runtime, std::uint64_t camera_address) noexcep
   if (read_camera_clip(camera_address, clip) && plausible_camera_clip(clip))
     runtime.main_clip = clip;
 }
+// The full aircraft walk to the active controller and the scene transform it
+// leads to. False (pose_busy, message set) when no stable active aircraft is
+// found; otherwise user is the controller and scene its read, complete or not.
+bool walk_aircraft_scene(Runtime& runtime,
+                         LocalMemoryReader& objects,
+                         std::uint64_t& user,
+                         AircraftScenePose& scene,
+                         std::string& memory_detail) {
+  user = 0;
+  scene = {};
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+  // One read-only scope for the aircraft walk and the scene pose it leads to:
+  // pages and allocations are proven once and revalidated together at its end.
+  // Nothing is published unless that endpoint validation succeeds.
+  const auto aircraft = inspected(
+      runtime,
+      [&] {
+        auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
+                                                          runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr, &user,
+                                                          runtime.contract.layout);
+        if (found.valid && found.available && user) {
+          objects.reset_budget();
+          scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
+        }
+        return found;
+      },
+      &memory_detail);
+  if (!aircraft.valid || !aircraft.available || !user) {
+    runtime.pose_busy = true;
+    runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
+    if (!memory_detail.empty())
+      runtime.message += " " + memory_detail;
+    return false;
+  }
+  return true;
+}
+// Once this flight session's aircraft controller has matched the public pose,
+// its scene transform places the cameras for the rest of the session without
+// the public match (PoseSourceCache), so the cameras keep working beyond the
+// 10 km local calibration radius in flight. Returns nullopt when no controller
+// is proven for this session or the walk found a different one: the caller
+// then proves it against the public pose.
+std::optional<bool> capture_trusted_pose(Runtime& runtime, std::string& memory_detail) {
+  const auto now = GetTickCount64();
+  const auto epoch = get_aircraft_session_readiness().epoch;
+  const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+  const auto trusted = runtime.pose_source.session_proven(epoch, resets);
+  if (!trusted)
+    return std::nullopt;
+  LocalMemoryReader objects;
+  AircraftScenePose scene;
+  std::uint64_t user = runtime.pose_source.reuse(now, epoch, resets);
+  if (user)
+    scene = inspected(
+        runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
+  if (!user || !scene.complete) {
+    runtime.pose_source.forget();
+    memory_detail.clear();
+    objects.reset_budget();
+    if (!walk_aircraft_scene(runtime, objects, user, scene, memory_detail))
+      return false;
+  }
+  if (user != trusted) {
+    // Not the proven aircraft: only a fresh public match may accept it.
+    runtime.pose_source.forget();
+    memory_detail.clear();
+    return std::nullopt;
+  }
+  if (!scene.complete || !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+    // The proven aircraft mid-update or briefly unreadable: wait, keep the proof.
+    runtime.pose_source.forget();
+    runtime.pose_busy = true;
+    runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") + scene.error;
+    if (!memory_detail.empty())
+      runtime.message += " " + memory_detail;
+    return false;
+  }
+  runtime.pose_source.refresh(user, now, epoch, resets);
+  runtime.pose_captured = true;
+  return true;
+}
 // fresh_views: view addresses of the owned pair from the caller's current
 // inspection, indexed like owned_ids. Only calibration reads them, to exclude
 // the retained pair from the pool scan.
@@ -444,6 +525,8 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
     runtime.message = std::string("Aircraft telemetry temporarily unavailable; render gates remain closed: ") + body.error;
     return false;
   }
+  if (const auto trusted = capture_trusted_pose(runtime, memory_detail))
+    return *trusted;
   if (!body.valid && outside_local_calibration_radius(body.error)) {
     // Departure local lock is still held after a long sector. Clear it so the
     // caller can recalibrate at arrival instead of latching pose_invalid.
@@ -576,30 +659,8 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
     }
   }
   if (!user) {
-    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-    // One read-only scope for the aircraft walk and the scene pose it leads to:
-    // pages and allocations are proven once and revalidated together at its end.
-    // Nothing is published unless that endpoint validation succeeds.
-    const auto aircraft = inspected(
-        runtime,
-        [&] {
-          auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
-                                                            runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr,
-                                                            &user, runtime.contract.layout);
-          if (found.valid && found.available && user) {
-            objects.reset_budget();
-            scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
-          }
-          return found;
-        },
-        &memory_detail);
-    if (!aircraft.valid || !aircraft.available || !user) {
-      runtime.pose_busy = true;
-      runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
-      if (!memory_detail.empty())
-        runtime.message += " " + memory_detail;
+    if (!walk_aircraft_scene(runtime, objects, user, scene, memory_detail))
       return false;
-    }
     if (scene.complete && scene_body_matches_public(scene.pose, body.pose))
       runtime.pose_source.prove(user, now, epoch, resets);
   }
@@ -1666,6 +1727,9 @@ void observer(void* manager) noexcept {
       return timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, nullptr, &manager_inspection); });
     };
     const auto start_body = requested_start ? sample_body_pose(now) : BodyPoseSnapshot{};
+    // A session-proven aircraft needs no local calibration (capture_trusted_pose).
+    const bool session_pose_proven = runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
+                                                                        runtime.pose_source_resets.load(std::memory_order_acquire)) != 0;
     if (session_hold) {
       service_session_reset(runtime, manager, report);
     } else if (profile_hold) {
@@ -1678,7 +1742,8 @@ void observer(void* manager) noexcept {
       // heartbeat or expired prewarm budget, and never erase a pair.
       report.pair = before;
       report.message = "Initial camera creation parked until render demand resumes.";
-    } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !start_body.valid && !start_body.calibration_required) {
+    } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !start_body.valid &&
+               !start_body.calibration_required && !(session_pose_proven && outside_local_calibration_radius(start_body.error))) {
       // Public startup is asynchronous. Do not walk private manager, pool or
       // aircraft graphs repeatedly while its first telemetry is still pending.
       // A stale local lock after relocation is cleared so the next tick can
@@ -2285,6 +2350,9 @@ void observer(void* manager) noexcept {
       }
       runtime.published.main_clip = {runtime.main_clip.near_plane, runtime.main_clip.far_plane, runtime.main_clip.default_far};
       runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
+      runtime.published.pose_session_proven =
+          runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
+                                             runtime.pose_source_resets.load(std::memory_order_acquire)) != 0;
       runtime.published.draw_clip_writes = runtime.clip_writes;
       runtime.published.draw_clip_error = runtime.clip_error;
     } catch (...) {
