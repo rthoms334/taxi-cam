@@ -17,6 +17,10 @@ struct AircraftIdentitySample {
 class AircraftSessionLifecycle {
  public:
   static constexpr std::uint32_t SimEvent = 100, AircraftEvent = 101, FlightEvent = 102;
+  // Pause_EX1: dwData is the pause-state flag set, zero when running. Any pause
+  // (the pause menu every flight end and quit goes through, or active pause)
+  // takes the camera mounts off the aircraft (node_mount.hpp).
+  static constexpr std::uint32_t PauseEvent = 103;
   // Public MSFS2024 SIMCONNECT_FLOW_EVENT values (DWORD, not event IDs).
   // https://docs.flightsimulator.com/msfs2024/html/6_Programming_APIs/SimConnect/API_Reference/Structures_And_Enumerations/SIMCONNECT_FLOW_EVENT.htm
   enum Flow : std::uint32_t {
@@ -62,10 +66,15 @@ class AircraftSessionLifecycle {
         pending_ &= ~2u;
       } else if (event == FlightStart) {
         pending_ &= ~4u;
+        paused_ = false;
       }
       // Completion invalidates samples received during loading but does not
       // manufacture another session. Duplicate starts/completions are inert.
       return before != pending_;
+    }
+    if (h[2] == 4 && bytes == 24 && h[4] == PauseEvent) {
+      paused_ = h[5] != 0;
+      return false;
     }
     if (h[2] == 4 && bytes == 24 && h[4] == SimEvent && h[5] <= 1) {
       const bool transition = known_ && running_ != (h[5] != 0);
@@ -91,11 +100,12 @@ class AircraftSessionLifecycle {
   std::uint64_t epoch() const noexcept { return epoch_; }
   bool running() const noexcept { return !known_ || running_; }
   bool loading() const noexcept { return pending_ != 0; }
+  bool paused() const noexcept { return paused_; }
   std::uint32_t last_flow_event() const noexcept { return last_flow_event_; }
 
  private:
   std::uint64_t epoch_ = 0;
-  bool known_ = false, running_ = false;
+  bool known_ = false, running_ = false, paused_ = false;
   unsigned pending_ = 0;
   std::uint32_t last_flow_event_ = 0;
 };

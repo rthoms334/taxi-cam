@@ -326,6 +326,30 @@ void run() {
   require(nc::temporary_pose_unavailable("aircraft_session_changed"), "Flight-load pose reset requested permanent cleanup");
   require(!nc::temporary_pose_unavailable("invalid_geometry") && !nc::temporary_pose_unavailable("unknown_error"),
           "Permanent pose failures lost their guards");
+  // In-place resize for another aircraft's panes: once rebased, the views must
+  // carry the new dimensions while their new output may still be pending;
+  // resized() requires the output again.
+  transition.begin(2, original, dimensions);
+  require(transition.inspect(owner, original, ready_views()) == Transition::Decision::ready, "Fixture pair was not validated");
+  auto resized = ready_views();
+  for (auto& view : resized)
+    if (view.complete)
+      view.dimensions = {{{736, 268}, {736, 268}, {736, 268}}};
+  require(transition.inspect(owner, original, resized) == Transition::Decision::refused, "Changed dimensions were accepted unrebased");
+  transition.begin(2, original, dimensions);
+  transition.rebase({resized[0].dimensions, resized[1].dimensions});
+  require(transition.inspect(owner, original, resized) == Transition::Decision::ready, "A rebased pair awaiting output was refused");
+  require(transition.inspect(owner, original, ready_views()) == Transition::Decision::refused, "Old dimensions passed after a rebase");
+  transition.begin(2, original, dimensions);
+  transition.rebase({resized[0].dimensions, resized[1].dimensions});
+  transition.resized();
+  require(transition.inspect(owner, original, resized) == Transition::Decision::refused, "A resized pair passed without its new output");
+  for (auto& view : resized)
+    view.output_dimensions = view.dimensions[0];
+  transition.begin(2, original, dimensions);
+  transition.rebase({resized[0].dimensions, resized[1].dimensions});
+  transition.resized();
+  require(transition.inspect(owner, original, resized) == Transition::Decision::ready, "A resized pair with its new output was refused");
   transition.begin(1, {}, {});
   require(transition.ready() && !transition.can_resume({}), "Empty startup pretended to retain an existing pair");
   transition.begin(2, original, dimensions);

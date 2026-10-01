@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <limits>
 
-#include "../../src/camera/taxi_speed_cutoff.hpp"
 #include "../../src/graphics/ground_speed_display.hpp"
 
 int main() {
@@ -40,11 +39,5 @@ int main() {
   const auto unavailable = ground_speed_display(12.9f, false);
   assert(!unavailable.valid && unavailable.knots == 0);
 
-  // Quantizing the display must not delay the raw-speed cutoff until 61 kt.
-  taxi_camera::native_camera::TaxiSpeedCutoff cutoff;
-  assert(cutoff.update(100, true, 59.99, true, 1, 100) == 0);
-  assert(cutoff.update(101, true, 60.0, true, 1, 101) == 0);
-  assert(cutoff.update(102, true, 60.01, true, 1, 102) == 1);
-  assert(cutoff.inhibited());
-  std::puts("Ground-speed display: PASS; fractional truncation, invalid/overflow samples, raw-speed cutoff");
+  std::puts("Ground-speed display: PASS; fractional truncation, invalid/overflow samples");
 }

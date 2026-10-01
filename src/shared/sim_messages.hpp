@@ -20,7 +20,6 @@ enum class SimEvent : unsigned {
   presentation_stalled,  // Watchdog trip, posted by the watchdog thread itself.
   cameras_disarmed,      // Degraded path applied by the bridge worker.
   presentation_resumed,
-  speed_cutoff,
   aircraft_mismatch,
   camera_startup_failed,
   capture_paused,
@@ -50,8 +49,6 @@ inline constexpr SimMessage sim_message_for(SimEvent event) noexcept {
       return {"Taxi Cam degraded: cameras disarmed and hooks released; they re-arm when frames resume.", 12.0f, true};
     case SimEvent::presentation_resumed:
       return {"Taxi Cam: simulator frames resumed; cameras re-armed.", 6.0f, false};
-    case SimEvent::speed_cutoff:
-      return {"Taxi Cam: above 60 knots, taxi cameras off.", 5.0f, false};
     case SimEvent::aircraft_mismatch:
       return {"Taxi Cam: the loaded aircraft does not match the selected profile.", 8.0f, false};
     case SimEvent::camera_startup_failed:
@@ -68,7 +65,7 @@ inline constexpr SimMessage sim_message_for(SimEvent event) noexcept {
 // Toast policy: a desktop notification only for what the pilot must act on or
 // would otherwise not notice while the simulator is full-screen, i.e. cameras
 // off for the rest of the session or until they change something. Routine
-// transitions (connect/disconnect, cameras up, speed cutoff, aircraft/profile
+// transitions (connect/disconnect, cameras up, aircraft/profile
 // mismatch, transient capture pauses, watchdog recovery) and the worker's
 // echo of a watchdog or storm disarm never toast.
 inline constexpr bool sim_event_toasts(SimEvent event) noexcept {
@@ -84,9 +81,10 @@ inline constexpr bool sim_event_toasts(SimEvent event) noexcept {
 }
 
 inline constexpr const char* sim_event_name(SimEvent event) noexcept {
-  constexpr const char* names[]{"bridge_connected",     "cameras_ready",         "connection_stopped",   "simulator_unsupported",
-                                "presentation_stalled", "cameras_disarmed",      "presentation_resumed", "speed_cutoff",
-                                "aircraft_mismatch",    "camera_startup_failed", "capture_paused",       "hook_storm"};
+  constexpr const char* names[]{
+      "bridge_connected", "cameras_ready",        "connection_stopped", "simulator_unsupported", "presentation_stalled",
+      "cameras_disarmed", "presentation_resumed", "aircraft_mismatch",  "camera_startup_failed", "capture_paused",
+      "hook_storm"};
   return static_cast<unsigned>(event) < static_cast<unsigned>(SimEvent::count) ? names[static_cast<unsigned>(event)] : "invalid_event";
 }
 
@@ -102,7 +100,6 @@ class SimMessageLimiter {
       case SimEvent::cameras_disarmed:
       case SimEvent::presentation_resumed:
         return 15000;
-      case SimEvent::speed_cutoff:
       case SimEvent::aircraft_mismatch:
       case SimEvent::capture_paused:
         return 60000;
@@ -157,7 +154,6 @@ struct SimEventInputs {
   bool connection_stopped = false;  // Pulse from the connection session.
   bool simulator_unsupported = false;
   bool degraded = false;  // Watchdog gate closed.
-  bool speed_cutoff = false;
   bool aircraft_mismatch = false;
   bool camera_startup_failed = false;
   bool capture_paused = false;
@@ -201,8 +197,6 @@ class SimEventTracker {
       emit(SimEvent::cameras_ready);
     if (in.simulator_unsupported && !previous_.simulator_unsupported)
       emit(SimEvent::simulator_unsupported);
-    if (in.speed_cutoff && !previous_.speed_cutoff)
-      emit(SimEvent::speed_cutoff);
     if (in.aircraft_mismatch && !previous_.aircraft_mismatch)
       emit(SimEvent::aircraft_mismatch);
     if (in.camera_startup_failed && !previous_.camera_startup_failed)

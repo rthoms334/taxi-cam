@@ -116,6 +116,21 @@ void aircraft_swap_tests() {
   assert(session.accept(event.data(), event.size()) && session.epoch() == 4);
   assert(sim(0) && session.epoch() == 5 && !session.running());
   assert(sim(1) && session.epoch() == 6 && session.running());
+  // Pause_EX1 only records the pause state: no session change, no loading.
+  const auto pause = [&](std::uint32_t flags) {
+    const std::array<std::uint32_t, 6> p{24, 0, 4, 0, session.PauseEvent, flags};
+    return session.accept(p.data(), sizeof(p));
+  };
+  assert(!session.paused() && !pause(1) && session.paused() && session.epoch() == 6 && !session.loading() && session.running());
+  assert(!pause(4) && session.paused());
+  assert(!pause(0) && !session.paused() && session.epoch() == 6);
+  // FLIGHT_START clears a pause whose end was missed.
+  assert(!pause(1) && session.paused());
+  std::array<unsigned char, 272> flow{};
+  const std::array<std::uint32_t, 4> f{272, 0, session.FlowReceiveId, session.FlightStart};
+  std::memcpy(flow.data(), f.data(), sizeof(f));
+  session.accept(flow.data(), flow.size());
+  assert(!session.paused());
 }
 void guide_settings_tests() {
   using namespace standalone;

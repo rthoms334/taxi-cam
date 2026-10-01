@@ -114,6 +114,7 @@ $runtimeSources = @(
     'tools/diagnostics/image_inventory.cpp',
     'src/camera/view_resize.cpp',
     'src/camera/view_aa.cpp',
+    'src/camera/view_clip.cpp',
     'src/camera/aircraft_inventory.cpp',
     'src/graphics/scene_handoff.cpp',
     'src/camera/entry_pair.cpp',

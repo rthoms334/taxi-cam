@@ -739,7 +739,7 @@ int offline_tests() {
   check(get_aircraft_session_epoch() == before_epoch + 1);
   check(!get_ground_speed().valid && !get_taxi_buttons().valid && !get_lighting().valid);
   check(!get_body_telemetry_timing().fresh && !get_body_telemetry_timing().last_sample_ms);
-  check(!get_taxi_cutoff().inhibited && !get_taxi_cutoff().pending_off && !sample_body_pose(now).calibration_required);
+  check(!sample_body_pose(now).calibration_required);
   check(select_aircraft_profile(1) && get_aircraft_session_epoch() == before_epoch + 1);
   check(!testing::accept_session_packet(sim_event.data(), sizeof(sim_event)) && get_aircraft_session_epoch() == before_epoch + 1);
   check(testing::accept_session_packet(load_event.data(), load_event.size()) && get_aircraft_session_epoch() == before_epoch + 2);

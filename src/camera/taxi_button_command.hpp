@@ -19,18 +19,17 @@ struct TaxiButtonRequestStatus {
 struct TaxiButtonCommandContext {
   std::uint64_t now{}, session_epoch{}, button_sample_ms{};
   std::uint32_t profile{};
-  unsigned actual_mask{}, cutoff_commands{};
-  bool identity_valid{}, buttons_valid{}, speed_valid{}, cutoff_inhibited{}, aircraft_buttons = true;
-  double speed_knots{}, speed_limit = 60;
+  unsigned actual_mask{};
+  bool identity_valid{}, buttons_valid{}, aircraft_buttons = true;
 };
 struct TaxiButtonCommandDecision {
-  unsigned send_mask{}, desired_mask{}, cutoff_mask{};
+  unsigned send_mask{}, desired_mask{};
   std::uint64_t serial{}, button_sample_ms{};
 };
 
-// One dispatcher owns user requests and the cutoff's OFF commands. Accepted
-// toggle sends survive request cancellation until a later observed latch
-// acknowledges them; a timeout is not permission to repeat an uncertain toggle.
+// One dispatcher owns user TAXI requests. Accepted toggle sends survive
+// request cancellation until a later observed latch acknowledges them; a
+// timeout is not permission to repeat an uncertain toggle.
 class TaxiButtonCommand {
  public:
   static constexpr std::uint64_t PermissionAgeMs = 500, RequestLifetimeMs = 3000;
@@ -75,7 +74,7 @@ class TaxiButtonCommand {
     flights_ = {};
   }
   TaxiButtonCommandDecision step(const TaxiButtonCommandContext& c) noexcept {
-    TaxiButtonCommandDecision result{0, 0, 0, status_.serial, c.button_sample_ms};
+    TaxiButtonCommandDecision result{0, 0, status_.serial, c.button_sample_ms};
     const bool buttons =
         c.buttons_valid && c.button_sample_ms && c.now >= c.button_sample_ms && c.now - c.button_sample_ms <= PermissionAgeMs;
     if (!permission_ || c.now < permission_ms_ || c.now - permission_ms_ > PermissionAgeMs)
@@ -84,33 +83,17 @@ class TaxiButtonCommand {
       fail("taxi_request_session_changed");
     if (status_.pending_mask && (c.now < started_ms_ || c.now - started_ms_ >= RequestLifetimeMs))
       fail("taxi_request_ack_timeout");
-    if (status_.pending_mask && c.cutoff_inhibited && (latest_.desired_mask & status_.pending_mask))
-      fail("taxi_request_speed_inhibited");
     if (!c.identity_valid || !buttons || !c.aircraft_buttons)
       return result;
-    const bool speed = c.speed_valid && std::isfinite(c.speed_knots) && c.speed_knots >= 0;
     for (unsigned side = 0; side < MaxDisplaySides; ++side) {
       const unsigned bit = 1u << side;
       auto& flight = flights_[side];
       const bool actual = (c.actual_mask & bit) != 0;
       if (flight.active && c.button_sample_ms > flight.sample_ms && c.button_sample_ms > flight.sent_ms && actual == flight.desired)
         flight = {};
-      if (flight.active)
-        continue;
-      if ((c.cutoff_commands & bit) && actual) {
-        result.send_mask |= bit;
-        result.cutoff_mask |= bit;
-        continue;
-      }
-      if (!(status_.pending_mask & bit) || !speed)
+      if (flight.active || !(status_.pending_mask & bit))
         continue;
       const bool desired = (latest_.desired_mask & bit) != 0;
-      if (desired && (c.cutoff_inhibited || c.speed_knots > c.speed_limit)) {
-        fail("taxi_request_speed_inhibited");
-        result.send_mask &= result.cutoff_mask;
-        result.desired_mask = 0;
-        break;
-      }
       if (actual == desired) {
         status_.pending_mask &= ~bit;
       } else {
@@ -125,8 +108,6 @@ class TaxiButtonCommand {
   bool current(const TaxiButtonCommandDecision& decision, unsigned side, std::uint64_t now) const noexcept {
     if (side >= MaxDisplaySides || !(decision.send_mask & (1u << side)) || flights_[side].active)
       return false;
-    if (decision.cutoff_mask & (1u << side))
-      return true;
     return permission_ && now >= permission_ms_ && now - permission_ms_ <= PermissionAgeMs && decision.serial == status_.serial &&
            (status_.pending_mask & (1u << side));
   }
@@ -135,7 +116,7 @@ class TaxiButtonCommand {
       return;
     if (accepted)
       flights_[side] = {true, (decision.desired_mask & (1u << side)) != 0, decision.button_sample_ms, now, decision.serial};
-    else if (!(decision.cutoff_mask & (1u << side)) && decision.serial == status_.serial)
+    else if (decision.serial == status_.serial)
       fail("taxi_button_command_failed");
   }
   // Only a correlated SimConnect rejection proves an accepted send did not run.

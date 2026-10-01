@@ -15,7 +15,9 @@ namespace taxi_camera::standalone {
 // Protocol 14: side masks gained bit 2 (A340-600 lower ECAM).
 // Protocol 15: Settings/Status lower_id for a separate side-2 texture (PMDG 777 lower DU).
 // Protocol 16: Settings dynamic_tail (nose priority while rolling straight).
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 16;
+// Protocol 17: the 60-knot cutoff is gone: Status drops speed_inhibited and the
+// notification log drops the speed_cutoff event.
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 17;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -65,7 +67,7 @@ struct Candidate {
 };
 struct Status {
   std::uint64_t heartbeat{}, captures{}, composed{}, stamps{}, left_id{}, right_id{}, hook_failures{};
-  std::uint32_t graphics_ready{}, scene_ready{}, taxi_mask{}, speed_inhibited{}, candidate_count{};
+  std::uint32_t graphics_ready{}, scene_ready{}, taxi_mask{}, candidate_count{};
   std::uint32_t active_profile{}, detected_profile{};
   std::uint64_t identity_sample_ms{}, aircraft_session_epoch{};
   std::uint64_t taxi_buttons_sample_ms{}, taxi_request_seen{}, taxi_request_retired{};

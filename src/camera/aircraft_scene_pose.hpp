@@ -11,6 +11,12 @@ struct AircraftScenePose {
   bool complete = false;
   const char* error = "unavailable";
   BodyPose pose{};
+  // The model Node read, valid in the same update only, and the controller+336
+  // generation handle that resolved it ({control, generation}). The camera
+  // mount (node_mount.hpp) keeps the handle to tell when that Node goes away.
+  std::uint64_t node = 0;
+  std::uint64_t node_control = 0;
+  std::uint32_t node_generation = 0;
   std::uint32_t read_bytes = 0;
 };
 
@@ -149,6 +155,9 @@ inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader
       return result;
   }
   result.pose = candidate;
+  result.node = node;
+  result.node_control = handle[0];
+  result.node_generation = generation;
   result.complete = true;
   result.error = "";
   return result;
@@ -161,7 +170,7 @@ inline bool scene_body_matches_public(const BodyPose& scene, const BodyPose& pub
     return false;
   const Vector3 delta{scene.origin[0] - public_pose.origin[0], scene.origin[1] - public_pose.origin[1],
                       scene.origin[2] - public_pose.origin[2]};
-  // Existing telemetry freshness is <=500ms and taxi cutoff is independent.
+  // Existing telemetry freshness is <=500ms.
   // Allow render/telemetry phase differences, never accept a distant model or
   // incompatible orientation. A failure keeps both render gates closed.
   constexpr double minimum_dot = 0.9659258262890683;  // 15 degrees

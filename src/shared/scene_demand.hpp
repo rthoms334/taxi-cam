@@ -11,7 +11,7 @@ struct SceneDemand {
   bool suspend;
   unsigned stamp_mask;
 };
-// accepted_mask has already passed heartbeat, identity, enabled and cutoff
+// accepted_mask has already passed heartbeat, identity, enabled and degraded
 // checks. Target discovery gates writes, never preparation of requested views.
 inline SceneDemand scene_demand(unsigned accepted_mask,
                                 bool test_scene,
@@ -27,12 +27,12 @@ inline SceneDemand scene_demand(unsigned accepted_mask,
 // moving, loading or stale sessions cannot perform background rendering.
 struct ScenePrewarmReadiness {
   bool connected{}, session_settings{}, enabled{}, matching_identity{}, graphics_ready{};
-  bool cutoff{}, buttons_valid{}, pose_ready{}, on_ground_valid{}, on_ground{};
+  bool buttons_valid{}, pose_ready{}, on_ground_valid{}, on_ground{};
   bool speed_valid{}, diagnostics_active{};
   double speed_knots{};
   bool session_ready{};
   bool eligible() const noexcept {
-    return session_ready && connected && session_settings && enabled && matching_identity && graphics_ready && !cutoff && buttons_valid &&
+    return session_ready && connected && session_settings && enabled && matching_identity && graphics_ready && buttons_valid &&
            pose_ready && on_ground_valid && on_ground && speed_valid && std::isfinite(speed_knots) && speed_knots >= 0 &&
            speed_knots <= 0.5 && !diagnostics_active;
   }

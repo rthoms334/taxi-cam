@@ -62,6 +62,8 @@ std::uint64_t get_aircraft_session_epoch() noexcept;
 struct AircraftSessionReadiness {
   std::uint64_t epoch = 0;
   bool loading = false, ready = false, flow_subscribed = false;
+  // The simulator reported a pause (Pause_EX1), independent of ready.
+  bool paused = false;
   // The telemetry cache was busy; this is the last complete reading (same
   // epoch, at most ReadinessCacheMaxAgeMs old), not a fresh evaluation.
   bool cached = false;
@@ -139,12 +141,6 @@ TaxiButtonSample get_taxi_buttons() noexcept;
 // Permission must be refreshed; false consumes/cancels the current request.
 void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted) noexcept;
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept;
-struct TaxiCutoffStatus {
-  bool inhibited = false;
-  unsigned pending_off = 0;
-  const char* status = "below_speed_limit";
-};
-TaxiCutoffStatus get_taxi_cutoff() noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;

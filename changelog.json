@@ -6,6 +6,11 @@
       "changes": [
         "When camera images are ready but another graphics hook, such as ReShade or an overlay, stops Taxi Cam drawing on the PFDs, the status now names that hook's DLL instead of waiting indefinitely. bridge.log records the same DLL name when the simulator starts, so include it in bug reports.",
         "A single unreadable camera position from the simulator no longer restarts the cameras and makes them find the displays again. Taxi Cam keeps the last good position and restarts only if the simulator keeps reporting unreadable positions for a second.",
+        "Changed: the cameras no longer switch off above 60 knots, and Taxi Cam no longer turns the TAXI buttons off. Turn them off yourself when you no longer need them.",
+        "New: above 60 knots the camera views draw as far as the main view, so the ground stays in view after take-off. While taxiing they keep their shorter 1,000 m draw distance.",
+        "The cameras keep working for the whole flight. Before, they stopped about 10 km after departure.",
+        "When an aircraft recreates one of its cockpit displays mid-flight (the PMDG 777 did this repeatedly, both the inboard and the lower display), Taxi Cam switches to the new display straight away instead of re-detecting it from scratch, and without showing PLEASE WAIT again. This applies to every aircraft.",
+        "The cameras stay fixed to the aircraft at speed on every aircraft. Before, they trailed it slightly and jumped back and forth, also while taxiing; on the iniBuilds A350 the tail camera showed the fin after take-off. Taxi Cam now attaches its cameras to the aircraft in the simulator's scene, so the simulator itself moves them with the aircraft in every frame it draws.",
         "Setup can now turn on automatic startup when MSFS is installed from the Microsoft Store on a drive other than C:. Windows protects the simulator's startup file there, and Setup previously stopped with \"access denied\" and left Taxi Cam to be started from the Start menu. Run Setup again to turn on automatic startup."
       ]
     },

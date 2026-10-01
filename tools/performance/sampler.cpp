@@ -282,12 +282,12 @@ std::string status_json(const ipc::Status& s) {
   std::ostringstream out;
   out << std::setprecision(17);
   out << "{\"heartbeat\":" << s.heartbeat << ",\"graphics_ready\":" << s.graphics_ready << ",\"scene_ready\":" << s.scene_ready
-      << ",\"taxi_mask\":" << s.taxi_mask << ",\"speed_inhibited\":" << s.speed_inhibited << ",\"active_profile\":" << s.active_profile
-      << ",\"detected_profile\":" << s.detected_profile << ",\"effective_rate\":" << s.effective_rate
-      << ",\"useful_rate\":" << s.useful_rate << ",\"rate_limits\":" << s.rate_limits << ",\"parked\":" << s.parked
-      << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch << ",\"identity_sample_ms\":" << s.identity_sample_ms
-      << ",\"aircraft_type\":" << json(s.aircraft_type) << ",\"aircraft_path\":" << json(s.aircraft_path) << ",\"captures\":" << s.captures
-      << ",\"composed\":" << s.composed << ",\"stamps\":" << s.stamps << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
+      << ",\"taxi_mask\":" << s.taxi_mask << ",\"active_profile\":" << s.active_profile << ",\"detected_profile\":" << s.detected_profile
+      << ",\"effective_rate\":" << s.effective_rate << ",\"useful_rate\":" << s.useful_rate << ",\"rate_limits\":" << s.rate_limits
+      << ",\"parked\":" << s.parked << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch
+      << ",\"identity_sample_ms\":" << s.identity_sample_ms << ",\"aircraft_type\":" << json(s.aircraft_type)
+      << ",\"aircraft_path\":" << json(s.aircraft_path) << ",\"captures\":" << s.captures << ",\"composed\":" << s.composed
+      << ",\"stamps\":" << s.stamps << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
       << ",\"hook_failures\":" << s.hook_failures << ",\"speed\":" << s.speed << ",\"exposure\":" << s.exposure
       << ",\"probe_elapsed_ms\":" << s.probe_cpu_ms << ",\"probe_max_elapsed_ms\":" << s.probe_max_ms << ",\"stage_elapsed_ms\":";
   array_json(out, s.stage_ms);
@@ -451,7 +451,7 @@ std::string validate_capture(const IpcSnapshot& snapshot, const Options& options
     return "session_mismatch";
   if (s.taxi_mask != options.mask)
     return "unexpected_taxi_mask";
-  if (!options.mask && settings.enabled && !s.speed_inhibited) {
+  if (!options.mask && settings.enabled) {
     const auto* profile = taxi_camera::profiles::find(settings.profile);
     const bool follow = settings.follow_taxi && profile && profile->taxi_control != taxi_camera::profiles::TaxiControl::manual_only;
     if (follow && (!s.taxi_buttons_valid || !fresh(s.taxi_buttons_sample_ms, GetTickCount64())))

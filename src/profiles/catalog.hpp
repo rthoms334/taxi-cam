@@ -66,7 +66,6 @@ struct AircraftProfile {
   std::array<DisplayRect, MaxDisplaySides> display_regions{{{0, 0, 768, 763}, {0, 0, 768, 763}}};
   CameraPanes camera_panes{{{736, 251}, {736, 496}, {736, 496}}};
   bool higher_id_left = true;
-  double speed_cutoff_knots = 60;
   Composition composition{};
   std::array<unsigned, 6> formats{28};
   std::array<std::string_view, 3> package_markers{"flybywire-aircraft-a380-842", "flybywire_a380_842"};
@@ -152,7 +151,6 @@ inline constexpr AircraftProfile A359 = [] {
                     {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
                     {{{774, 251}, {774, 496}, {774, 496}}},
                     true,
-                    60,
                     A350Etacs,
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
@@ -175,7 +173,6 @@ inline constexpr AircraftProfile A35K = [] {
                     {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
                     {{{774, 251}, {774, 496}, {774, 496}}},
                     true,
-                    60,
                     A350EtacsA35K,
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
@@ -305,7 +302,6 @@ inline constexpr auto make_pmdg_777 =
                           {Pmdg777LowerX, Pmdg777LowerY, Pmdg777LowerX + Pmdg777NdWidth, Pmdg777LowerY + Pmdg777NdHeight}}},
                         Pmdg777Panes,
                         true,
-                        60,
                         Pmdg777Composition,
                         Pmdg777Formats,
                         {marker, "", ""}};
@@ -364,7 +360,7 @@ inline constexpr Composition A346Composition = [] {
   return c;
 }();
 // All three TAXI selectors are two-state XML switches whose setter writes 1/0
-// to the latch. Same idempotent zero write as the A350 for automatic cutoff.
+// to the latch, like the A350.
 inline constexpr AircraftProfile AerosoftA346 = [] {
   AircraftProfile p{8,
                     "aerosoft-a346",

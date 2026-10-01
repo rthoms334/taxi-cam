@@ -11,6 +11,7 @@
 #include "camera_contract.hpp"
 #include "local_memory.hpp"
 #include "manager_inspection.hpp"
+#include "node_mount.hpp"
 #include "owned_entry_inventory.hpp"
 #include "owned_view.hpp"
 #include "pose_source_cache.hpp"
@@ -20,6 +21,7 @@
 #include "scene_session_reset.hpp"
 #include "source_view.hpp"
 #include "view_aa.hpp"
+#include "view_clip.hpp"
 #include "view_creation_wait.hpp"
 #include "view_output.hpp"
 #include "view_readiness_wait.hpp"
@@ -50,6 +52,8 @@ struct Runtime {
   std::atomic<bool> enabled{false};
   std::atomic<bool> suspended{false};
   std::atomic<unsigned> requested_settings{kDefaultCameraRate | (2u << 8)};
+  // True above 60 kt: the views draw as far as the main view (view_clip).
+  std::atomic<bool> follow_main_far{false};
   // Protected by mutex; never used directly by a native engine call.
   MountPair requested_mounts = default_mounts();
   const profiles::AircraftProfile* requested_profile = &profiles::A380;
@@ -60,6 +64,15 @@ struct Runtime {
   RetainedProfileTransition::AllocationEvidence published_allocation{};
   std::uint64_t profile_transition_token = 0;
   bool session_reset_failed = false;
+  // A flight change keeping the owned pair (begin_flight_change); cleared by
+  // its resume or by a full reset. holds/fallbacks count them for bridge.log.
+  bool flight_change_hold = false;
+  std::uint64_t flight_change_holds = 0, flight_change_fallbacks = 0;
+  // Kept pairs resized in place for another aircraft's panes (resize_kept_panes):
+  // updates spent awaiting the new output, completed resizes and refusals.
+  unsigned kept_resize_waits = 0;
+  std::uint64_t kept_resizes = 0, kept_resize_failures = 0;
+  bool kept_resize_refused = false;
   std::atomic<std::uint64_t> scene_session_epoch{0};
   bool retained_restart_requested = false;
   profiles::CameraPanes allocation_panes = profiles::A380.camera_panes;
@@ -81,6 +94,18 @@ struct Runtime {
   double observer_last_ms = 0;
   double observer_max_ms = 0;
   ProbePerformance performance;
+  // Camera far distance (view_clip), observer thread. main_clip is the main
+  // view's camera as read at the last calibration match, valid only for the
+  // aircraft session epoch and reset generation it was read in
+  // (current_main_clip). own_clips holds each feed camera's values as first
+  // observed, so following the main view can be undone; clip_cameras is the
+  // camera they belong to.
+  CameraClip main_clip{};
+  std::uint64_t main_clip_epoch = 0, main_clip_resets = 0;
+  std::array<std::uint64_t, kMaxCameraFeeds> clip_cameras{};
+  std::array<CameraClip, kMaxCameraFeeds> own_clips{}, last_clips{};
+  std::uint64_t clip_writes = 0;
+  const char* clip_error = "";
   // Slowest update since the worker's last take_observer_peak(). peak_local_ms
   // is observer-thread only; peak is guarded by mutex and written only when an
   // update sets a new maximum, so ordinary updates take no lock for it.
@@ -90,6 +115,17 @@ struct Runtime {
   // Proven aircraft controller for the camera pose (observer thread). A session
   // reset from any thread advances pose_source_resets, which retires it.
   PoseSourceCache pose_source;
+  // The aircraft scene read by the last successful capture_pose. Its model
+  // Node is used only in the update that read it (mount_scene_update).
+  AircraftScenePose mount_scene{};
+  std::uint64_t mount_scene_update = 0;
+  // Camera Nodes attached to the aircraft model Node (node_mount.hpp), per
+  // feed (observer thread). Empty when the parent contract did not resolve.
+  std::array<FeedMount, kMaxCameraFeeds> feed_mounts{};
+  std::uint64_t mount_attaches = 0, mount_restores = 0, mount_refused = 0, mount_rehomes = 0;
+  const char* mount_error = "";
+  // Set once with the contract, before the observer is installed.
+  std::string mount_contract_error;
   std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
@@ -170,6 +206,7 @@ Runtime& state() {
 
 // Caller owns the mailbox mutex. No native engine call is made here.
 void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& profile) {
+  runtime.flight_change_hold = false;
   runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
   runtime.reset_requested.store(true, std::memory_order_release);
   runtime.suspended.store(true, std::memory_order_release);
@@ -200,6 +237,50 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
   runtime.published.readiness_deferred = false;
   runtime.published.outputs_matched = false;
   runtime.published.message = "Flight session reset pending; camera creation is disabled until retirement and load readiness.";
+}
+
+void publish_transition(Runtime& runtime, ProbeSnapshot& report);
+
+// Caller owns the mailbox mutex. A new flight, airport or teleport with the same
+// aircraft profile keeps the owned camera pair, closed and revalidated like a
+// profile change, instead of erasing and recreating it: every RenderThreadProc
+// fault (0x3d0ffe4; 19 in September 2026, Store, Steam SU6 and SU7) followed a
+// replacement pair created in the same simulator session, never a first pair.
+// Anything that cannot be kept (no owned pair, another profile, a refused
+// revalidation) takes the full reset.
+void begin_flight_change(Runtime& runtime) {
+  const auto pair = runtime.pair.snapshot();
+  const bool owned = pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2];
+  const auto* profile = runtime.requested_profile;
+  if (owned && profile == runtime.aircraft_profile && runtime.profile_transition.holding() &&
+      runtime.profile_transition.id() == profile->id && !runtime.profile_transition.failed()) {
+    // Already closing and revalidating this pair (a Disconnect during the load).
+    runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
+    runtime.flight_change_hold = true;
+    ++runtime.flight_change_holds;
+    return;
+  }
+  if (!owned || profile != runtime.aircraft_profile || runtime.profile_transition.holding() ||
+      runtime.profile_transition_token == UINT64_MAX) {
+    begin_session_reset(runtime, *profile);
+    return;
+  }
+  runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
+  runtime.suspended.store(true, std::memory_order_release);
+  scene_handoff().stop_scene();
+  runtime.requested_start = false;
+  ++runtime.requested_start_revision;
+  runtime.retained_restart_requested = false;
+  runtime.recovery.stop();
+  const auto cancelled = runtime.pair.cancel_uncreated_request();
+  if (cancelled == ec::EmptyPairCancel::busy)
+    runtime.profile_transition.defer_pair(profile->id);
+  else
+    runtime.profile_transition.begin_published(profile->id, runtime.pair.snapshot(), runtime.published_allocation);
+  runtime.flight_change_hold = true;
+  ++runtime.flight_change_holds;
+  ++runtime.profile_transition_token;
+  publish_transition(runtime, runtime.published);
 }
 
 bool session_work_allowed(const Runtime& runtime) noexcept {
@@ -392,6 +473,111 @@ std::array<std::uint64_t, kMaxCameraFeeds> view_addresses(const std::array<ec::O
     out[i] = views[i].complete && views[i].ready ? views[i].view_address : 0;
   return out;
 }
+// The camera just matched to CameraGet's current view is the main view. Its
+// far distances are kept as numbers only, bound to the current aircraft
+// session epoch and reset generation; the address is not retained. An
+// implausible or unreadable camera clears them, so the views keep their own.
+void note_main_view_clip(Runtime& runtime, std::uint64_t camera_address) noexcept {
+  CameraClip clip;
+  if (!read_camera_clip(camera_address, clip) || !plausible_camera_clip(clip))
+    clip = {};
+  runtime.main_clip = clip;
+  runtime.main_clip_epoch = get_aircraft_session_readiness().epoch;
+  runtime.main_clip_resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+}
+// The main view's far distances read in this aircraft session and reset
+// generation, or zeros (implausible: each view keeps its own far). A new
+// flight, aircraft or session reset needs a fresh calibration match.
+CameraClip current_main_clip(const Runtime& runtime) noexcept {
+  const auto epoch = get_aircraft_session_readiness().epoch;
+  return epoch && epoch == runtime.main_clip_epoch && runtime.main_clip_resets == runtime.pose_source_resets.load(std::memory_order_acquire)
+             ? runtime.main_clip
+             : CameraClip{};
+}
+// The full aircraft walk to the active controller and the scene transform it
+// leads to. False (pose_busy, message set) when no stable active aircraft is
+// found; otherwise user is the controller and scene its read, complete or not.
+bool walk_aircraft_scene(Runtime& runtime,
+                         LocalMemoryReader& objects,
+                         std::uint64_t& user,
+                         AircraftScenePose& scene,
+                         std::string& memory_detail) {
+  user = 0;
+  scene = {};
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+  // One read-only scope for the aircraft walk and the scene pose it leads to:
+  // pages and allocations are proven once and revalidated together at its end.
+  // Nothing is published unless that endpoint validation succeeds.
+  const auto aircraft = inspected(
+      runtime,
+      [&] {
+        auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
+                                                          runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr, &user,
+                                                          runtime.contract.layout);
+        if (found.valid && found.available && user) {
+          objects.reset_budget();
+          scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
+        }
+        return found;
+      },
+      &memory_detail);
+  if (!aircraft.valid || !aircraft.available || !user) {
+    runtime.pose_busy = true;
+    runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
+    if (!memory_detail.empty())
+      runtime.message += " " + memory_detail;
+    return false;
+  }
+  return true;
+}
+// Once this flight session's aircraft controller has matched the public pose,
+// its scene transform places the cameras for the rest of the session without
+// the public match (PoseSourceCache), so the cameras keep working beyond the
+// 10 km local calibration radius in flight. Returns nullopt when no controller
+// is proven for this session or the walk found a different one: the caller
+// then proves it against the public pose.
+std::optional<bool> capture_trusted_pose(Runtime& runtime, std::string& memory_detail) {
+  const auto now = GetTickCount64();
+  const auto epoch = get_aircraft_session_readiness().epoch;
+  const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+  const auto trusted = runtime.pose_source.session_proven(epoch, resets);
+  if (!trusted)
+    return std::nullopt;
+  LocalMemoryReader objects;
+  AircraftScenePose scene;
+  std::uint64_t user = runtime.pose_source.reuse(now, epoch, resets);
+  if (user)
+    scene = inspected(
+        runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
+  if (!user || !scene.complete) {
+    runtime.pose_source.forget();
+    memory_detail.clear();
+    objects.reset_budget();
+    if (!walk_aircraft_scene(runtime, objects, user, scene, memory_detail))
+      return false;
+  }
+  if (user != trusted) {
+    // Not the proven aircraft: only a fresh public match may accept it.
+    runtime.pose_source.forget();
+    memory_detail.clear();
+    return std::nullopt;
+  }
+  if (!scene.complete ||
+      !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses, runtime.schedule.feeds())) {
+    // The proven aircraft mid-update or briefly unreadable: wait, keep the proof.
+    runtime.pose_source.forget();
+    runtime.pose_busy = true;
+    runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") + scene.error;
+    if (!memory_detail.empty())
+      runtime.message += " " + memory_detail;
+    return false;
+  }
+  runtime.pose_source.refresh(user, now, epoch, resets);
+  runtime.mount_scene = scene;
+  runtime.mount_scene_update = runtime.updates;
+  runtime.pose_captured = true;
+  return true;
+}
 // fresh_views: view addresses of the owned pair from the caller's current
 // inspection, indexed like owned_ids. Only calibration reads them, to exclude
 // the retained pair from the pool scan.
@@ -401,6 +587,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
   runtime.stale_local_calibration = false;
   runtime.calibration_pending = false;
   runtime.mounted_poses = {};
+  runtime.mount_scene_update = 0;
   std::string memory_detail;
   auto body = sample_body_pose(GetTickCount64());
   if (!body.valid && std::strcmp(body.error, "camera_world_values") == 0) {
@@ -424,6 +611,8 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
     runtime.message = std::string("Aircraft telemetry temporarily unavailable; render gates remain closed: ") + body.error;
     return false;
   }
+  if (const auto trusted = capture_trusted_pose(runtime, memory_detail))
+    return *trusted;
   if (!body.valid && outside_local_calibration_radius(body.error)) {
     // Departure local lock is still held after a long sector. Clear it so the
     // caller can recalibrate at arrival instead of latching pose_invalid.
@@ -467,6 +656,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
         matched = true;
         matched_fov = camera.fov;
         aircraft_camera = "matched";
+        note_main_view_clip(runtime, camera.camera_address);
       }
     }
     ViewMatchScan scan;
@@ -500,6 +690,7 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
           position = translation;
           matched_fov = chosen.fov;
           matched = true;
+          note_main_view_clip(runtime, chosen.camera_address);
         }
       }
     }
@@ -554,30 +745,8 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
     }
   }
   if (!user) {
-    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-    // One read-only scope for the aircraft walk and the scene pose it leads to:
-    // pages and allocations are proven once and revalidated together at its end.
-    // Nothing is published unless that endpoint validation succeeds.
-    const auto aircraft = inspected(
-        runtime,
-        [&] {
-          auto found = discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
-                                                            runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr,
-                                                            &user, runtime.contract.layout);
-          if (found.valid && found.available && user) {
-            objects.reset_budget();
-            scene = inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout);
-          }
-          return found;
-        },
-        &memory_detail);
-    if (!aircraft.valid || !aircraft.available || !user) {
-      runtime.pose_busy = true;
-      runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
-      if (!memory_detail.empty())
-        runtime.message += " " + memory_detail;
+    if (!walk_aircraft_scene(runtime, objects, user, scene, memory_detail))
       return false;
-    }
     if (scene.complete && scene_body_matches_public(scene.pose, body.pose))
       runtime.pose_source.prove(user, now, epoch, resets);
   }
@@ -591,6 +760,8 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
       runtime.message += " " + memory_detail;
     return false;
   }
+  runtime.mount_scene = scene;
+  runtime.mount_scene_update = runtime.updates;
   runtime.pose_captured = true;
   return true;
 }
@@ -852,7 +1023,36 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
   return true;
 }
 
-void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose) noexcept {
+// Before update_view rebuilds the frustum: the main view's far distances above
+// 60 kt, otherwise the camera's own. A refusal leaves the camera as it was;
+// the pose still applies.
+void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsigned feed) noexcept {
+  if (feed >= kMaxCameraFeeds)
+    return;
+  if (runtime.clip_cameras[feed] != view.camera_address) {
+    CameraClip own;
+    if (!read_camera_clip(view.camera_address, own) || !plausible_camera_clip(own)) {
+      runtime.clip_error = "clip_implausible_camera";
+      return;
+    }
+    runtime.clip_cameras[feed] = view.camera_address;
+    runtime.own_clips[feed] = own;
+  }
+  CameraClip target;
+  if (!camera_far_target(runtime.own_clips[feed], current_main_clip(runtime), runtime.follow_main_far.load(std::memory_order_acquire),
+                         target)) {
+    runtime.clip_error = "clip_implausible_target";
+    return;
+  }
+  const auto clip = apply_camera_far(view.camera_address, target);
+  runtime.last_clips[feed] = clip.complete ? clip.after : clip.before;
+  if (clip.complete && clip.write_attempted)
+    ++runtime.clip_writes;
+  if (!clip.complete)
+    runtime.clip_error = clip.error;
+}
+
+void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose, unsigned feed) noexcept {
   if (!session_work_allowed(runtime))
     return;
   using SetVector = void (*)(void*, const double*);
@@ -860,7 +1060,218 @@ void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const Mount
   function<SetVector>(runtime, runtime.contract.functions.set_up)(reinterpret_cast<void*>(view.camera_address), pose.up.data());
   function<SetVector>(runtime, runtime.contract.functions.set_target)(reinterpret_cast<void*>(view.camera_address), pose.target.data());
   function<void (*)(void*, float)>(runtime, runtime.contract.functions.set_fov)(reinterpret_cast<void*>(view.camera_address), pose.fov);
+  apply_camera_clip(runtime, view, feed);
   function<void (*)(void*)>(runtime, runtime.contract.functions.update_view)(reinterpret_cast<void*>(view.view_address));
+}
+
+// Camera mount on the aircraft (node_mount.hpp). Engine calls, in the camera
+// manager update like the engine's own camera setup, which attaches each new
+// camera Node to the world root through the same attach_child:
+//   attach_child(parent Node*, const NodeHandle* child, bool keep_world)
+//   detach_node(Node*, bool keep_children_attached, bool keep_world)
+// Taxi Cam's camera Nodes have no children; neither call keeps the world
+// transform, because the next set_position stores the mount relative to the
+// new parent.
+using AttachChild = void (*)(void*, const NodeHandle*, bool);
+using DetachNode = void (*)(void*, bool, bool);
+
+bool parenting_available(const Runtime& runtime) noexcept {
+  return runtime.contract.functions.attach_child && runtime.contract.functions.detach_node;
+}
+
+enum class MountState { none, attached, lost };
+
+enum class GiveBack { returned, unreferenced, held };
+
+// Puts a mounted camera Node back under the Node it was created under (the
+// world root), with the camera Node's own generation handle kept at attach.
+//   returned: it was moved back (detach + attach while the aircraft Node is
+//     alive and lists it; attach alone when it still names a destroyed aircraft
+//     Node, which nothing alive lists it from: attach rewrites only the camera
+//     Node's and the root's links, never the destroyed Node's).
+//   unreferenced: the engine already moved it under the root, or the aircraft
+//     Node is alive but no longer lists it; nothing to do.
+//   held: it cannot be moved safely; the mount is marked lost.
+// returned and unreferenced clear the mount.
+GiveBack give_back(Runtime& runtime, FeedMount& mount) noexcept {
+  if (!mount.node || !parenting_available(runtime))
+    return GiveBack::unreferenced;
+  LocalMemoryReader reader;
+  const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
+  const auto camera = read_node_links(reader, mount.node, node_vtable);
+  const auto root = read_node_links(reader, mount.root, node_vtable);
+  const bool alive = handle_alive(reader, mount.parent_handle, mount.parent);
+  const bool own = handle_alive(reader, mount.node_handle, mount.node);
+  const auto refuse = [&](const char* error) {
+    mount.lost = true;
+    runtime.mount_error = error;
+    return GiveBack::held;
+  };
+  if (!own || !camera.valid)
+    return refuse("mount_camera_unreadable");
+  if (camera.parent == mount.root && listed_child(reader, mount.root, mount.node)) {
+    mount = {};
+    return GiveBack::unreferenced;
+  }
+  if (!root.valid || root.world < 0)
+    return refuse("mount_root_unverified");
+  const auto node = mount.node, home = mount.root;
+  const auto handle = mount.node_handle;
+  if (alive && camera.parent == mount.parent) {
+    if (!listed_child(reader, mount.parent, node)) {
+      mount = {};
+      return GiveBack::unreferenced;
+    }
+    function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(node), true, false);
+  } else if (alive || camera.parent != mount.parent) {
+    return refuse("mount_parent_changed");
+  }
+  function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(home), &handle, false);
+  if (!listed_child(reader, home, node))
+    return refuse("mount_return_unconfirmed");
+  mount = {};
+  return GiveBack::returned;
+}
+
+// Feed's mount for this view's Node, rechecked: the aircraft Node is still the
+// one its generation handle names and the camera Node is still its child. When
+// the aircraft Node went away (a flight ended with the cameras on), the camera
+// Node goes back to the world root and the caller mounts it on the current
+// aircraft. A lost camera is never placed again, because set_position walks the
+// parent chain the camera Node names.
+MountState current_mount(Runtime& runtime, unsigned feed, const ec::OwnedViewSnapshot& view) noexcept {
+  auto& mount = runtime.feed_mounts[feed];
+  if (!mount.node || mount.node != view.node_address)
+    return MountState::none;
+  if (mount.lost)
+    return MountState::lost;
+  LocalMemoryReader reader;
+  std::uint64_t parent = 0;
+  if (handle_alive(reader, mount.parent_handle, mount.parent) && reader.read(mount.node + kNodeParent, &parent, sizeof(parent)) &&
+      parent == mount.parent)
+    return MountState::attached;
+  if (give_back(runtime, mount) == GiveBack::held)
+    return MountState::lost;
+  ++runtime.mount_rehomes;
+  return MountState::none;
+}
+
+// Every mount goes back to the world root while the simulator is paused (the
+// pause menu every flight end and quit goes through) or the flight is not
+// ready: once the simulator unloads the aircraft the camera-manager update has
+// already stopped, so this is the last update in which it can be done. The next
+// pulse after the pause mounts the cameras again.
+void return_all_mounts(Runtime& runtime) noexcept {
+  for (auto& mount : runtime.feed_mounts)
+    if (mount.node && !mount.lost && give_back(runtime, mount) == GiveBack::returned)
+      ++runtime.mount_restores;
+}
+
+// Moves feed's camera Node from the Node it was created under (the world root)
+// to the aircraft model Node read in this same update. Refused, with the camera
+// left where it was, unless both Nodes are verified scene Nodes in the same
+// world, the camera Node is listed by its current parent and has no children,
+// and both generation handles still resolve.
+bool mount_on_aircraft(Runtime& runtime,
+                       unsigned feed,
+                       ec::EntryId entry,
+                       const ec::OwnedViewSnapshot& view,
+                       const AircraftScenePose& scene) noexcept {
+  auto& mount = runtime.feed_mounts[feed];
+  if (mount.node && mount.node != view.node_address)
+    mount = {};  // A different entry; the previous one was handed back before its erase.
+  const auto refuse = [&](const char* error) {
+    ++runtime.mount_refused;
+    runtime.mount_error = error;
+    return false;
+  };
+  if (!parenting_available(runtime) || !scene.complete || !scene.node || !scene.node_control)
+    return refuse("mount_unavailable");
+  LocalMemoryReader reader;
+  const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
+  const auto camera = read_node_links(reader, view.node_address, node_vtable);
+  const auto aircraft = read_node_links(reader, scene.node, node_vtable);
+  if (!camera.valid || !aircraft.valid)
+    return refuse("mount_node_unreadable");
+  if (camera.parent == scene.node || camera.first_child || camera.world < 0 || camera.world != aircraft.world ||
+      view.node_address == scene.node)
+    return refuse("mount_node_state");
+  const auto root = read_node_links(reader, camera.parent, node_vtable);
+  if (!root.valid || !listed_child(reader, camera.parent, view.node_address))
+    return refuse("mount_root_unverified");
+  NodeHandle node_handle, aircraft_handle{scene.node_control, scene.node_generation, 0};
+  if (!read_node_handle(reader, view.view_address, 104, view.node_address, node_handle) ||
+      !handle_alive(reader, aircraft_handle, scene.node))
+    return refuse("mount_handle");
+  function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(view.node_address), true, false);
+  function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(scene.node), &node_handle, false);
+  ++runtime.mount_attaches;
+  mount = {entry, view.node_address, scene.node, camera.parent, aircraft_handle, node_handle, false};
+  if (!listed_child(reader, scene.node, view.node_address)) {
+    mount.lost = true;
+    return refuse("mount_attach_unconfirmed");
+  }
+  return true;
+}
+
+// Before entry id is erased, its camera Node goes back under the Node it was
+// created under, the state the engine's erase has always seen. False holds the
+// erase: the aircraft Node is alive and still lists the camera Node but it could
+// not be handed back (erasing it then would leave the aircraft listing a
+// destroyed Node). Otherwise nothing alive refers to it and the erase proceeds.
+bool restore_mount(Runtime& runtime, ec::EntryId id) noexcept {
+  bool proceed = true;
+  for (auto& mount : runtime.feed_mounts) {
+    if (!mount.node || mount.entry != id)
+      continue;
+    const auto outcome = give_back(runtime, mount);
+    if (outcome == GiveBack::returned) {
+      ++runtime.mount_restores;
+      continue;
+    }
+    if (outcome == GiveBack::unreferenced)
+      continue;
+    LocalMemoryReader reader;
+    if (handle_alive(reader, mount.parent_handle, mount.parent) && listed_child(reader, mount.parent, mount.node)) {
+      runtime.mount_error = "mount_restore_held";
+      proceed = false;
+    } else {
+      mount = {};
+    }
+  }
+  return proceed;
+}
+
+// Mounting needs the parent contract and a running, ready flight session.
+bool mounting_allowed(const Runtime& runtime) noexcept {
+  const auto session = get_aircraft_session_readiness();
+  return parenting_available(runtime) && !session.paused && !session.loading && session.ready && session_work_allowed(runtime);
+}
+
+// Places the feeds this update opens on the pose capture_pose read in it. A
+// feed's camera Node is mounted on that aircraft's model Node on its first
+// pulse; from then on its mount is stored relative to the aircraft and aimed
+// far ahead (far_aim), so the engine carries it with the aircraft. A lost
+// mount, or one on another aircraft's Node, is never placed.
+void place_feeds(Runtime& runtime,
+                 const std::array<ec::EntryId, kMaxCameraFeeds>& ids,
+                 const std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds>& views,
+                 const std::array<bool, kMaxCameraFeeds>& desired) noexcept {
+  const auto& scene = runtime.mount_scene;
+  const bool mounting = mounting_allowed(runtime) && runtime.mount_scene_update == runtime.updates && scene.complete;
+  for (unsigned i = 0; i < desired.size(); ++i) {
+    if (!desired[i])
+      continue;
+    const auto& mount = runtime.feed_mounts[i];
+    auto mounted = mounting                                            ? current_mount(runtime, i, views[i])
+                   : mount.node && mount.node == views[i].node_address ? MountState::lost
+                                                                       : MountState::none;
+    if (mounted == MountState::none && mounting && mount_on_aircraft(runtime, i, ids[i], views[i], scene))
+      mounted = MountState::attached;
+    if (mounted == MountState::lost || (mounted == MountState::attached && runtime.feed_mounts[i].parent != scene.node))
+      continue;
+    apply_pose(runtime, views[i], mounted == MountState::attached ? far_aim(runtime.mounted_poses[i]) : runtime.mounted_poses[i], i);
+  }
 }
 
 void apply_gates(Runtime& runtime,
@@ -898,6 +1309,69 @@ void apply_gates(Runtime& runtime,
 
 // Runs only in the verified observer phase. Reuses the existing gate operation;
 // profile changes never call the native erase, create, resize or pose setters.
+enum class ResizeOutcome { failed, output_pending, complete };
+ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true);
+
+// Feeds a profile renders: a split bottom display has a camera per half.
+unsigned profile_feeds(const profiles::AircraftProfile& profile) noexcept {
+  return profile.composition.split_bottom != 0 ? 3u : 2u;
+}
+
+enum class KeptPanes { ready, pending, failed };
+
+// A kept pair taken to an aircraft with other camera panes: each feed that
+// aircraft renders is resized in place, gate closed, by the closed-gate resize
+// a new view gets right after creation (dimensions, projection, then the
+// engine's output routine replaces the output at the new size). Repeats are
+// idempotent: written dimensions return unchanged and only the output is
+// awaited, for at most ViewResizeWarmup::MaximumOutputWaits updates. A feed
+// the aircraft does not render (the third, after the PMDG 777) keeps its size
+// and stays closed. Session work must be allowed (the resume was requested).
+KeptPanes resize_kept_panes(Runtime& runtime, const ec::Snapshot& pair) {
+  const auto& profile = *runtime.requested_profile;
+  const unsigned feeds = profile_feeds(profile);
+  bool differs = false;
+  for (unsigned i = 0; i < feeds; ++i)
+    differs = differs || (pair.owned_ids[i] && runtime.allocation_panes[i] != profile.camera_panes[i]);
+  if (!differs && !runtime.kept_resize_waits)
+    return KeptPanes::ready;
+  if (!session_work_allowed(runtime))
+    return KeptPanes::pending;
+  for (unsigned i = 0; i < feeds; ++i) {
+    if (!pair.owned_ids[i])
+      continue;
+    ViewDimensions desired{};
+    if (!plan_view_resize(runtime.resized_dimensions[i], i, desired, profile.camera_panes)) {
+      runtime.stage_error = "The kept camera cannot be planned for the new aircraft's pane.";
+      return KeptPanes::failed;
+    }
+    runtime.allocation_panes[i] = profile.camera_panes[i];
+    runtime.resized_dimensions[i] = desired;
+  }
+  KeptPanes overall = KeptPanes::ready;
+  for (unsigned i = 0; i < feeds; ++i) {
+    if (!pair.owned_ids[i])
+      continue;
+    const auto part = resize_closed_entry(runtime, pair.owned_ids[i], i, true);
+    if (part == ResizeOutcome::failed)
+      return KeptPanes::failed;
+    if (part == ResizeOutcome::output_pending)
+      overall = KeptPanes::pending;
+  }
+  if (overall == KeptPanes::ready) {
+    if (runtime.kept_resize_waits)
+      ++runtime.kept_resizes;
+    runtime.kept_resize_waits = 0;
+    return overall;
+  }
+  if (++runtime.kept_resize_waits > ViewResizeWarmup::MaximumOutputWaits) {
+    runtime.stage_error = "The kept camera's new output did not appear within the bounded wait.";
+    runtime.kept_resize_waits = 0;
+    return KeptPanes::failed;
+  }
+  return overall;
+}
+
 void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& report) {
   RetainedProfileTransition transition;
   std::uint64_t token, start_revision;
@@ -970,12 +1444,32 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   // A prior ready acknowledgement never authorizes resume after a failed fresh
   // manager inspection. Missing telemetry/calibration keeps this hold active.
   const auto resume_epoch = get_aircraft_session_epoch();
-  const bool pose_ready = validated && resume_requested && session_work_allowed(runtime) && aircraft_matches_profile() &&
+  // Another aircraft's panes: resize the kept views before they resume.
+  auto panes = KeptPanes::ready;
+  if (validated && resume_requested && session_work_allowed(runtime) && !transition.failed()) {
+    const auto before = runtime.resized_dimensions;
+    panes = timed(runtime, ProbeStage::lifecycle, [&] { return resize_kept_panes(runtime, pair); });
+    if (panes == KeptPanes::failed) {
+      ++runtime.kept_resize_failures;
+      runtime.kept_resize_refused = true;
+      transition.refuse();
+      validated = false;
+    } else if (panes == KeptPanes::pending || runtime.resized_dimensions != before) {
+      transition.rebase(runtime.resized_dimensions);
+      if (panes == KeptPanes::ready)
+        transition.resized();
+    }
+  }
+  if (panes == KeptPanes::ready && validated)
+    transition.resized();
+  const bool pose_ready = validated && panes == KeptPanes::ready && resume_requested && session_work_allowed(runtime) &&
+                          aircraft_matches_profile() &&
                           timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime, retained_views); });
   report.outputs_matched = false;
-  report.pose_waiting = resume_requested && validated && !pose_ready;
+  report.pose_waiting = resume_requested && validated && panes == KeptPanes::ready && !pose_ready;
   report.message = transition.failed() ? "Aircraft change paused: retained camera identity could not be validated. Restart MSFS to resume."
                    : !validated        ? "Waiting for complete retained camera views before changing aircraft profile."
+                   : panes == KeptPanes::pending     ? "Resizing the kept cameras for the new aircraft's displays."
                    : resume_requested && !pose_ready ? "Retained cameras are closed; waiting for fresh aircraft pose calibration."
                                                      : "Camera pair retained with gates closed; ready for the new aircraft profile.";
   const std::lock_guard lock(runtime.mutex);
@@ -1164,7 +1658,7 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
       runtime.creation_valid = false;
       return id;
     }
-    apply_pose(runtime, view, runtime.mounted_poses[runtime.creations - 1]);
+    apply_pose(runtime, view, runtime.mounted_poses[runtime.creations - 1], runtime.creations - 1);
     ViewDimensions desired{};
     if (!plan_view_resize(view.dimensions, runtime.creations - 1, desired, runtime.allocation_panes)) {
       runtime.creation_valid = false;
@@ -1178,13 +1672,11 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
   return id;
 }
 
-enum class ResizeOutcome { failed, output_pending, complete };
-
 // Both paths end with the same proof: the closed view carries the requested
 // pane in all three size pairs AND its output chain resolves to a resource
 // whose Bitmap has that pane. The output routine's return address alone never
 // established an allocation; a view without that proof may not open a gate.
-ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true) {
+ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output) {
   if (!session_work_allowed(runtime))
     return ResizeOutcome::failed;
   const auto view = inspect_entry(runtime, id);
@@ -1267,6 +1759,9 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   const auto readiness = get_aircraft_session_readiness();
   if (action != ViewRetirement::Action::erase || readiness.loading ||
       (runtime.reset_requested.load(std::memory_order_acquire) && !readiness.ready))
+    return false;
+  // A camera Node mounted on the aircraft goes back under its world root first.
+  if (!restore_mount(runtime, id))
     return false;
   if (!runtime.retired_views.retain(runtime.renderer, view.view_address))
     return false;
@@ -1430,11 +1925,11 @@ void park_unready_session(Runtime& runtime, void* manager, ProbeSnapshot& report
 bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
   const auto readiness = get_aircraft_session_readiness();
   const std::lock_guard lock(runtime.mutex);
-  if (runtime.session_reset.holding())
+  if (runtime.session_reset.holding() || runtime.flight_change_hold)
     return true;
   if (!readiness.loading && !RetainedProfileTransition::session_changed(pair, runtime.scene_session_epoch, readiness.epoch))
     return false;
-  begin_session_reset(runtime, *runtime.requested_profile);
+  begin_flight_change(runtime);
   return true;
 }
 // Observer thread. Measures the whole update after its own work, including
@@ -1487,6 +1982,11 @@ void observer(void* manager) noexcept {
   ScopedLocalMemoryMetrics memory_scope(memory_metrics);
   try {
     ++runtime.updates;
+    // Mounts come off the aircraft while paused or not in a ready flight, every
+    // update, so quitting or ending a flight never unloads an aircraft that
+    // still holds a camera Node (return_all_mounts).
+    if (parenting_available(runtime) && !mounting_allowed(runtime))
+      return_all_mounts(runtime);
     const auto before = runtime.pair.snapshot();
     const auto now = GetTickCount64();
     const auto settings = runtime.requested_settings.load(std::memory_order_acquire);
@@ -1502,9 +2002,16 @@ void observer(void* manager) noexcept {
       const std::lock_guard lock(runtime.mutex);
       if (!before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !before.creation_pending)
         runtime.aircraft_profile = runtime.requested_profile;
-      if (!runtime.session_reset.holding() &&
-          (readiness.loading || RetainedProfileTransition::session_changed(before, runtime.scene_session_epoch, readiness.epoch)))
+      if ((runtime.flight_change_hold || runtime.kept_resize_refused) && runtime.profile_transition.failed()) {
+        // The kept pair could not be revalidated or resized: the full reset
+        // retires it and creates a new one.
+        ++runtime.flight_change_fallbacks;
+        runtime.kept_resize_refused = false;
         begin_session_reset(runtime, *runtime.requested_profile);
+      }
+      if (!runtime.session_reset.holding() && !runtime.flight_change_hold &&
+          (readiness.loading || RetainedProfileTransition::session_changed(before, runtime.scene_session_epoch, readiness.epoch)))
+        begin_flight_change(runtime);
       session_hold = runtime.session_reset.holding();
       profile_hold = runtime.profile_transition.holding() &&
                      (before.owned_ids[0] || before.owned_ids[1] || before.owned_ids[2] || runtime.profile_transition.awaiting_pair());
@@ -1615,6 +2122,9 @@ void observer(void* manager) noexcept {
       return timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, nullptr, &manager_inspection); });
     };
     const auto start_body = requested_start ? sample_body_pose(now) : BodyPoseSnapshot{};
+    // A session-proven aircraft needs no local calibration (capture_trusted_pose).
+    const bool session_pose_proven = runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
+                                                                        runtime.pose_source_resets.load(std::memory_order_acquire)) != 0;
     if (session_hold) {
       service_session_reset(runtime, manager, report);
     } else if (profile_hold) {
@@ -1624,10 +2134,11 @@ void observer(void* manager) noexcept {
     } else if (park_initial_scene(suspended, before.owned_ids[0] || before.owned_ids[1] || before.owned_ids[2])) {
       // OFF also parks an unfinished background creation request. Keep its
       // mailbox request for an explicit resume; never create behind a lost
-      // heartbeat, cutoff or expired prewarm budget, and never erase a pair.
+      // heartbeat or expired prewarm budget, and never erase a pair.
       report.pair = before;
       report.message = "Initial camera creation parked until render demand resumes.";
-    } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !start_body.valid && !start_body.calibration_required) {
+    } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !start_body.valid &&
+               !start_body.calibration_required && !(session_pose_proven && outside_local_calibration_radius(start_body.error))) {
       // Public startup is asynchronous. Do not walk private manager, pool or
       // aircraft graphs repeatedly while its first telemetry is still pending.
       // A stale local lock after relocation is cleared so the next tick can
@@ -2000,11 +2511,7 @@ void observer(void* manager) noexcept {
             // Position changes happen only inside the validated observer phase,
             // before the original manager update can consume a newly opened gate.
             if (needs_pose)
-              timed(runtime, ProbeStage::pose, [&] {
-                for (unsigned i = 0; i < desired.size(); ++i)
-                  if (desired[i])
-                    apply_pose(runtime, views[i], runtime.mounted_poses[i]);
-              });
+              timed(runtime, ProbeStage::pose, [&] { place_feeds(runtime, pair.owned_ids, views, desired); });
             if (needs_pose && runtime.retained_recalibration) {
               // The retained pair now carries the arrival pose. Reopen its scene
               // like a retained profile resume; the next inspection republishes.
@@ -2228,6 +2735,32 @@ void observer(void* manager) noexcept {
       runtime.published.performance = runtime.performance;
       runtime.published.gates = runtime.gates;
       runtime.published.activation_counts = runtime.activation_counts;
+      for (unsigned i = 0; i < kMaxCameraFeeds; ++i) {
+        const auto& clip = runtime.last_clips[i];
+        runtime.published.draw_clip[i] = {clip.near_plane, clip.far_plane, clip.default_far};
+      }
+      const auto main_clip = current_main_clip(runtime);
+      runtime.published.main_clip = {main_clip.near_plane, main_clip.far_plane, main_clip.default_far};
+      runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
+      for (unsigned i = 0; i < kMaxCameraFeeds; ++i) {
+        const auto& mount = runtime.feed_mounts[i];
+        runtime.published.mount_state[i] = !mount.node ? 0 : mount.lost ? 2 : 1;
+      }
+      runtime.published.mount_attaches = runtime.mount_attaches;
+      runtime.published.mount_restores = runtime.mount_restores;
+      runtime.published.mount_rehomes = runtime.mount_rehomes;
+      runtime.published.mount_refused = runtime.mount_refused;
+      runtime.published.mount_error = runtime.mount_error;
+      runtime.published.mount_available = parenting_available(runtime);
+      runtime.published.flight_change_holds = runtime.flight_change_holds;
+      runtime.published.flight_change_fallbacks = runtime.flight_change_fallbacks;
+      runtime.published.sim_paused = get_aircraft_session_readiness().paused;
+      runtime.published.mount_contract_error = runtime.mount_contract_error;
+      runtime.published.pose_session_proven =
+          runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
+                                             runtime.pose_source_resets.load(std::memory_order_acquire)) != 0;
+      runtime.published.draw_clip_writes = runtime.clip_writes;
+      runtime.published.draw_clip_error = runtime.clip_error;
     } catch (...) {
       runtime.pair.request_disable();
     }
@@ -2264,6 +2797,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
         return;
       }
       runtime.contract = contract.contract;
+      runtime.mount_contract_error = contract.parent_error;
       const auto disable_mask = inspect_activation_disable_mask(reader, runtime.image, runtime.contract.layout);
       if (!disable_mask.valid)
         throw std::runtime_error("Native activation-mask verification refused: " + disable_mask.error);
@@ -2336,9 +2870,12 @@ void request_scene_test(bool reuse_calibration) noexcept {
       runtime.published.message = "Retained transition is not ready; no creation or removal requested.";
       return;
     }
-    if (retained)
+    if (retained) {
       runtime.retained_restart_requested = true;
-    else {
+      // A kept pair resumes in the new flight's session.
+      runtime.scene_session_epoch = readiness.epoch;
+      runtime.flight_change_hold = false;
+    } else {
       runtime.pair.request_disable();
       runtime.profile_transition.consume();
       runtime.scene_session_epoch = readiness.epoch;
@@ -2445,6 +2982,10 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
 void suspend_scene_rendering(bool suspended) noexcept {
   auto& runtime = state();
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
+}
+
+void request_scene_main_far(bool follow) noexcept {
+  state().follow_main_far.store(follow, std::memory_order_release);
 }
 
 void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {

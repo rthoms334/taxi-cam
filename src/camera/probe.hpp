@@ -90,6 +90,31 @@ struct ProbeSnapshot {
   // Last native activation requests, not a measured rendered-frame rate.
   std::array<bool, kMaxCameraFeeds> gates{};
   std::array<std::uint64_t, kMaxCameraFeeds> activation_counts{};
+  // Camera far distance (view_clip): near plane, culling far and default far
+  // in metres, per feed as last applied and for the main view as last matched
+  // (zeros until known). writes counts changed cameras; error is the last
+  // refusal ("" when none).
+  std::array<std::array<float, 3>, kMaxCameraFeeds> draw_clip{};
+  std::array<float, 3> main_clip{};
+  bool follow_main_far = false;
+  // Camera mount on the aircraft Node (node_mount.hpp): whether this image's
+  // parent contract resolved (and why not), per-feed state (0 world placement,
+  // 1 attached, 2 lost), attach/restore/refusal counts, cameras taken back to
+  // the world root after their aircraft Node went away (rehomes), and the last
+  // refusal.
+  bool mount_available = false, sim_paused = false;
+  // Flight changes that kept the camera pair, and kept pairs that failed
+  // revalidation and took the full reset instead (begin_flight_change).
+  std::uint64_t flight_change_holds = 0, flight_change_fallbacks = 0;
+  std::string mount_contract_error;
+  std::array<std::uint8_t, kMaxCameraFeeds> mount_state{};
+  std::uint64_t mount_attaches = 0, mount_restores = 0, mount_refused = 0, mount_rehomes = 0;
+  const char* mount_error = "";
+  // This flight session's aircraft passed its public pose match; its scene
+  // transform places the cameras without the local calibration from then on.
+  bool pose_session_proven = false;
+  std::uint64_t draw_clip_writes = 0;
+  const char* draw_clip_error = "";
   std::uint32_t thread_id = 0;
   std::uint32_t free_views = 0;
   std::uint64_t retirement_deferrals = 0;
@@ -155,6 +180,10 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
 void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept;
+// Atomic only, consumed by the observer before each pose refresh. True gives
+// Taxi Cam's views the main view's far distances (above 60 kt, so they keep
+// drawing the ground after take-off); false restores each camera's own far.
+void request_scene_main_far(bool follow) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;
