@@ -261,6 +261,42 @@ try {
     if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-*.tmp').Count) { throw 'Encryption-mismatched backup left temporary XML.' }
 }
 
+# Application Protected folders (Store app data on a secondary drive) encrypt
+# new files on creation, while File.Encrypt is refused without a personal EFS
+# certificate. An inherited replacement must commit without calling Encrypt;
+# a replacement that stays unencrypted must still fall back unchanged.
+foreach ($inherits in @($true, $false)) {
+    [IO.File]::WriteAllText($failurePath, $failureContents)
+    & {
+        $helper = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'installer/exe_xml.ps1')
+        foreach ($argument in @('$absolute','$temporary','$backup')) {
+            $helper = $helper.Replace(('[IO.File]::GetAttributes(' + $argument + ')'), ('(Get-FixtureAttributes ' + $argument + ')'))
+        }
+        $helper = $helper.Replace('[IO.File]::Encrypt($temporary)', 'Set-FixtureEncryption $temporary')
+        . ([scriptblock]::Create($helper))
+        function Get-FixtureAttributes([string]$Path) {
+            $attributes = [IO.File]::GetAttributes($Path)
+            if ($Path -eq $failurePath -or $inherits) { return $attributes -bor [IO.FileAttributes]::Encrypted }
+            return $attributes
+        }
+        function Set-FixtureEncryption([string]$Path) { throw [UnauthorizedAccessException]::new("Access to the path '$Path' is denied.") }
+        $failure = $null; $writtenHash = ''; $backup = $null
+        try { $backup = Save-TaxiLaunchXml $failureDocument $failurePath $failureHash ([ref]$writtenHash) } catch { $failure = $_ }
+        if ($inherits) {
+            if ($failure) { throw "Inherited Application Protected encryption did not commit: $($failure.Exception.Message)" }
+            if ($writtenHash -ne (Get-FileHash -LiteralPath $failurePath).Hash) { throw 'Inherited encryption commit reported the wrong XML hash.' }
+            if ((Get-FileHash -LiteralPath $backup).Hash -ne $failureHash) { throw 'Inherited encryption commit did not preserve the original backup.' }
+            Remove-Item -LiteralPath $backup
+        } else {
+            if (-not $failure -or $failure.Exception.Data['TaxiStartupOperation'] -ne 'Encrypt startup replacement') { throw 'Refused replacement encryption did not report its operation.' }
+            if ($failure.Exception.Data['TaxiStartupUnsafe'] -or $failure.Exception.Data['TaxiStartupConflict']) { throw 'Refused replacement encryption blocked safe manual startup.' }
+            if ($writtenHash -or (Get-FileHash -LiteralPath $failurePath).Hash -ne $failureHash) { throw 'Refused replacement encryption changed the original XML.' }
+            if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-backup-*').Count) { throw 'Refused replacement encryption left a backup.' }
+        }
+        if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-*.tmp').Count) { throw 'Application Protected fixture left temporary XML.' }
+    }
+}
+
 # A real access-denied replacement, after a verified backup exists, is still safe
 # to downgrade only when the original bytes and encryption remain unchanged.
 [IO.File]::WriteAllText($failurePath, $failureContents)
