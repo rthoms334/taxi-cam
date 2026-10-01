@@ -95,11 +95,11 @@ struct AircraftProfile {
   unsigned sides = 2;
   // Simulator frames the cameras' mount pose is led by (PoseLead): the
   // aircraft's model transform read at the camera-manager update lags the
-  // rendered frame on some aircraft. Live 2026-10-01 the iniBuilds A350's
-  // cameras trailed their mounts in flight (the tail view showed the fin);
-  // the PMDG 777 did not visibly. 0 places the cameras on the transform as
-  // read.
-  double pose_lead_frames = 0;
+  // rendered frame. Live 2026-10-01 the cameras trailed their mounts to a
+  // degree on every aircraft the user flew, most visibly the iniBuilds A350's
+  // fin-mounted tail camera on take-off. 0 places the cameras on the
+  // transform as read.
+  double pose_lead_frames = 1;
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -162,7 +162,6 @@ inline constexpr AircraftProfile A359 = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
-  p.pose_lead_frames = 1;
   return p;
 }();
 inline constexpr AircraftProfile A35K = [] {
@@ -185,7 +184,6 @@ inline constexpr AircraftProfile A35K = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
-  p.pose_lead_frames = 1;
   return p;
 }();
 // iniBuilds A380 display layout started from FBW. Mounts and guide defaults

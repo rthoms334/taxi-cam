@@ -5,12 +5,13 @@
 
 namespace taxi_camera::native_camera {
 
-// On some aircraft the model's scene transform read during the camera-manager
-// update lags the frame the camera views render: live 2026-10-01 in flight
+// The aircraft model's scene transform read during the camera-manager update
+// lags the frame the camera views render: live 2026-10-01 in flight
 // (iniBuilds A350, about 240 kt) the cameras sat metres behind their mounts,
 // the tail view showed the fin it is mounted on, and the viewpoints wandered
-// with frame time, also back and forth while taxiing. The PMDG 777 did not
-// show it, so the lead is per aircraft (AircraftProfile::pose_lead_frames).
+// with frame time, also back and forth while taxiing. The user saw the same to
+// a degree on every aircraft, so every profile leads by one frame unless its
+// AircraftProfile::pose_lead_frames says otherwise.
 // The pose is led by the model's own movement per simulator frame: the
 // displacement between two reads divided by the camera-manager updates
 // between them, so no clock jitter enters. Orientation is not led.
