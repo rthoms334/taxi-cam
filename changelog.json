@@ -11,7 +11,8 @@
         "The cameras keep working for the whole flight. Before, they stopped about 10 km after departure.",
         "When an aircraft recreates one of its cockpit displays mid-flight (the PMDG 777 did this repeatedly, both the inboard and the lower display), Taxi Cam switches to the new display straight away instead of re-detecting it from scratch, and without showing PLEASE WAIT again. This applies to every aircraft.",
         "The cameras stay fixed to the aircraft at speed on every aircraft. Before, they trailed it slightly and jumped back and forth, also while taxiing; on the iniBuilds A350 the tail camera showed the fin after take-off. Taxi Cam now attaches its cameras to the aircraft in the simulator's scene, so the simulator itself moves them with the aircraft in every frame it draws.",
-        "Setup can now turn on automatic startup when MSFS is installed from the Microsoft Store on a drive other than C:. Windows protects the simulator's startup file there, and Setup previously stopped with \"access denied\" and left Taxi Cam to be started from the Start menu. Run Setup again to turn on automatic startup."
+        "Setup can now turn on automatic startup when MSFS is installed from the Microsoft Store on a drive other than C:. Windows protects the simulator's startup file there, and Setup previously stopped with \"access denied\" and left Taxi Cam to be started from the Start menu. Run Setup again to turn on automatic startup.",
+        "PMDG 777: the camera page now looks more like the real aircraft. The nose picture is shorter, the left and right wing pictures are taller, and the dividers and black frames are thinner. Check your wing camera framing, because the wing pictures are now taller than they are wide."
       ]
     },
     {

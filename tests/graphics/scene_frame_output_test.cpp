@@ -199,7 +199,7 @@ EncodingResult encoding_case(ID3D12Device* device, Manager& manager) {
   };
   require(code_is(384, 140, colors[0]) && code_is(180, 500, colors[1]) && code_is(588, 500, colors[2]),
           "PMDG 777 camera panes are flagged camera pixels");
-  require(code_is(384, 299, {28, 27, 34, OverlayAlpha}) && code_is(384, 500, {28, 27, 34, OverlayAlpha}),
+  require(code_is(384, 232, {28, 27, 34, OverlayAlpha}) && code_is(384, 500, {28, 27, 34, OverlayAlpha}),
           "PMDG 777 T bar and gap are flagged overlay #1C1B22");
   require(code_is(5, 140, {0, 0, 0, OverlayAlpha}) && code_is(384, 700, {0, 0, 0, OverlayAlpha}),
           "PMDG 777 nose side frame and rows below the squares are flagged overlay black");
@@ -265,10 +265,10 @@ EncodingResult encoding_case(ID3D12Device* device, Manager& manager) {
       return true;
     };
     if (srgb)
-      require(at(384, 140, {2, 13, 34}, 1) && at(180, 500, {50, 122, 200}, 1) && at(384, 299, {93, 92, 102}, 1),
+      require(at(384, 140, {2, 13, 34}, 1) && at(180, 500, {50, 122, 200}, 1) && at(384, 232, {93, 92, 102}, 1),
               "sRGB patch keeps nose 2/13/34 and stores the overlay T as #5D5C66");
     else
-      require(at(384, 140, {2, 13, 34}, 0) && at(384, 299, {28, 27, 34}, 0), "UNORM patch stores nose 2/13/34 and the T #1C1B22 exactly");
+      require(at(384, 140, {2, 13, 34}, 0) && at(384, 232, {28, 27, 34}, 0), "UNORM patch stores nose 2/13/34 and the T #1C1B22 exactly");
     patch_reads[n]->Unmap(0, &none);
   }
   require(result.pixels > 3000000 && result.srgb_camera_exact > 0, "Encoding case checked every typed patch format");
