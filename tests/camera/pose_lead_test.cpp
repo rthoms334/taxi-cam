@@ -65,9 +65,9 @@ int main() {
   ok &= require(near(pose.origin[0], 30), "A NaN lead moved the cameras");
   pose = frames.lead(at(40), 1.4, 0.03, Epoch, Resets, 5);
   ok &= require(near(pose.origin[0], 40), "A lead beyond the maximum was applied");
-  // A hitch longer than 100 ms is capped.
+  // A hitch longer than 50 ms is capped.
   pose = frames.lead(at(50), 1.5, 0.5, Epoch, Resets, 1);
-  ok &= require(near(pose.origin[0], 60), "A long hitch was not capped at 100 ms");
+  ok &= require(near(pose.origin[0], 55), "A long hitch was not capped at 50 ms");
   // A zero or invalid frame duration gives no lead.
   pose = frames.lead(at(60), 1.6, 0, Epoch, Resets, 1);
   ok &= require(near(pose.origin[0], 60), "A zero frame duration was led");

@@ -26,8 +26,9 @@ class PoseLead {
   static constexpr double kMaximumReadGapSeconds = 0.5;
   // Faster than this (m/s) is a slew, teleport or new model: no lead.
   static constexpr double kMaximumSpeed = 400;
-  // Longer frames are capped: a hitch is not flown through by the camera.
-  static constexpr double kMaximumFrameSeconds = 0.1;
+  // Longer frames are capped: a hitch is not flown through by the camera. A
+  // 100 ms cap allowed a 9 m lead during a stall in a 0.9.61 flight.
+  static constexpr double kMaximumFrameSeconds = 0.05;
   static constexpr double kMaximumLeadFrames = 4;
   // Velocity smoothing per read (1 = unsmoothed).
   static constexpr double kSmoothing = 0.35;

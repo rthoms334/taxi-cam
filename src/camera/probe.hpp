@@ -3,6 +3,7 @@
 #include "../shared/camera_rate.hpp"
 #include "aircraft_mounts.hpp"
 #include "entry_pair.hpp"
+#include "pose_trace.hpp"
 #include "scene_recovery.hpp"
 
 #include <array>
@@ -174,6 +175,10 @@ void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = 
 // Taxi Cam's views the main view's far distances (above 60 kt, so they keep
 // drawing the ground after take-off); false restores each camera's own far.
 void request_scene_main_far(bool follow) noexcept;
+// Diagnostics: hands each completed PoseTrace window to sink once (bridge
+// worker; no engine access). False when none is ready.
+using PoseTraceSink = void (*)(unsigned window, const PoseTraceEntry* entries, std::size_t count, void* context);
+bool take_pose_trace(PoseTraceSink sink, void* context) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;

@@ -47,6 +47,33 @@ void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noe
     return;
   notification_log.publish(event, now);
 }
+// Diagnostics: a completed PoseTrace window as pose-trace-<pid>-<window>.csv
+// beside bridge.log (window 0 from taxi speed, 1 from take-off speed).
+void write_pose_trace(unsigned window, const native_camera::PoseTraceEntry* entries, std::size_t count, void*) noexcept {
+  try {
+    wchar_t directory[32768]{};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
+    if (!n || n >= 32700)
+      return;
+    std::wstring path(directory);
+    path += L"\\Taxi Cam";
+    CreateDirectoryW(path.c_str(), nullptr);
+    path += L"\\pose-trace-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(window) + L".csv";
+    FILE* file = _wfopen(path.c_str(), L"wb");
+    if (!file)
+      return;
+    std::fputs("update,time_s,frame_ms,read_ok,read_x,read_y,read_z,applied,applied_x,applied_y,applied_z,lead_m\r\n", file);
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto& e = entries[i];
+      std::fprintf(file, "%llu,%.6f,%.3f,%u,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.3f\r\n", static_cast<unsigned long long>(e.update), e.time_s,
+                   e.frame_s * 1000.0, (e.flags & native_camera::kPoseTraceRead) ? 1u : 0u, e.read[0], e.read[1], e.read[2],
+                   (e.flags & native_camera::kPoseTraceApplied) ? 1u : 0u, e.applied[0], e.applied[1], e.applied[2], e.lead_m);
+    }
+    std::fclose(file);
+  } catch (...) {
+    // Diagnostics must not interrupt bridge operation.
+  }
+}
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
     wchar_t directory[32768]{};
@@ -801,6 +828,8 @@ DWORD run_impl() {
     // Atomic only; the observer applies it before each pose refresh.
     far_follows_main = native_camera::follow_main_far(far_follows_main, speed.valid, speed.knots);
     native_camera::request_scene_main_far(far_follows_main);
+    // Diagnostics: write each completed per-update pose trace once.
+    native_camera::take_pose_trace(write_pose_trace, nullptr);
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
       for (unsigned i = 0; i < mounts.size(); ++i) {

@@ -15,6 +15,7 @@
 #include "owned_view.hpp"
 #include "pose_lead.hpp"
 #include "pose_source_cache.hpp"
+#include "pose_trace.hpp"
 #include "probe_inspection_gate.hpp"
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
@@ -113,6 +114,11 @@ struct Runtime {
   // two updates, the duration of the frame being drawn (observer thread).
   double update_s = 0, update_frame_s = 0;
   LONGLONG previous_update_qpc = 0;
+  // Diagnostics: per-update model transform windows (PoseTrace), and the led
+  // origin mount_pose produced on update led_update.
+  PoseTrace pose_trace;
+  Vector3 led_origin{};
+  std::uint64_t led_update = 0;
   std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
@@ -440,9 +446,12 @@ CameraClip current_main_clip(const Runtime& runtime) noexcept {
 // pose_lead_frames of the model's per-frame movement (PoseLead). The public
 // plausibility check keeps using the pose as read.
 BodyPose mount_pose(Runtime& runtime, const BodyPose& scene) noexcept {
-  return runtime.pose_lead.lead(scene, runtime.update_s, runtime.update_frame_s, get_aircraft_session_readiness().epoch,
-                                runtime.pose_source_resets.load(std::memory_order_acquire),
-                                runtime.aircraft_profile ? runtime.aircraft_profile->pose_lead_frames : 0);
+  const auto led = runtime.pose_lead.lead(scene, runtime.update_s, runtime.update_frame_s, get_aircraft_session_readiness().epoch,
+                                          runtime.pose_source_resets.load(std::memory_order_acquire),
+                                          runtime.aircraft_profile ? runtime.aircraft_profile->pose_lead_frames : 0);
+  runtime.led_origin = led.origin;
+  runtime.led_update = runtime.updates;
+  return led;
 }
 // The full aircraft walk to the active controller and the scene transform it
 // leads to. False (pose_busy, message set) when no stable active aircraft is
@@ -2369,6 +2378,32 @@ void observer(void* manager) noexcept {
       runtime.performance.query_ms = memory_metrics.query_ticks * milliseconds_per_tick;
       runtime.performance.read_ms = memory_metrics.read_ticks * milliseconds_per_tick;
     }
+    // Diagnostics (PoseTrace): the model transform on every update while the
+    // aircraft moves, only for a session-proven controller and only while a
+    // trace window wants this update. No camera or engine state changes.
+    if (session_work_allowed(runtime) && runtime.pose_trace.wants(runtime.pose_lead.speed())) {
+      const auto trace_readiness = get_aircraft_session_readiness();
+      const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+      if (const auto user = trace_readiness.ready ? runtime.pose_source.session_proven(trace_readiness.epoch, resets) : 0) {
+        PoseTraceEntry entry;
+        entry.update = runtime.updates;
+        entry.time_s = runtime.update_s;
+        entry.frame_s = runtime.update_frame_s;
+        LocalMemoryReader objects;
+        const auto scene =
+            inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); });
+        if (scene.complete) {
+          entry.read = scene.pose.origin;
+          entry.flags |= kPoseTraceRead;
+        }
+        if (runtime.led_update == runtime.updates) {
+          entry.applied = runtime.led_origin;
+          entry.flags |= kPoseTraceApplied;
+          entry.lead_m = runtime.pose_lead.lead_metres();
+        }
+        runtime.pose_trace.record(entry, runtime.pose_lead.speed());
+      }
+    }
     // Sample after diagnostic/private work and status publication. The original
     // manager update executes only after this observer returns through the thunk.
     LARGE_INTEGER finished{};
@@ -2620,6 +2655,11 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
 void suspend_scene_rendering(bool suspended) noexcept {
   auto& runtime = state();
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
+}
+
+bool take_pose_trace(PoseTraceSink sink, void* context) noexcept {
+  return state().pose_trace.take(
+      [&](unsigned window, const PoseTraceEntry* entries, std::size_t count) { sink(window, entries, count, context); });
 }
 
 void request_scene_main_far(bool follow) noexcept {
