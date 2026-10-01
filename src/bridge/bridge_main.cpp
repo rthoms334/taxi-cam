@@ -570,9 +570,13 @@ DWORD run_impl() {
       native_camera::suspend_scene_rendering(true);
       if (pending_full_reset && !pending_gpu_generation)
         pending_gpu_generation = scene_runtime::reset_session(key);
+      // A new flight, airport or teleport with the same profile resets display
+      // discovery and the GPU session here, but keeps the native camera pair
+      // (begin_flight_change); only another aircraft profile retires it.
       if (!transition_token)
-        transition_token = pending_full_reset ? native_camera::request_scene_session_reset(pending_profile)
-                                              : native_camera::request_scene_profile_transition(pending_profile);
+        transition_token = pending_full_reset && pending_profile != applied_profile
+                               ? native_camera::request_scene_session_reset(pending_profile)
+                               : native_camera::request_scene_profile_transition(pending_profile);
       const auto transition = native_camera::scene_snapshot();
       const bool ready = transition_token && transition.profile_transition_token == transition_token &&
                          transition.profile_transition_id == pending_profile && transition.profile_transition_ready &&
@@ -1364,15 +1368,17 @@ DWORD run_impl() {
       log_status(status, clip_detail);
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
-      char mount_detail[384];
+      char mount_detail[448];
       std::snprintf(
           mount_detail, sizeof(mount_detail),
-          "Camera mount: available=%d paused=%d feeds=%u/%u/%u attaches=%llu restores=%llu rehomes=%llu refused=%llu error=%s contract=%s",
+          "Camera mount: available=%d paused=%d feeds=%u/%u/%u attaches=%llu restores=%llu rehomes=%llu refused=%llu error=%s contract=%s "
+          "kept_pairs=%llu kept_fallbacks=%llu",
           scene.mount_available ? 1 : 0, scene.sim_paused ? 1 : 0, scene.mount_state[0], scene.mount_state[1], scene.mount_state[2],
           static_cast<unsigned long long>(scene.mount_attaches), static_cast<unsigned long long>(scene.mount_restores),
           static_cast<unsigned long long>(scene.mount_rehomes), static_cast<unsigned long long>(scene.mount_refused),
           scene.mount_error && *scene.mount_error ? scene.mount_error : "none",
-          scene.mount_contract_error.empty() ? "ok" : scene.mount_contract_error.c_str());
+          scene.mount_contract_error.empty() ? "ok" : scene.mount_contract_error.c_str(),
+          static_cast<unsigned long long>(scene.flight_change_holds), static_cast<unsigned long long>(scene.flight_change_fallbacks));
       log_status(status, mount_detail);
       // Diagnostics: is the main view parented to the aircraft? s=sampled r=read
       // p=+368 set n=it is a Node a=it is the aircraft model c=it is the

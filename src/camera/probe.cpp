@@ -67,6 +67,10 @@ struct Runtime {
   RetainedProfileTransition::AllocationEvidence published_allocation{};
   std::uint64_t profile_transition_token = 0;
   bool session_reset_failed = false;
+  // A flight change keeping the owned pair (begin_flight_change); cleared by
+  // its resume or by a full reset. holds/fallbacks count them for bridge.log.
+  bool flight_change_hold = false;
+  std::uint64_t flight_change_holds = 0, flight_change_fallbacks = 0;
   std::atomic<std::uint64_t> scene_session_epoch{0};
   bool retained_restart_requested = false;
   profiles::CameraPanes allocation_panes = profiles::A380.camera_panes;
@@ -227,6 +231,7 @@ Runtime& state() {
 
 // Caller owns the mailbox mutex. No native engine call is made here.
 void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& profile) {
+  runtime.flight_change_hold = false;
   runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
   runtime.reset_requested.store(true, std::memory_order_release);
   runtime.suspended.store(true, std::memory_order_release);
@@ -257,6 +262,50 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
   runtime.published.readiness_deferred = false;
   runtime.published.outputs_matched = false;
   runtime.published.message = "Flight session reset pending; camera creation is disabled until retirement and load readiness.";
+}
+
+void publish_transition(Runtime& runtime, ProbeSnapshot& report);
+
+// Caller owns the mailbox mutex. A new flight, airport or teleport with the same
+// aircraft profile keeps the owned camera pair, closed and revalidated like a
+// profile change, instead of erasing and recreating it: every RenderThreadProc
+// fault (0x3d0ffe4; 19 in September 2026, Store, Steam SU6 and SU7) followed a
+// replacement pair created in the same simulator session, never a first pair.
+// Anything that cannot be kept (no owned pair, another profile, a refused
+// revalidation) takes the full reset.
+void begin_flight_change(Runtime& runtime) {
+  const auto pair = runtime.pair.snapshot();
+  const bool owned = pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2];
+  const auto* profile = runtime.requested_profile;
+  if (owned && profile == runtime.aircraft_profile && runtime.profile_transition.holding() &&
+      runtime.profile_transition.id() == profile->id && !runtime.profile_transition.failed()) {
+    // Already closing and revalidating this pair (a Disconnect during the load).
+    runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
+    runtime.flight_change_hold = true;
+    ++runtime.flight_change_holds;
+    return;
+  }
+  if (!owned || profile != runtime.aircraft_profile || runtime.profile_transition.holding() ||
+      runtime.profile_transition_token == UINT64_MAX) {
+    begin_session_reset(runtime, *profile);
+    return;
+  }
+  runtime.pose_source_resets.fetch_add(1, std::memory_order_acq_rel);
+  runtime.suspended.store(true, std::memory_order_release);
+  scene_handoff().stop_scene();
+  runtime.requested_start = false;
+  ++runtime.requested_start_revision;
+  runtime.retained_restart_requested = false;
+  runtime.recovery.stop();
+  const auto cancelled = runtime.pair.cancel_uncreated_request();
+  if (cancelled == ec::EmptyPairCancel::busy)
+    runtime.profile_transition.defer_pair(profile->id);
+  else
+    runtime.profile_transition.begin_published(profile->id, runtime.pair.snapshot(), runtime.published_allocation);
+  runtime.flight_change_hold = true;
+  ++runtime.flight_change_holds;
+  ++runtime.profile_transition_token;
+  publish_transition(runtime, runtime.published);
 }
 
 bool session_work_allowed(const Runtime& runtime) noexcept {
@@ -1816,11 +1865,11 @@ void park_unready_session(Runtime& runtime, void* manager, ProbeSnapshot& report
 bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
   const auto readiness = get_aircraft_session_readiness();
   const std::lock_guard lock(runtime.mutex);
-  if (runtime.session_reset.holding())
+  if (runtime.session_reset.holding() || runtime.flight_change_hold)
     return true;
   if (!readiness.loading && !RetainedProfileTransition::session_changed(pair, runtime.scene_session_epoch, readiness.epoch))
     return false;
-  begin_session_reset(runtime, *runtime.requested_profile);
+  begin_flight_change(runtime);
   return true;
 }
 // Observer thread. Measures the whole update after its own work, including
@@ -1975,9 +2024,14 @@ void observer(void* manager) noexcept {
       const std::lock_guard lock(runtime.mutex);
       if (!before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !before.creation_pending)
         runtime.aircraft_profile = runtime.requested_profile;
-      if (!runtime.session_reset.holding() &&
-          (readiness.loading || RetainedProfileTransition::session_changed(before, runtime.scene_session_epoch, readiness.epoch)))
+      if (runtime.flight_change_hold && runtime.profile_transition.failed()) {
+        // The kept pair could not be revalidated: the full reset retires it.
+        ++runtime.flight_change_fallbacks;
         begin_session_reset(runtime, *runtime.requested_profile);
+      }
+      if (!runtime.session_reset.holding() && !runtime.flight_change_hold &&
+          (readiness.loading || RetainedProfileTransition::session_changed(before, runtime.scene_session_epoch, readiness.epoch)))
+        begin_flight_change(runtime);
       session_hold = runtime.session_reset.holding();
       profile_hold = runtime.profile_transition.holding() &&
                      (before.owned_ids[0] || before.owned_ids[1] || before.owned_ids[2] || runtime.profile_transition.awaiting_pair());
@@ -2733,6 +2787,8 @@ void observer(void* manager) noexcept {
       runtime.published.mount_refused = runtime.mount_refused;
       runtime.published.mount_error = runtime.mount_error;
       runtime.published.mount_available = parenting_available(runtime);
+      runtime.published.flight_change_holds = runtime.flight_change_holds;
+      runtime.published.flight_change_fallbacks = runtime.flight_change_fallbacks;
       runtime.published.sim_paused = get_aircraft_session_readiness().paused;
       runtime.published.mount_contract_error = runtime.mount_contract_error;
       runtime.published.node_links = runtime.node_links;
@@ -2958,9 +3014,12 @@ void request_scene_test(bool reuse_calibration) noexcept {
       runtime.published.message = "Retained transition is not ready; no creation or removal requested.";
       return;
     }
-    if (retained)
+    if (retained) {
       runtime.retained_restart_requested = true;
-    else {
+      // A kept pair resumes in the new flight's session.
+      runtime.scene_session_epoch = readiness.epoch;
+      runtime.flight_change_hold = false;
+    } else {
       runtime.pair.request_disable();
       runtime.profile_transition.consume();
       runtime.scene_session_epoch = readiness.epoch;

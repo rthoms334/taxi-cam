@@ -111,6 +111,9 @@ struct ProbeSnapshot {
   // 1 attached, 2 lost), attach/restore/refusal counts, cameras taken back to the world root after
   // their aircraft Node went away (rehomes), and the last refusal.
   bool mount_available = false, sim_paused = false;
+  // Flight changes that kept the camera pair, and kept pairs that failed
+  // revalidation and took the full reset instead (begin_flight_change).
+  std::uint64_t flight_change_holds = 0, flight_change_fallbacks = 0;
   std::string mount_contract_error;
   std::array<std::uint8_t, kMaxCameraFeeds> mount_state{};
   std::uint64_t mount_attaches = 0, mount_restores = 0, mount_refused = 0, mount_rehomes = 0;
