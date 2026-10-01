@@ -780,7 +780,10 @@ DWORD WINAPI worker(void*) noexcept {
       const bool current = state.button_commands.current(decision, side, send_now) && state.aircraft_session.epoch() == epoch &&
                            readiness_locked(send_now).ready && current_identity.fresh && current_identity.detected_profile == profile.id;
       ReleaseSRWLockShared(&state.lock);
-      if (!current || WaitForSingleObject(state.stop, 0) == WAIT_OBJECT_0)
+      // The setting may have been switched off since this decision was prepared;
+      // an automatic OFF must not follow the user's choice.
+      const bool cutoff_withdrawn = (decision.cutoff_mask & (1u << side)) && !speed_cutoff_enabled.load(std::memory_order_acquire);
+      if (!current || cutoff_withdrawn || WaitForSingleObject(state.stop, 0) == WAIT_OBJECT_0)
         continue;
       // Public SimConnect priority flag: GroupID is an explicit priority.
       // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_transmitclientevent/
