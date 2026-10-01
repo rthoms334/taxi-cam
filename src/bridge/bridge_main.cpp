@@ -309,6 +309,14 @@ DWORD run_impl() {
     return ERROR_NOT_SUPPORTED;
   }
   log_status(status, "Native graphics initialization completed.");
+  {
+    const auto graphics = win::graphics_status();
+    char endpoint_detail[256];
+    std::snprintf(endpoint_detail, sizeof(endpoint_detail),
+                  "Command-list Close endpoint: module=%s location=%s native=%u device_proxied=%u", graphics.close_endpoint_module,
+                  graphics.close_endpoint_location, graphics.queue_close_verified ? 1u : 0u, graphics.device_proxied ? 1u : 0u);
+    log_status(status, endpoint_detail);
+  }
   const auto key = win::graphics_status().device;
   wchar_t gpu_timing_option[2]{};
   const bool gpu_timing = GetEnvironmentVariableW(L"TAXI_CAM_GPU_TIMING", gpu_timing_option, 2) == 1 && gpu_timing_option[0] == L'1';
@@ -1049,6 +1057,11 @@ DWORD run_impl() {
                                                   : "Checking the iniBuilds A380 display group across three active samples.";
     }
     const auto stopped_camera = camera_stop_message(scene);
+    char close_blocked_message[sizeof(status.message)];
+    std::snprintf(close_blocked_message, sizeof(close_blocked_message),
+                  "Camera images ready, but another graphics hook (%s) is in front of Direct3D command-list Close, so PFD writes are "
+                  "refused. Test with ReShade and overlays disabled.",
+                  graphics.close_endpoint_module);
     const char* message =
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : degraded && graphics.admission_halted
@@ -1073,8 +1086,9 @@ DWORD run_impl() {
         : !active                          ? "Ready. Use the aircraft's left or right TAXI button."
         : !requested || failed             ? scene.message.c_str()
         : progress.stalled()               ? "Capture paused: waiting for verified GPU state; camera views retained."
-        : output.output && !output.stamps  ? "Camera images ready; waiting for a verified PFD write opportunity."
-                                           : output.message;
+        : output.output && !output.stamps && !graphics.queue_close_verified ? close_blocked_message
+        : output.output && !output.stamps ? "Camera images ready; waiting for a verified PFD write opportunity."
+                                          : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
     notification_log.snapshot(status.notifications);
     if (mailbox.lock()) {

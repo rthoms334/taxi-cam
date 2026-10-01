@@ -305,7 +305,7 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |
 | Captures increase, no compositions | Both feeds, current scene identity and GPU completion |
-| Compositions increase, no PFD draws | Assigned targets, active side, recording-end/query/state admission and `close_forward_refused` |
+| Compositions increase, no PFD draws | Assigned targets, active side, recording-end/query/state admission, `close_forward_refused` and the `Command-list Close endpoint` log line |
 | PFD draws increase, wrong display | Target identification, left/right assignment and display layer |
 | Camera inhibited below 60 knots | Pending TAXI OFF acknowledgement |
 

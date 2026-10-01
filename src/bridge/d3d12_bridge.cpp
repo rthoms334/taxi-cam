@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -325,6 +327,11 @@ struct Registry {
   std::atomic<std::uint64_t> fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
   std::atomic<std::uint64_t> recording_end_draws{}, shader_deferred{}, close_forward_refused{};
   bool close_forward_verified = false;
+  // Bootstrap-time owner of the saved Close forward, for triage when the
+  // native endpoint proof fails. Basename only: logs are shared publicly.
+  char close_endpoint_module[64]{};
+  const char* close_endpoint_location = "unknown";
+  bool device_proxied{};
   std::atomic<std::uint64_t> preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
   std::atomic<const char*> preferred_copy_reason{"not_attempted"};
   std::atomic<std::uint64_t> dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{};
@@ -2482,6 +2489,35 @@ bool native_close_endpoint(const void* address) noexcept {
   return owner == GetModuleHandleW(L"D3D12Core.dll") || owner == GetModuleHandleW(L"d3d12.dll") ||
          owner == GetModuleHandleW(L"D3D12SDKLayers.dll");
 }
+// Names the module behind the saved Close forward without changing the proof
+// above. Location separates a system DLL from a same-named injector DLL, such
+// as an application-folder dxgi.dll.
+void describe_close_endpoint(Registry& r, const void* address) noexcept {
+  HMODULE owner{};
+  if (!image_region(address, true) ||
+      !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(address), &owner)) {
+    std::snprintf(r.close_endpoint_module, sizeof(r.close_endpoint_module), "%s", "none");
+    r.close_endpoint_location = "non_image";
+    return;
+  }
+  wchar_t path[MAX_PATH]{}, system[MAX_PATH]{};
+  const DWORD length = GetModuleFileNameW(owner, path, MAX_PATH);
+  if (!length || length >= MAX_PATH) {
+    std::snprintf(r.close_endpoint_module, sizeof(r.close_endpoint_module), "%s", "unknown");
+    return;
+  }
+  const wchar_t* slash = std::wcsrchr(path, L'\\');
+  const wchar_t* name = slash ? slash + 1 : path;
+  std::snprintf(r.close_endpoint_module, sizeof(r.close_endpoint_module), "%ls", name);
+  const UINT system_length = GetSystemDirectoryW(system, MAX_PATH);
+  const auto directory_length = static_cast<std::size_t>(name - path);
+  r.close_endpoint_location =
+      system_length && system_length < MAX_PATH && directory_length == system_length + 1u &&
+              CompareStringOrdinal(path, static_cast<int>(system_length), system, static_cast<int>(system_length), TRUE) == CSTR_EQUAL
+          ? "system"
+          : "other";
+}
 // Remember the state a display list actually left, including while the camera
 // is still off. Arming later can copy on a quiet Execute without waiting for
 // the next instrument write, and without guessing a state this list abandoned.
@@ -3236,6 +3272,15 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   }
   r.device = device;
   device->AddRef();
+  IUnknown* reported_identity{};
+  if (reported && SUCCEEDED(reported->QueryInterface(IID_PPV_ARGS(&reported_identity))) && reported_identity) {
+    IUnknown* native_identity{};
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&native_identity))) && native_identity) {
+      r.device_proxied = native_identity != reported_identity;
+      native_identity->Release();
+    }
+    reported_identity->Release();
+  }
   r.key = reinterpret_cast<std::uint64_t>(device);
   if (!scene_handoff().register_device(r.key) || !runtime::init_device(r.key, device)) {
     error("native_device_registration_failed");
@@ -3257,6 +3302,7 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   // Bootstrap objects, modules and the device remain pinned. No runtime unload.
   bool ok = hook_state(list);
   r.close_forward_verified = native_close_endpoint(list_close.original.load(std::memory_order_acquire));
+  describe_close_endpoint(r, list_close.original.load(std::memory_order_acquire));
   const auto base = boundary::register_list(list, ++r.next_id, Boundaries);
   ok &= base.ready && base.protection_restored;
   // Discover the runtime's real active-pass table on this owned, empty list,
@@ -3471,6 +3517,9 @@ GraphicsStatus graphics_status() noexcept {
   result.idle_callback_bypasses = r.idle_callback_bypasses.load(std::memory_order_relaxed);
   result.queue_patch_plans = r.queue_patch_plans.load(std::memory_order_relaxed);
   result.queue_close_verified = r.close_forward_verified;
+  result.close_endpoint_module = r.close_endpoint_module;
+  result.close_endpoint_location = r.close_endpoint_location;
+  result.device_proxied = r.device_proxied;
   for (unsigned i = 0; i < result.queue_outcomes.size(); ++i)
     result.queue_outcomes[i] = r.queue_outcomes[i].load(std::memory_order_relaxed);
   for (unsigned i = 0; i < result.queue_proof_refusals.size(); ++i)
