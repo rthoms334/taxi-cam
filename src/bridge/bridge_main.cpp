@@ -389,6 +389,12 @@ DWORD run_impl() {
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
   std::uint64_t next_inventory{};
+  // Display snapshot (PFD routing): the last handled request and its outcome.
+  struct SnapshotState {
+    std::uint64_t serial{}, id{};
+    win::DisplaySnapshotResult result = win::DisplaySnapshotResult::none;
+    unsigned width{}, height{}, format{};
+  } snapshot;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
   const auto service_scene = [&] {
     const auto begin = GetTickCount64();
@@ -728,6 +734,35 @@ DWORD run_impl() {
       if (win::assign_targets(settings.left_id, settings.right_id, settings.lower_id))
         route_request = settings.route_request;
     }
+    // One snapshot per companion serial. It needs graphics observation while
+    // pending, like calibration, but never a camera or a matching aircraft.
+    const auto log_snapshot = [&] {
+      char detail[192];
+      std::snprintf(detail, sizeof(detail), "Display snapshot: serial=%llu id=%llu result=%s texture=%ux%u format=%u",
+                    static_cast<unsigned long long>(snapshot.serial), static_cast<unsigned long long>(snapshot.id),
+                    win::display_snapshot_name(snapshot.result), snapshot.width, snapshot.height, snapshot.format);
+      log_status(status, detail);
+    };
+    if (connected && settings.enabled && session_settings && session.ready && !degraded && settings.snapshot_request &&
+        settings.snapshot_request != snapshot.serial) {
+      snapshot = {settings.snapshot_request, settings.snapshot_id, win::request_display_snapshot(settings.snapshot_id, now)};
+      if (snapshot.result != win::DisplaySnapshotResult::pending)
+        log_snapshot();
+    }
+    if (snapshot.result == win::DisplaySnapshotResult::pending) {
+      auto poll = win::poll_display_snapshot(now);
+      if (poll.result != win::DisplaySnapshotResult::pending) {
+        snapshot.width = poll.width;
+        snapshot.height = poll.height;
+        snapshot.format = poll.format;
+        // none: another request replaced this one inside the bridge.
+        snapshot.result = poll.result == win::DisplaySnapshotResult::none ? win::DisplaySnapshotResult::lost : poll.result;
+        if (snapshot.result == win::DisplaySnapshotResult::ready && !win::save_snapshot_bmp(win::display_snapshot_path(), poll.image))
+          snapshot.result = win::DisplaySnapshotResult::failed;
+        log_snapshot();
+      }
+    }
+    const bool snapshot_pending = snapshot.result == win::DisplaySnapshotResult::pending;
     const auto identity = native_camera::get_aircraft_identity();
     const bool aircraft_matches =
         native_camera::aircraft_matches_profile() && (!settings.auto_profile || identity.detected_profile == settings.profile);
@@ -823,7 +858,7 @@ DWORD run_impl() {
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && !degraded ? settings.calibration_mask : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
-    win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
+    win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
     win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
@@ -964,7 +999,7 @@ DWORD run_impl() {
         active = 0;
         win::set_target_mask(0);
         native_camera::suspend_scene_rendering(true);
-        win::set_graphics_observation_demand(calibration != 0);
+        win::set_graphics_observation_demand(calibration != 0 || snapshot_pending);
       }
     }
     // Normal button changes never call request_scene_stop/reset_feed or release
@@ -1066,6 +1101,12 @@ DWORD run_impl() {
     status.left_id = targets[0];
     status.right_id = targets[1];
     status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
+    status.snapshot_serial = snapshot.serial;
+    status.snapshot_id = snapshot.id;
+    status.snapshot_result = static_cast<std::uint32_t>(snapshot.result);
+    status.snapshot_width = snapshot.width;
+    status.snapshot_height = snapshot.height;
+    status.snapshot_format = snapshot.format;
     status.speed = speed.valid ? static_cast<float>(speed.knots) : -1;
     status.exposure = display.applied_ev;
     status.probe_cpu_ms = scene.observer_last_ms;

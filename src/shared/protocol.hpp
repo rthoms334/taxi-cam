@@ -21,7 +21,9 @@ namespace taxi_camera::standalone {
 // Protocol 20: Settings drops camera_weather (camera weather is always on).
 // Protocol 21: Settings drops camera_tone, automatic_exposure, exposure and
 // night_boost (the camera views always take the main view's lighting).
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 21;
+// Protocol 22: Settings snapshot_request/snapshot_id and Status snapshot_*
+// for a one-shot display texture snapshot on PFD routing.
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 22;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
@@ -56,6 +58,9 @@ struct Settings {
   // feeds equal. Off by default: live the tail looked like a slide show.
   // Saved per aircraft profile.
   std::uint32_t dynamic_tail = 0;
+  // Protocol 22, session-only: a new serial asks for one snapshot of the
+  // tracked display texture snapshot_id (see display_snapshot.hpp).
+  std::uint64_t snapshot_request{}, snapshot_id{};
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -91,6 +96,11 @@ struct Status {
   NotificationLog notifications{};
   // Protocol 15: routed separate side-2 texture (PMDG 777 lower DU).
   std::uint64_t lower_id{};
+  // Protocol 22: the last handled snapshot_request, its texture and
+  // DisplaySnapshotResult. A ready image is in display_snapshot_path().
+  // Width, height and DXGI format describe the texture, not the image.
+  std::uint64_t snapshot_serial{}, snapshot_id{};
+  std::uint32_t snapshot_result{}, snapshot_width{}, snapshot_height{}, snapshot_format{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};

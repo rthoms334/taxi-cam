@@ -325,6 +325,7 @@ if ($Validate) {
         @{Name='waiting-page'; Sources=@('tests/app/waiting_page_test.cpp')},
         @{Name='settings-store'; Sources=@('tests/app/settings_store_test.cpp')},
         @{Name='camera-rate-migration'; Sources=@('tests/app/camera_rate_migration_test.cpp')},
+        @{Name='display-snapshot'; Sources=@('tests/app/display_snapshot_test.cpp')},
         @{Name='notification-settings'; Sources=@('tests/app/notification_settings_test.cpp')},
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='startup-state'; Sources=@('tests/app/startup_state_test.cpp')},

@@ -330,6 +330,18 @@ struct Registry {
   unsigned queue_patch_camera{}, queue_patch_calibration{}, queue_patch_waiting{};
   std::uint32_t queue_patch_profile{};
   std::atomic<std::uint64_t> queue_patch_plans{};
+  // Display snapshot (PFD routing). Guarded by mutex; the submission planner
+  // reads it under its try-lock. The pool raises snapshot_completed to the
+  // serial of each readback whose covering fence has passed.
+  struct DisplaySnapshot {
+    std::shared_ptr<Resource> target;
+    ID3D12Resource* buffer{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    bool bgra{};
+    std::uint64_t serial{}, requested_ms{}, planned_ms{};
+  } snapshot;
+  std::uint64_t snapshot_serials{};
+  std::atomic<std::uint64_t> snapshot_completed{}, snapshot_plans{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(PfdSubmissionProof::Refusal::count)> queue_proof_refusals{};
   std::atomic<unsigned> queue_last_proof_flags{};
@@ -2531,13 +2543,33 @@ void plan_display_submission(void*,
       cover_serial[side] = target->content_serial.load(std::memory_order_acquire);
     }
   }
-  if (!candidates && std::all_of(positions.begin(), positions.end(), [&](UINT position) { return position == no_position; })) {
+  // A requested snapshot reads its texture at the same kind of proven site a
+  // display write uses. The texture need not be routed, and no camera patch
+  // has to be ready. One copy is planned per replan interval.
+  PfdSubmissionProof::Overlay snapshot_overlay;
+  auto& snapshot = r.snapshot;
+  const auto now = snapshot.buffer ? GetTickCount64() : 0;
+  if (snapshot.buffer && snapshot.target && snapshot.target->alive &&
+      r.snapshot_completed.load(std::memory_order_acquire) < snapshot.serial &&
+      (!snapshot.planned_ms || now - snapshot.planned_ms >= kDisplaySnapshotReplanMs)) {
+    const PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(snapshot.target->native), snapshot.target->id};
+    snapshot_overlay = PfdSubmissionProof::batch_overlay(batch.data(), count, key);
+    if (!snapshot_overlay && !r.settlement_stale.load(std::memory_order_acquire))
+      if (const auto state_bits = snapshot.target->settled_state.load(std::memory_order_acquire);
+          state_bits != Resource::kSettledStateUnknown)
+        snapshot_overlay = PfdSubmissionProof::carried_overlay(batch.data(), count, key, static_cast<D3D12_RESOURCE_STATES>(state_bits));
+  }
+  if (!candidates && !snapshot_overlay &&
+      std::all_of(positions.begin(), positions.end(), [&](UINT position) { return position == no_position; })) {
     outcome(DisplaySubmissionOutcome::no_display_exit);
     return;
   }
   if (patches.generation != generation || patches.profile != r.profile->id) {
-    outcome(DisplaySubmissionOutcome::patch_not_ready);
-    return;
+    if (!snapshot_overlay) {
+      outcome(DisplaySubmissionOutcome::patch_not_ready);
+      return;
+    }
+    positions.fill(no_position);  // Snapshot only: no display write this batch.
   }
   plan.device_key = r.key;
   plan.generation = generation;
@@ -2578,6 +2610,36 @@ void plan_display_submission(void*,
       target->covered_serial.store(cover_serial[side], std::memory_order_release);
     if (carried[side])
       r.carried_covers.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (snapshot_overlay && plan.count < plan.items.size()) {
+    // Keep batch order. At a shared site the snapshot follows the display
+    // write, so it shows what the pilots see.
+    const auto site = [](UINT list, bool before) { return list * 2 + (before ? 0u : 1u); };
+    const auto position = site(static_cast<UINT>(snapshot_overlay.list), snapshot_overlay.before);
+    UINT at = plan.count;
+    for (; at && site(plan.items[at - 1].after_list, plan.items[at - 1].before) > position; --at)
+      plan.items[at] = plan.items[at - 1];
+    auto& item = plan.items[at];
+    item = {};
+    item.after_list = static_cast<UINT>(snapshot_overlay.list);
+    item.before = snapshot_overlay.before;
+    const auto& desc = snapshot.target->desc;
+    item.copy = {snapshot.target->native,
+                 snapshot.buffer,
+                 snapshot.footprint,
+                 item.before ? snapshot_overlay.candidate.first_before : snapshot_overlay.candidate.state_after,
+                 0,
+                 0,
+                 static_cast<UINT>(desc.Width),
+                 desc.Height,
+                 true,
+                 &r.snapshot_completed,
+                 snapshot.serial};
+    item.copy.target->AddRef();
+    item.copy.source->AddRef();
+    ++plan.count;
+    snapshot.planned_ms = now ? now : 1;
+    r.snapshot_plans.fetch_add(1, std::memory_order_relaxed);
   }
   if (plan.count)
     r.queue_patch_plans.fetch_add(1, std::memory_order_relaxed);
@@ -4155,6 +4217,160 @@ void service_display_patches() noexcept {
     }
   }
   runtime::configure_queue_patches(r.key, config);
+}
+namespace {
+// Typed copy format for an 8-bit display, or UNKNOWN when it cannot be read back.
+DXGI_FORMAT snapshot_copy_format(DXGI_FORMAT format, bool& bgra) noexcept {
+  switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+      bgra = false;
+      return format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM : format;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+      bgra = true;
+      return format == DXGI_FORMAT_B8G8R8A8_TYPELESS ? DXGI_FORMAT_B8G8R8A8_UNORM : format;
+    default:
+      return DXGI_FORMAT_UNKNOWN;
+  }
+}
+// Registry lock held. Clears the request and returns its buffer, which the
+// caller releases after the lock; a recorded packet keeps its own lease.
+ID3D12Resource* take_snapshot(Registry& r) noexcept {
+  auto* buffer = std::exchange(r.snapshot.buffer, nullptr);
+  r.snapshot.target.reset();
+  r.snapshot.planned_ms = r.snapshot.requested_ms = 0;
+  return buffer;
+}
+void release_snapshot_buffer(ID3D12Resource* buffer) noexcept {
+  if (!buffer)
+    return;
+  const OwnedWork guard;
+  buffer->Release();
+}
+}  // namespace
+DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t now) noexcept {
+  auto& r = registry();
+  std::shared_ptr<Resource> target;
+  ID3D12Device* device = nullptr;
+  ID3D12Resource* previous = nullptr;
+  {
+    const WorkerRegistryLock lock(r);
+    previous = take_snapshot(r);
+    device = r.ready && id ? r.device : nullptr;
+    for (const auto& [native, item] : r.resources) {
+      (void)native;
+      if (device && item->alive && item->id == id && display_candidate_desc(item->desc)) {
+        target = item;
+        break;
+      }
+    }
+  }
+  release_snapshot_buffer(previous);
+  if (!target || !device)
+    return DisplaySnapshotResult::unavailable;
+  auto desc = target->desc;
+  bool bgra = false;
+  const auto format = snapshot_copy_format(desc.Format, bgra);
+  if (format == DXGI_FORMAT_UNKNOWN || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.DepthOrArraySize != 1 ||
+      desc.SampleDesc.Count != 1 || !desc.Width || !desc.Height || desc.Width * desc.Height * 4 > kDisplaySnapshotMaxBytes)
+    return DisplaySnapshotResult::unsupported;
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  UINT64 bytes = 0;
+  desc.MipLevels = 1;
+  device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+  if (!bytes || bytes == UINT64_MAX)
+    return DisplaySnapshotResult::unsupported;
+  footprint.Footprint.Format = format;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer_desc{};
+  buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer_desc.Width = bytes;
+  buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = buffer_desc.SampleDesc.Count = 1;
+  buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* buffer = nullptr;
+  {
+    const OwnedWork guard;
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                               IID_PPV_ARGS(&buffer))))
+      return DisplaySnapshotResult::failed;
+  }
+  {
+    const WorkerRegistryLock lock(r);
+    previous = take_snapshot(r);
+    if (target->alive && r.ready) {
+      r.snapshot.target = std::move(target);
+      r.snapshot.buffer = std::exchange(buffer, nullptr);
+      r.snapshot.footprint = footprint;
+      r.snapshot.bgra = bgra;
+      r.snapshot.serial = ++r.snapshot_serials;
+      r.snapshot.requested_ms = now ? now : 1;
+    }
+  }
+  // A buffer still held here was not stored: the texture went away meanwhile.
+  const auto result = buffer ? DisplaySnapshotResult::lost : DisplaySnapshotResult::pending;
+  release_snapshot_buffer(previous);
+  release_snapshot_buffer(buffer);
+  return result;
+}
+DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
+  auto& r = registry();
+  DisplaySnapshotPoll poll;
+  ID3D12Resource* buffer = nullptr;
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  bool bgra = false;
+  {
+    const WorkerRegistryLock lock(r);
+    auto& snapshot = r.snapshot;
+    if (!snapshot.buffer || !snapshot.target)
+      return poll;
+    poll.id = snapshot.target->id;
+    poll.width = static_cast<unsigned>(snapshot.target->desc.Width);
+    poll.height = snapshot.target->desc.Height;
+    poll.format = static_cast<unsigned>(snapshot.target->desc.Format);
+    if (r.snapshot_completed.load(std::memory_order_acquire) >= snapshot.serial) {
+      footprint = snapshot.footprint;
+      bgra = snapshot.bgra;
+      buffer = take_snapshot(r);
+    } else if (!snapshot.target->alive || !r.ready) {
+      poll.result = DisplaySnapshotResult::lost;
+    } else if (now >= snapshot.requested_ms && now - snapshot.requested_ms > kDisplaySnapshotTimeoutMs) {
+      poll.result = DisplaySnapshotResult::timeout;
+    } else {
+      poll.result = DisplaySnapshotResult::pending;
+      return poll;
+    }
+    if (!buffer)
+      buffer = take_snapshot(r);
+  }
+  if (poll.result != DisplaySnapshotResult::none) {
+    release_snapshot_buffer(buffer);
+    return poll;
+  }
+  // The covering fence has passed, so the CPU can read the copy without waiting.
+  std::uint8_t* bytes = nullptr;
+  const auto& layout = footprint.Footprint;
+  const D3D12_RANGE readable{static_cast<SIZE_T>(footprint.Offset),
+                             static_cast<SIZE_T>(footprint.Offset + std::uint64_t{layout.RowPitch} * layout.Height)};
+  poll.result = DisplaySnapshotResult::failed;
+  if (SUCCEEDED(buffer->Map(0, &readable, reinterpret_cast<void**>(&bytes))) && bytes) {
+    try {
+      poll.image =
+          downsample_snapshot(bytes + footprint.Offset, layout.RowPitch, layout.Width, layout.Height, bgra, kDisplaySnapshotMaxEdge);
+      if (poll.image.width)
+        poll.result = DisplaySnapshotResult::ready;
+    } catch (...) {
+      poll.image = {};
+    }
+    const D3D12_RANGE written{};
+    buffer->Unmap(0, &written);
+  }
+  release_snapshot_buffer(buffer);
+  return poll;
 }
 bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();

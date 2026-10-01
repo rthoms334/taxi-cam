@@ -5,6 +5,7 @@
 #include "../graphics/pfd_target_detector.hpp"
 #include "../graphics/render_target_shapes.hpp"
 #include "../graphics/scene_runtime.hpp"
+#include "../shared/display_snapshot.hpp"
 namespace taxi_camera::standalone {
 inline constexpr const char* pfd_gpu_operation_name(unsigned slot) noexcept {
   switch (slot) {
@@ -241,4 +242,19 @@ std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept;
 void reset_display_session() noexcept;
 void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;
+// Display texture snapshot for PFD routing. Control thread only. Replaces any
+// earlier request, then copies the tracked display texture's base mip into a
+// private READBACK buffer at the next proven submission boundary, the same
+// kind of site a display write uses. The texture need not be routed.
+// Returns pending, or why the request was refused.
+DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t now) noexcept;
+struct DisplaySnapshotPoll {
+  DisplaySnapshotResult result = DisplaySnapshotResult::none;
+  std::uint64_t id = 0;
+  unsigned width = 0, height = 0, format = 0;
+  SnapshotImage image;  // Only for ready: shrunk to kDisplaySnapshotMaxEdge.
+};
+// Control thread only. pending until the copy completes or fails; the final
+// result is returned once, then none until the next request.
+DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept;
 }  // namespace taxi_camera::standalone

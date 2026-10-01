@@ -15,6 +15,7 @@
 #include "launcher_log.hpp"
 #include "connection_recoverability.hpp"
 #include "../shared/camera_rate_policy.hpp"
+#include "../shared/display_snapshot.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/sim_messages.hpp"
 #include "settings_store.hpp"
@@ -190,9 +191,13 @@ void publish(const win::Settings& value) {
   const std::lock_guard lock(app_mutex);
   const auto enabled = current.enabled;
   const auto profile_request = std::max(current.profile_request, value.profile_request);
+  // A snapshot request is session-only; an older draft must not withdraw it.
+  const auto snapshot = current.snapshot_request >= value.snapshot_request ? current : value;
   current = value;
   current.enabled = enabled;  // Profile/settings edits cannot override connection state.
   current.profile_request = profile_request;
+  current.snapshot_request = snapshot.snapshot_request;
+  current.snapshot_id = snapshot.snapshot_id;
 }
 void refresh_connection_button() {
   SetDlgItemTextW(window, 241, win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
@@ -678,6 +683,218 @@ void request_whats_new() {
   }
   InvalidateRect(window, nullptr, FALSE);
 }
+// PFD routing: a one-shot picture of a tracked display texture, with the
+// selected profile's display rectangles drawn over it. The bridge writes the
+// image; this dialog only reads it.
+struct SnapshotView {
+  std::uint64_t id{}, serial{};
+  ULONGLONG requested_ms{};
+  HBITMAP image{};
+  int width{}, height{};
+  std::wstring caption, legend;
+} snapshot_view;
+std::uint64_t request_display_snapshot(std::uint64_t id) {
+  const std::lock_guard lock(app_mutex);
+  // Past the bridge's last handled serial too, which survives a profile reload.
+  current.snapshot_request = std::max(current.snapshot_request, status.snapshot_serial) + 1;
+  current.snapshot_id = id;
+  return current.snapshot_request;
+}
+void release_snapshot_image() {
+  if (snapshot_view.image)
+    DeleteObject(snapshot_view.image);
+  snapshot_view.image = nullptr;
+  snapshot_view.width = snapshot_view.height = 0;
+}
+// Texture each display side is routed to, from the bridge's status.
+std::array<std::uint64_t, MaxDisplaySides> routed_texture_ids(const win::Status& sample, const profiles::AircraftProfile& profile) {
+  const bool single = profile.pfd_detection == profiles::PfdDetectionPolicy::single_display;
+  return {sample.left_id, single ? sample.left_id : sample.right_id,
+          profiles::separate_lower_texture(profile) ? sample.lower_id : sample.left_id};
+}
+const wchar_t* snapshot_side_name(const win::Settings& s, unsigned side) {
+  return side == 0 ? L"Left" : side == 1 ? L"Right" : pmdg_cam_control(s) ? L"Lower DU" : L"SD";
+}
+// Profile rectangles apply only when the texture has the profile's display size.
+const profiles::AircraftProfile* snapshot_profile(const win::Settings& s, const win::Status& sample) {
+  const auto* profile = profiles::find(s.profile);
+  return profile && sample.snapshot_width == profile->width && sample.snapshot_height == profile->height ? profile : nullptr;
+}
+void update_snapshot_dialog(HWND hwnd) {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto s = draft();
+  const bool answered = sample.snapshot_serial == snapshot_view.serial;
+  const auto result = answered ? static_cast<win::DisplaySnapshotResult>(sample.snapshot_result) : win::DisplaySnapshotResult::pending;
+  if (answered && result == win::DisplaySnapshotResult::ready && !snapshot_view.image) {
+    snapshot_view.image = static_cast<HBITMAP>(
+        LoadImageW(nullptr, win::display_snapshot_path().c_str(), IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION));
+    BITMAP bitmap{};
+    if (snapshot_view.image && GetObjectW(snapshot_view.image, sizeof(bitmap), &bitmap)) {
+      snapshot_view.width = bitmap.bmWidth;
+      snapshot_view.height = std::abs(bitmap.bmHeight);
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+  }
+  wchar_t caption[320];
+  if (!answered)
+    std::swprintf(caption, 320, L"Texture #%llu. %ls", static_cast<unsigned long long>(snapshot_view.id),
+                  GetTickCount64() - snapshot_view.requested_ms > 3000
+                      ? L"Waiting for the simulator. Connect Taxi Cam with a flight loaded."
+                      : L"Requesting a snapshot...");
+  else
+    std::swprintf(caption, 320, L"Texture #%llu | %u x %u | format %u. %ls", static_cast<unsigned long long>(sample.snapshot_id),
+                  sample.snapshot_width, sample.snapshot_height, sample.snapshot_format,
+                  result == win::DisplaySnapshotResult::ready && !snapshot_view.image ? L"The saved image could not be opened."
+                                                                                      : win::display_snapshot_text(result));
+  std::wstring legend;
+  if (answered && result == win::DisplaySnapshotResult::ready) {
+    const auto* profile = snapshot_profile(s, sample);
+    std::wstring bound;
+    if (profile) {
+      const auto routed = routed_texture_ids(sample, *profile);
+      for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
+        if (routed[side] == sample.snapshot_id)
+          bound += (bound.empty() ? L"" : L", ") + std::wstring(snapshot_side_name(s, side));
+    }
+    const auto* named = profiles::find(s.profile);
+    const std::wstring name = named ? named->name : L"the selected profile";
+    legend = !profile ? L"This texture is not the size of a " + name + L" display texture, so no display rectangles are drawn."
+             : bound.empty()
+                 ? L"Not routed to a display on " + name + L". Dotted outlines show where its displays would be drawn."
+                 : L"Routed to " + bound + L" on " + name + L". Solid outlines are routed display rectangles; dotted ones are not.";
+  }
+  if (legend != snapshot_view.legend) {
+    snapshot_view.legend = legend;
+    SetDlgItemTextW(hwnd, 702, legend.c_str());
+  }
+  if (caption != snapshot_view.caption) {
+    snapshot_view.caption = caption;
+    SetDlgItemTextW(hwnd, 701, caption);
+    InvalidateRect(hwnd, nullptr, FALSE);
+  }
+}
+void paint_snapshot(HDC dc) {
+  const auto area = rectangle(20, 92, 860, 560);
+  HBRUSH fill = CreateSolidBrush(Sidebar);
+  FillRect(dc, &area, fill);
+  DeleteObject(fill);
+  if (!snapshot_view.image || snapshot_view.width <= 0 || snapshot_view.height <= 0)
+    return;
+  const int area_width = area.right - area.left, area_height = area.bottom - area.top;
+  const double fit = std::min(double(area_width) / snapshot_view.width, double(area_height) / snapshot_view.height);
+  const int width = std::max(1, int(snapshot_view.width * fit)), height = std::max(1, int(snapshot_view.height * fit));
+  const int left = area.left + (area_width - width) / 2, top = area.top + (area_height - height) / 2;
+  HDC memory = CreateCompatibleDC(dc);
+  const auto old_bitmap = SelectObject(memory, snapshot_view.image);
+  SetStretchBltMode(dc, HALFTONE);
+  SetBrushOrgEx(dc, 0, 0, nullptr);
+  StretchBlt(dc, left, top, width, height, memory, 0, 0, snapshot_view.width, snapshot_view.height, SRCCOPY);
+  SelectObject(memory, old_bitmap);
+  DeleteDC(memory);
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto s = draft();
+  const auto* profile = sample.snapshot_serial == snapshot_view.serial ? snapshot_profile(s, sample) : nullptr;
+  if (!profile)
+    return;
+  const auto routed = routed_texture_ids(sample, *profile);
+  const auto saved = SaveDC(dc);
+  SelectObject(dc, GetStockObject(NULL_BRUSH));
+  SelectObject(dc, small);
+  SetBkMode(dc, OPAQUE);
+  SetBkColor(dc, Sidebar);
+  for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side) {
+    const auto r = profiles::display_rect(*profile, side);
+    const bool bound = routed[side] == sample.snapshot_id;
+    const COLORREF color = bound ? Accent : Muted;
+    HPEN pen = CreatePen(bound ? PS_SOLID : PS_DOT, bound ? scale(2) : 1, color);
+    const auto old_pen = SelectObject(dc, pen);
+    RECT box{left + MulDiv(int(r.left), width, int(profile->width)), top + MulDiv(int(r.top), height, int(profile->height)),
+             left + MulDiv(int(r.right), width, int(profile->width)), top + MulDiv(int(r.bottom), height, int(profile->height))};
+    Rectangle(dc, box.left, box.top, box.right, box.bottom);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+    SetTextColor(dc, color);
+    InflateRect(&box, -scale(4), -scale(3));
+    DrawTextW(dc, snapshot_side_name(s, side), -1, &box, DT_LEFT | DT_TOP | DT_SINGLELINE);
+  }
+  RestoreDC(dc, saved);
+}
+INT_PTR CALLBACK snapshot_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
+  if (message == WM_INITDIALOG) {
+    place_dialog(hwnd, L"Taxi Cam — Display texture snapshot", 900, 760);
+    dialog_control(hwnd, L"STATIC", L"Display texture snapshot", -1, 20, 17, 860, 28, 0, heading);
+    dialog_control(hwnd, L"STATIC", L"", 701, 20, 54, 860, 30);
+    dialog_control(hwnd, L"STATIC", L"", 702, 20, 662, 860, 44, 0, small);
+    dialog_control(hwnd, L"BUTTON", L"Take again", 703, 652, 714, 120, 34, WS_TABSTOP);
+    const auto close = dialog_control(hwnd, L"BUTTON", L"Close", IDCANCEL, 782, 714, 98, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    SetTimer(hwnd, 1, 200, nullptr);
+    update_snapshot_dialog(hwnd);
+    SetFocus(close);
+    return FALSE;
+  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC)
+    return dialog_colors(w);
+  if (message == WM_TIMER) {
+    update_snapshot_dialog(hwnd);
+    return TRUE;
+  }
+  if (message == WM_PAINT) {
+    PAINTSTRUCT paint;
+    HDC dc = BeginPaint(hwnd, &paint);
+    paint_snapshot(dc);
+    EndPaint(hwnd, &paint);
+    return TRUE;
+  }
+  if (message == WM_COMMAND && LOWORD(w) == 703) {
+    release_snapshot_image();
+    snapshot_view.serial = request_display_snapshot(snapshot_view.id);
+    snapshot_view.requested_ms = GetTickCount64();
+    update_snapshot_dialog(hwnd);
+    InvalidateRect(hwnd, nullptr, TRUE);
+    return TRUE;
+  }
+  if ((message == WM_COMMAND && (LOWORD(w) == IDOK || LOWORD(w) == IDCANCEL)) || message == WM_CLOSE) {
+    EndDialog(hwnd, IDCANCEL);
+    return TRUE;
+  }
+  if (message == WM_DESTROY) {
+    KillTimer(hwnd, 1);
+    release_snapshot_image();
+  }
+  return FALSE;
+}
+void show_display_snapshot(std::uint64_t id) {
+  release_snapshot_image();
+  snapshot_view = {};
+  snapshot_view.id = id;
+  snapshot_view.serial = request_display_snapshot(id);
+  snapshot_view.requested_ms = GetTickCount64();
+  const DialogTemplate layout;
+  if (DialogBoxIndirectParamW(instance, &layout.dialog, window, snapshot_dialog, 0) == -1) {
+    notice = L"Could not open the display snapshot.";
+    InvalidateRect(window, nullptr, FALSE);
+  }
+}
+// The texture chosen in a PFD routing list, or the one routed there now.
+std::uint64_t snapshot_target(unsigned list) {
+  const auto index = SendDlgItemMessageW(window, 400 + list, CB_GETCURSEL, 0, 0);
+  if (index > 0 && static_cast<size_t>(index - 1) < combo_ids.size())
+    return combo_ids[index - 1];
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  return list == 0 ? sample.left_id : separate_lower_profile(draft()) ? sample.lower_id : sample.right_id;
+}
 void show_whats_new() {
   win::ChangelogFetchResult result;
   if (!changelog_fetcher.take(result))
@@ -984,6 +1201,10 @@ void build_controls() {
     button(L"Refresh textures", 402, 260, 294, 190);
     button(L"Swap left / right", 403, 475, 294, 190);
     EnableWindow(GetDlgItem(window, 403), !single_display_profile(s));
+    const bool separate = separate_lower_profile(s), single = single_display_profile(s);
+    button(separate ? L"Snapshot NDs" : single ? L"Snapshot texture" : L"Snapshot left", 404, 690, 294, 150);
+    if (!single || separate)
+      button(separate ? L"Snapshot lower" : L"Snapshot right", 405, 850, 294, 150);
     toggle(L"Left preview", 224, (s.manual_mask & 1) != 0, 260, 429, 200);
     toggle(L"Right preview", 225, (s.manual_mask & 2) != 0, 505, 429, 200);
     toggle(L"Calibrate left", 226, (s.calibration_mask & 1) != 0, 260, 540, 200);
@@ -2138,6 +2359,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
             InvalidateRect(hwnd, nullptr, FALSE);
           }
           build_controls();
+        }
+        return 0;
+      }
+      if (id == 404 || id == 405) {
+        if (const auto texture = snapshot_target(static_cast<unsigned>(id - 404)))
+          show_display_snapshot(texture);
+        else {
+          notice = L"Choose a texture in the list, or wait for automatic assignment, then take a snapshot.";
+          InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
       }

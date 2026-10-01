@@ -51,6 +51,8 @@ void Pool::release_resources(Packet& packet) noexcept {
   if (packet.source)
     packet.source->Release();
   packet.target = packet.source = nullptr;
+  packet.completed = nullptr;
+  packet.completed_value = 0;
   packet.covering_value = 0;
 }
 
@@ -68,8 +70,15 @@ bool Pool::service(ID3D12Device* device, std::uint64_t completed) noexcept {
     device_->AddRef();
   }
   for (auto& packet : packets_) {
-    if (packet.state == State::submitted && packet.covering_value <= completed)
+    if (packet.state == State::submitted && packet.covering_value <= completed) {
+      if (packet.completed) {
+        auto seen = packet.completed->load(std::memory_order_relaxed);
+        while (seen < packet.completed_value && !packet.completed->compare_exchange_weak(
+                                                    seen, packet.completed_value, std::memory_order_release, std::memory_order_relaxed)) {
+        }
+      }
       packet.state = State::retired;
+    }
     if (packet.state == State::retired) {
       release_resources(packet);
       if (FAILED(packet.allocator->Reset()) || FAILED(packet.list->Reset(packet.allocator, nullptr))) {
@@ -112,6 +121,13 @@ bool Pool::valid_copy(const Copy& copy) const noexcept {
       footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 || copy.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 ||
       copy.x > target.Width || copy.width > target.Width - copy.x || copy.y > target.Height || copy.height > target.Height - copy.y)
     return false;
+  if (copy.completed && (!copy.readback || !copy.completed_value))
+    return false;
+  if (copy.readback) {
+    D3D12_HEAP_PROPERTIES heap{};
+    if (FAILED(copy.source->GetHeapProperties(&heap, nullptr)) || heap.Type != D3D12_HEAP_TYPE_READBACK)
+      return false;
+  }
   const std::uint64_t bytes = std::uint64_t{copy.height - 1} * footprint.RowPitch + std::uint64_t{copy.width} * 4;
   return copy.footprint.Offset <= source.Width && bytes <= source.Width - copy.footprint.Offset;
 }
@@ -128,20 +144,28 @@ Pool::Recording Pool::record(const Copy& copy) noexcept {
     copy.source->AddRef();
     packet.target = copy.target;
     packet.source = copy.source;
+    packet.completed = copy.completed;
+    packet.completed_value = copy.completed_value;
     packet.state = State::recorded;
+    const auto copy_state = copy.readback ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition = {copy.target, 0, copy.state, D3D12_RESOURCE_STATE_COPY_DEST};
+    barrier.Transition = {copy.target, 0, copy.state, copy_state};
     packet.list->ResourceBarrier(1, &barrier);
-    D3D12_TEXTURE_COPY_LOCATION source{}, target{};
-    source.pResource = copy.source;
-    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    source.PlacedFootprint = copy.footprint;
-    target.pResource = copy.target;
-    target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    const D3D12_BOX box{0, 0, 0, copy.width, copy.height, 1};
-    packet.list->CopyTextureRegion(&target, copy.x, copy.y, 0, &source, &box);
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    D3D12_TEXTURE_COPY_LOCATION buffer{}, texture{};
+    buffer.pResource = copy.source;
+    buffer.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    buffer.PlacedFootprint = copy.footprint;
+    texture.pResource = copy.target;
+    texture.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    if (copy.readback) {
+      const D3D12_BOX box{copy.x, copy.y, 0, copy.x + copy.width, copy.y + copy.height, 1};
+      packet.list->CopyTextureRegion(&buffer, 0, 0, 0, &texture, &box);
+    } else {
+      const D3D12_BOX box{0, 0, 0, copy.width, copy.height, 1};
+      packet.list->CopyTextureRegion(&texture, copy.x, copy.y, 0, &buffer, &box);
+    }
+    barrier.Transition.StateBefore = copy_state;
     barrier.Transition.StateAfter = copy.state;
     packet.list->ResourceBarrier(1, &barrier);
     if (FAILED(packet.list->Close())) {
