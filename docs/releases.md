@@ -74,7 +74,7 @@ Provenance and manifests remain beside the ZIP in the ignored build directory as
 
 ## Tags and release notes
 
-The release version comes from [`changelog.json`](../changelog.json): every build uses the `version` of its first (newest) entry exactly, so the installed version, its What's new notes and the published tag always agree. To release a new version, add a new top entry with the higher version (see [What's new notes](#whats-new-notes)); merging it makes `main` build that version. Commits without a new entry rebuild the same version, and the published `build.<N>` suffix tells those builds apart. Git history and tags do not affect the version, so local builds, pull-request builds and GitHub Actions resolve the same value from the checked-out file. The build refuses a changelog whose versions are not strictly descending `major.minor.patch` values with each component at most 65535.
+The release version comes from [`changelog.json`](../changelog.json): every build uses the `version` of its first (newest) entry exactly, so the installed version, its What's new notes and the published tag always agree. To release a new version, add a new top entry with the higher version (see [What's new notes](#whats-new-notes)); merging it makes `main` build that version. Commits without a new entry rebuild the same version for testing, but **Publish release** refuses a version that is not higher than the last release tag on `main` (a rerun of an already-tagged commit is still allowed). This is required because the updater compares the version before the build number, and installed binaries carry the workflow run number rather than the tag's `build.<N>`. Git history and tags do not affect the version, so local builds, pull-request builds and GitHub Actions resolve the same value from the checked-out file. The build refuses a changelog whose versions are not strictly descending `major.minor.patch` values with each component at most 65535.
 
 The generated header and Windows manifest live under `build/native/generated/`; the resolved version and build number are recorded in `build/native/version.json`. The app UI, executable version resources, installer and release title all use this resolved semantic version.
 
@@ -108,7 +108,7 @@ To add notes, put a new object at the top of `releases`:
 }
 ~~~
 
-`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. `changes` holds 1–32 non-empty strings of at most 400 characters. Unknown keys are refused. The top entry's `version` is the version every build is stamped with, so adding an entry is how a release version is chosen. Notes for further changes that ship in the same version go into the existing top entry.
+`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. `changes` holds 1–32 non-empty strings of at most 400 characters. Unknown keys are refused. The top entry's `version` is the version every build is stamped with, so adding an entry is how a release version is chosen. Each published release needs its own higher entry; notes for changes merged before that release go into the current top entry.
 
 Because the companion reads the file from `main`, wording can be corrected after a release without reinstalling. `changelog.json` is a build input, so any change to it starts the release workflow; publishing that candidate still needs approval. Every pull request still validates the file through `tests/app/changelog_test.cpp` in `build.ps1 -Validate`.
 

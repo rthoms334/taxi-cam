@@ -56,6 +56,16 @@ function Get-TaxiNextPublishTag {
             throw 'Could not resolve the last main release tag.'
         }
         if ($tagged -eq $head) { return $last }
+        # The updater compares major.minor.patch before the build number, and
+        # installed binaries carry the workflow run number rather than the tag
+        # build number. A release that keeps the previous version could then
+        # look older than what users already run, so every publish needs a
+        # higher changelog.json version.
+        $null = $last -cmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-build\.'
+        $previous = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+        if ([version]$Version -le $previous) {
+            throw "Version $Version is not higher than the last release $last. Add a new top entry to changelog.json before publishing."
+        }
         $number = (Get-TaxiReleaseTagBuildNumber $last) + 1
     } else {
         $number = 1
