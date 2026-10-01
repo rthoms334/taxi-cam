@@ -1,6 +1,6 @@
 # Windows builds and approved releases
 
-The [Windows build and release workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency or version configuration, camera defaults, the project licence, bundled runtime notices, or the release workflow itself. A successful run retains a downloadable Windows x64 release candidate for checking. Publication waits for your approval in the same workflow run.
+The [Windows build and release workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency configuration, `changelog.json` (the release version), camera defaults, the project licence, bundled runtime notices, or the release workflow itself. A successful run retains a downloadable Windows x64 release candidate for checking. Publication waits for your approval in the same workflow run.
 
 README, documentation, issue-template and other repository-only changes do not trigger an automatic build. Markdown files and formatting/ignore files are excluded even inside the code directories. A push containing both documentation and a qualifying code change still runs. Keep the workflow's `paths` list current when adding a new build input outside the listed directories.
 
@@ -74,11 +74,9 @@ Provenance and manifests remain beside the ZIP in the ignored build directory as
 
 ## Tags and release notes
 
-`version.json` defines the semantic version baseline, starting at `0.8.1`. The commit introducing that value uses the baseline exactly. Each subsequent first-parent commit on `main` adds one to its patch component: `0.8.1`, `0.8.2`, `0.8.3`, and so on. A merge counts once; a push containing several direct commits advances by their count. Documentation commits still count towards version calculation, but no longer trigger a release; the next code release may therefore skip patch numbers. Formatting the configuration without changing its version value does not reset the baseline.
+The release version comes from [`changelog.json`](../changelog.json): every build uses the `version` of its first (newest) entry exactly, so the installed version, its What's new notes and the published tag always agree. To release a new version, add a new top entry with the higher version (see [What's new notes](#whats-new-notes)); merging it makes `main` build that version. Commits without a new entry rebuild the same version, and the published `build.<N>` suffix tells those builds apart. Git history and tags do not affect the version, so local builds, pull-request builds and GitHub Actions resolve the same value from the checked-out file. The build refuses a changelog whose versions are not strictly descending `major.minor.patch` values with each component at most 65535.
 
-For a minor or major release, deliberately change the baseline in `version.json` to the required version, such as `0.9.0` or `1.0.0`. That commit establishes a new baseline. Local builds and GitHub Actions calculate the same semantic version from the same complete Git history. A local, uncommitted baseline change uses its configured version. Shallow checkouts are refused because they cannot establish the version reliably.
-
-The generated header and Windows manifest live under `build/native/generated/`; the resolved version and baseline commit are recorded in `build/native/version.json`. The app UI, executable version resources, installer and release title all use this resolved semantic version.
+The generated header and Windows manifest live under `build/native/generated/`; the resolved version and build number are recorded in `build/native/version.json`. The app UI, executable version resources, installer and release title all use this resolved semantic version.
 
 The approval-gated **Publish release** job is the only place that creates `v<application-version>-build.<N>` on the exact `main` commit being published (`gh release create` with that tag). `N` is one greater than the last matching tag on that commit's first-parent history, or `1` when `main` has no such tag. A rerun of the same commit reuses its existing tag. Pushes to `main` and pull-request CI must not create tags or increment that published build number. Workflow run numbers still name artifacts (`windows-release-<run>-attempt-<attempt>`), the compiled receipt and the runtime ZIP label; they are not the published tag. Only `main`-branch GitHub Actions runs stamp that workflow run number into the compiled binary and validation receipt. Local builds and pull-request test builds use build number zero. Packaging refuses a `build.N` label that differs from the compiled build number. Publication uses the already-stamped receipt; it does not rebuild or rewrite historical release receipts.
 
@@ -110,9 +108,9 @@ To add notes, put a new object at the top of `releases`:
 }
 ~~~
 
-`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. `changes` holds 1–32 non-empty strings of at most 400 characters. Unknown keys are refused. Each first-parent commit on `main` advances the patch, so label an entry with the version its merge will build as: the current `main` version plus one for the merge commit. An entry labelled higher than the version eventually built stays hidden until a build at or above that version is installed.
+`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. `changes` holds 1–32 non-empty strings of at most 400 characters. Unknown keys are refused. The top entry's `version` is the version every build is stamped with, so adding an entry is how a release version is chosen. Notes for further changes that ship in the same version go into the existing top entry.
 
-Because the companion reads the file from `main`, notes can be corrected after a release without rebuilding, and a change to `changelog.json` alone does not start the release workflow. Every pull request still validates the file through `tests/app/changelog_test.cpp` in `build.ps1 -Validate`.
+Because the companion reads the file from `main`, wording can be corrected after a release without reinstalling. `changelog.json` is a build input, so any change to it starts the release workflow; publishing that candidate still needs approval. Every pull request still validates the file through `tests/app/changelog_test.cpp` in `build.ps1 -Validate`.
 
 ## Failures and reruns
 

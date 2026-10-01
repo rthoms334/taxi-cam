@@ -5,85 +5,54 @@ $repo = Split-Path -Parent $PSScriptRoot
 $fixture = Join-Path $repo ('build/version-tests/' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $fixture | Out-Null
 $checks = 0
-function Invoke-TestGit([string[]]$Arguments) {
-    $output = @(& git -C $fixture -c user.name='Taxi Cam version tests' -c user.email='version-tests@example.invalid' -c commit.gpgSign=false -c core.hooksPath=disabled-test-hooks @Arguments)
-    if ($LASTEXITCODE -ne 0) { throw "Version fixture Git command failed: $($Arguments[0])" }
-    return $output
-}
-function Commit-Fixture([string]$Message) {
-    $null = Invoke-TestGit @('add','--all')
-    $null = Invoke-TestGit @('commit','--quiet','-m',$Message)
-}
-function Write-Version([string]$Version) {
-    @{version=$Version} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $fixture 'version.json') -Encoding ascii
+function Write-Changelog([string[]]$Versions) {
+    $releases = @($Versions | ForEach-Object { @{version=$_; changes=@('Change.')} })
+    @{releases=$releases} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $fixture 'changelog.json') -Encoding utf8
 }
 function Assert-Version([string]$Expected, [int]$BuildNumber = 10) {
     $actual = Get-TaxiVersion $fixture $BuildNumber
-    if ($actual.Version -ne $Expected -or $actual.BuildNumber -ne $BuildNumber) { throw "Expected $Expected, got $($actual.Version)." }
+    if ($actual.Version -cne $Expected -or $actual.BuildNumber -ne $BuildNumber) { throw "Expected $Expected, got $($actual.Version)." }
     $script:checks++
 }
-function Reject-Version {
+function Reject-Version([string]$Name) {
     $rejected = $false
     try { Get-TaxiVersion $fixture | Out-Null } catch { $rejected = $true }
-    if (-not $rejected) { throw 'Invalid version was accepted.' }
+    if (-not $rejected) { throw "Invalid changelog was accepted: $Name." }
     $script:checks++
 }
-$null = Invoke-TestGit @('init','--quiet','-b','main')
-$null = Invoke-TestGit @('commit','--quiet','--allow-empty','-m','Initial fixture')
-Write-Version '0.8.1'
-Assert-Version '0.8.1' 0
-Commit-Fixture 'Set version baseline'
-Assert-Version '0.8.1'
-'First change' | Set-Content -LiteralPath (Join-Path $fixture 'change.txt')
-Commit-Fixture 'Change app'
-Assert-Version '0.8.2'
-Assert-Version '0.8.2' 99
-'{"version":"0.8.1"}' | Set-Content -LiteralPath (Join-Path $fixture 'version.json') -Encoding ascii
-Commit-Fixture 'Reformat version configuration'
-Assert-Version '0.8.3'
-$null = Invoke-TestGit @('switch','--quiet','-c','feature')
-foreach ($number in 1..2) {
-    "Feature $number" | Set-Content -LiteralPath (Join-Path $fixture 'change.txt')
-    Commit-Fixture "Feature change $number"
-}
-$null = Invoke-TestGit @('switch','--quiet','main')
-$null = Invoke-TestGit @('merge','--quiet','--no-ff','feature','-m','Merge feature')
-Assert-Version '0.8.4'
-# A version change arriving through a merge establishes its baseline on main.
-$null = Invoke-TestGit @('switch','--quiet','-c','minor-release')
-Write-Version '0.9.0'
-Commit-Fixture 'Start minor release'
-'Minor release change' | Set-Content -LiteralPath (Join-Path $fixture 'change.txt')
-Commit-Fixture 'Finish minor release'
-$null = Invoke-TestGit @('switch','--quiet','main')
-$null = Invoke-TestGit @('merge','--quiet','--no-ff','minor-release','-m','Release new minor version')
-Assert-Version '0.9.0'
-'Documentation change' | Set-Content -LiteralPath (Join-Path $fixture 'docs.txt')
-Commit-Fixture 'Update docs'
-Assert-Version '0.9.1'
-# Semantic version is stamped from version.json first-parent height at build
-# time, not from the last publish tag. A later tag on main or a higher tag
-# off main must not change the compiled version.
-$null = Invoke-TestGit @('tag','v0.9.1-build.38')
-Assert-Version '0.9.1'
-$null = Invoke-TestGit @('switch','--quiet','-c','off-main-tag')
-$null = Invoke-TestGit @('tag','v9.9.9-build.99')
-$null = Invoke-TestGit @('switch','--quiet','main')
-Assert-Version '0.9.1'
-Write-Version '1.0.0'
-Assert-Version '1.0.0'
-Commit-Fixture 'Start major release'
-Assert-Version '1.0.0'
-foreach ($invalid in @('01.2.3','1.2','1.2.3-preview','1.2.3+build.4','1.2.-1','1.2.65536','999999999999.0.0')) {
-    Write-Version $invalid
-    Reject-Version
-}
-Write-Version '0.0.65535'
+# The release version is the newest changelog entry, independent of Git
+# history, tags or how many commits have landed since it was added.
+Write-Changelog @('0.9.50')
+Assert-Version '0.9.50' 0
+Assert-Version '0.9.50' 99
+Write-Changelog @('0.9.51','0.9.50','0.9.47')
+Assert-Version '0.9.51'
+Write-Changelog @('1.0.0','0.9.51')
+$actual = Get-TaxiVersion $fixture
+if ($actual.Major -ne 1 -or $actual.Minor -ne 0 -or $actual.Patch -ne 0) { throw 'Version components were not split.' }
+$checks++
+Write-Changelog @('0.0.65535')
 Assert-Version '0.0.65535'
-Commit-Fixture 'Windows version limit'
-'Overflow' | Set-Content -LiteralPath (Join-Path $fixture 'change.txt')
-Commit-Fixture 'One more patch'
-Reject-Version
+foreach ($invalid in @('01.2.3','1.2','1.2.3-preview','1.2.3+build.4','1.2.-1','1.2.65536','999999999999.0.0','')) {
+    Write-Changelog @($invalid)
+    Reject-Version "version '$invalid'"
+}
+Write-Changelog @('0.9.50','0.9.51')
+Reject-Version 'ascending versions'
+Write-Changelog @('0.9.50','0.9.50')
+Reject-Version 'duplicate versions'
+'{"releases":[]}' | Set-Content -LiteralPath (Join-Path $fixture 'changelog.json') -Encoding ascii
+Reject-Version 'empty releases'
+'{"notes":[]}' | Set-Content -LiteralPath (Join-Path $fixture 'changelog.json') -Encoding ascii
+Reject-Version 'missing releases'
+'{"releases":[{"changes":["Change."]}]}' | Set-Content -LiteralPath (Join-Path $fixture 'changelog.json') -Encoding ascii
+Reject-Version 'missing version'
+Remove-Item -LiteralPath (Join-Path $fixture 'changelog.json')
+Reject-Version 'missing changelog.json'
+$repositoryVersion = Get-TaxiVersion $repo
+$repositoryTop = @((Get-Content -Raw -LiteralPath (Join-Path $repo 'changelog.json') | ConvertFrom-Json).releases)[0].version
+if ($repositoryVersion.Version -cne $repositoryTop) { throw 'The repository build version differs from its newest changelog entry.' }
+$checks++
 function Assert-ReleaseBuildNumber([int]$Expected, [hashtable]$Context, [string]$Name) {
     $actual = Get-TaxiReleaseBuildNumber @Context
     if ($actual -ne $Expected) { throw "Expected release build $Expected for $Name, got $actual." }
@@ -100,4 +69,4 @@ $rejected = $false
 try { Get-TaxiReleaseBuildNumber -GitHubActions 'true' -EventName 'push' -Ref 'refs/heads/main' -RunNumber '01' | Out-Null } catch { $rejected = $true }
 if (-not $rejected) { throw 'Leading-zero run numbers were accepted.' }
 $script:checks++
-Write-Output "PASS semantic versions: $checks checks for patch progression, stable reruns, merge history, minor/major baselines, Windows limits and publish-only build numbers."
+Write-Output "PASS release versions: $checks checks for changelog-sourced versions, ordering, Windows limits and publish-only build numbers."

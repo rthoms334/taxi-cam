@@ -19,37 +19,42 @@ function Get-TaxiReleaseBuildNumber(
     return $buildNumber
 }
 
+function ConvertTo-TaxiReleaseVersion([string]$Text) {
+    if ($Text -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+        throw "changelog.json version '$Text' is not major.minor.patch."
+    }
+    $parts = @($Matches[1], $Matches[2], $Matches[3]) | ForEach-Object {
+        $number = 0
+        if (-not [int]::TryParse($_, [ref]$number) -or $number -gt 65535) { throw 'Windows version components must fit in 16 bits.' }
+        $number
+    }
+    return ,[int[]]$parts
+}
+
 function Get-TaxiVersion([string]$Repository, [int]$BuildNumber = 0) {
     if ($BuildNumber -lt 0) { throw 'Build number must not be negative.' }
-    $config = Get-Content -Raw -LiteralPath (Join-Path $Repository 'version.json') | ConvertFrom-Json
-    if ($config.version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'version.json must contain a major.minor.patch version.' }
-    $parts = @($Matches[1], $Matches[2], $Matches[3])
-    foreach ($part in $parts) {
-        $number = 0
-        if (-not [int]::TryParse($part, [ref]$number) -or $number -gt 65535) { throw 'Windows version components must fit in 16 bits.' }
+    # The release version is the newest entry in changelog.json, so every build
+    # carries exactly the version its What's new notes describe. Add a new top
+    # entry to release a new version.
+    $changelog = Get-Content -Raw -LiteralPath (Join-Path $Repository 'changelog.json') | ConvertFrom-Json
+    if (-not ($changelog.PSObject.Properties.Name -contains 'releases')) { throw 'changelog.json must contain a releases list.' }
+    $releases = @($changelog.releases)
+    if ($releases.Count -eq 0) { throw 'changelog.json must list at least one release.' }
+    $previous = $null
+    foreach ($release in $releases) {
+        if (-not ($release.PSObject.Properties.Name -contains 'version')) { throw 'Every changelog.json release needs a version.' }
+        $current = ConvertTo-TaxiReleaseVersion ([string]$release.version)
+        if ($previous) {
+            $order = 0
+            for ($i = 0; $i -lt 3 -and $order -eq 0; $i++) { $order = $previous[$i].CompareTo($current[$i]) }
+            if ($order -le 0) { throw "changelog.json versions must be strictly descending; $($release.version) is out of order." }
+        }
+        $previous = $current
     }
-    $shallow = & git -C $Repository rev-parse --is-shallow-repository
-    if ($LASTEXITCODE -ne 0 -or $shallow -ne 'false') { throw 'Version calculation requires a full Git checkout.' }
-    $history = @(& git -C $Repository log --first-parent '--format=%H' -- version.json)
-    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the version configuration history.' }
-    $baseCommit = ''; $height = 0
-    foreach ($commit in $history) {
-        $prior = & git -C $Repository show "${commit}:version.json"
-        if ($LASTEXITCODE -ne 0) { throw 'Could not read a historical version configuration.' }
-        if (($prior -join "`n" | ConvertFrom-Json).version -cne $config.version) { break }
-        $baseCommit = $commit
-    }
-    if ($baseCommit) {
-        # A changed version value establishes the baseline. Formatting-only
-        # edits do not reset it; subsequent first-parent commits advance patch.
-        $count = & git -C $Repository rev-list --first-parent --count "$baseCommit..HEAD"
-        if ($LASTEXITCODE -ne 0 -or -not [int]::TryParse($count, [ref]$height)) { throw 'Could not count commits since the version baseline.' }
-    }
-    $patch = [long]$parts[2] + $height
-    if ($patch -gt 65535) { throw 'Patch version exceeds the Windows version limit; set a new minor version in version.json.' }
+    $parts = ConvertTo-TaxiReleaseVersion ([string]$releases[0].version)
     [pscustomobject]@{
-        Version = "$($parts[0]).$($parts[1]).$patch"
-        Major = [int]$parts[0]; Minor = [int]$parts[1]; Patch = [int]$patch
-        BuildNumber = $BuildNumber; BaseCommit = $baseCommit; CommitsSinceBase = $height
+        Version = "$($parts[0]).$($parts[1]).$($parts[2])"
+        Major = $parts[0]; Minor = $parts[1]; Patch = $parts[2]
+        BuildNumber = $BuildNumber; Source = 'changelog.json'
     }
 }

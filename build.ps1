@@ -8,7 +8,7 @@ $taskRoot = $PSScriptRoot
 $buildNumber = Get-TaxiReleaseBuildNumber
 $releaseVersion = Get-TaxiVersion -Repository $taskRoot -BuildNumber $buildNumber
 $version = $releaseVersion.Version
-Write-Output "Building Taxi Cam $version (build $buildNumber; $($releaseVersion.CommitsSinceBase) commits since version baseline)."
+Write-Output "Building Taxi Cam $version (build $buildNumber; version from changelog.json)."
 $deps = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'dependencies.json') | ConvertFrom-Json
 $compiler = Join-Path $taskRoot ('build/deps/' + $deps.'llvm-mingw'.directory + '/bin/clang++.exe')
 if ($Bootstrap -and -not (Test-Path -LiteralPath $compiler)) { & (Join-Path $taskRoot 'bootstrap.ps1') }

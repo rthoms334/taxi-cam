@@ -29,7 +29,7 @@ jobs:
       - name: Confirm this workflow cannot publish
         run: ./ci/pr-test-build_test.ps1
 
-      - name: Test semantic version progression
+      - name: Test changelog release version
         run: ./ci/version_test.ps1
 
       - name: Cache verified compiler archive
