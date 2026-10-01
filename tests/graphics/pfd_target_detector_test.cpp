@@ -733,6 +733,23 @@ int main() {
   assert(!inboard.observe(reversed.data(), reversed.size(), 1000).valid);
   assert(!inboard.observe(reversed.data(), reversed.size(), 2000).valid);
   assert(inboard.observe(reversed.data(), reversed.size(), 3000).valid && inboard.snapshot().targets[0] == 95);
+  // The lower texture recreated (live PMDG 777: 228 -> 653) gets the highest id;
+  // it replaces the lower guess and is not mistaken for the display.
+  std::array<PfdTargetObservation, 3> lower_new{reversed[0], reversed[1], one};
+  lower_new[2].id = 120;
+  const auto& lower_replaced = inboard.observe(lower_new.data(), lower_new.size(), 30000);
+  assert(lower_replaced.valid && lower_replaced.targets[0] == 95 && lower_replaced.targets[1] == 120 &&
+         std::strcmp(lower_replaced.status, "replaced") == 0);
+  // Two new textures at once is ambiguous: the slow path decides.
+  std::array<PfdTargetObservation, 4> two_new{lower_new[1], lower_new[2], one, one};
+  two_new[2].id = 130;
+  two_new[3].id = 131;
+  assert(!inboard.observe(two_new.data(), two_new.size(), 31000).valid);
+  inboard.reset();
+  assert(!inboard.observe(reversed.data(), reversed.size(), 0).valid);
+  assert(!inboard.observe(reversed.data(), reversed.size(), 1000).valid);
+  assert(!inboard.observe(reversed.data(), reversed.size(), 2000).valid);
+  assert(inboard.observe(reversed.data(), reversed.size(), 3000).valid && inboard.snapshot().targets[0] == 95);
   assert(!inboard.observe(older.data(), older.size(), 4000).valid);
   assert(std::strcmp(inboard.snapshot().status, "candidate_disappeared") == 0 && inboard.snapshot().targets[0] == 0);
   // reset() (device or session change) forgets the confirmed display.

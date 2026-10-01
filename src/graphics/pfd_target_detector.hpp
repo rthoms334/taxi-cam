@@ -54,7 +54,7 @@ class PfdTargetDetector {
     previous_count_ = 0;
     baseline_valid_ = false;
     submission_mode_ = false;
-    confirmed_single_ = 0;
+    confirmed_single_ = confirmed_lower_ = 0;
     clear("warming_up");
   }
 
@@ -285,7 +285,7 @@ class PfdTargetDetector {
   // which is the routing dropdown order. The last entry is the navigation
   // display for this profile; the first entry is not. The confirmed pair is
   // {id, 0}; routing copies that id onto both inboard rectangles.
-  // A changed last id starts a new baseline, except a replacement of the
+  // A changed last id starts a new baseline, except a replacement of a
   // confirmed display. Draw count does not rank them.
   const PfdTargetDetection& observe_single_display(std::size_t count, std::uint64_t now_ms) noexcept {
     if (count == 0) {
@@ -294,22 +294,38 @@ class PfdTargetDetector {
       return detection_;
     }
     const auto chosen = current_[count - 1].id;
-    // The confirmed display texture was retired and a newer incarnation of the
-    // same shape is now last: the aircraft recreated its display. Follow it at
-    // once; the baseline and three confirmations are for a first detection.
-    // Live PMDG 777 (2026-10-01) recreated it every 3-5 s in flight, faster
-    // than that wait, so the display never came back. Incarnation ids are not
-    // reused, so a newer id is a newly created texture.
-    if (confirmed_single_ && chosen > confirmed_single_ && !contains(count, confirmed_single_)) {
-      clear("replaced");
-      seed(count, now_ms);
-      pending_ = {chosen, 0};
-      detection_.stable_windows = required_windows;
-      detection_.valid = true;
-      detection_.confidence = PfdTargetConfidence::confirmed;
-      detection_.targets = pending_;
-      detection_.status = "replaced";
-      return single_display_confirmed(count);
+    // The aircraft recreated one of its confirmed display textures: exactly
+    // one confirmed texture (display or lower guess) is gone and exactly one
+    // texture of the same shape is new since the last observation. The new one
+    // takes over that display at once; the baseline and three confirmations
+    // are for a first detection. Live PMDG 777 (2026-10-01) recreated the
+    // display every 3-5 s in flight, faster than that wait, and in another
+    // flight recreated the lower texture, whose new id was then the highest,
+    // which the id-order rule below would take for the display. Incarnation
+    // ids are not reused. Anything less clear-cut takes the slow path.
+    if (confirmed_single_) {
+      const bool display_gone = !contains(count, confirmed_single_);
+      const bool lower_gone = confirmed_lower_ && !contains(count, confirmed_lower_);
+      std::uint64_t created = 0;
+      unsigned created_count = 0;
+      for (std::size_t i = 0; i < count; ++i)
+        if (!contains_previous(current_[i].id)) {
+          created = current_[i].id;
+          ++created_count;
+        }
+      if (display_gone != lower_gone && created_count == 1) {
+        clear("replaced");
+        seed(count, now_ms);
+        pending_ = {display_gone ? created : confirmed_single_, 0};
+        detection_.stable_windows = required_windows;
+        detection_.valid = true;
+        detection_.confidence = PfdTargetConfidence::confirmed;
+        detection_.targets = {pending_[0], lower_gone ? created : confirmed_lower_};
+        detection_.status = "replaced";
+        confirmed_single_ = detection_.targets[0];
+        confirmed_lower_ = detection_.targets[1];
+        return detection_;
+      }
     }
     if (!baseline_valid_ || now_ms < baseline_ms_ || now_ms - baseline_ms_ > maximum_window_ms) {
       clear(!baseline_valid_ ? "warming_up" : now_ms < baseline_ms_ ? "clock_reset" : "stale_window");
@@ -339,6 +355,7 @@ class PfdTargetDetector {
     // EICASCDU, was the next-highest id. Routing can override it.
     if (profiles::separate_lower_texture(*profile_) && count >= 2)
       detection_.targets[1] = current_[count - 2].id;
+    confirmed_lower_ = detection_.targets[1];
     return detection_;
   }
 
@@ -346,6 +363,12 @@ class PfdTargetDetector {
     const auto found = std::lower_bound(current_.begin(), current_.begin() + count, id,
                                         [](const Counter& value, std::uint64_t key) { return value.id < key; });
     return found != current_.begin() + count && found->id == id;
+  }
+  // In the inventory of the last observation (seed keeps it sorted by id).
+  bool contains_previous(std::uint64_t id) const noexcept {
+    const auto found = std::lower_bound(previous_.begin(), previous_.begin() + previous_count_, id,
+                                        [](const Counter& value, std::uint64_t key) { return value.id < key; });
+    return found != previous_.begin() + previous_count_ && found->id == id;
   }
 
   void clear(const char* status, bool invalidates = false) noexcept {
@@ -369,9 +392,10 @@ class PfdTargetDetector {
   bool baseline_valid_ = false;
   bool submission_mode_ = false;
   std::array<std::uint64_t, 2> pending_{};
-  // Single-display policy: the last confirmed display id; a newer replacement
-  // of it is followed without a new baseline. reset() forgets it.
-  std::uint64_t confirmed_single_ = 0;
+  // Single-display policy: the last confirmed display id and lower guess; a
+  // clear-cut replacement of either is followed without a new baseline.
+  // reset() forgets them.
+  std::uint64_t confirmed_single_ = 0, confirmed_lower_ = 0;
   PfdTargetDetection detection_{};
 };
 
