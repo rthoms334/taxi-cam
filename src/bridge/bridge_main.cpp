@@ -553,8 +553,11 @@ DWORD run_impl() {
         if (full_reset) {
           // Forget discovery and completed frames, but keep every outstanding
           // GPU lease on its existing fence. Native retirement is observer-only.
+          // A same-profile change keeps the camera pair (begin_flight_change)
+          // and with it the GPU capture session: its output textures are never
+          // created again, so their state could not be established afresh.
           win::reset_display_session();
-          pending_gpu_generation = scene_runtime::reset_session(key);
+          pending_gpu_generation = settings.profile != applied_profile ? scene_runtime::reset_session(key) : 0;
         }
         pending_full_reset = full_reset;
         pending_profile = settings.profile;
@@ -568,15 +571,15 @@ DWORD run_impl() {
         route_request = 0;
       }
       native_camera::suspend_scene_rendering(true);
-      if (pending_full_reset && !pending_gpu_generation)
+      const bool keep_pair = pending_full_reset && pending_profile == applied_profile;
+      if (pending_full_reset && !keep_pair && !pending_gpu_generation)
         pending_gpu_generation = scene_runtime::reset_session(key);
       // A new flight, airport or teleport with the same profile resets display
       // discovery and the GPU session here, but keeps the native camera pair
       // (begin_flight_change); only another aircraft profile retires it.
       if (!transition_token)
-        transition_token = pending_full_reset && pending_profile != applied_profile
-                               ? native_camera::request_scene_session_reset(pending_profile)
-                               : native_camera::request_scene_profile_transition(pending_profile);
+        transition_token = pending_full_reset && !keep_pair ? native_camera::request_scene_session_reset(pending_profile)
+                                                            : native_camera::request_scene_profile_transition(pending_profile);
       const auto transition = native_camera::scene_snapshot();
       const bool ready = transition_token && transition.profile_transition_token == transition_token &&
                          transition.profile_transition_id == pending_profile && transition.profile_transition_ready &&
@@ -588,7 +591,7 @@ DWORD run_impl() {
       const bool public_ready = transition_session.ready && transition_session.epoch == pending_session_epoch;
       const bool gpu_ready =
           ready && telemetry_ready && public_ready &&
-          (!pending_full_reset || (pending_gpu_generation && scene_runtime::resume_session(key, pending_gpu_generation)));
+          (!pending_full_reset || keep_pair || (pending_gpu_generation && scene_runtime::resume_session(key, pending_gpu_generation)));
       if (!ready || !telemetry_ready || !public_ready || !gpu_ready) {
         const auto identity = native_camera::get_aircraft_identity();
         const auto graphics = win::graphics_status();
