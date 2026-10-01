@@ -169,6 +169,7 @@ AircraftSessionReadiness readiness_locked(std::uint64_t now) noexcept {
   out.epoch = state.aircraft_session.epoch();
   out.flow_subscribed = state.flow_subscribed;
   out.last_flow_event = state.aircraft_session.last_flow_event();
+  out.paused = state.aircraft_session.paused();
   const auto pending = invalid_world.load(std::memory_order_acquire);
   out.loading = state.aircraft_session.loading() || pending != 0;
   const auto identity = state.identity.sample(now);
@@ -474,7 +475,7 @@ DWORD WINAPI worker(void*) noexcept {
   // https://docs.flightsimulator.com/html/Programming_Tools/SimConnect/API_Reference/Events_And_Data/SimConnect_SubscribeToSystemEvent.htm
   for (const auto event :
        {std::pair{AircraftSessionLifecycle::SimEvent, "Sim"}, std::pair{AircraftSessionLifecycle::AircraftEvent, "AircraftLoaded"},
-        std::pair{AircraftSessionLifecycle::FlightEvent, "FlightLoaded"}}) {
+        std::pair{AircraftSessionLifecycle::FlightEvent, "FlightLoaded"}, std::pair{AircraftSessionLifecycle::PauseEvent, "Pause_EX1"}}) {
     if (SUCCEEDED(hr))
       hr = subscribe(session, event.first, event.second);
   }

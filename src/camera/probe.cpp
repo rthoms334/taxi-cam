@@ -1085,53 +1085,90 @@ bool parenting_available(const Runtime& runtime) noexcept {
 
 enum class MountState { none, attached, lost };
 
+enum class GiveBack { returned, unreferenced, held };
+
+// Puts a mounted camera Node back under the Node it was created under (the
+// world root), with the camera Node's own generation handle kept at attach.
+//   returned: it was moved back (detach + attach while the aircraft Node is
+//     alive and lists it; attach alone when it still names a destroyed aircraft
+//     Node, which nothing alive lists it from: attach rewrites only the camera
+//     Node's and the root's links, never the destroyed Node's).
+//   unreferenced: the engine already moved it under the root, or the aircraft
+//     Node is alive but no longer lists it; nothing to do.
+//   held: it cannot be moved safely; the mount is marked lost.
+// returned and unreferenced clear the mount.
+GiveBack give_back(Runtime& runtime, FeedMount& mount) noexcept {
+  if (!mount.node || !parenting_available(runtime))
+    return GiveBack::unreferenced;
+  LocalMemoryReader reader;
+  const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
+  const auto camera = read_node_links(reader, mount.node, node_vtable);
+  const auto root = read_node_links(reader, mount.root, node_vtable);
+  const bool alive = handle_alive(reader, mount.parent_handle, mount.parent);
+  const bool own = handle_alive(reader, mount.node_handle, mount.node);
+  const auto refuse = [&](const char* error) {
+    mount.lost = true;
+    runtime.mount_error = error;
+    return GiveBack::held;
+  };
+  if (!own || !camera.valid)
+    return refuse("mount_camera_unreadable");
+  if (camera.parent == mount.root && listed_child(reader, mount.root, mount.node)) {
+    mount = {};
+    return GiveBack::unreferenced;
+  }
+  if (!root.valid || root.world < 0)
+    return refuse("mount_root_unverified");
+  const auto node = mount.node, home = mount.root;
+  const auto handle = mount.node_handle;
+  if (alive && camera.parent == mount.parent) {
+    if (!listed_child(reader, mount.parent, node)) {
+      mount = {};
+      return GiveBack::unreferenced;
+    }
+    function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(node), true, false);
+  } else if (alive || camera.parent != mount.parent) {
+    return refuse("mount_parent_changed");
+  }
+  function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(home), &handle, false);
+  if (!listed_child(reader, home, node))
+    return refuse("mount_return_unconfirmed");
+  mount = {};
+  return GiveBack::returned;
+}
+
 // Feed's mount for this view's Node, rechecked: the aircraft Node is still the
-// one its generation handle names and the camera Node is still its child.
-// Anything else marks the mount lost; a lost camera is never placed again,
-// because set_position walks the parent chain the camera Node names.
+// one its generation handle names and the camera Node is still its child. When
+// the aircraft Node went away (a flight ended with the cameras on), the camera
+// Node goes back to the world root and the caller mounts it on the current
+// aircraft. A lost camera is never placed again, because set_position walks the
+// parent chain the camera Node names.
 MountState current_mount(Runtime& runtime, unsigned feed, const ec::OwnedViewSnapshot& view) noexcept {
   auto& mount = runtime.feed_mounts[feed];
-  const auto node = view.node_address;
-  if (!mount.node || mount.node != node)
+  if (!mount.node || mount.node != view.node_address)
     return MountState::none;
   if (mount.lost)
     return MountState::lost;
   LocalMemoryReader reader;
   std::uint64_t parent = 0;
-  const bool alive = handle_alive(reader, mount.parent_handle, mount.parent);
-  if (alive && reader.read(node + kNodeParent, &parent, sizeof(parent)) && parent == mount.parent)
+  if (handle_alive(reader, mount.parent_handle, mount.parent) && reader.read(mount.node + kNodeParent, &parent, sizeof(parent)) &&
+      parent == mount.parent)
     return MountState::attached;
-  // The aircraft Node went away (a flight ended with the cameras on) or the
-  // engine moved the camera Node. Back under its world root, the camera is
-  // mounted again on the current aircraft by the caller.
-  if (parent && parent == mount.root && listed_child(reader, mount.root, node)) {
-    // The engine handed it back itself.
-    mount = {};
-    ++runtime.mount_rehomes;
-    return MountState::none;
-  }
-  const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
-  const auto root = read_node_links(reader, mount.root, node_vtable);
-  NodeHandle node_handle;
-  if (!alive && reader.read(node + kNodeParent, &parent, sizeof(parent)) && parent == mount.parent && root.valid && root.world >= 0 &&
-      read_node_handle(reader, view.view_address, 104, node, node_handle)) {
-    // It still names the destroyed aircraft Node, which nothing alive lists it
-    // from. Attach alone rewrites only the camera Node's own links and the
-    // root's, never the destroyed Node's (detach would write into it).
-    function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(mount.root), &node_handle, false);
-    const auto home = mount.root;
-    mount = {};
-    if (listed_child(reader, home, node)) {
-      ++runtime.mount_rehomes;
-      return MountState::none;
-    }
-    mount = {0, node, home, home, {}, true};
-    runtime.mount_error = "mount_rehome_unconfirmed";
+  if (give_back(runtime, mount) == GiveBack::held)
     return MountState::lost;
-  }
-  mount.lost = true;
-  runtime.mount_error = "mount_parent_gone";
-  return MountState::lost;
+  ++runtime.mount_rehomes;
+  return MountState::none;
+}
+
+// Every mount goes back to the world root while the simulator is paused (the
+// pause menu every flight end and quit goes through) or the flight is not
+// ready: once the simulator unloads the aircraft the camera-manager update has
+// already stopped, so this is the last update in which it can be done. The next
+// pulse after the pause mounts the cameras again.
+void return_all_mounts(Runtime& runtime) noexcept {
+  for (auto& mount : runtime.feed_mounts)
+    if (mount.node && !mount.lost && give_back(runtime, mount) == GiveBack::returned)
+      ++runtime.mount_restores;
 }
 
 // Moves feed's camera Node from the Node it was created under (the world root)
@@ -1173,7 +1210,7 @@ bool mount_on_aircraft(Runtime& runtime,
   function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(view.node_address), true, false);
   function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(scene.node), &node_handle, false);
   ++runtime.mount_attaches;
-  mount = {entry, view.node_address, scene.node, camera.parent, aircraft_handle, false};
+  mount = {entry, view.node_address, scene.node, camera.parent, aircraft_handle, node_handle, false};
   if (!listed_child(reader, scene.node, view.node_address)) {
     mount.lost = true;
     return refuse("mount_attach_unconfirmed");
@@ -1183,36 +1220,28 @@ bool mount_on_aircraft(Runtime& runtime,
 
 // Before entry id is erased, its camera Node goes back under the Node it was
 // created under, the state the engine's erase has always seen. False holds the
-// erase: the aircraft Node is alive and still lists the camera Node, but this
-// view cannot be re-read to hand it back (erasing it then would leave the
-// aircraft listing a destroyed Node). When the aircraft Node is gone or no
-// longer lists the camera Node, nothing refers to it and the erase proceeds.
-bool restore_mount(Runtime& runtime, ec::EntryId id, const ec::OwnedViewSnapshot& view) noexcept {
+// erase: the aircraft Node is alive and still lists the camera Node but it could
+// not be handed back (erasing it then would leave the aircraft listing a
+// destroyed Node). Otherwise nothing alive refers to it and the erase proceeds.
+bool restore_mount(Runtime& runtime, ec::EntryId id) noexcept {
   bool proceed = true;
-  for (unsigned feed = 0; feed < kMaxCameraFeeds; ++feed) {
-    auto& mount = runtime.feed_mounts[feed];
+  for (auto& mount : runtime.feed_mounts) {
     if (!mount.node || mount.entry != id)
       continue;
-    LocalMemoryReader reader;
-    if (!parenting_available(runtime) || !handle_alive(reader, mount.parent_handle, mount.parent) ||
-        !listed_child(reader, mount.parent, mount.node)) {
-      mount = {};
+    const auto outcome = give_back(runtime, mount);
+    if (outcome == GiveBack::returned) {
+      ++runtime.mount_restores;
       continue;
     }
-    const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
-    const auto root = read_node_links(reader, mount.root, node_vtable);
-    NodeHandle node_handle;
-    if (!view.complete || !view.ready || view.node_address != mount.node || !root.valid || root.world < 0 ||
-        !read_node_handle(reader, view.view_address, 104, mount.node, node_handle)) {
+    if (outcome == GiveBack::unreferenced)
+      continue;
+    LocalMemoryReader reader;
+    if (handle_alive(reader, mount.parent_handle, mount.parent) && listed_child(reader, mount.parent, mount.node)) {
       runtime.mount_error = "mount_restore_held";
       proceed = false;
-      continue;
+    } else {
+      mount = {};
     }
-    const auto node = mount.node, home = mount.root;
-    mount = {};
-    function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(node), true, false);
-    function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(home), &node_handle, false);
-    ++runtime.mount_restores;
   }
   return proceed;
 }
@@ -1623,7 +1652,7 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
       (runtime.reset_requested.load(std::memory_order_acquire) && !readiness.ready))
     return false;
   // A camera Node mounted on the aircraft goes back under its world root first.
-  if (!restore_mount(runtime, id, view))
+  if (!restore_mount(runtime, id))
     return false;
   if (!runtime.retired_views.retain(runtime.renderer, view.view_address))
     return false;
@@ -2704,6 +2733,7 @@ void observer(void* manager) noexcept {
       runtime.published.mount_refused = runtime.mount_refused;
       runtime.published.mount_error = runtime.mount_error;
       runtime.published.mount_available = parenting_available(runtime);
+      runtime.published.sim_paused = get_aircraft_session_readiness().paused;
       runtime.published.mount_contract_error = runtime.mount_contract_error;
       runtime.published.node_links = runtime.node_links;
       runtime.published.pose_step_m = runtime.pose_lead.step_metres();
@@ -2739,6 +2769,14 @@ void after_observer(void* manager) noexcept {
   try {
     const unsigned feeds = runtime.post_pose_update == runtime.updates ? runtime.post_pose_feeds : 0;
     runtime.post_pose_feeds = 0;
+    // Mounts come off the aircraft while paused or not in a ready flight, every
+    // update, so quitting or ending a flight never unloads an aircraft that
+    // still holds a camera Node (return_all_mounts).
+    const auto session = get_aircraft_session_readiness();
+    const bool mounting =
+        parenting_available(runtime) && !session.paused && !session.loading && session.ready && session_work_allowed(runtime);
+    if (parenting_available(runtime) && !mounting)
+      return_all_mounts(runtime);
     const auto refuse = [&](const char* error) {
       ++runtime.post_refused;
       runtime.post_error = error;
@@ -2783,9 +2821,12 @@ void after_observer(void* manager) noexcept {
             }
             // Mounted on the aircraft Node (first pulse attaches): the mount is
             // stored relative to the aircraft and aimed far ahead (far_aim).
-            auto mounted = parenting_available(runtime) ? current_mount(runtime, i, view) : MountState::none;
-            if (mounted == MountState::none && parenting_available(runtime) &&
-                mount_on_aircraft(runtime, i, runtime.post_pose_ids[i], view, scene))
+            // Not mounting: a mount still held here could not be returned and
+            // is placed like a lost one (never).
+            auto mounted = mounting ? current_mount(runtime, i, view)
+                           : runtime.feed_mounts[i].node && runtime.feed_mounts[i].node == view.node_address ? MountState::lost
+                                                                                                             : MountState::none;
+            if (mounted == MountState::none && mounting && mount_on_aircraft(runtime, i, runtime.post_pose_ids[i], view, scene))
               mounted = MountState::attached;
             if (mounted == MountState::lost) {
               refuse("post_mount_lost");

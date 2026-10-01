@@ -62,6 +62,8 @@ std::uint64_t get_aircraft_session_epoch() noexcept;
 struct AircraftSessionReadiness {
   std::uint64_t epoch = 0;
   bool loading = false, ready = false, flow_subscribed = false;
+  // The simulator reported a pause (Pause_EX1), independent of ready.
+  bool paused = false;
   // The telemetry cache was busy; this is the last complete reading (same
   // epoch, at most ReadinessCacheMaxAgeMs old), not a fresh evaluation.
   bool cached = false;

@@ -119,7 +119,7 @@ inline MountedPose far_aim(const MountedPose& pose) noexcept {
 // it is never placed or moved again, only erased.
 struct FeedMount {
   std::uint64_t entry = 0, node = 0, parent = 0, root = 0;
-  NodeHandle parent_handle{};
+  NodeHandle parent_handle{}, node_handle{};
   bool lost = false;
 };
 
