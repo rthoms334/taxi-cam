@@ -1,5 +1,6 @@
 #include <d3d11on12.h>
 #include <algorithm>
+#include <cstring>
 #include "../../src/bridge/d3d12_bridge.hpp"
 #include "../../src/bridge/native_hooks.hpp"
 #include "../../src/graphics/native_device_identity.hpp"
@@ -1000,6 +1001,17 @@ void native_case(bool warp,
   }
   require(win::initialize_graphics(device.get()), win::graphics_status().error);
   require(win::graphics_status().device == reinterpret_cast<std::uint64_t>(native_device.get()), "Bridge owns the resolved device");
+  {
+    const auto endpoint = win::graphics_status();
+    Reference<IUnknown> reported_identity, native_identity;
+    check(device->QueryInterface(IID_PPV_ARGS(reported_identity.put())), "Reported device identity for endpoint diagnostics");
+    check(native_device->QueryInterface(IID_PPV_ARGS(native_identity.put())), "Native device identity for endpoint diagnostics");
+    require(endpoint.device_proxied == (reported_identity.get() != native_identity.get()),
+            "Close endpoint diagnostics report the device proxy");
+    require(endpoint.close_endpoint_module[0] && !std::strchr(endpoint.close_endpoint_module, '\\') &&
+                !std::strchr(endpoint.close_endpoint_module, '/'),
+            "Close endpoint diagnostics name a module basename without its path");
+  }
   require(win::initialize_graphics(native_device.get()) && win::initialize_graphics(device.get()),
           "Repeated initialization shares one native registry through either interface");
   win::set_aircraft_profile(ini_a380 ? taxi_camera::profiles::A380.id : profile.id);

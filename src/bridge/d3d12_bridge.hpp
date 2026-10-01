@@ -134,6 +134,11 @@ struct GraphicsStatus {
   std::uint64_t idle_state_bypasses{}, idle_callback_bypasses{};
   std::uint64_t queue_patch_plans{};
   bool queue_close_verified{};
+  // Module and location (system/other/non_image) behind the saved Close
+  // forward, and whether the reported device was a proxy. Set at bootstrap.
+  const char* close_endpoint_module = "";
+  const char* close_endpoint_location = "unknown";
+  bool device_proxied{};
   std::array<std::uint64_t, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
   std::array<std::uint64_t, static_cast<unsigned>(PfdSubmissionProof::Refusal::count)> queue_proof_refusals{};
   unsigned queue_last_proof_flags{};
