@@ -515,6 +515,16 @@ bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* tabl
   }
   return true;
 }
+bool set_screen_scale(std::uint64_t key, float scale) {
+  if (!std::isfinite(scale) || scale < 0)
+    return false;
+  const std::lock_guard lock(runtime().mutex);
+  auto* item = find(key);
+  if (!item || item->status.failed)
+    return false;
+  item->status.screen_scale = scale;
+  return true;
+}
 void set_ground_speed(std::uint64_t key, float knots, bool valid) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
@@ -666,6 +676,7 @@ void service() {
         item.status.tone_exposure > 0)
       item.tone_table_pending = false;
     item.status.tone_active = item.output.tone_curve_active();
+    item.output.set_screen_scale(item.status.screen_scale);
     if (!item.output.set_display_exposure(item.status.display_exposure_ev) || !speed_ready ||
         !item.output.prepare(first.resource, scene_format(first.resource), second.resource, scene_format(second.resource), right,
                              scene_format(right))) {

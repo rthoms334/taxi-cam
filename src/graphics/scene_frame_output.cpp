@@ -75,6 +75,9 @@ bool SceneFrameOutput::set_tone_curve(float exposure, const std::uint32_t* table
   }
   return compositor_->set_tone_curve(exposure, table);
 }
+bool SceneFrameOutput::set_screen_scale(float scale) noexcept {
+  return compositor_ && !prepared_ && !failed_ && compositor_->set_screen_scale(scale);
+}
 bool SceneFrameOutput::tone_curve_active() const noexcept {
   return compositor_ && compositor_->tone_curve_active();
 }

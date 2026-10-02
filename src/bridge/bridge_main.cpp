@@ -979,6 +979,13 @@ DWORD run_impl() {
     scene_runtime::set_display_exposure(key, display.applied_ev);
     static ToneFeed tone;
     tone.update(key, settings.camera_tone != 0, now);
+    // On an aircraft whose display is decoded, the camera image is written as
+    // scene light divided by the display's own full-code light, so the display
+    // gives the scene light back and the main view exposes, tonemaps and blooms
+    // it once. Camera texels hold scene light / 16.
+    const double display_light =
+        settings.camera_tone && light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
+    scene_runtime::set_screen_scale(key, display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f);
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1392,13 +1399,14 @@ DWORD run_impl() {
       // Match main view lighting: the simulator exposure in use (0: Taxi Cam's
       // exposure), copies of its exposure and table, and resource changes.
       const auto tone_copies = win::tone_status();
-      char tone_detail[256];
+      char tone_detail[320];
       std::snprintf(tone_detail, sizeof(tone_detail),
-                    "Camera tone: enabled=%d active=%d exposure=%.6g exposure_copies=%llu table_copies=%llu source_changes=%llu "
-                    "readback_failed=%d",
+                    "Camera tone: enabled=%d active=%d exposure=%.6g screen_scale=%.6g exposure_copies=%llu table_copies=%llu "
+                    "source_changes=%llu readback_failed=%d",
                     settings.camera_tone ? 1 : 0, output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure),
-                    static_cast<unsigned long long>(tone_copies.exposure_copies), static_cast<unsigned long long>(tone_copies.table_copies),
-                    static_cast<unsigned long long>(tone_copies.source_changes), tone_copies.readback_failed ? 1 : 0);
+                    static_cast<double>(output.screen_scale), static_cast<unsigned long long>(tone_copies.exposure_copies),
+                    static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
+                    tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.

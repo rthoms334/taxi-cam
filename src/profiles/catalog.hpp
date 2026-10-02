@@ -52,6 +52,20 @@ inline constexpr Composition A350EtacsA35K = [] {
   c.tail_inner = {0.37f, 0.855f};
   return c;
 }();
+// How bright the aircraft's camera display shines, in the simulator's scene
+// units for a full code (sRGB-decoded 1): emissive x the gain its behaviour
+// maps from A:AMBIENT LIGHT SENSOR, linear between the two lux values and
+// clamped outside them. emissive 0: not decoded for this aircraft.
+struct DisplayLight {
+  float emissive = 0;
+  float lux_low = 0, lux_high = 0, gain_low = 0, gain_high = 0;
+};
+inline double display_full_light(const DisplayLight& d, double ambient) noexcept {
+  if (!(d.emissive > 0) || !(d.lux_high > d.lux_low) || ambient != ambient)
+    return 0;
+  const double t = ambient <= d.lux_low ? 0 : ambient >= d.lux_high ? 1 : (ambient - d.lux_low) / (d.lux_high - d.lux_low);
+  return d.emissive * (d.gain_low + (d.gain_high - d.gain_low) * t);
+}
 struct AircraftProfile {
   std::uint32_t id;
   std::string_view key;
@@ -97,6 +111,8 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
+  // Decoded camera-display brightness (Match main view lighting).
+  DisplayLight display_light{};
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -325,6 +341,12 @@ inline constexpr auto make_pmdg_777 =
       // picture. Bottom inset stays 0; leftover working-image rows under the squares
       // are black. L/R stay 0.
       p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
+      // PMDG773ER_VC.gltf material DUS emissiveFactor 148.8235 (150 x 253/255);
+      // 77W_Cockpit_Behavior.xml: (A:AMBIENT LIGHT SENSOR) 200 2000 0.15 11.0
+      // (F:MapRange). The shared ph_base_gbuffer emissive path (PIX 2026-10-02)
+      // gives 148.8235 x 11 = 1637.06 by day, matched bit for bit, with no screen
+      // filter or glass; the lower EICASCDU uses 150 (0.8% brighter).
+      p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 =

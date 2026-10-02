@@ -82,6 +82,8 @@ struct Snapshot {
   // exposure), and whether the latest composition used its tone curve.
   float tone_exposure = 0;
   bool tone_active = false;
+  // Camera texels to the aircraft display's codes (0: not used).
+  float screen_scale = 0;
   float ground_speed_knots = 0;
   bool ground_speed_valid = false;
   // False skips the GS overlay entirely (PMDG 777: no readout, no black box).
@@ -106,6 +108,9 @@ bool set_display_exposure(std::uint64_t key, float ev);
 // exposure (0 returns to Taxi Cam's) and, when new, its 64^3 tone-curve table
 // (copied here; R10G10B10A2 texels, x fastest).
 bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* table);
+// Scene light for the aircraft display, which then shines it into the main
+// view (CameraCompositorD3D12::set_screen_scale); 0 turns it off.
+bool set_screen_scale(std::uint64_t key, float scale);
 // A fresh public SimConnect sample; unavailable samples render GS --.
 void set_ground_speed(std::uint64_t key, float knots, bool valid);
 // Skip the GS overlay entirely (no glyphs, no black panel). Font fixtures
