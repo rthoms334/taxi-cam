@@ -18,7 +18,7 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 | Aerosoft A340-600 | `aerosoft-a346` | Shared `$GAUGES_UNIFIED`, 4096 x 4096; gauges `CaptPFD`, `CoPFD` and `ECAM_LOWER` (750 x 750) | Nose 736 x 251 / tail 736 x 496 |
 | iniBuilds A340-300 | `ini-a340-300` | One 1560 x 2340 one-mip texture, a 2 x 3 grid of 780 x 780 display cells (name unknown) | Nose 736 x 251 / tail 736 x 496 |
 
-A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The user has verified A350 rendering in the simulator. This does not establish every aircraft variant, framing, graphics mode or automatic target ordering; see [PR 42 validation](pr42-validation.md).
+A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The user has verified A350 rendering in the simulator. This does not establish every aircraft variant, framing, graphics mode or automatic target ordering.
 
 ## Controls
 
@@ -75,7 +75,7 @@ The iniBuilds A380 defaults are: nose **right/up/forward 0 / 2.2 / 16 m, pitch/y
 
 Texture admission requires 768 x 1024, exactly one mip and supported RGBA/BGRA views. The ini A380 detector uses eight RGBA8 typeless resources (format 27), assigning the highest resource ID left and third-highest right. It checks unchanged membership and activity on every member across three one-second windows; discovery also has a complete-idle-group fallback. IDs may have gaps and are not fixed constants. Missing, extra, changed or incompletely tracked resources prevent the complete-group assignment. Structural changes withdraw automatically assigned sides while preserving explicit selections; loss of both identities can require reselecting the aircraft profile or assigning the PFDs manually. Pauses alone do not remove existing identities. FBW A380 and A350 use activity ranking instead.
 
-The user confirmed camera rendering with the revised bridge, then reported that both A380 integrations selected another instrument when the camera was requested during display boot. Automatic display identity is therefore a known unresolved issue. PFD routing permits manual correction. The dropdown sorts by draw count, so its visual position is not resource-ID order. No texture-content classifier or thumbnail export is implemented. Own-device GPU fixtures check display regions and preserved lower rows; they do not establish cockpit identity, hotkeys, AA, turns, cutoff or reload behavior. See [PR 42 validation](pr42-validation.md) for the exact tested build and scope.
+The user confirmed camera rendering with the revised bridge, then reported that both A380 integrations selected another instrument when the camera was requested during display boot. Automatic display identity is therefore a known unresolved issue. PFD routing permits manual correction. The dropdown sorts by draw count, so its visual position is not resource-ID order. No texture-content classifier or thumbnail export is implemented. Own-device GPU fixtures check display regions and preserved lower rows; they do not establish cockpit identity, hotkeys, AA, turns, cutoff or reload behavior.
 
 ### PMDG 777 configuration
 
