@@ -1127,6 +1127,7 @@ DWORD run_impl() {
       win::set_light_factors(factors);
       win::set_light_all(dev_shader.light_all);
       win::set_fog_dev(dev_shader.fog_copy, dev_shader.fog_clear, dev_shader.fog_reset);
+      win::set_fog_history_reset(settings.camera_tone != 0);
       last_light_factors = factors;
     }
     if (drawing->ground_speed)

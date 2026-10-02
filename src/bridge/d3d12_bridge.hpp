@@ -199,6 +199,9 @@ void fog_volumes(char* text, std::size_t size) noexcept;
 // overwrite camera views' integrated fog with clear air, and reset each camera
 // fog history once to clear air.
 void set_fog_dev(bool copy, bool clear, bool reset) noexcept;
+// Camera fog: write each camera view's fog history once with clear air, so it
+// starts where the main view sits instead of at opaque (Match main view lighting).
+void set_fog_history_reset(bool enabled) noexcept;
 struct LightStatus {
   bool learnt = false;
   unsigned confirmations = 0;

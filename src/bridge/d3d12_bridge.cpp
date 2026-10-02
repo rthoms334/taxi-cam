@@ -1451,8 +1451,15 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
 // pair member's exit first copy it into its partner, so the next frame's
 // history is this frame's result; `clear` overwrites the integrated volume of
 // every group but the most used one (the main view) with the main view's
-// clear-air texel, transmittance 1; `reset` overwrites each camera history
-// volume once with that texel and then leaves the simulator's blending alone.
+// clear-air texel, transmittance 1; `reset` re-arms the history reset below.
+//
+// History reset (2026-10-02, live readout): a new view's history starts at
+// transmittance 0 and the blend (3-12% per frame) climbs out of it slowly, so
+// camera views show dense fog that dims distant lights by orders of magnitude.
+// The main view sits at exactly 1 in clear air, which the blend keeps. Each
+// camera history volume (size: a camera output's size / 8) is therefore
+// written once with the main view's clear-air texel at its first exit; the
+// simulator's own blending then follows the real fog from there.
 namespace fog {
 struct Volume {
   std::atomic<ID3D12Resource*> resource{nullptr};
@@ -1466,7 +1473,10 @@ struct State {
   std::array<Volume, 48> volumes;
   std::atomic<Volume*> last_created{nullptr};
   std::atomic<std::uint32_t> groups{0};
-  std::atomic<bool> copy{false}, clear{false}, reset{false};
+  std::atomic<bool> copy{false}, clear{false}, reset{false}, automatic{false};
+  // Camera output sizes in fog cells ((width/8) << 16 | height/8, rounded up).
+  std::array<std::atomic<std::uint32_t>, 4> cameras{};
+  std::atomic<unsigned> next_camera{0}, evict{0};
   std::atomic<std::uint64_t> copies{0}, clears{0}, resets{0};
   std::atomic<ID3D12Resource*> clear_source{nullptr};
   std::atomic<bool> clear_failed{false};
@@ -1501,7 +1511,19 @@ Volume* slot(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
     if (seen == resource)
       return &v;
   }
-  return nullptr;
+  // Full: recycle slots in turn (views are recreated by resizes and CAM
+  // toggles). A recycled live volume only loses its counters and may be reset
+  // once more.
+  auto& v = state().volumes[state().evict.fetch_add(1, std::memory_order_relaxed) % state().volumes.size()];
+  v.group.store(0, std::memory_order_relaxed);
+  v.index.store(0, std::memory_order_relaxed);
+  v.exits.store(0, std::memory_order_relaxed);
+  v.reset.store(false, std::memory_order_relaxed);
+  v.sampled_ms.store(0, std::memory_order_relaxed);
+  v.width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
+  v.height.store(d.Height, std::memory_order_relaxed);
+  v.resource.store(resource, std::memory_order_release);
+  return &v;
 }
 void created(IUnknown* object) noexcept {
   ID3D12Resource* resource = nullptr;
@@ -1518,6 +1540,8 @@ void created(IUnknown* object) noexcept {
   v->width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
   v->height.store(d.Height, std::memory_order_relaxed);
   v->exits.store(0, std::memory_order_relaxed);
+  v->reset.store(false, std::memory_order_relaxed);
+  v->sampled_ms.store(0, std::memory_order_relaxed);
   auto* last = s.last_created.exchange(v, std::memory_order_acq_rel);
   if (last && last != v && last->width.load(std::memory_order_relaxed) == d.Width &&
       last->height.load(std::memory_order_relaxed) == d.Height && last->group.load(std::memory_order_relaxed) &&
@@ -1528,6 +1552,24 @@ void created(IUnknown* object) noexcept {
     v->group.store(s.groups.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     v->index.store(0, std::memory_order_relaxed);
   }
+}
+std::uint32_t cells(std::uint64_t width, std::uint32_t height) noexcept {
+  return static_cast<std::uint32_t>(((width + 7) / 8) << 16) | ((height + 7) / 8);
+}
+void note_camera_output(std::uint64_t width, std::uint32_t height) noexcept {
+  auto& s = state();
+  const auto value = cells(width, height);
+  for (auto& c : s.cameras)
+    if (c.load(std::memory_order_relaxed) == value)
+      return;
+  s.cameras[s.next_camera.fetch_add(1, std::memory_order_relaxed) % s.cameras.size()].store(value, std::memory_order_relaxed);
+}
+bool camera_volume(const D3D12_RESOURCE_DESC& d) noexcept {
+  const auto value = static_cast<std::uint32_t>(d.Width << 16) | d.Height;
+  for (auto& c : state().cameras)
+    if (c.load(std::memory_order_relaxed) == value)
+      return true;
+  return false;
 }
 // The other member of a creation group's history pair (indices 1 and 2).
 Volume* partner(const Volume& v) noexcept {
@@ -1686,23 +1728,19 @@ void exit(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) noexcept {
   v->exits.fetch_add(1, std::memory_order_relaxed);
   if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return;
+  // Any camera volume, so creation grouping is not needed: the integrated
+  // volume is rewritten every frame and only this frame's copy is affected.
+  if ((s.automatic.load(std::memory_order_relaxed) || s.reset.load(std::memory_order_relaxed)) &&
+      !v->reset.load(std::memory_order_relaxed) && camera_volume(d)) {
+    v->reset.store(true, std::memory_order_relaxed);
+    clear(list, resource, d);
+    s.resets.fetch_add(1, std::memory_order_relaxed);
+  }
   if (v->index.load(std::memory_order_relaxed) == 0) {
     if (v->group.load(std::memory_order_relaxed) && s.clear.load(std::memory_order_relaxed) && !main_view(*v))
       clear(list, resource, d);
     sample(list, resource, d, *v);
     return;
-  }
-  if (s.reset.load(std::memory_order_relaxed) && !v->reset.load(std::memory_order_relaxed)) {
-    const auto group = v->group.load(std::memory_order_relaxed);
-    const Volume* integrated = nullptr;
-    for (auto& o : s.volumes)
-      if (o.group.load(std::memory_order_relaxed) == group && o.index.load(std::memory_order_relaxed) == 0)
-        integrated = &o;
-    if (group && integrated && !main_view(*integrated)) {
-      v->reset.store(true, std::memory_order_relaxed);
-      clear(list, resource, d);
-      s.resets.fetch_add(1, std::memory_order_relaxed);
-    }
   }
   if (!s.copy.load(std::memory_order_relaxed))
     return;
@@ -3489,8 +3527,10 @@ struct Targets {
     if (!view.resource || !view.resource->alive)
       return {};
     const auto handle = reinterpret_cast<std::uint64_t>(view.resource->native);
-    return {
-        handle, view.format, view.mip, view.resource->desc.Width, view.resource->desc.Height, scene_handoff().observed_feed(handle) >= 0};
+    const bool camera = scene_handoff().observed_feed(handle) >= 0;
+    if (camera)
+      fog::note_camera_output(view.resource->desc.Width, view.resource->desc.Height);
+    return {handle, view.format, view.mip, view.resource->desc.Width, view.resource->desc.Height, camera};
   }
   // Runs right after the simulator's own bind, inside the owned-work guard, so
   // the calls below reach the runtime directly. The camera output is still
@@ -4085,8 +4125,9 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept {
 }
 void fog_volumes(char* text, std::size_t size) noexcept {
   auto& f = fog::state();
-  int used = std::snprintf(text, size, "copy=%d copies=%llu clear=%d clears=%llu reset=%d resets=%llu",
-                           f.copy.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.copies.load(std::memory_order_relaxed)),
+  int used = std::snprintf(text, size, "history_reset=%d copy=%d copies=%llu clear=%d clears=%llu reset=%d resets=%llu",
+                           f.automatic.load(std::memory_order_relaxed) ? 1 : 0, f.copy.load(std::memory_order_relaxed) ? 1 : 0,
+                           static_cast<unsigned long long>(f.copies.load(std::memory_order_relaxed)),
                            f.clear.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.clears.load(std::memory_order_relaxed)),
                            f.reset.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.resets.load(std::memory_order_relaxed)));
   for (auto& v : f.volumes) {
@@ -4124,6 +4165,9 @@ void fog_volumes(char* text, std::size_t size) noexcept {
       }
     }
   }
+}
+void set_fog_history_reset(bool enabled) noexcept {
+  fog::state().automatic.store(enabled, std::memory_order_relaxed);
 }
 void set_fog_dev(bool copy, bool clear, bool reset) noexcept {
   auto& f = fog::state();
