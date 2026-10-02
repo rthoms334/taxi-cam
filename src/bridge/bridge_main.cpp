@@ -57,8 +57,9 @@ struct DevShader {
   // optionally `all` to repeat every light-shaped camera draw.
   double light_scale = 1;
   bool light_all = false;
-  // dev\fog.txt: `copy` copies each camera fog result into its history.
-  bool fog_copy = false;
+  // dev\fog.txt: words `copy` (each camera fog result into its history) and
+  // `clear` (camera integrated fog overwritten with clear air).
+  bool fog_copy = false, fog_clear = false;
   std::uint64_t next_ms = 0;
   FILETIME written{};
   std::uint64_t bytes = 0;
@@ -98,10 +99,13 @@ struct DevShader {
     }
     {
       const auto fog_path = directory + L"\\fog.txt";
-      fog_copy = false;
+      fog_copy = fog_clear = false;
       if (FILE* file = _wfopen(fog_path.c_str(), L"r")) {
         char word[8]{};
-        fog_copy = std::fscanf(file, "%7s", word) == 1 && std::strcmp(word, "copy") == 0;
+        while (std::fscanf(file, "%7s", word) == 1) {
+          fog_copy = fog_copy || std::strcmp(word, "copy") == 0;
+          fog_clear = fog_clear || std::strcmp(word, "clear") == 0;
+        }
         std::fclose(file);
       }
     }
@@ -1096,7 +1100,7 @@ DWORD run_impl() {
         }
       win::set_light_factors(factors);
       win::set_light_all(dev_shader.light_all);
-      win::set_fog_copy(dev_shader.fog_copy);
+      win::set_fog_dev(dev_shader.fog_copy, dev_shader.fog_clear);
       last_light_factors = factors;
     }
     if (drawing->ground_speed)

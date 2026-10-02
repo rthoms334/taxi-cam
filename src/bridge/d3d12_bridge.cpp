@@ -1444,11 +1444,14 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
 // Camera fog: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
 // one eighth of the view's width and height). The density pass blends each
 // frame with a history volume; the main view swaps its history pair every
-// frame. A view's three volumes are created back to back: the history pair,
-// then the integrated volume. Volumes created after the bridge attached (the
-// camera views') are grouped at creation. Each volume's UNORDERED_ACCESS exits
-// are counted. With the dev copy switch, a pair member's exit first copies it
-// into its partner, so the next frame's history is this frame's result.
+// frame. A view's three volumes are created back to back: the integrated
+// volume (index 0, read by lights and the scene), then the history pair.
+// Volumes created after the bridge attached are grouped at creation. Each
+// volume's UNORDERED_ACCESS exits are counted. Dev switches: `copy` makes a
+// pair member's exit first copy it into its partner, so the next frame's
+// history is this frame's result; `clear` overwrites the integrated volume of
+// every group but the most used one (the main view) with the main view's
+// clear-air texel, transmittance 1.
 namespace fog {
 struct Volume {
   std::atomic<ID3D12Resource*> resource{nullptr};
@@ -1460,9 +1463,15 @@ struct State {
   std::array<Volume, 48> volumes;
   std::atomic<Volume*> last_created{nullptr};
   std::atomic<std::uint32_t> groups{0};
-  std::atomic<bool> copy{false};
-  std::atomic<std::uint64_t> copies{0};
+  std::atomic<bool> copy{false}, clear{false};
+  std::atomic<std::uint64_t> copies{0}, clears{0};
+  std::atomic<ID3D12Resource*> clear_source{nullptr};
+  std::atomic<bool> clear_failed{false};
+  std::mutex creation;
 };
+// R 1023 (transmittance 1), G 0, B 580 and A 3: the main view's volume at night.
+constexpr std::uint32_t ClearTexel = 1023u | (580u << 20) | (3u << 30);
+constexpr UINT64 ClearBytes = 16ull << 20;
 State& state() noexcept {
   static State value;
   return value;
@@ -1510,23 +1519,90 @@ void created(IUnknown* object) noexcept {
     v->index.store(0, std::memory_order_relaxed);
   }
 }
-// The other member of a complete creation group's history pair.
+// The other member of a creation group's history pair (indices 1 and 2).
 Volume* partner(const Volume& v) noexcept {
   const auto group = v.group.load(std::memory_order_relaxed);
   const auto index = v.index.load(std::memory_order_relaxed);
-  if (!group || index > 1)
+  if (!group || (index != 1 && index != 2))
     return nullptr;
-  Volume* other = nullptr;
-  bool complete = false;
-  for (auto& o : state().volumes) {
-    if (o.group.load(std::memory_order_relaxed) != group || &o == &v)
-      continue;
-    const auto i = o.index.load(std::memory_order_relaxed);
-    if (i == 1 - index)
-      other = &o;
-    complete = complete || i == 2;
+  for (auto& o : state().volumes)
+    if (&o != &v && o.group.load(std::memory_order_relaxed) == group && o.index.load(std::memory_order_relaxed) == 3 - index)
+      return &o;
+  return nullptr;
+}
+// The integrated volume with the most exits belongs to the main view.
+bool main_view(const Volume& v) noexcept {
+  const auto exits = v.exits.load(std::memory_order_relaxed);
+  for (auto& o : state().volumes)
+    if (&o != &v && o.group.load(std::memory_order_relaxed) && o.index.load(std::memory_order_relaxed) == 0 &&
+        o.exits.load(std::memory_order_relaxed) > exits)
+      return false;
+  return true;
+}
+// One upload buffer of clear texels, kept for the process (copies may still
+// be executing). Creation never blocks a recording thread.
+ID3D12Resource* clear_source() noexcept {
+  auto& s = state();
+  if (auto* existing = s.clear_source.load(std::memory_order_acquire))
+    return existing;
+  if (s.clear_failed.load(std::memory_order_relaxed))
+    return nullptr;
+  const std::unique_lock lock(s.creation, std::try_to_lock);
+  if (!lock.owns_lock())
+    return nullptr;
+  if (auto* existing = s.clear_source.load(std::memory_order_acquire))
+    return existing;
+  auto* device = registry().device;
+  if (!device)
+    return nullptr;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = ClearBytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* created = nullptr;
+  void* mapped = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                             IID_PPV_ARGS(&created))) ||
+      FAILED(created->Map(0, nullptr, &mapped))) {
+    if (created)
+      created->Release();
+    s.clear_failed.store(true, std::memory_order_relaxed);
+    return nullptr;
   }
-  return complete ? other : nullptr;
+  auto* texels = static_cast<std::uint32_t*>(mapped);
+  for (UINT64 i = 0; i < ClearBytes / 4; ++i)
+    texels[i] = ClearTexel;
+  created->Unmap(0, nullptr);
+  s.clear_source.store(created, std::memory_order_release);
+  return created;
+}
+void clear(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
+  const UINT pitch = (static_cast<UINT>(d.Width) * 4 + 255) & ~255u;
+  if (UINT64{pitch} * d.Height * d.DepthOrArraySize > ClearBytes)
+    return;
+  auto* source = clear_source();
+  if (!source)
+    return;
+  D3D12_RESOURCE_BARRIER barrier{};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_COPY_DEST};
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
+  target.pResource = resource;
+  target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  origin.pResource = source;
+  origin.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  origin.PlacedFootprint = {0, {d.Format, static_cast<UINT>(d.Width), d.Height, d.DepthOrArraySize, pitch}};
+  list->CopyTextureRegion(&target, 0, 0, 0, &origin, nullptr);
+  std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+  list->ResourceBarrier(1, &barrier);
+  state().clears.fetch_add(1, std::memory_order_relaxed);
 }
 // Before the simulator's own UNORDERED_ACCESS exit of a volume, inside the
 // owned-work guard. Both volumes rest as shader resources between uses.
@@ -1539,7 +1615,14 @@ void exit(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) noexcept {
   if (!v)
     return;
   v->exits.fetch_add(1, std::memory_order_relaxed);
-  if (!s.copy.load(std::memory_order_relaxed) || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+    return;
+  if (v->index.load(std::memory_order_relaxed) == 0) {
+    if (v->group.load(std::memory_order_relaxed) && s.clear.load(std::memory_order_relaxed) && !main_view(*v))
+      clear(list, resource, d);
+    return;
+  }
+  if (!s.copy.load(std::memory_order_relaxed))
     return;
   auto* other = partner(*v);
   ID3D12Resource* history = other ? other->resource.load(std::memory_order_acquire) : nullptr;
@@ -3920,8 +4003,9 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept {
 }
 void fog_volumes(char* text, std::size_t size) noexcept {
   auto& f = fog::state();
-  int used = std::snprintf(text, size, "copy=%d copies=%llu", f.copy.load(std::memory_order_relaxed) ? 1 : 0,
-                           static_cast<unsigned long long>(f.copies.load(std::memory_order_relaxed)));
+  int used = std::snprintf(text, size, "copy=%d copies=%llu clear=%d clears=%llu", f.copy.load(std::memory_order_relaxed) ? 1 : 0,
+                           static_cast<unsigned long long>(f.copies.load(std::memory_order_relaxed)),
+                           f.clear.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.clears.load(std::memory_order_relaxed)));
   for (auto& v : f.volumes) {
     if (used < 0 || static_cast<std::size_t>(used) >= size || !v.resource.load(std::memory_order_relaxed))
       break;
@@ -3936,8 +4020,9 @@ void fog_volumes(char* text, std::size_t size) noexcept {
     used += n;
   }
 }
-void set_fog_copy(bool copy) noexcept {
+void set_fog_dev(bool copy, bool clear) noexcept {
   fog::state().copy.store(copy, std::memory_order_relaxed);
+  fog::state().clear.store(clear, std::memory_order_relaxed);
 }
 void set_light_all(bool all) noexcept {
   lights::state().all.store(all, std::memory_order_relaxed);
