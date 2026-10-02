@@ -1266,12 +1266,29 @@ struct State {
   std::atomic<ID3D12PipelineState*> candidate{nullptr};
   std::atomic<unsigned> confirmations{0};
   std::atomic<std::uint64_t> anchors{0}, shaped{0}, sightings{0}, repeated_draws{0}, extra_draws{0};
+  // Light-shaped draws into a camera output after its cloud merge with any
+  // other pipeline, and the distinct pipelines seen there (first 8). The dev
+  // `all` switch repeats them too, to find which draws a camera's lights use.
+  std::atomic<std::uint64_t> other_draws{0};
+  std::array<std::atomic<ID3D12PipelineState*>, 8> others{};
+  std::atomic<bool> all{false};
 };
 State& state() noexcept {
   static State value;
   return value;
 }
 constexpr unsigned Confirmations = 3;
+void note_other(ID3D12PipelineState* pipeline) noexcept {
+  for (auto& slot : state().others) {
+    ID3D12PipelineState* seen = slot.load(std::memory_order_relaxed);
+    if (seen == pipeline)
+      return;
+    if (!seen && slot.compare_exchange_strong(seen, pipeline, std::memory_order_relaxed))
+      return;
+    if (seen == pipeline)
+      return;
+  }
+}
 bool light_draw(UINT indices, UINT instances, UINT first_index, INT vertex_offset, UINT first_instance) noexcept {
   return indices && indices % 6 == 0 && instances == 1 && first_index == 0 && vertex_offset == 0 && first_instance == 0;
 }
@@ -1720,8 +1737,17 @@ UINT light_repeats(void*,
     lights::confirm(l->pipeline);
   }
   const int feed = l->light_feed;
-  if (l->pipeline != s.pipeline.load(std::memory_order_acquire) || feed < 0 || feed >= 3)
+  if (feed < 0 || feed >= 3)
     return 0;
+  if (l->pipeline != s.pipeline.load(std::memory_order_acquire)) {
+    if (!l->count || !l->targets[0].resource || !l->targets[0].resource->alive ||
+        scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(l->targets[0].resource->native)) != feed)
+      return 0;
+    s.other_draws.fetch_add(1, std::memory_order_relaxed);
+    lights::note_other(l->pipeline);
+    if (!s.all.load(std::memory_order_relaxed))
+      return 0;
+  }
   const float factor = s.factors[feed].load(std::memory_order_relaxed);
   if (!(factor >= 1.5f) || !(factor <= 64))
     return 0;
@@ -3768,11 +3794,18 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept {
   for (unsigned i = 0; i < 3; ++i)
     lights::state().factors[i].store(factors[i], std::memory_order_relaxed);
 }
+void set_light_all(bool all) noexcept {
+  lights::state().all.store(all, std::memory_order_relaxed);
+}
 LightStatus light_status() noexcept {
   auto& s = lights::state();
+  unsigned others = 0;
+  for (auto& slot : s.others)
+    others += slot.load(std::memory_order_relaxed) != nullptr;
   return {s.pipeline.load(std::memory_order_relaxed) != nullptr, s.confirmations.load(std::memory_order_relaxed),
           s.anchors.load(std::memory_order_relaxed), s.shaped.load(std::memory_order_relaxed), s.sightings.load(std::memory_order_relaxed),
-          s.repeated_draws.load(std::memory_order_relaxed), s.extra_draws.load(std::memory_order_relaxed)};
+          s.repeated_draws.load(std::memory_order_relaxed), s.extra_draws.load(std::memory_order_relaxed),
+          s.other_draws.load(std::memory_order_relaxed), others};
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();

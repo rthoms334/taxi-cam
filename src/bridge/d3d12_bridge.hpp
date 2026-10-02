@@ -189,10 +189,15 @@ CloudMergeStatus cloud_merge_status() noexcept;
 // light-shaped draws seen at all and after one, and light draws repeated with their
 // extra copies.
 void set_light_factors(const std::array<float, 3>& factors) noexcept;
+// Dev only: also repeat light-shaped camera draws made with other pipelines.
+void set_light_all(bool all) noexcept;
 struct LightStatus {
   bool learnt = false;
   unsigned confirmations = 0;
   std::uint64_t anchors = 0, shaped = 0, sightings = 0, repeated_draws = 0, extra_draws = 0;
+  // Light-shaped camera draws with other pipelines, and how many pipelines.
+  std::uint64_t other_draws = 0;
+  unsigned other_pipelines = 0;
 };
 LightStatus light_status() noexcept;
 // Camera tone: copies of the main view's eye-adaptation exposure and 64^3

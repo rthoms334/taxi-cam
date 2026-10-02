@@ -53,8 +53,10 @@ constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s
 // The built-in source is written beside it as compositor.default.hlsl to copy.
 // No file, no change. Deleting the file keeps the last loaded shader.
 struct DevShader {
-  // dev\lights.txt: one number multiplying the camera light factors (1).
+  // dev\lights.txt: a number multiplying the camera light factors (1), then
+  // optionally `all` to repeat every light-shaped camera draw.
   double light_scale = 1;
+  bool light_all = false;
   std::uint64_t next_ms = 0;
   FILETIME written{};
   std::uint64_t bytes = 0;
@@ -82,10 +84,13 @@ struct DevShader {
     {
       const auto lights_path = directory + L"\\lights.txt";
       light_scale = 1;
+      light_all = false;
       if (FILE* file = _wfopen(lights_path.c_str(), L"r")) {
         double value = 0;
+        char word[8]{};
         if (std::fscanf(file, "%lf", &value) == 1 && value > 0 && value < 1000)
           light_scale = value;
+        light_all = std::fscanf(file, "%7s", word) == 1 && std::strcmp(word, "all") == 0;
         std::fclose(file);
       }
     }
@@ -1079,6 +1084,7 @@ DWORD run_impl() {
           factors[i] = static_cast<float>(std::clamp(ratio * ratio * dev_shader.light_scale, 1.0, 64.0));
         }
       win::set_light_factors(factors);
+      win::set_light_all(dev_shader.light_all);
       last_light_factors = factors;
     }
     if (drawing->ground_speed)
@@ -1508,11 +1514,13 @@ DWORD run_impl() {
         char light_detail[320];
         std::snprintf(light_detail, sizeof(light_detail),
                       "Camera lights: learnt=%d confirmations=%u anchors=%llu shaped=%llu sightings=%llu repeated_draws=%llu extra_draws=%llu "
-                      "factors=%.3g/%.3g/%.3g",
+                      "other_draws=%llu other_pipelines=%u factors=%.3g/%.3g/%.3g",
                       light_status.learnt ? 1 : 0, light_status.confirmations, static_cast<unsigned long long>(light_status.anchors),
                       static_cast<unsigned long long>(light_status.shaped), static_cast<unsigned long long>(light_status.sightings),
                       static_cast<unsigned long long>(light_status.repeated_draws),
-                      static_cast<unsigned long long>(light_status.extra_draws), static_cast<double>(last_light_factors[0]),
+                      static_cast<unsigned long long>(light_status.extra_draws),
+                      static_cast<unsigned long long>(light_status.other_draws), light_status.other_pipelines,
+                      static_cast<double>(last_light_factors[0]),
                       static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
         log_status(status, light_detail);
       }
