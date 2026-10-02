@@ -1507,15 +1507,11 @@ DWORD run_impl() {
         const auto light_status = win::light_status();
         char light_detail[320];
         std::snprintf(light_detail, sizeof(light_detail),
-                      "Camera lights: twins=%u failures=%llu boosts=%llu factors=%.3g/%.3g/%.3g pipelines=%llu/%llu/%llu/%llu "
-                      "unparsed=%llu",
-                      light_status.twins, static_cast<unsigned long long>(light_status.failures),
-                      static_cast<unsigned long long>(light_status.boosts), static_cast<double>(last_light_factors[0]),
-                      static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]),
-                      static_cast<unsigned long long>(light_status.graphics), static_cast<unsigned long long>(light_status.streams),
-                      static_cast<unsigned long long>(light_status.library_graphics),
-                      static_cast<unsigned long long>(light_status.library_streams),
-                      static_cast<unsigned long long>(light_status.unparsed));
+                      "Camera lights: learnt=%d confirmations=%u anchors=%llu repeated_draws=%llu extra_draws=%llu factors=%.3g/%.3g/%.3g",
+                      light_status.learnt ? 1 : 0, light_status.confirmations, static_cast<unsigned long long>(light_status.anchors),
+                      static_cast<unsigned long long>(light_status.repeated_draws),
+                      static_cast<unsigned long long>(light_status.extra_draws), static_cast<double>(last_light_factors[0]),
+                      static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
         log_status(status, light_detail);
       }
       if (output.shader_reloads || output.shader_reload_failures) {

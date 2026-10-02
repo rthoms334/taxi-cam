@@ -112,8 +112,12 @@ struct List : Metadata {
   // bridge-owned RTVs for the redirected cloud merge (cloud_merge.hpp).
   View cloud_scene{}, cloud_previous{};
   ID3D12DescriptorHeap* cloud_rtvs{};
-  // Camera lights: this bridge set the blend factor for a light twin.
-  bool light_boosted = false;
+  // Camera lights: 1 after a camera cloud merge, 2 after the camera scene is
+  // bound again; the next pipeline is a light candidate (lights namespace).
+  // `pipeline` is the bound pipeline and `light_feed` the camera it draws for.
+  unsigned light_anchor = 0;
+  ID3D12PipelineState* pipeline = nullptr;
+  ID3D12PipelineState* light_candidate = nullptr;
   ~List() override {
     if (snapshot_rtvs)
       snapshot_rtvs->Release();
@@ -1243,227 +1247,44 @@ void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*
 // Camera lights (PIX 2026-10-02, 1.8.16.0). The simulator draws runway and
 // taxiway lights as additive sprites (vh/ph_billboard_lights, blend ONE/ONE)
 // whose star is a fixed number of render pixels and whose energy scales with
-// the view's render pixels per unit tangent squared (U[1].x = W H 4/(9 pi)).
-// Per degree the camera views therefore get the main view's light, but each
-// star is (camera/main pixel density)^2 as bright: about 1/20 on the 777 nose
-// view, so its lights were dim dots. For every light pipeline the bridge
-// creates a twin whose source blend is the blend factor; in a camera view's
-// recording the light draws use the twin with that camera's factor.
+// the view's render pixels per unit tangent squared (U[1].x = W H 4/(9 pi)):
+// on the 777 nose view about 1/20 of the main view's, so its lights were dim
+// dots. Additive light adds up, so drawing the simulator's own light draw k
+// times gives it k times the energy with its own pipeline and bindings.
+//
+// The light pipeline is learnt, not created here: the simulator builds its
+// pipelines before the bridge attaches. In a camera recording the light pass
+// follows the cloud merge (cloud_merge.hpp): the camera scene is bound again,
+// the light pipeline is set, and its draws are single-instance indexed quads
+// from index 0 (index counts a multiple of 6). A pipeline that shows this
+// three times becomes the light pipeline; a different one starts again.
 namespace lights {
-struct Twin {
-  ID3D12PipelineState* original = nullptr;  // retained, so its address is never reused
-  ID3D12PipelineState* twin = nullptr;
-};
 struct State {
-  std::mutex creation;
-  std::array<Twin, 32> twins{};
-  std::atomic<unsigned> count{0};
   std::array<std::atomic<float>, 3> factors{};
-  std::atomic<std::uint64_t> twins_created{0}, twin_failures{0}, boosts{0};
-  // Pipeline creations seen per path: CreateGraphicsPipelineState,
-  // CreatePipelineState (streams), and pipeline-library loads of each kind.
-  std::atomic<std::uint64_t> graphics{0}, streams{0}, library_graphics{0}, library_streams{0}, unparsed{0};
+  std::atomic<ID3D12PipelineState*> pipeline{nullptr};
+  std::atomic<ID3D12PipelineState*> candidate{nullptr};
+  std::atomic<unsigned> confirmations{0};
+  std::atomic<std::uint64_t> anchors{0}, repeated_draws{0}, extra_draws{0};
 };
 State& state() noexcept {
   static State value;
   return value;
 }
-ID3D12PipelineState* twin_of(ID3D12PipelineState* pipeline) noexcept {
+constexpr unsigned Confirmations = 3;
+bool light_draw(UINT indices, UINT instances, UINT first_index, INT vertex_offset, UINT first_instance) noexcept {
+  return indices && indices % 6 == 0 && instances == 1 && first_index == 0 && vertex_offset == 0 && first_instance == 0;
+}
+// A light pipeline candidate drew a light-shaped draw after the anchor.
+void confirm(ID3D12PipelineState* pipeline) noexcept {
   auto& s = state();
-  const unsigned n = s.count.load(std::memory_order_acquire);
-  for (unsigned i = 0; i < n; ++i)
-    if (s.twins[i].original == pipeline)
-      return s.twins[i].twin;
-  return nullptr;
-}
-bool named(const D3D12_SHADER_BYTECODE& code, const char* name) noexcept {
-  if (!code.pShaderBytecode || code.BytecodeLength < 32 || code.BytecodeLength > (1u << 22))
-    return false;
-  const auto* bytes = static_cast<const char*>(code.pShaderBytecode);
-  const std::size_t length = std::strlen(name);
-  for (std::size_t i = 0; i + length <= code.BytecodeLength; ++i)
-    if (bytes[i] == name[0] && std::memcmp(bytes + i, name, length) == 0)
-      return true;
-  return false;
-}
-bool light_pipeline(const D3D12_SHADER_BYTECODE& vs,
-                    const D3D12_SHADER_BYTECODE& ps,
-                    const D3D12_BLEND_DESC& blend_desc,
-                    UINT targets) noexcept {
-  const auto& blend = blend_desc.RenderTarget[0];
-  return targets == 1 && blend.BlendEnable && blend.SrcBlend == D3D12_BLEND_ONE && blend.DestBlend == D3D12_BLEND_ONE &&
-         blend.BlendOp == D3D12_BLEND_OP_ADD && !blend_desc.IndependentBlendEnable &&
-         (named(ps, "ph_billboard_lights") || named(vs, "vh_billboard_lights"));
-}
-void remember(ID3D12PipelineState* created, ID3D12PipelineState* twin) noexcept {
-  auto& s = state();
-  const unsigned n = s.count.load(std::memory_order_relaxed);
-  if (n == s.twins.size()) {
-    twin->Release();
-    s.twin_failures.fetch_add(1, std::memory_order_relaxed);
+  if (!pipeline || s.pipeline.load(std::memory_order_relaxed) == pipeline)
+    return;
+  if (s.candidate.exchange(pipeline, std::memory_order_relaxed) != pipeline) {
+    s.confirmations.store(1, std::memory_order_relaxed);
     return;
   }
-  created->AddRef();
-  s.twins[n] = {created, twin};
-  s.count.store(n + 1, std::memory_order_release);
-  s.twins_created.fetch_add(1, std::memory_order_relaxed);
-}
-// A pipeline-state stream: subobjects, each a type aligned to a pointer and
-// its inner D3D12 description at that description's alignment. Sizes come
-// from the d3d12.h declarations; an unknown type stops the parse.
-struct StreamView {
-  D3D12_SHADER_BYTECODE vs{}, ps{};
-  const D3D12_BLEND_DESC* blend = nullptr;
-  std::size_t blend_offset = 0;
-  UINT targets = 1;  // a stream without RENDER_TARGET_FORMATS has none to compare; treated as one
-  bool formats = false;
-};
-template <class T>
-constexpr std::pair<std::size_t, std::size_t> layout() noexcept {
-  return {sizeof(T), alignof(T)};
-}
-bool parse_stream(const D3D12_PIPELINE_STATE_STREAM_DESC& desc, StreamView& view) noexcept {
-  if (!desc.pPipelineStateSubobjectStream || !desc.SizeInBytes || desc.SizeInBytes > 65536)
-    return false;
-  const auto* base = static_cast<const unsigned char*>(desc.pPipelineStateSubobjectStream);
-  std::size_t offset = 0;
-  while (offset < desc.SizeInBytes) {
-    if (offset + sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE) > desc.SizeInBytes)
-      return false;
-    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type{};
-    std::memcpy(&type, base + offset, sizeof(type));
-    std::pair<std::size_t, std::size_t> inner{};
-    switch (type) {
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
-        inner = layout<ID3D12RootSignature*>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
-        inner = layout<D3D12_SHADER_BYTECODE>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT:
-        inner = layout<D3D12_STREAM_OUTPUT_DESC>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND:
-        inner = layout<D3D12_BLEND_DESC>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK:
-        inner = layout<UINT>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER:
-        inner = layout<D3D12_RASTERIZER_DESC>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
-        inner = layout<D3D12_DEPTH_STENCIL_DESC>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT:
-        inner = layout<D3D12_INPUT_LAYOUT_DESC>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
-        inner = layout<D3D12_INDEX_BUFFER_STRIP_CUT_VALUE>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
-        inner = layout<D3D12_PRIMITIVE_TOPOLOGY_TYPE>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS:
-        inner = layout<D3D12_RT_FORMAT_ARRAY>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
-        inner = layout<DXGI_FORMAT>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC:
-        inner = layout<DXGI_SAMPLE_DESC>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK:
-        inner = layout<UINT>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO:
-        inner = layout<D3D12_CACHED_PIPELINE_STATE>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS:
-        inner = layout<D3D12_PIPELINE_STATE_FLAGS>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1:
-        inner = layout<D3D12_DEPTH_STENCIL_DESC1>();
-        break;
-      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING:
-        inner = layout<D3D12_VIEW_INSTANCING_DESC>();
-        break;
-      default:
-        return false;
-    }
-    const std::size_t at = (offset + sizeof(type) + inner.second - 1) / inner.second * inner.second;
-    if (at + inner.first > desc.SizeInBytes)
-      return false;
-    const auto* data = base + at;
-    if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS)
-      std::memcpy(&view.vs, data, sizeof(view.vs));
-    else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS)
-      std::memcpy(&view.ps, data, sizeof(view.ps));
-    else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND) {
-      view.blend = reinterpret_cast<const D3D12_BLEND_DESC*>(data);
-      view.blend_offset = at;
-    } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS) {
-      D3D12_RT_FORMAT_ARRAY formats{};
-      std::memcpy(&formats, data, sizeof(formats));
-      view.targets = formats.NumRenderTargets;
-      view.formats = true;
-    }
-    offset = (at + inner.first + sizeof(void*) - 1) / sizeof(void*) * sizeof(void*);
-  }
-  return true;
-}
-// Inside a creation hook's owned-work guard, after the native creation.
-// `create` makes the twin from a stream description.
-template <class Create>
-void observe_stream(ID3D12Device* device,
-                    const D3D12_PIPELINE_STATE_STREAM_DESC& desc,
-                    ID3D12PipelineState* created,
-                    Create create) noexcept {
-  StreamView view;
-  if (!created || !parse_stream(desc, view)) {
-    state().unparsed.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-  if (!view.blend || !light_pipeline(view.vs, view.ps, *view.blend, view.targets))
-    return;
-  auto& s = state();
-  const std::lock_guard lock(s.creation);
-  std::vector<unsigned char> copy(static_cast<const unsigned char*>(desc.pPipelineStateSubobjectStream),
-                                  static_cast<const unsigned char*>(desc.pPipelineStateSubobjectStream) + desc.SizeInBytes);
-  reinterpret_cast<D3D12_BLEND_DESC*>(copy.data() + view.blend_offset)->RenderTarget[0].SrcBlend = D3D12_BLEND_BLEND_FACTOR;
-  const D3D12_PIPELINE_STATE_STREAM_DESC twin_desc{copy.size(), copy.data()};
-  ID3D12PipelineState* twin = nullptr;
-  if (FAILED(create(device, &twin_desc, IID_PPV_ARGS(&twin))) || !twin) {
-    s.twin_failures.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-  remember(created, twin);
-}
-// Inside a creation hook's owned-work guard, after the native creation.
-template <class Create>
-void observe_pipeline(ID3D12Device* device,
-                      const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
-                      ID3D12PipelineState* created,
-                      Create create) noexcept {
-  if (!created || !light_pipeline(desc.VS, desc.PS, desc.BlendState, desc.NumRenderTargets))
-    return;
-  auto& s = state();
-  const std::lock_guard lock(s.creation);
-  auto twin_desc = desc;
-  twin_desc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_BLEND_FACTOR;
-  ID3D12PipelineState* twin = nullptr;
-  if (FAILED(create(device, &twin_desc, IID_PPV_ARGS(&twin))) || !twin) {
-    s.twin_failures.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-  remember(created, twin);
+  if (s.confirmations.fetch_add(1, std::memory_order_relaxed) + 1 >= Confirmations)
+    s.pipeline.store(pipeline, std::memory_order_release);
 }
 }  // namespace lights
 // Camera tone: the main view's eye-adaptation exposure and tone-curve table
@@ -1870,6 +1691,43 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
       ++registry().pass_no_targets;
   }
   runtime::manager().invalidate_source_recording(native, id, true, reasons);
+}
+// Camera lights: extra copies of a camera view's light draw, issued by the
+// boundary observer right after the simulator's own draw with every binding
+// unchanged. A learnt light pipeline drawing light-shaped draws into a camera
+// output gets round(factor) - 1 copies; a candidate's draw confirms it.
+UINT light_repeats(void*,
+                   ID3D12GraphicsCommandList* native,
+                   std::uint64_t id,
+                   UINT indices,
+                   UINT instances,
+                   UINT first_index,
+                   INT vertex_offset,
+                   UINT first_instance) noexcept {
+  if (!lights::light_draw(indices, instances, first_index, vertex_offset, first_instance))
+    return 0;
+  auto& s = lights::state();
+  const OwnedWork guard;
+  std::shared_ptr<List> fallback;
+  auto* l = metadata_list(native, id, fallback);
+  if (!l || !l->pipeline)
+    return 0;
+  if (l->light_candidate == l->pipeline) {
+    l->light_candidate = nullptr;
+    lights::confirm(l->pipeline);
+  }
+  if (l->pipeline != s.pipeline.load(std::memory_order_acquire) || !l->count || !l->targets[0].resource || !l->targets[0].resource->alive)
+    return 0;
+  const int feed = scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(l->targets[0].resource->native));
+  if (feed < 0 || feed >= 3)
+    return 0;
+  const float factor = s.factors[feed].load(std::memory_order_relaxed);
+  if (!(factor >= 1.5f) || !(factor <= 64))
+    return 0;
+  const auto extra = static_cast<UINT>(factor + 0.5f) - 1;
+  s.repeated_draws.fetch_add(1, std::memory_order_relaxed);
+  s.extra_draws.fetch_add(extra, std::memory_order_relaxed);
+  return extra;
 }
 // The global observed-draw count is diagnostic. Each recording thread adds its
 // draws in batches so the counter's cache line is not shared on every draw.
@@ -2300,7 +2158,8 @@ const boundary::Callbacks Boundaries{nullptr,
                                      metadata_end,
                                      submission_pass_began,
                                      submission_enhanced,
-                                     before_legacy_uav};
+                                     before_legacy_uav,
+                                     light_repeats};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -2645,141 +2504,7 @@ const std::array<void*, 10> CreationWrappers{
     reinterpret_cast<void*>(&Creation<8, decltype(&ID3D12Device10::CreatePlacedResource2)>::call),
     reinterpret_cast<void*>(&Creation<9, decltype(&ID3D12Device10::CreateReservedResource2)>::call)};
 
-NativeSlot root_creation, rtv_creation, dsv_creation, descriptor_copy, descriptor_copy_simple, create_list, create_list1, pso_creation;
-NativeSlot stream_creation, library_graphics_load, library_stream_load;
-HRESULT STDMETHODCALLTYPE stream_create(ID3D12Device2* device,
-                                        const D3D12_PIPELINE_STATE_STREAM_DESC* desc,
-                                        REFIID iid,
-                                        void** out) noexcept {
-  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device2*, const D3D12_PIPELINE_STATE_STREAM_DESC*, REFIID, void**);
-  const hook_timing::Scope timing(hook_timing::device);
-  const bool observe = !owned_depth && registry().ready && same_device(device) && desc;
-  const OwnedWork guard;
-  const auto forward = stream_creation.forward<F>();
-  const auto hr = hook_timing::forward(forward, device, desc, iid, out);
-  if (observe)
-    lights::state().streams.fetch_add(1, std::memory_order_relaxed);
-  if (observe && SUCCEEDED(hr) && out && *out)
-    observe_safely([&] {
-      ID3D12PipelineState* created{};
-      if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&created)))) {
-        lights::observe_stream(device, *desc, created,
-                               [&](ID3D12Device*, const D3D12_PIPELINE_STATE_STREAM_DESC* twin, REFIID id, void** result) {
-                                 return forward(device, twin, id, result);
-                               });
-        created->Release();
-      }
-    });
-  return hr;
-}
-// Library loads return a pipeline from the simulator's shader cache; the twin
-// is created from the same description through the device.
-HRESULT STDMETHODCALLTYPE library_graphics(ID3D12PipelineLibrary* library,
-                                           LPCWSTR name,
-                                           const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
-                                           REFIID iid,
-                                           void** out) noexcept {
-  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12PipelineLibrary*, LPCWSTR, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
-  const bool observe = !owned_depth && registry().ready && desc;
-  const OwnedWork guard;
-  const auto hr = hook_timing::forward(library_graphics_load.forward<F>(), library, name, desc, iid, out);
-  if (observe)
-    lights::state().library_graphics.fetch_add(1, std::memory_order_relaxed);
-  if (observe && SUCCEEDED(hr) && out && *out)
-    observe_safely([&] {
-      ID3D12Device* device{};
-      ID3D12PipelineState* created{};
-      if (SUCCEEDED(library->GetDevice(IID_PPV_ARGS(&device))) && same_device(device) &&
-          SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&created)))) {
-        lights::observe_pipeline(device, *desc, created,
-                                 [&](ID3D12Device* d, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* twin, REFIID id, void** result) {
-                                   return d->CreateGraphicsPipelineState(twin, id, result);
-                                 });
-      }
-      if (created)
-        created->Release();
-      if (device)
-        device->Release();
-    });
-  return hr;
-}
-HRESULT STDMETHODCALLTYPE library_stream(ID3D12PipelineLibrary1* library,
-                                         LPCWSTR name,
-                                         const D3D12_PIPELINE_STATE_STREAM_DESC* desc,
-                                         REFIID iid,
-                                         void** out) noexcept {
-  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12PipelineLibrary1*, LPCWSTR, const D3D12_PIPELINE_STATE_STREAM_DESC*, REFIID, void**);
-  const bool observe = !owned_depth && registry().ready && desc;
-  const OwnedWork guard;
-  const auto hr = hook_timing::forward(library_stream_load.forward<F>(), library, name, desc, iid, out);
-  if (observe)
-    lights::state().library_streams.fetch_add(1, std::memory_order_relaxed);
-  if (observe && SUCCEEDED(hr) && out && *out)
-    observe_safely([&] {
-      ID3D12Device2* device{};
-      ID3D12PipelineState* created{};
-      if (SUCCEEDED(library->GetDevice(IID_PPV_ARGS(&device))) && same_device(device) &&
-          SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&created)))) {
-        lights::observe_stream(device, *desc, created,
-                               [&](ID3D12Device*, const D3D12_PIPELINE_STATE_STREAM_DESC* twin, REFIID id, void** result) {
-                                 return device->CreatePipelineState(twin, id, result);
-                               });
-      }
-      if (created)
-        created->Release();
-      if (device)
-        device->Release();
-    });
-  return hr;
-}
-// The runtime's pipeline-library class shares one method table, so a library
-// the bridge creates (and keeps for the process) carries the hooks for the
-// simulator's own libraries.
-void install_library_hooks(ID3D12Device* device) noexcept {
-  ID3D12Device1* device1{};
-  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))) || !device1)
-    return;
-  ID3D12PipelineLibrary* library{};
-  {
-    const OwnedWork guard;
-    if (FAILED(device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&library))))
-      library = nullptr;
-  }
-  device1->Release();
-  if (!library)
-    return;
-  library_graphics_load.install(library, 9, reinterpret_cast<void*>(&library_graphics));
-  ID3D12PipelineLibrary1* library1{};
-  if (SUCCEEDED(library->QueryInterface(IID_PPV_ARGS(&library1))) && library1) {
-    library_stream_load.install(library1, 13, reinterpret_cast<void*>(&library_stream));
-    library1->Release();
-  }
-}
-HRESULT STDMETHODCALLTYPE pso_create(ID3D12Device* device,
-                                     const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
-                                     REFIID iid,
-                                     void** out) noexcept {
-  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
-  const hook_timing::Scope timing(hook_timing::device);
-  const bool observe = !owned_depth && registry().ready && same_device(device) && desc;
-  const OwnedWork guard;
-  const auto forward = pso_creation.forward<F>();
-  const auto hr = hook_timing::forward(forward, device, desc, iid, out);
-  if (observe)
-    lights::state().graphics.fetch_add(1, std::memory_order_relaxed);
-  if (observe && SUCCEEDED(hr) && out && *out)
-    observe_safely([&] {
-      ID3D12PipelineState* created{};
-      if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&created)))) {
-        lights::observe_pipeline(device, *desc, created,
-                                 [&](ID3D12Device* d, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* twin, REFIID id, void** result) {
-                                   return forward(d, twin, id, result);
-                                 });
-        created->Release();
-      }
-    });
-  return hr;
-}
+NativeSlot root_creation, rtv_creation, dsv_creation, descriptor_copy, descriptor_copy_simple, create_list, create_list1;
 HRESULT STDMETHODCALLTYPE root_create(ID3D12Device* device, UINT node, const void* blob, SIZE_T bytes, REFIID iid, void** out) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const void*, SIZE_T, REFIID, void**);
   const hook_timing::Scope timing(hook_timing::device);
@@ -3149,7 +2874,9 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->pending_rt = {};
     item->cloud_scene = {};
     item->cloud_previous = {};
-    item->light_boosted = false;
+    item->light_anchor = 0;
+    item->pipeline = nullptr;
+    item->light_candidate = nullptr;
     item->raw_rtvs = {};
     item->raw_dsv = {};
     item->raw_rtv_count = 0;
@@ -3192,34 +2919,9 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
 struct Pipeline {
   static void apply(List& l, ID3D12PipelineState* p) {
     l.graphics.bind_pipeline(p);
-    boost_lights(l, p);
-  }
-  // Runs right after the simulator's own SetPipelineState, inside the
-  // owned-work guard. Its light pipeline follows the bind of the view's scene
-  // target, so a camera output there identifies a camera view's light draws.
-  static void boost_lights(List& l, ID3D12PipelineState* p) noexcept {
-    auto* twin = lights::twin_of(p);
-    if (!twin) {
-      if (l.light_boosted) {
-        const float ones[4]{1, 1, 1, 1};
-        l.native->OMSetBlendFactor(ones);
-        l.light_boosted = false;
-      }
-      return;
-    }
-    if (!l.count || !l.targets[0].resource || !l.targets[0].resource->alive)
-      return;
-    const int feed = scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(l.targets[0].resource->native));
-    if (feed < 0 || feed >= 3)
-      return;
-    const float factor = lights::state().factors[feed].load(std::memory_order_relaxed);
-    if (!(factor > 1.001f) || !(factor <= 4096))
-      return;
-    l.native->SetPipelineState(twin);
-    const float blend[4]{factor, factor, factor, 1};
-    l.native->OMSetBlendFactor(blend);
-    l.light_boosted = true;
-    lights::state().boosts.fetch_add(1, std::memory_order_relaxed);
+    l.pipeline = p;
+    l.light_candidate = l.light_anchor == 2 ? p : nullptr;
+    l.light_anchor = 0;
   }
 };
 struct PipelineStateObject {
@@ -3236,7 +2938,9 @@ struct ClearState {
     l.pending_pfds = {};
     l.pending_rt = {};
     l.cloud_scene = {};
-    l.light_boosted = false;
+    l.light_anchor = 0;
+    l.pipeline = nullptr;
+    l.light_candidate = nullptr;
     l.raw_rtvs = {};
     l.raw_dsv = {};
     l.raw_rtv_count = 0;
@@ -3458,8 +3162,11 @@ struct Targets {
     flush_pfd(l.native, l.id);
     record(l, count, handles, contiguous, depth, true);
     l.cloud_previous = std::exchange(l.cloud_scene, View{});
-    if (registry().cloud_merge_enabled.load(std::memory_order_relaxed) && l.count && cloud_target(l.targets[0]).camera_output)
+    const bool camera_output = l.count && cloud_target(l.targets[0]).camera_output;
+    if (camera_output)
       l.cloud_scene = l.targets[0];
+    // Camera lights: the camera scene bound again after its cloud merge.
+    l.light_anchor = l.light_anchor == 1 && camera_output ? 2 : (l.light_anchor == 1 ? 1 : 0);
   }
   static void apply(List& l,
                     UINT count,
@@ -3487,10 +3194,14 @@ struct Targets {
                                    const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
     auto& r = registry();
     const View previous = std::exchange(l.cloud_previous, View{});
-    if (!r.cloud_merge_enabled.load(std::memory_order_relaxed) || !previous.resource || count != 3 || !handles || l.count != 3)
+    if (!previous.resource || count != 3 || !handles || l.count != 3)
       return;
     const cloud_merge::Target bound[3]{cloud_target(l.targets[0]), cloud_target(l.targets[1]), cloud_target(l.targets[2])};
     if (!cloud_merge::camera_merge_bind(cloud_target(previous), count, depth != nullptr, bound))
+      return;
+    l.light_anchor = 1;
+    lights::state().anchors.fetch_add(1, std::memory_order_relaxed);
+    if (!r.cloud_merge_enabled.load(std::memory_order_relaxed))
       return;
     if (!l.cloud_rtvs) {
       D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 3, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
@@ -3964,11 +3675,6 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   ok &= descriptor_copy_simple.install(device, 24, reinterpret_cast<void*>(&descriptors_simple));
   ok &= create_list.install(device, 12, reinterpret_cast<void*>(&list_create));
   ok &= create_list1.install(device, 51, reinterpret_cast<void*>(&list_create1));
-  ok &= pso_creation.install(device, 10, reinterpret_cast<void*>(&pso_create));
-  // Streams and pipeline libraries are optional paths: a missing interface only
-  // leaves the camera lights unboosted.
-  stream_creation.install(device, 47, reinterpret_cast<void*>(&stream_create));
-  install_library_hooks(device);
   r.ready = ok;
   r.error = ok ? "native_graphics_ready" : "native_hook_installation_failed";
   if (ok) {
@@ -4068,10 +3774,9 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept {
 }
 LightStatus light_status() noexcept {
   auto& s = lights::state();
-  return {s.count.load(std::memory_order_relaxed),           s.twin_failures.load(std::memory_order_relaxed),
-          s.boosts.load(std::memory_order_relaxed),          s.graphics.load(std::memory_order_relaxed),
-          s.streams.load(std::memory_order_relaxed),         s.library_graphics.load(std::memory_order_relaxed),
-          s.library_streams.load(std::memory_order_relaxed), s.unparsed.load(std::memory_order_relaxed)};
+  return {s.pipeline.load(std::memory_order_relaxed) != nullptr, s.confirmations.load(std::memory_order_relaxed),
+          s.anchors.load(std::memory_order_relaxed), s.repeated_draws.load(std::memory_order_relaxed),
+          s.extra_draws.load(std::memory_order_relaxed)};
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();
