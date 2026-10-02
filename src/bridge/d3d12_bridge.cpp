@@ -1441,6 +1441,47 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
   s.table_copies.fetch_add(1, std::memory_order_relaxed);
 }
 }  // namespace tone
+// Diagnostic: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
+// width and height one eighth of the view) and how often each leaves
+// UNORDERED_ACCESS. A view whose temporal history is never written shows one
+// volume of its size that is never exited.
+namespace fog {
+struct Volume {
+  std::atomic<ID3D12Resource*> resource{nullptr};
+  std::atomic<std::uint32_t> width{0}, height{0};
+  std::atomic<std::uint64_t> exits{0};
+};
+std::array<Volume, 24>& volumes() noexcept {
+  static std::array<Volume, 24> value;
+  return value;
+}
+bool volume_shape(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && d.DepthOrArraySize == 64 && d.MipLevels == 1 &&
+         d.Format == DXGI_FORMAT_R10G10B10A2_UNORM && !(d.Width == 64 && d.Height == 64);
+}
+Volume* slot(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
+  for (auto& v : volumes()) {
+    ID3D12Resource* seen = v.resource.load(std::memory_order_acquire);
+    if (!seen && v.resource.compare_exchange_strong(seen, resource, std::memory_order_acq_rel)) {
+      v.width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
+      v.height.store(d.Height, std::memory_order_relaxed);
+      return &v;
+    }
+    if (seen == resource)
+      return &v;
+  }
+  return nullptr;
+}
+void note(ID3D12Resource* resource) noexcept {
+  const auto d = tone::description(resource);
+  if (!volume_shape(d))
+    return;
+  if (auto* v = slot(resource, d))
+    v->exits.fetch_add(1, std::memory_order_relaxed);
+}
+// Volumes first seen as an SRV-only partner are not visible here; a pair with
+// one entry missing reads as a history that is never written.
+}  // namespace fog
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   if (idle_callback())
     return;
@@ -1454,6 +1495,7 @@ void before_legacy_uav(void*, ID3D12GraphicsCommandList* list, std::uint64_t, co
     return;
   const OwnedWork guard;
   tone::table_exit(list, b);
+  fog::note(b.pResource);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
   if (idle_callback())
@@ -3793,6 +3835,23 @@ bool read_tone_table(std::uint32_t* table) noexcept {
 void set_light_factors(const std::array<float, 3>& factors) noexcept {
   for (unsigned i = 0; i < 3; ++i)
     lights::state().factors[i].store(factors[i], std::memory_order_relaxed);
+}
+void fog_volumes(char* text, std::size_t size) noexcept {
+  std::size_t used = 0;
+  if (size)
+    text[0] = 0;
+  for (auto& v : fog::volumes()) {
+    if (!v.resource.load(std::memory_order_relaxed) || used >= size)
+      break;
+    const int n = std::snprintf(text + used, size - used, "%s%ux%u@%llx:%llu", used ? "," : "", v.width.load(std::memory_order_relaxed),
+                                v.height.load(std::memory_order_relaxed),
+                                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(v.resource.load(std::memory_order_relaxed)) &
+                                                                0xffffff),
+                                static_cast<unsigned long long>(v.exits.load(std::memory_order_relaxed)));
+    if (n < 0)
+      break;
+    used += static_cast<std::size_t>(n);
+  }
 }
 void set_light_all(bool all) noexcept {
   lights::state().all.store(all, std::memory_order_relaxed);

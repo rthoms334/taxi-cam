@@ -1523,6 +1523,9 @@ DWORD run_impl() {
                       static_cast<double>(last_light_factors[0]),
                       static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
         log_status(status, light_detail);
+        char fog_detail[1200] = "Camera fog: volumes=";
+        win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
+        log_status(status, fog_detail);
       }
       if (output.shader_reloads || output.shader_reload_failures) {
         char shader_detail[400];

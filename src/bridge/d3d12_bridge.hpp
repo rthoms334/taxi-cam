@@ -191,6 +191,8 @@ CloudMergeStatus cloud_merge_status() noexcept;
 void set_light_factors(const std::array<float, 3>& factors) noexcept;
 // Dev only: also repeat light-shaped camera draws made with other pipelines.
 void set_light_all(bool all) noexcept;
+// Diagnostic: froxel fog volumes as WxH@address:UAV exits, comma separated.
+void fog_volumes(char* text, std::size_t size) noexcept;
 struct LightStatus {
   bool learnt = false;
   unsigned confirmations = 0;
