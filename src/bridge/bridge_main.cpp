@@ -42,38 +42,11 @@ std::atomic<bool> notifications_enabled{};
 // status line and the log.
 SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
-// Match main view lighting: hands the simulator's main-view exposure and
-// tone-curve table, as the graphics hooks copied them, to the composition.
-// A table is read at most once a second, only when a newer copy exists. An
-// exposure older than two seconds (no copies, the setting off, or the main
-// view not rendering) returns the camera images to Taxi Cam's exposure.
 // Development loop: a camera output shader at
 // %LOCALAPPDATA%\Taxi Cam\dev\compositor.hlsl replaces the built-in one,
 // checked once a second, so lighting changes show while the simulator runs.
 // The built-in source is written beside it as compositor.default.hlsl to copy.
 // No file, no change. Deleting the file keeps the last loaded shader.
-// deveeds.txt: a number 1..3 limiting the camera feeds (feed 0, the nose,
-// first) for diagnosis, without touching saved settings. 0: no limit.
-unsigned dev_feed_limit(std::uint64_t now) {
-  static std::uint64_t next_ms = 0;
-  static unsigned limit = 0;
-  if (now < next_ms)
-    return limit;
-  next_ms = now + 1000;
-  limit = 0;
-  wchar_t base[32768]{};
-  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
-  if (!n || n >= 32700)
-    return limit;
-  const auto path = std::wstring(base) + L"\\Taxi Cam\\dev\\feeds.txt";
-  if (FILE* file = _wfopen(path.c_str(), L"r")) {
-    unsigned value = 0;
-    if (std::fscanf(file, "%u", &value) == 1 && value >= 1 && value <= 3)
-      limit = value;
-    std::fclose(file);
-  }
-  return limit;
-}
 struct DevShader {
   std::uint64_t next_ms = 0;
   FILETIME written{};
@@ -124,6 +97,11 @@ struct DevShader {
 };
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
+// Match main view lighting: hands the simulator's main-view exposure and
+// tone-curve table, as the graphics hooks copied them, to the composition.
+// A table is read at most once a second, only when a newer copy exists. An
+// exposure older than two seconds (no copies, the setting off, or the main
+// view not rendering) returns the camera images to Taxi Cam's exposure.
 struct ToneFeed {
   std::uint64_t exposure_copies = 0, table_copies = 0;
   std::uint64_t exposure_ms = 0, table_ms = 0;
@@ -907,10 +885,8 @@ DWORD run_impl() {
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
     effective_rate =
         effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
-    unsigned desired_feeds =
+    const unsigned desired_feeds =
         settings.single_camera ? 1u : (rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u);
-    if (const unsigned limit = dev_feed_limit(now); limit && limit < desired_feeds)
-      desired_feeds = limit;
     // Dynamic tail rate: cached telemetry only, no simulator or engine reads.
     const auto heading_pose = native_camera::sample_body_pose(now);
     NosePriorityPolicy::Input nose_input;
