@@ -112,12 +112,6 @@ struct List : Metadata {
   // bridge-owned RTVs for the redirected cloud merge (cloud_merge.hpp).
   View cloud_scene{}, cloud_previous{};
   ID3D12DescriptorHeap* cloud_rtvs{};
-  // Camera lights (lights namespace): the bound pipeline, the camera whose
-  // cloud merge this recording drew (-1: none), and whether the first
-  // light-shaped draw since that merge is still to come.
-  ID3D12PipelineState* pipeline = nullptr;
-  int light_feed = -1;
-  bool light_anchor = false;
   ~List() override {
     if (snapshot_rtvs)
       snapshot_rtvs->Release();
@@ -1244,67 +1238,6 @@ List* metadata_list(ID3D12GraphicsCommandList* native, std::uint64_t id, std::sh
 }
 void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = true) noexcept;
 void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
-// Camera lights (PIX 2026-10-02, 1.8.16.0). The simulator draws runway and
-// taxiway lights as additive sprites (vh/ph_billboard_lights, blend ONE/ONE)
-// whose star is a fixed number of render pixels and whose energy scales with
-// the view's render pixels per unit tangent squared (U[1].x = W H 4/(9 pi)):
-// on the 777 nose view about 1/20 of the main view's, so its lights were dim
-// dots. Additive light adds up, so drawing the simulator's own light draw k
-// times gives it k times the energy with its own pipeline and bindings.
-//
-// The light pipeline is learnt, not created here: the simulator builds its
-// pipelines before the bridge attaches. In a camera recording the light pass
-// follows the cloud merge (cloud_merge.hpp), which also names the camera: the
-// first single-instance indexed-quad draw from index 0 after it (index count a
-// multiple of 6) is drawn with the light pipeline. A pipeline seen there three
-// times becomes the light pipeline; a different one starts again. Its draws in
-// a recording that had a camera cloud merge are that camera's light draws.
-namespace lights {
-struct State {
-  std::array<std::atomic<float>, 3> factors{};
-  std::atomic<ID3D12PipelineState*> pipeline{nullptr};
-  std::atomic<ID3D12PipelineState*> candidate{nullptr};
-  std::atomic<unsigned> confirmations{0};
-  std::atomic<std::uint64_t> anchors{0}, shaped{0}, sightings{0}, repeated_draws{0}, extra_draws{0};
-  // Light-shaped draws into a camera output after its cloud merge with any
-  // other pipeline, and the distinct pipelines seen there (first 8). The dev
-  // `all` switch repeats them too, to find which draws a camera's lights use.
-  std::atomic<std::uint64_t> other_draws{0};
-  std::array<std::atomic<ID3D12PipelineState*>, 8> others{};
-  std::atomic<bool> all{false};
-};
-State& state() noexcept {
-  static State value;
-  return value;
-}
-constexpr unsigned Confirmations = 3;
-void note_other(ID3D12PipelineState* pipeline) noexcept {
-  for (auto& slot : state().others) {
-    ID3D12PipelineState* seen = slot.load(std::memory_order_relaxed);
-    if (seen == pipeline)
-      return;
-    if (!seen && slot.compare_exchange_strong(seen, pipeline, std::memory_order_relaxed))
-      return;
-    if (seen == pipeline)
-      return;
-  }
-}
-bool light_draw(UINT indices, UINT instances, UINT first_index, INT vertex_offset, UINT first_instance) noexcept {
-  return indices && indices % 6 == 0 && instances == 1 && first_index == 0 && vertex_offset == 0 && first_instance == 0;
-}
-// A light pipeline candidate drew a light-shaped draw after the anchor.
-void confirm(ID3D12PipelineState* pipeline) noexcept {
-  auto& s = state();
-  if (!pipeline || s.pipeline.load(std::memory_order_relaxed) == pipeline)
-    return;
-  if (s.candidate.exchange(pipeline, std::memory_order_relaxed) != pipeline) {
-    s.confirmations.store(1, std::memory_order_relaxed);
-    return;
-  }
-  if (s.confirmations.fetch_add(1, std::memory_order_relaxed) + 1 >= Confirmations)
-    s.pipeline.store(pipeline, std::memory_order_release);
-}
-}  // namespace lights
 // Camera tone: the main view's eye-adaptation exposure and tone-curve table
 // (1.8.16.0, PIX 2026-10-02). ph_lumadaptation writes the exposure into a
 // 1 x 1 R32G32_FLOAT render target; the simulator moves it out of
@@ -1441,109 +1374,6 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
   s.table_copies.fetch_add(1, std::memory_order_relaxed);
 }
 }  // namespace tone
-// Dev experiment: the light pass tests each light against the view's depth
-// pyramid (R32_FLOAT, several mips, built from the view's own depth earlier in
-// its frame). With `noocc` in dev\lights.txt, the top level of every pyramid
-// of the camera's output size is written with 0 (far, reverse depth) at the
-// camera's cloud merge, just before its light draws, so no light is occluded.
-// Later passes of that camera frame also see the cleared level.
-namespace occlusion {
-struct State {
-  std::array<std::atomic<ID3D12Resource*>, 16> pyramids{};
-  std::array<std::atomic<std::uint32_t>, 16> sizes{};  // width << 16 | height
-  std::atomic<unsigned> next{0};
-  std::atomic<bool> enabled{false}, failed{false};
-  std::atomic<ID3D12Resource*> zeros{nullptr};
-  std::atomic<std::uint64_t> cleared{0};
-  std::mutex creation;
-};
-State& state() noexcept {
-  static State value;
-  return value;
-}
-constexpr UINT64 ZeroBytes = 4ull << 20;
-void note(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
-  if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.Format != DXGI_FORMAT_R32_FLOAT || d.MipLevels < 2 ||
-      d.DepthOrArraySize != 1 || !(d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) || d.Width > 4096 || d.Height > 4096)
-    return;
-  auto& s = state();
-  const auto i = s.next.fetch_add(1, std::memory_order_relaxed) % s.pyramids.size();
-  s.sizes[i].store(static_cast<std::uint32_t>(d.Width << 16) | d.Height, std::memory_order_relaxed);
-  s.pyramids[i].store(resource, std::memory_order_release);
-}
-ID3D12Resource* zeros() noexcept {
-  auto& s = state();
-  if (auto* existing = s.zeros.load(std::memory_order_acquire))
-    return existing;
-  if (s.failed.load(std::memory_order_relaxed))
-    return nullptr;
-  const std::unique_lock lock(s.creation, std::try_to_lock);
-  if (!lock.owns_lock())
-    return nullptr;
-  if (auto* existing = s.zeros.load(std::memory_order_acquire))
-    return existing;
-  auto* device = registry().device;
-  if (!device)
-    return nullptr;
-  D3D12_HEAP_PROPERTIES heap{};
-  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
-  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
-  D3D12_RESOURCE_DESC buffer{};
-  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer.Width = ZeroBytes;
-  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
-  buffer.SampleDesc.Count = 1;
-  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-  ID3D12Resource* created = nullptr;
-  void* mapped = nullptr;
-  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                             IID_PPV_ARGS(&created))) ||
-      FAILED(created->Map(0, nullptr, &mapped))) {
-    if (created)
-      created->Release();
-    s.failed.store(true, std::memory_order_relaxed);
-    return nullptr;
-  }
-  std::memset(mapped, 0, ZeroBytes);
-  created->Unmap(0, nullptr);
-  s.zeros.store(created, std::memory_order_release);
-  return created;
-}
-// At the camera's cloud merge, inside the owned-work guard. The pyramids rest
-// as shader resources between their build and their readers.
-void clear(ID3D12GraphicsCommandList* list, std::uint64_t width, std::uint32_t height) noexcept {
-  auto& s = state();
-  if (!s.enabled.load(std::memory_order_relaxed))
-    return;
-  const auto size = static_cast<std::uint32_t>(width << 16) | height;
-  const UINT pitch = (static_cast<UINT>(width) * 4 + 255) & ~255u;
-  if (UINT64{pitch} * height > ZeroBytes)
-    return;
-  ID3D12Resource* source = nullptr;
-  for (unsigned i = 0; i < s.pyramids.size(); ++i) {
-    auto* pyramid = s.pyramids[i].load(std::memory_order_acquire);
-    if (!pyramid || s.sizes[i].load(std::memory_order_relaxed) != size)
-      continue;
-    if (!source && !(source = zeros()))
-      return;
-    constexpr auto Resting = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition = {pyramid, 0, Resting, D3D12_RESOURCE_STATE_COPY_DEST};
-    list->ResourceBarrier(1, &barrier);
-    D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
-    target.pResource = pyramid;
-    target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    origin.pResource = source;
-    origin.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    origin.PlacedFootprint = {0, {DXGI_FORMAT_R32_FLOAT, static_cast<UINT>(width), height, 1, pitch}};
-    list->CopyTextureRegion(&target, 0, 0, 0, &origin, nullptr);
-    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-    list->ResourceBarrier(1, &barrier);
-    s.cleared.fetch_add(1, std::memory_order_relaxed);
-  }
-}
-}  // namespace occlusion
 // Camera fog: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
 // one eighth of the view's width and height). The density pass blends each
 // frame with a history volume; the main view swaps its history pair every
@@ -1634,7 +1464,6 @@ void created(IUnknown* object) noexcept {
     return;
   const auto d = tone::description(resource);
   resource->Release();
-  occlusion::note(resource, d);
   if (!volume_shape(d))
     return;
   auto& s = state();
@@ -2140,52 +1969,6 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
   }
   runtime::manager().invalidate_source_recording(native, id, true, reasons);
 }
-// Camera lights: extra copies of a camera view's light draw, issued by the
-// boundary observer right after the simulator's own draw with every binding
-// unchanged. A learnt light pipeline drawing light-shaped draws into a camera
-// output gets round(factor) - 1 copies; a candidate's draw confirms it.
-UINT light_repeats(void*,
-                   ID3D12GraphicsCommandList* native,
-                   std::uint64_t id,
-                   UINT indices,
-                   UINT instances,
-                   UINT first_index,
-                   INT vertex_offset,
-                   UINT first_instance) noexcept {
-  if (!lights::light_draw(indices, instances, first_index, vertex_offset, first_instance))
-    return 0;
-  auto& s = lights::state();
-  s.shaped.fetch_add(1, std::memory_order_relaxed);
-  const OwnedWork guard;
-  std::shared_ptr<List> fallback;
-  auto* l = metadata_list(native, id, fallback);
-  if (!l || !l->pipeline)
-    return 0;
-  if (l->light_anchor) {
-    l->light_anchor = false;
-    s.sightings.fetch_add(1, std::memory_order_relaxed);
-    lights::confirm(l->pipeline);
-  }
-  const int feed = l->light_feed;
-  if (feed < 0 || feed >= 3)
-    return 0;
-  if (l->pipeline != s.pipeline.load(std::memory_order_acquire)) {
-    if (!l->count || !l->targets[0].resource || !l->targets[0].resource->alive ||
-        scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(l->targets[0].resource->native)) != feed)
-      return 0;
-    s.other_draws.fetch_add(1, std::memory_order_relaxed);
-    lights::note_other(l->pipeline);
-    if (!s.all.load(std::memory_order_relaxed))
-      return 0;
-  }
-  const float factor = s.factors[feed].load(std::memory_order_relaxed);
-  if (!(factor >= 1.5f) || !(factor <= 64))
-    return 0;
-  const auto extra = static_cast<UINT>(factor + 0.5f) - 1;
-  s.repeated_draws.fetch_add(1, std::memory_order_relaxed);
-  s.extra_draws.fetch_add(extra, std::memory_order_relaxed);
-  return extra;
-}
 // The global observed-draw count is diagnostic. Each recording thread adds its
 // draws in batches so the counter's cache line is not shared on every draw.
 thread_local unsigned unpublished_draws = 0;
@@ -2615,8 +2398,7 @@ const boundary::Callbacks Boundaries{nullptr,
                                      metadata_end,
                                      submission_pass_began,
                                      submission_enhanced,
-                                     before_legacy_uav,
-                                     light_repeats};
+                                     before_legacy_uav};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -3332,9 +3114,6 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->pending_rt = {};
     item->cloud_scene = {};
     item->cloud_previous = {};
-    item->pipeline = nullptr;
-    item->light_feed = -1;
-    item->light_anchor = false;
     item->raw_rtvs = {};
     item->raw_dsv = {};
     item->raw_rtv_count = 0;
@@ -3375,10 +3154,7 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   return hr;
 }
 struct Pipeline {
-  static void apply(List& l, ID3D12PipelineState* p) {
-    l.graphics.bind_pipeline(p);
-    l.pipeline = p;
-  }
+  static void apply(List& l, ID3D12PipelineState* p) { l.graphics.bind_pipeline(p); }
 };
 struct PipelineStateObject {
   static void apply(List& l, ID3D12StateObject*) { l.graphics.invalidate("state_object_binding_not_restorable"); }
@@ -3394,8 +3170,6 @@ struct ClearState {
     l.pending_pfds = {};
     l.pending_rt = {};
     l.cloud_scene = {};
-    l.pipeline = nullptr;
-    l.light_anchor = false;
     l.raw_rtvs = {};
     l.raw_dsv = {};
     l.raw_rtv_count = 0;
@@ -3648,17 +3422,10 @@ struct Targets {
                                    const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
     auto& r = registry();
     const View previous = std::exchange(l.cloud_previous, View{});
-    if (!previous.resource || count != 3 || !handles || l.count != 3)
+    if (!r.cloud_merge_enabled.load(std::memory_order_relaxed) || !previous.resource || count != 3 || !handles || l.count != 3)
       return;
     const cloud_merge::Target bound[3]{cloud_target(l.targets[0]), cloud_target(l.targets[1]), cloud_target(l.targets[2])};
     if (!cloud_merge::camera_merge_bind(cloud_target(previous), count, depth != nullptr, bound))
-      return;
-    l.light_anchor = true;
-    l.light_feed = scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(previous.resource->native));
-    lights::state().anchors.fetch_add(1, std::memory_order_relaxed);
-    // A render-target bind: always a direct list.
-    occlusion::clear(l.native, previous.resource->desc.Width, previous.resource->desc.Height);
-    if (!r.cloud_merge_enabled.load(std::memory_order_relaxed))
       return;
     if (!l.cloud_rtvs) {
       D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 3, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
@@ -4225,10 +3992,6 @@ bool read_tone_table(std::uint32_t* table) noexcept {
   buffer->Unmap(0, &none);
   return stable;
 }
-void set_light_factors(const std::array<float, 3>& factors) noexcept {
-  for (unsigned i = 0; i < 3; ++i)
-    lights::state().factors[i].store(factors[i], std::memory_order_relaxed);
-}
 void fog_volumes(char* text, std::size_t size) noexcept {
   auto& f = fog::state();
   int used = std::snprintf(text, size, "history_reset=%d copy=%d copies=%llu clear=%d clears=%llu reset=%d resets=%llu",
@@ -4285,25 +4048,6 @@ void set_fog_dev(bool copy, bool clear, bool reset) noexcept {
       v.reset.store(false, std::memory_order_relaxed);
   if (reset)
     f.reset.store(true, std::memory_order_relaxed);
-}
-void set_light_all(bool all) noexcept {
-  lights::state().all.store(all, std::memory_order_relaxed);
-}
-void set_light_occlusion_off(bool off) noexcept {
-  occlusion::state().enabled.store(off, std::memory_order_relaxed);
-}
-std::uint64_t light_occlusion_clears() noexcept {
-  return occlusion::state().cleared.load(std::memory_order_relaxed);
-}
-LightStatus light_status() noexcept {
-  auto& s = lights::state();
-  unsigned others = 0;
-  for (auto& slot : s.others)
-    others += slot.load(std::memory_order_relaxed) != nullptr;
-  return {s.pipeline.load(std::memory_order_relaxed) != nullptr, s.confirmations.load(std::memory_order_relaxed),
-          s.anchors.load(std::memory_order_relaxed), s.shaped.load(std::memory_order_relaxed), s.sightings.load(std::memory_order_relaxed),
-          s.repeated_draws.load(std::memory_order_relaxed), s.extra_draws.load(std::memory_order_relaxed),
-          s.other_draws.load(std::memory_order_relaxed), others};
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();

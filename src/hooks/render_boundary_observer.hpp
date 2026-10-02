@@ -140,17 +140,6 @@ struct Callbacks {
                             ID3D12GraphicsCommandList*,
                             std::uint64_t object_generation,
                             const D3D12_RESOURCE_TRANSITION_BARRIER&) noexcept = nullptr;
-  // Optional. After the application's own DrawIndexedInstanced, before
-  // after_draw: how many identical extra draws the observer issues at once,
-  // with no state change in between (at most 63). Metadata decision only.
-  UINT (*draw_indexed_repeats)(void*,
-                               ID3D12GraphicsCommandList*,
-                               std::uint64_t object_generation,
-                               UINT indices,
-                               UINT instances,
-                               UINT first_index,
-                               INT vertex_offset,
-                               UINT first_instance) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;

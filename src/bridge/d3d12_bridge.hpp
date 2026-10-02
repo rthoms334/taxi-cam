@@ -183,18 +183,6 @@ struct CloudMergeStatus {
   std::uint64_t redirects = 0, refusals = 0;
 };
 CloudMergeStatus cloud_merge_status() noexcept;
-// Camera lights: per-feed energy factors for the simulator's light sprites in
-// the camera views (below 1.5: unchanged); whether the light pipeline is
-// learnt, confirmations of the current candidate, cloud-merge anchors seen,
-// light-shaped draws seen at all and after one, and light draws repeated with their
-// extra copies.
-void set_light_factors(const std::array<float, 3>& factors) noexcept;
-// Dev only: also repeat light-shaped camera draws made with other pipelines.
-void set_light_all(bool all) noexcept;
-// Dev only: clear camera depth pyramids before their light draws (occlusion
-// off), and how many clears were recorded.
-void set_light_occlusion_off(bool off) noexcept;
-std::uint64_t light_occlusion_clears() noexcept;
 // Camera fog: the copy switch and copies made, then each froxel fog volume as
 // WxH@address g<creation group>.<index>:UAV exits (group 0: created before
 // the bridge attached).
@@ -206,15 +194,6 @@ void set_fog_dev(bool copy, bool clear, bool reset) noexcept;
 // Camera fog: write each camera view's fog history once with clear air, so it
 // starts where the main view sits instead of at opaque (Match main view lighting).
 void set_fog_history_reset(bool enabled) noexcept;
-struct LightStatus {
-  bool learnt = false;
-  unsigned confirmations = 0;
-  std::uint64_t anchors = 0, shaped = 0, sightings = 0, repeated_draws = 0, extra_draws = 0;
-  // Light-shaped camera draws with other pipelines, and how many pipelines.
-  std::uint64_t other_draws = 0;
-  unsigned other_pipelines = 0;
-};
-LightStatus light_status() noexcept;
 // Camera tone: copies of the main view's eye-adaptation exposure and 64^3
 // tone-curve table, made at the simulator's own state exits while enabled.
 // Counts are cumulative for the bridge lifetime.

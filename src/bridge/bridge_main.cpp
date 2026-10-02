@@ -75,10 +75,6 @@ unsigned dev_feed_limit(std::uint64_t now) {
   return limit;
 }
 struct DevShader {
-  // dev\lights.txt: a number multiplying the camera light factors (1), then
-  // optionally `all` to repeat every light-shaped camera draw.
-  double light_scale = 1;
-  bool light_all = false, light_noocc = false;
   // dev\fog.txt: words `copy` (each camera fog result into its history),
   // `clear` (camera integrated fog overwritten with clear air) and `reset`
   // (each camera fog history set to clear air once).
@@ -105,22 +101,6 @@ struct DevShader {
         DWORD written_bytes = 0;
         WriteFile(file, source, static_cast<DWORD>(std::strlen(source)), &written_bytes, nullptr);
         CloseHandle(file);
-      }
-    }
-    {
-      const auto lights_path = directory + L"\\lights.txt";
-      light_scale = 1;
-      light_all = light_noocc = false;
-      if (FILE* file = _wfopen(lights_path.c_str(), L"r")) {
-        double value = 0;
-        char word[8]{};
-        if (std::fscanf(file, "%lf", &value) == 1 && value > 0 && value < 1000)
-          light_scale = value;
-        while (std::fscanf(file, "%7s", word) == 1) {
-          light_all = light_all || std::strcmp(word, "all") == 0;
-          light_noocc = light_noocc || std::strcmp(word, "noocc") == 0;
-        }
-        std::fclose(file);
       }
     }
     {
@@ -161,7 +141,6 @@ struct DevShader {
 };
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
-std::array<float, 3> last_light_factors{};
 struct ToneFeed {
   std::uint64_t exposure_copies = 0, table_copies = 0;
   std::uint64_t exposure_ms = 0, table_ms = 0;
@@ -1110,30 +1089,8 @@ DWORD run_impl() {
     scene_runtime::set_light_inputs(key, tone.fresh_exposure(now), display_scale, static_cast<float>(last_ambient));
     static DevShader dev_shader;
     dev_shader.poll(key, now);
-    // Camera lights (lights namespace in d3d12_bridge.cpp): each camera's light
-    // sprites get the energy the main view's pixel density gives them, from the
-    // camera's render height and vertical lens. 866.8 render pixels per unit
-    // tangent is the main view measured in the 777 capture (1707 x 913 render,
-    // 0.97 rad); dev\lights.txt can scale the result while tuning.
-    {
-      std::array<float, 3> factors{};
-      if (settings.camera_tone)
-        for (unsigned i = 0; i < 3; ++i) {
-          const double lens = settings.mounts[i][5];
-          const double height = drawing->camera_panes[i][1];
-          if (!(lens > 0.05 && lens < 3.0) || !(height > 0))
-            continue;
-          const double density = height / (2 * std::tan(lens / 2));
-          const double ratio = 866.8 / density;
-          factors[i] = static_cast<float>(std::clamp(ratio * ratio * dev_shader.light_scale, 1.0, 64.0));
-        }
-      win::set_light_factors(factors);
-      win::set_light_all(dev_shader.light_all);
-      win::set_light_occlusion_off(dev_shader.light_noocc);
-      win::set_fog_dev(dev_shader.fog_copy, dev_shader.fog_clear, dev_shader.fog_reset);
-      win::set_fog_history_reset(settings.camera_tone != 0);
-      last_light_factors = factors;
-    }
+    win::set_fog_dev(dev_shader.fog_copy, dev_shader.fog_clear, dev_shader.fog_reset);
+    win::set_fog_history_reset(settings.camera_tone != 0);
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1556,25 +1513,9 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
                     tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);
-      {
-        const auto light_status = win::light_status();
-        char light_detail[320];
-        std::snprintf(light_detail, sizeof(light_detail),
-                      "Camera lights: learnt=%d confirmations=%u anchors=%llu shaped=%llu sightings=%llu repeated_draws=%llu extra_draws=%llu "
-                      "other_draws=%llu other_pipelines=%u occlusion_clears=%llu factors=%.3g/%.3g/%.3g",
-                      light_status.learnt ? 1 : 0, light_status.confirmations, static_cast<unsigned long long>(light_status.anchors),
-                      static_cast<unsigned long long>(light_status.shaped), static_cast<unsigned long long>(light_status.sightings),
-                      static_cast<unsigned long long>(light_status.repeated_draws),
-                      static_cast<unsigned long long>(light_status.extra_draws),
-                      static_cast<unsigned long long>(light_status.other_draws), light_status.other_pipelines,
-                      static_cast<unsigned long long>(win::light_occlusion_clears()),
-                      static_cast<double>(last_light_factors[0]),
-                      static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
-        log_status(status, light_detail);
-        char fog_detail[1200] = "Camera fog: volumes=";
-        win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
-        log_status(status, fog_detail);
-      }
+      char fog_detail[1200] = "Camera fog: volumes=";
+      win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
+      log_status(status, fog_detail);
       if (output.shader_reloads || output.shader_reload_failures) {
         char shader_detail[400];
         std::snprintf(shader_detail, sizeof(shader_detail), "Dev shader: reloads=%llu failures=%llu error=%.300s",

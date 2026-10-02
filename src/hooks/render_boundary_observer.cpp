@@ -372,14 +372,6 @@ void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
   std::uint64_t changes = 0;
   const auto identity = lookup(list, changes);
   hook_timing::forward(original, list, indices, instances, first_index, vertex_offset, first_instance);
-  // Repeating a draw needs no capture or pass proof: only a known recording.
-  if (indices && instances && identity.generation && callbacks.draw_indexed_repeats && enabled.load(std::memory_order_acquire)) {
-    const UINT repeats = (std::min)(callbacks.draw_indexed_repeats(callbacks.context, list, identity.generation, indices, instances,
-                                                                   first_index, vertex_offset, first_instance),
-                                    63u);
-    for (UINT n = 0; n < repeats; ++n)
-      original(list, indices, instances, first_index, vertex_offset, first_instance);
-  }
   if (indices && instances)
     after_draw_work(list, identity, changes);
 }
@@ -918,7 +910,7 @@ bool same_callbacks(const Callbacks& a, const Callbacks& b) noexcept {
          a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended &&
          a.selected_legacy_targets == b.selected_legacy_targets && a.metadata_begin == b.metadata_begin &&
          a.metadata_end == b.metadata_end && a.pass_began == b.pass_began && a.enhanced_call == b.enhanced_call &&
-         a.before_legacy_uav == b.before_legacy_uav && a.draw_indexed_repeats == b.draw_indexed_repeats;
+         a.before_legacy_uav == b.before_legacy_uav;
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
   {
