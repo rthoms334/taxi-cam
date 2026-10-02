@@ -95,6 +95,43 @@ struct DevShader {
     scene_runtime::reload_shader(key, source);
   }
 };
+// Development A/B switch: %LOCALAPPDATA%\Taxi Cam\dev\camera_aa.txt starting
+// with '1' leaves the simulator's AA on for Taxi Cam's camera views; '0', any
+// other content or no file keeps today's clear. Checked once a second; the
+// observer applies it in its closed-gate AA preparation before each pulse.
+// Byte-order marks, NULs and whitespace before the digit are skipped, so a
+// UTF-16 file written by Windows PowerShell also works.
+struct DevCameraAa {
+  std::uint64_t next_ms = 0;
+  void poll(std::uint64_t now) {
+    if (now < next_ms)
+      return;
+    next_ms = now + 1000;
+    wchar_t base[32768]{};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
+    if (!n || n >= 32700)
+      return;
+    const std::wstring path = std::wstring(base) + L"\\Taxi Cam\\dev\\camera_aa.txt";
+    bool enabled = false;
+    HANDLE file =
+        CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+      unsigned char text[16]{};
+      DWORD read = 0;
+      if (ReadFile(file, text, sizeof(text), &read, nullptr)) {
+        for (DWORD i = 0; i < read; ++i) {
+          const auto c = text[i];
+          if (c == 0 || c == 0xef || c == 0xbb || c == 0xbf || c == 0xff || c == 0xfe || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+            continue;
+          enabled = c == '1';
+          break;
+        }
+      }
+      CloseHandle(file);
+    }
+    native_camera::request_scene_view_aa(enabled);
+  }
+};
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
 // Match main view lighting: hands the simulator's main-view exposure and
@@ -1048,6 +1085,8 @@ DWORD run_impl() {
     scene_runtime::set_light_inputs(key, tone.fresh_exposure(now), display_scale, static_cast<float>(last_ambient));
     static DevShader dev_shader;
     dev_shader.poll(key, now);
+    static DevCameraAa dev_camera_aa;
+    dev_camera_aa.poll(now);
     // Match main view lighting starts each camera's fog history at clear air.
     win::set_fog_history_reset(settings.camera_tone != 0);
     if (drawing->ground_speed)
@@ -1475,6 +1514,15 @@ DWORD run_impl() {
       char fog_detail[1200] = "Camera fog: ";
       win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
       log_status(status, fog_detail);
+      // Camera AA development switch (dev\camera_aa.txt): the requested state,
+      // the simulator's global AA mode (-1: not read on this image), bit31
+      // writes that set or cleared it on the views, refusals and the last one.
+      char aa_detail[224];
+      std::snprintf(aa_detail, sizeof(aa_detail), "Camera AA: requested=%d mode=%d sets=%llu clears=%llu refused=%llu error=%s",
+                    scene.aa_requested ? 1 : 0, static_cast<int>(native_camera::scene_global_aa_mode()),
+                    static_cast<unsigned long long>(scene.aa_sets), static_cast<unsigned long long>(scene.aa_clears),
+                    static_cast<unsigned long long>(scene.aa_refusals), scene.aa_error && *scene.aa_error ? scene.aa_error : "none");
+      log_status(status, aa_detail);
       if (output.shader_reloads || output.shader_reload_failures) {
         char shader_detail[400];
         std::snprintf(shader_detail, sizeof(shader_detail), "Dev shader: reloads=%llu failures=%llu error=%.300s",

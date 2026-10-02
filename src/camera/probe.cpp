@@ -144,6 +144,11 @@ struct Runtime {
   ClearedAaLedger cleared_aa;
   std::uint64_t aa_restores = 0;
   std::uint64_t aa_restore_failures = 0;
+  // Camera AA development switch (request_scene_view_aa); false clears bit31
+  // as before. The counters and last refusal are observer-thread only.
+  std::atomic<bool> view_aa{false};
+  std::uint64_t aa_sets = 0, aa_clears = 0, aa_refusals = 0;
+  const char* aa_error = "";
   // Consecutive activation pulses refused because the diffuse texture had no
   // render-target record; bounded by ViewResizeWarmup::MaximumOutputWaits.
   unsigned rt_record_refusals = 0;
@@ -998,24 +1003,44 @@ bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair,
 bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapshot& view) {
   if (!session_work_allowed(runtime))
     return false;
+  // Development switch, read once per preparation: true leaves the engine's
+  // AA bit set (the main view's temporal path), false clears it as before.
+  const bool enabled = runtime.view_aa.load(std::memory_order_acquire);
   LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-  const auto result = disable_owned_view_aa(view, image, runtime.contract.layout);
+  const auto result = set_owned_view_aa(view, image, runtime.contract.layout, enabled);
   if (!result.complete) {
     runtime.stage_error = result.error;
+    runtime.aa_error = result.error;
+    ++runtime.aa_refusals;
     return false;
   }
+  // A set bit is the state a restore hands back: nothing is owed for this
+  // view, so a later erase or pool reuse must not count it as cleared.
+  if (enabled)
+    runtime.cleared_aa.forget(view.view_address);
   if (result.write_attempted) {
-    // The pooled view now carries a bridge-modified flag word. Remember the
-    // exact P so the bit is restored before the slot's next entry or erase.
-    runtime.cleared_aa.note(runtime.renderer, view.view_address);
+    if (enabled) {
+      ++runtime.aa_sets;
+    } else {
+      // The pooled view now carries a bridge-modified flag word. Remember the
+      // exact P so the bit is restored before the slot's next entry or erase.
+      runtime.cleared_aa.note(runtime.renderer, view.view_address);
+      ++runtime.aa_clears;
+    }
     const auto confirmed = inspect_entry(runtime, id);
     auto expected_flags = view.flags;
-    expected_flags[0] &= ~kViewAaFlag;
+    if (enabled)
+      expected_flags[0] |= kViewAaFlag;
+    else
+      expected_flags[0] &= ~kViewAaFlag;
     if (!confirmed.complete || !confirmed.ready || confirmed.mode != 2 || confirmed.view_address != view.view_address ||
         confirmed.node_address != view.node_address || confirmed.camera_address != view.camera_address ||
         confirmed.resource_address != view.resource_address || confirmed.dimensions != view.dimensions ||
         confirmed.output_dimensions != view.output_dimensions || confirmed.flags != expected_flags) {
-      runtime.stage_error = "Owned camera identity changed while disabling its AA; render gate stays closed.";
+      runtime.stage_error = enabled ? "Owned camera identity changed while enabling its AA; render gate stays closed."
+                                    : "Owned camera identity changed while disabling its AA; render gate stays closed.";
+      runtime.aa_error = "aa_identity_changed";
+      ++runtime.aa_refusals;
       return false;
     }
     view = confirmed;
@@ -2669,6 +2694,10 @@ void observer(void* manager) noexcept {
     report.aa_restores = runtime.aa_restores;
     report.aa_restore_failures = runtime.aa_restore_failures;
     report.aa_cleared_pending = runtime.cleared_aa.pending();
+    report.aa_sets = runtime.aa_sets;
+    report.aa_clears = runtime.aa_clears;
+    report.aa_refusals = runtime.aa_refusals;
+    report.aa_error = runtime.aa_error;
     report.rt_record_refusals = runtime.rt_record_refusals;
     report.rt_record_holds = runtime.rt_record_holds;
     report.view_wait_count = runtime.view_wait.episodes();
@@ -2988,6 +3017,19 @@ void request_scene_main_far(bool follow) noexcept {
   state().follow_main_far.store(follow, std::memory_order_release);
 }
 
+void request_scene_view_aa(bool enabled) noexcept {
+  state().view_aa.store(enabled, std::memory_order_release);
+}
+
+std::int32_t scene_global_aa_mode() noexcept {
+  auto& runtime = state();
+  // The image, base and contract are written once, before hooked is released.
+  if (!runtime.hooked.load(std::memory_order_acquire))
+    return -1;
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+  return read_global_aa_mode(image, runtime.contract.layout);
+}
+
 void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {
   const auto settings = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
                         (nose_priority ? 1u << 16 : 0u);
@@ -3038,6 +3080,7 @@ ProbeSnapshot scene_snapshot() {
   result.requested_rate = settings & 0xffu;
   result.requested_feeds = (settings >> 8) & 0xffu;
   result.requested_nose_priority = ((settings >> 16) & 1u) != 0;
+  result.aa_requested = runtime.view_aa.load(std::memory_order_acquire);
   result.mounts = runtime.requested_mounts;
   return result;
 }

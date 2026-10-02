@@ -16,9 +16,10 @@ bool read_overrides(discovery::ImageReader& image, std::array<std::uint64_t, 2>&
 }
 }  // namespace
 
-ViewAaResult disable_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
-                                   discovery::ImageReader& image,
-                                   const CameraImageLayout& layout) noexcept {
+ViewAaResult set_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
+                               discovery::ImageReader& image,
+                               const CameraImageLayout& layout,
+                               bool enabled) noexcept {
   ViewAaResult result;
   const auto fail = [&](const char* error) {
     result.error = error;
@@ -41,10 +42,15 @@ ViewAaResult disable_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
     return fail("aa_read_failed");
   if (current != view.flags)
     return fail("aa_snapshot_changed");
-  if ((overrides[1] & ~overrides[0] & kViewAaFlag) != 0)
+  if (enabled && (overrides[0] & kViewAaFlag) != 0)
+    return fail("aa_cleared_by_global_override");
+  if (!enabled && (overrides[1] & ~overrides[0] & kViewAaFlag) != 0)
     return fail("aa_forced_by_global_override");
   auto desired = current;
-  desired[0] &= ~kViewAaFlag;
+  if (enabled)
+    desired[0] |= kViewAaFlag;
+  else
+    desired[0] &= ~kViewAaFlag;
   if (desired != current) {
     SIZE_T written = 0;
     result.write_attempted = true;
@@ -58,6 +64,19 @@ ViewAaResult disable_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
   result.complete = true;
   result.error = "";
   return result;
+}
+
+ViewAaResult disable_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
+                                   discovery::ImageReader& image,
+                                   const CameraImageLayout& layout) noexcept {
+  return set_owned_view_aa(view, image, layout, false);
+}
+
+std::int32_t read_global_aa_mode(discovery::ImageReader& image, const CameraImageLayout& layout) noexcept {
+  std::int32_t mode = -1;
+  if (layout != observed_store_layout() || !image.read(kObservedAaModeRva, &mode, sizeof(mode)))
+    return -1;
+  return mode;
 }
 
 ViewAaResult restore_view_aa_flag(std::uint64_t view_address) noexcept {

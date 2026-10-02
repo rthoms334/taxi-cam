@@ -126,6 +126,12 @@ struct ProbeSnapshot {
   std::uint64_t aa_restores = 0;
   std::uint64_t aa_restore_failures = 0;
   bool aa_cleared_pending = false;
+  // Camera AA development switch (request_scene_view_aa): the requested state,
+  // bit31 writes that set or cleared it on an owned view, refused preparations
+  // and the last refusal ("" when none).
+  bool aa_requested = false;
+  std::uint64_t aa_sets = 0, aa_clears = 0, aa_refusals = 0;
+  const char* aa_error = "";
   // Consecutive pulses and cumulative holds where the diffuse texture had no
   // render-target record (inspection=rt_record_absent).
   unsigned rt_record_refusals = 0;
@@ -184,6 +190,15 @@ void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = 
 // Taxi Cam's views the main view's far distances (above 60 kt, so they keep
 // drawing the ground after take-off); false restores each camera's own far.
 void request_scene_main_far(bool follow) noexcept;
+// Development switch, atomic only. The observer applies it in its existing
+// closed-gate AA preparation before each pulse: true leaves the engine's
+// per-view AA bit (P+48 bit31) set on Taxi Cam's views, false clears it (the
+// default). Untested live.
+void request_scene_view_aa(bool enabled) noexcept;
+// Diagnostics only, on the caller's thread: the simulator's global AA mode
+// read from the image (read_global_aa_mode), or -1 before the observer is
+// installed, on another image layout or when the read is refused.
+std::int32_t scene_global_aa_mode() noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;

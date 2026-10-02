@@ -18,6 +18,7 @@ void require(bool value, const char* message) {
 struct Image final : taxi_camera::discovery::ImageReader {
   nc::CameraImageLayout layout = nc::observed_store_layout();
   std::array<std::uint64_t, 2> overrides{4, 0};
+  std::int32_t aa_mode = 7;
   unsigned reads = 0, fail_at = 0, change_at = 0;
   unsigned protect_at = 0;
   void* protect_address = nullptr;
@@ -28,6 +29,10 @@ struct Image final : taxi_camera::discovery::ImageReader {
     if (reads == protect_at) {
       DWORD previous = 0;
       require(VirtualProtect(protect_address, 4096, protection, &previous) != FALSE, "override-time protection change failed");
+    }
+    if (reads != fail_at && rva == nc::kObservedAaModeRva && size == sizeof(aa_mode)) {
+      std::memcpy(output, &aa_mode, sizeof(aa_mode));
+      return true;
     }
     if (reads == fail_at || size != 8 || (rva != layout.view_flag_clear_override && rva != layout.view_flag_set_override))
       return false;
@@ -360,6 +365,118 @@ void restore_after_clear() {
   require(ledger.note(0x3000, 0x4000) && !ledger.contains(0x2000, 0x1008) && ledger.contains(0x3000, 0x4000),
           "A new renderer did not replace the AA ledger");
 }
+// The development switch's direction: exactly bit31 is set, P+56 and every
+// other bit (the closed gate included) stay, a set bit is not rewritten, and a
+// clear afterwards returns the original words.
+void set_direction(unsigned offset) {
+  Fixture fixture(offset);
+  const auto original = fixture.view.flags;
+  fixture.view.flags[0] &= ~nc::kViewAaFlag;
+  fixture.save();
+  nc::LocalMemoryMetrics metrics;
+  const auto result = [&] {
+    nc::ScopedLocalMemoryMetrics measured(metrics);
+    return nc::set_owned_view_aa(fixture.view, fixture.image, nc::observed_store_layout(), true);
+  }();
+  require(result.complete && result.write_attempted && !*result.error, "AA set failed");
+  accounting(metrics);
+  require(metrics.read_calls == 2 && metrics.requested_bytes == 32, "AA set flag reads were uncounted or widened");
+  auto expected = fixture.before;
+  std::memcpy(expected.data() + 48, original.data(), 16);
+  require(!std::memcmp(expected.data(), fixture.view_memory, expected.size()), "AA set changed bits outside bit31");
+  require(fixture.image.reads == 4, "AA set override bracket incomplete");
+  fixture.view.flags = original;
+  fixture.save();
+  const auto repeated = nc::set_owned_view_aa(fixture.view, fixture.image, nc::observed_store_layout(), true);
+  require(repeated.complete && !repeated.write_attempted && fixture.image.reads == 8, "already-set AA view rewritten");
+  fixture.unchanged();
+  require(nc::disable_owned_view_aa(fixture.view, fixture.image).complete, "AA clear after a set failed");
+  std::array<std::uint64_t, 2> words{};
+  std::memcpy(words.data(), fixture.view_memory + 48, 16);
+  require(words[0] == (original[0] & ~nc::kViewAaFlag) && words[1] == original[1], "AA clear after a set changed other bits");
+  // The set override alone already shows the bit; setting P+48 too is allowed.
+  Fixture forced;
+  forced.view.flags[0] &= ~nc::kViewAaFlag;
+  forced.save();
+  forced.image.overrides = {0, nc::kViewAaFlag};
+  const auto with_set = nc::set_owned_view_aa(forced.view, forced.image, nc::observed_store_layout(), true);
+  require(with_set.complete && with_set.write_attempted, "AA set refused under a set-only override");
+}
+void set_refusals() {
+  const auto layout = nc::observed_store_layout();
+  // Every fixture starts with bit31 clear, so an accepted call would write.
+  const auto cleared = [](Fixture& fixture) {
+    fixture.view.flags[0] &= ~nc::kViewAaFlag;
+    fixture.save();
+  };
+  const auto refused = [&](Fixture& fixture, const char* error, const char* message) {
+    const auto result = nc::set_owned_view_aa(fixture.view, fixture.image, layout, true);
+    require(!result.complete && !result.write_attempted && !std::strcmp(result.error, error), message);
+    fixture.unchanged();
+  };
+  {
+    Fixture fixture;
+    cleared(fixture);
+    fixture.image.overrides = {nc::kViewAaFlag, 0};
+    refused(fixture, "aa_cleared_by_global_override", "AA set accepted a clearing global override");
+  }
+  {
+    Fixture fixture;
+    cleared(fixture);
+    fixture.image.overrides = {nc::kViewAaFlag, nc::kViewAaFlag};
+    refused(fixture, "aa_cleared_by_global_override", "AA set ignored clear override precedence");
+  }
+  {
+    Fixture fixture;
+    cleared(fixture);
+    fixture.view.flags[0] &= ~1ull;
+    fixture.save();
+    refused(fixture, "aa_gate_open", "AA set accepted an open gate");
+    require(fixture.image.reads == 0, "AA set with an open gate reached override reads");
+  }
+  for (const unsigned word : {48u, 56u}) {
+    Fixture fixture;
+    cleared(fixture);
+    fixture.view_memory[word] ^= 4;
+    std::memcpy(fixture.before.data(), fixture.view_memory, fixture.before.size());
+    refused(fixture, "aa_snapshot_changed", "AA set accepted a changed snapshot");
+  }
+  {
+    Fixture fixture;
+    cleared(fixture);
+    fixture.view.mode = 0;
+    refused(fixture, "aa_invalid_owned_view", "AA set accepted an unverified view");
+  }
+  for (const unsigned offset : {0u, 4096u - 56u}) {
+    Fixture fixture(offset);
+    cleared(fixture);
+    // In the straddling case only P+56's page is read-only.
+    auto* protected_page = fixture.allocation + (offset ? 4096 : 0);
+    DWORD previous = 0;
+    require(VirtualProtect(protected_page, 4096, PAGE_READONLY, &previous) != FALSE, "AA set protection setup failed");
+    const auto result = nc::set_owned_view_aa(fixture.view, fixture.image, layout, true);
+    require(VirtualProtect(protected_page, 4096, PAGE_READWRITE, &previous) != FALSE, "AA set protection restore failed");
+    require(!result.complete && !result.write_attempted && !std::strcmp(result.error, "aa_flags_not_writable") && fixture.image.reads == 0,
+            "AA set accepted an unwritable flag span");
+    fixture.unchanged();
+  }
+  Fixture changed;
+  cleared(changed);
+  changed.image.change_at = 4;
+  const auto incomplete = nc::set_owned_view_aa(changed.view, changed.image, layout, true);
+  require(!incomplete.complete && incomplete.write_attempted && !std::strcmp(incomplete.error, "aa_changed_during_update"),
+          "AA set accepted an override that changed during the update");
+  require(changed.view_memory[48] & 1, "AA set failure opened the gate");
+}
+void global_aa_mode() {
+  Image image;
+  require(nc::read_global_aa_mode(image, nc::observed_store_layout()) == 7 && image.reads == 1, "AA mode was not read");
+  auto moved = nc::observed_store_layout();
+  moved.view_flag_set_override += 0x20000;
+  require(nc::read_global_aa_mode(image, moved) == -1 && image.reads == 1, "AA mode was read for another image layout");
+  image.fail_at = 2;
+  require(nc::read_global_aa_mode(image, nc::observed_store_layout()) == -1, "A refused AA mode read reported a value");
+}
 }  // namespace
 int main() {
   try {
@@ -371,6 +488,10 @@ int main() {
     refusals();
     resolved_layout();
     restore_after_clear();
+    set_direction(0);
+    set_direction(4096 - 56);
+    set_refusals();
+    global_aa_mode();
     std::printf("View AA guard tests passed: %u checks\n", checks);
     return 0;
   } catch (const std::exception& error) {
