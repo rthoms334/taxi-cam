@@ -31,12 +31,13 @@ namespace taxi_camera {
 //   until the next serialized record. The caller owns output-copy synchronization.
 //
 // initialize compiles/allocates once. set_inputs writes descriptors only when
-// resources/formats change. record allocates, compiles, uploads and reads back
+// resources/formats change, and then (re)allocates each HDR feed's bloom
+// pyramid for its size. record allocates, compiles, uploads and reads back
 // nothing; it restores both input mip-zero states and leaves output COPY_SOURCE.
 // RGB is sampled as declared by the typed SRV (sRGB views decode to linear).
-// R11G11B10_FLOAT feeds receive the main view's physically based bloom, then
-// exposure, per-channel Reinhard compression and sRGB encoding for this SDR
-// display. Other formats retain their sampled RGB.
+// R11G11B10_FLOAT feeds receive the simulator's own bloom (see BloomShader),
+// then exposure, per-channel Reinhard compression and sRGB encoding for this
+// SDR display. Other formats retain their sampled RGB.
 // This explicit display conversion is not simulator exposure/color calibration.
 // Each feed stretches over its full region. Output alpha is a per-pixel encoding
 // flag for the PFD stamp, not coverage: 1 marks camera pixels (display-referred
@@ -119,13 +120,13 @@ class CameraCompositorD3D12 {
 
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 3;
+    heap.NumDescriptors = SrvCount;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     status = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(srv_heap_.put()));
     if (FAILED(status))
-      return initialization_failed(status, "Creating the three-source SRV heap failed.");
+      return initialization_failed(status, "Creating the source and bloom SRV heap failed.");
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    heap.NumDescriptors = 1;
+    heap.NumDescriptors = RtvCount;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     status = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtv_heap_.put()));
     if (FAILED(status))
@@ -199,6 +200,22 @@ class CameraCompositorD3D12 {
     }
     formats_ = formats;
     input_descriptions_ = descriptions;
+    for (std::size_t index = 0; index < resources.size(); ++index) {
+      const bool hdr = formats[index] == DXGI_FORMAT_R11G11B10_FLOAT;
+      if (index == 2 && shared_bottom) {
+        bloom_view(2, hdr ? pyramids_[1].bloom.get() : nullptr);
+        continue;
+      }
+      if (!hdr) {
+        pyramids_[index].reset();
+        bloom_view(index, nullptr);
+        continue;
+      }
+      if (FAILED(prepare_pyramid(index, descriptions[index]))) {
+        pyramids_[index].reset();
+        bloom_view(index, nullptr);
+      }
+    }
     statistics_.descriptor_writes += shared_bottom ? 2u : 3u;
     ++statistics_.input_changes;
     error_[0] = '\0';
@@ -231,9 +248,17 @@ class CameraCompositorD3D12 {
         continue;
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
+    UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
+               (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
+    for (UINT index = 0; index < 3; ++index) {
+      const UINT source = index == 2 && shared_bottom ? 1u : index;
+      if (!(hdr & (1u << index)) || pyramids_[source].levels < 2)
+        continue;
+      if (index == source)
+        record_bloom(private_list, index);
+      hdr |= 16u << index;
+    }
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    const UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
-                     (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
     draw_output(private_list, hdr, ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u));
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     for (std::size_t index = 0; index < inputs_.size(); ++index) {
@@ -267,6 +292,8 @@ class CameraCompositorD3D12 {
       view.Texture2D.MipLevels = 1;
       for (std::size_t index = 0; index < inputs_.size(); ++index, handle.ptr += stride)
         device_->CreateShaderResourceView(nullptr, &view, handle);
+      for (std::size_t index = 0; index < pyramids_.size(); ++index)
+        bloom_view(index, nullptr);
       null_inputs_ = true;
     }
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -281,11 +308,16 @@ class CameraCompositorD3D12 {
   void release() noexcept {
     for (auto& input : inputs_)
       input.reset();
+    for (auto& pyramid : pyramids_)
+      pyramid.reset();
     output_.reset();
     srv_heap_.reset();
     rtv_heap_.reset();
     pipeline_.reset();
     root_signature_.reset();
+    down_pipeline_.reset();
+    up_pipeline_.reset();
+    bloom_signature_.reset();
     device_.reset();
     formats_ = {};
     input_descriptions_ = {};
@@ -298,11 +330,18 @@ class CameraCompositorD3D12 {
   void abandon() noexcept {
     for (auto& input : inputs_)
       input.abandon();
+    for (auto& pyramid : pyramids_) {
+      pyramid.scene.abandon();
+      pyramid.bloom.abandon();
+    }
     output_.abandon();
     srv_heap_.abandon();
     rtv_heap_.abandon();
     pipeline_.abandon();
     root_signature_.abandon();
+    down_pipeline_.abandon();
+    up_pipeline_.abandon();
+    bloom_signature_.abandon();
     device_.abandon();
   }
 
@@ -344,6 +383,186 @@ class CameraCompositorD3D12 {
   }
 
   bool same_device(ID3D12DeviceChild* child) const noexcept { return same_native_device(child, device_.get()); }
+
+  // The simulator's bloom, per HDR feed (BloomShader): image levels 1..L
+  // (scene: mip k holds image level k+1) and the bloom chain (bloom: mip k at
+  // the same size). Both start at half the input size and go down to 1 x 1.
+  struct Pyramid {
+    Reference<ID3D12Resource> scene;
+    Reference<ID3D12Resource> bloom;
+    UINT width = 0, height = 0, levels = 0;
+    void reset() noexcept {
+      scene.reset();
+      bloom.reset();
+      width = height = levels = 0;
+    }
+  };
+  // SRVs: three inputs, the output shader's three bloom views, then per feed
+  // MaxLevels scene-mip and MaxLevels bloom-mip views. RTVs: the output, then
+  // the same per-feed mip layout.
+  static constexpr UINT MaxLevels = 14;
+  static constexpr UINT SrvCount = 6 + 3 * 2 * MaxLevels;
+  static constexpr UINT RtvCount = 1 + 3 * 2 * MaxLevels;
+  static constexpr DXGI_FORMAT BloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  static constexpr UINT pyramid_slot(std::size_t feed, bool bloom, UINT level) noexcept {
+    return static_cast<UINT>(feed) * 2 * MaxLevels + (bloom ? MaxLevels : 0) + level;
+  }
+  D3D12_CPU_DESCRIPTOR_HANDLE srv_cpu(UINT index) const noexcept {
+    auto handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += SIZE_T{index} * device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return handle;
+  }
+  D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu(UINT index) const noexcept {
+    auto handle = srv_heap_->GetGPUDescriptorHandleForHeapStart();
+    handle.ptr += UINT64{index} * device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return handle;
+  }
+  D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu(UINT index) const noexcept {
+    auto handle = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += SIZE_T{index} * device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    return handle;
+  }
+  static UINT mip_size(UINT base, UINT level) noexcept { return (std::max)(1u, base >> level); }
+
+  // The output shader's bloom view of feed `index` (t3..t5); null when absent.
+  void bloom_view(std::size_t index, ID3D12Resource* bloom) noexcept {
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = BloomFormat;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(bloom, &view, srv_cpu(3 + static_cast<UINT>(index)));
+  }
+
+  // Allocates feed `index`'s pyramid when its size changes and writes its views.
+  HRESULT prepare_pyramid(std::size_t index, const D3D12_RESOURCE_DESC& input) noexcept {
+    auto& pyramid = pyramids_[index];
+    const UINT width = (std::max)(1u, static_cast<UINT>(input.Width) >> 1);
+    const UINT height = (std::max)(1u, input.Height >> 1);
+    UINT levels = 1;
+    while (levels < MaxLevels && ((std::max)(width, height) >> levels) > 0)
+      ++levels;
+    if (pyramid.scene.get() && pyramid.width == width && pyramid.height == height) {
+      bloom_view(index, pyramid.bloom.get());
+      return S_OK;
+    }
+    pyramid.reset();
+    D3D12_HEAP_PROPERTIES properties{};
+    properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture.Width = width;
+    texture.Height = height;
+    texture.DepthOrArraySize = 1;
+    texture.MipLevels = static_cast<UINT16>(levels);
+    texture.Format = BloomFormat;
+    texture.SampleDesc.Count = 1;
+    texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    for (auto* target : {&pyramid.scene, &pyramid.bloom}) {
+      const HRESULT status = device_->CreateCommittedResource(
+          &properties, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(target->put()));
+      if (FAILED(status)) {
+        pyramid.reset();
+        return status;
+      }
+    }
+    for (UINT level = 0; level < levels; ++level) {
+      for (const bool bloom : {false, true}) {
+        auto* resource = bloom ? pyramid.bloom.get() : pyramid.scene.get();
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = BloomFormat;
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.Texture2D.MostDetailedMip = level;
+        view.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(resource, &view, srv_cpu(6 + pyramid_slot(index, bloom, level)));
+        D3D12_RENDER_TARGET_VIEW_DESC target{};
+        target.Format = BloomFormat;
+        target.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        target.Texture2D.MipSlice = level;
+        device_->CreateRenderTargetView(resource, &target, rtv_cpu(1 + pyramid_slot(index, bloom, level)));
+      }
+    }
+    pyramid.width = width;
+    pyramid.height = height;
+    pyramid.levels = levels;
+    bloom_view(index, pyramid.bloom.get());
+    return S_OK;
+  }
+
+  struct BloomPass {
+    float target_texel[2];
+    float source_texel[2];
+    float previous_size[2];
+    float tent_weight;
+    float previous_weight;
+  };
+  void bloom_pass(ID3D12GraphicsCommandList* list,
+                  ID3D12Resource* target,
+                  UINT rtv,
+                  UINT level,
+                  UINT width,
+                  UINT height,
+                  UINT source,
+                  UINT previous,
+                  const BloomPass& constants) noexcept {
+    transition(list, target, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET, level);
+    list->SetGraphicsRootDescriptorTable(0, srv_gpu(source));
+    list->SetGraphicsRootDescriptorTable(1, srv_gpu(previous));
+    list->SetGraphicsRoot32BitConstants(2, 8, &constants, 0);
+    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    const auto handle = rtv_cpu(rtv);
+    list->OMSetRenderTargets(1, &handle, FALSE, nullptr);
+    list->DrawInstanced(3, 1, 0, 0);
+    transition(list, target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, level);
+  }
+
+  // ch_generate_mips_filtered for image levels 1..L, then ch_bloom's chain from
+  // the coarsest level down to the half-size bloom the output shader samples.
+  void record_bloom(ID3D12GraphicsCommandList* list, std::size_t index) noexcept {
+    const auto& pyramid = pyramids_[index];
+    const UINT levels = pyramid.levels;
+    list->SetGraphicsRootSignature(bloom_signature_.get());
+    ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
+    list->SetDescriptorHeaps(1, heaps);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->SetPipelineState(down_pipeline_.get());
+    UINT source_width = static_cast<UINT>(input_descriptions_[index].Width);
+    UINT source_height = input_descriptions_[index].Height;
+    for (UINT level = 0; level < levels; ++level) {
+      const UINT width = mip_size(pyramid.width, level), height = mip_size(pyramid.height, level);
+      const BloomPass constants{{1.f / width, 1.f / height}, {1.f / source_width, 1.f / source_height}, {}, 0, 0};
+      const UINT source = level ? 6 + pyramid_slot(index, false, level - 1) : static_cast<UINT>(index);
+      bloom_pass(list, pyramid.scene.get(), 1 + pyramid_slot(index, false, level), level, width, height, source, source, constants);
+      source_width = width;
+      source_height = height;
+    }
+    // bloom[k] = c/(k+1) tent(image level k+1) + B-spline(previous), with
+    // c = 1/H(L) so the level weights 1/m sum to one. The coarsest step's
+    // previous is image level L itself, weighted c/L.
+    double harmonic = 0;
+    for (UINT m = 1; m <= levels; ++m)
+      harmonic += 1.0 / m;
+    const double c = 1.0 / harmonic;
+    list->SetPipelineState(up_pipeline_.get());
+    for (UINT level = levels - 1; level-- > 0;) {
+      const bool first = level == levels - 2;
+      const UINT width = mip_size(pyramid.width, level), height = mip_size(pyramid.height, level);
+      const UINT previous_width = mip_size(pyramid.width, level + 1), previous_height = mip_size(pyramid.height, level + 1);
+      const BloomPass constants{{1.f / width, 1.f / height},
+                                {1.f / previous_width, 1.f / previous_height},
+                                {static_cast<float>(previous_width), static_cast<float>(previous_height)},
+                                static_cast<float>(c / (level + 1)),
+                                first ? static_cast<float>(c / levels) : 1.f};
+      bloom_pass(list, pyramid.bloom.get(), 1 + pyramid_slot(index, true, level), level, width, height,
+                 6 + pyramid_slot(index, false, level), 6 + pyramid_slot(index, !first, level + 1), constants);
+    }
+  }
 
   // Ground-speed modes in the shader constants: 0 unavailable, 1 valid,
   // 2 hidden, and 3 the waiting page.
@@ -435,13 +654,14 @@ class CameraCompositorD3D12 {
   static void transition(ID3D12GraphicsCommandList* list,
                          ID3D12Resource* texture,
                          D3D12_RESOURCE_STATES before,
-                         D3D12_RESOURCE_STATES after) noexcept {
+                         D3D12_RESOURCE_STATES after,
+                         UINT subresource = 0) noexcept {
     if (before == after)
       return;
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = texture;
-    barrier.Transition.Subresource = 0;
+    barrier.Transition.Subresource = subresource;
     barrier.Transition.StateBefore = before;
     barrier.Transition.StateAfter = after;
     list->ResourceBarrier(1, &barrier);
@@ -460,9 +680,11 @@ class CameraCompositorD3D12 {
     return status;
   }
 
-  HRESULT compile(const char* entry, const char* profile, ID3DBlob** bytecode) noexcept {
+  HRESULT compile(const char* entry, const char* profile, ID3DBlob** bytecode, bool bloom = false) noexcept {
     Reference<ID3DBlob> diagnostics;
-    const HRESULT status = D3DCompile(Shader, sizeof(Shader) - 1, "camera_compositor", nullptr, nullptr, entry, profile,
+    const char* source = bloom ? BloomShader : Shader;
+    const std::size_t size = bloom ? sizeof(BloomShader) - 1 : sizeof(Shader) - 1;
+    const HRESULT status = D3DCompile(source, size, bloom ? "camera_bloom" : "camera_compositor", nullptr, nullptr, entry, profile,
                                       D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
                                       bytecode, diagnostics.put());
     ++statistics_.shader_compiles;
@@ -481,7 +703,7 @@ class CameraCompositorD3D12 {
   HRESULT initialize_pipeline() noexcept {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 3;
+    range.NumDescriptors = 6;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
     std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -544,13 +766,130 @@ class CameraCompositorD3D12 {
     pipeline.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pipeline.SampleDesc.Count = 1;
     status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(pipeline_.put()));
-    return FAILED(status) ? fail(status, "Creating the compositor pipeline failed.") : S_OK;
+    if (FAILED(status))
+      return fail(status, "Creating the compositor pipeline failed.");
+    return initialize_bloom_pipelines(pipeline);
   }
+
+  // Two single-SRV tables (t0 source, t1 previous level) and eight constants.
+  HRESULT initialize_bloom_pipelines(D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline) noexcept {
+    std::array<D3D12_DESCRIPTOR_RANGE, 2> ranges{};
+    std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
+    for (UINT index = 0; index < 2; ++index) {
+      ranges[index].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+      ranges[index].NumDescriptors = 1;
+      ranges[index].BaseShaderRegister = index;
+      parameters[index].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      parameters[index].DescriptorTable.NumDescriptorRanges = 1;
+      parameters[index].DescriptorTable.pDescriptorRanges = &ranges[index];
+      parameters[index].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[2].Constants.Num32BitValues = 8;
+    parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC signature{};
+    signature.NumParameters = static_cast<UINT>(parameters.size());
+    signature.pParameters = parameters.data();
+    signature.NumStaticSamplers = 1;
+    signature.pStaticSamplers = &sampler;
+    Reference<ID3DBlob> serialized;
+    Reference<ID3DBlob> diagnostics;
+    HRESULT status = D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, serialized.put(), diagnostics.put());
+    if (FAILED(status))
+      return fail(status, "Serializing the bloom root signature failed.");
+    status =
+        device_->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(bloom_signature_.put()));
+    if (FAILED(status))
+      return fail(status, "Creating the bloom root signature failed.");
+    Reference<ID3DBlob> vertex;
+    Reference<ID3DBlob> down;
+    Reference<ID3DBlob> up;
+    if (FAILED(status = compile("vs_main", "vs_5_0", vertex.put(), true)) ||
+        FAILED(status = compile("ps_down", "ps_5_0", down.put(), true)) || FAILED(status = compile("ps_up", "ps_5_0", up.put(), true)))
+      return status;
+    pipeline.pRootSignature = bloom_signature_.get();
+    pipeline.VS = {vertex->GetBufferPointer(), vertex->GetBufferSize()};
+    pipeline.RTVFormats[0] = BloomFormat;
+    pipeline.PS = {down->GetBufferPointer(), down->GetBufferSize()};
+    status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(down_pipeline_.put()));
+    if (FAILED(status))
+      return fail(status, "Creating the bloom downsample pipeline failed.");
+    pipeline.PS = {up->GetBufferPointer(), up->GetBufferSize()};
+    status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(up_pipeline_.put()));
+    return FAILED(status) ? fail(status, "Creating the bloom upsample pipeline failed.") : S_OK;
+  }
+
+  // The simulator's bloom (1.8.16.0, PIX 2026-10-02, main view). The HDR image
+  // is box-filtered into mips (ch_generate_mips_filtered; its Reinhard
+  // weighting is off). ch_bloom then walks up from the coarsest mip; each step
+  // adds a 3 x 3 tent of the image mip at its size, weighted c/m, to a cubic
+  // B-spline upsample of the step before. The result is the sum over m of
+  // (1/m)/H(L) times image level m, with no threshold and no exposure, and the
+  // tonemapper mixes 10% of it into the image before exposure (BloomMix in
+  // Shader). The camera views run no post-processing, so Taxi Cam runs the same
+  // chain on each camera image at that image's own size.
+  static constexpr char BloomShader[] = R"(
+Texture2D<float4> Source : register(t0);
+Texture2D<float4> Previous : register(t1);
+SamplerState LinearClamp : register(s0);
+cbuffer Level : register(b0) { float2 TargetTexel; float2 SourceTexel; float2 PreviousSize; float TentWeight; float PreviousWeight; };
+float4 vs_main(uint id : SV_VertexID) : SV_Position {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+}
+// A non-finite camera texel must not spread through every level.
+float3 finite_tap(float2 uv) {
+  float3 tap = Source.SampleLevel(LinearClamp, uv, 0).rgb;
+  return all(isfinite(tap)) ? clamp(tap, 0, 65504) : 0;
+}
+// Four bilinear taps half a source texel around the target texel's centre.
+float4 ps_down(float4 position : SV_Position) : SV_Target {
+  float2 uv = position.xy * TargetTexel;
+  float2 h = 0.5 * SourceTexel;
+  return float4((finite_tap(uv + float2(h.x, h.y)) + finite_tap(uv + float2(-h.x, h.y)) + finite_tap(uv + float2(h.x, -h.y)) +
+                 finite_tap(uv - h)) * 0.25, 1);
+}
+// Tent: four bilinear taps on the target texel's corners. Previous: cubic
+// B-spline from four bilinear taps; SourceTexel holds its texel size here.
+float4 ps_up(float4 position : SV_Position) : SV_Target {
+  float2 corner = (position.xy - 0.5) * TargetTexel;
+  float3 tent = (Source.SampleLevel(LinearClamp, corner, 0).rgb + Source.SampleLevel(LinearClamp, corner + float2(TargetTexel.x, 0), 0).rgb +
+                 Source.SampleLevel(LinearClamp, corner + float2(0, TargetTexel.y), 0).rgb +
+                 Source.SampleLevel(LinearClamp, corner + TargetTexel, 0).rgb) * 0.25;
+  float2 p = position.xy * TargetTexel * PreviousSize - 0.5;
+  float2 f = frac(p);
+  float2 i = floor(p);
+  float2 f2 = f * f;
+  float2 f3 = f2 * f;
+  float2 w0 = (1 - 3 * f + 3 * f2 - f3) / 6;
+  float2 w1 = (4 - 6 * f2 + 3 * f3) / 6;
+  float2 w2 = (1 + 3 * f + 3 * f2 - 3 * f3) / 6;
+  float2 w3 = f3 / 6;
+  float2 g0 = w0 + w1;
+  float2 g1 = w2 + w3;
+  float2 h0 = (i - 0.5 + w1 / g0) * SourceTexel;
+  float2 h1 = (i + 1.5 + w3 / g1) * SourceTexel;
+  float3 cubic = g0.y * (g0.x * Previous.SampleLevel(LinearClamp, float2(h0.x, h0.y), 0).rgb +
+                         g1.x * Previous.SampleLevel(LinearClamp, float2(h1.x, h0.y), 0).rgb) +
+                 g1.y * (g0.x * Previous.SampleLevel(LinearClamp, float2(h0.x, h1.y), 0).rgb +
+                         g1.x * Previous.SampleLevel(LinearClamp, float2(h1.x, h1.y), 0).rgb);
+  return float4(TentWeight * tent + PreviousWeight * cubic, 1);
+}
+)";
 
   static constexpr char Shader[] = R"(
 Texture2D<float4> Nose : register(t0);
 Texture2D<float4> TailLeft : register(t1);
 Texture2D<float4> TailRight : register(t2);
+Texture2D<float4> NoseBloom : register(t3);
+Texture2D<float4> TailLeftBloom : register(t4);
+Texture2D<float4> TailRightBloom : register(t5);
 SamplerState LinearClamp : register(s0);
 cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGuides; uint GroundSpeed; uint GroundSpeedValid;
  float NoseHeight; float TailTop; float DividerTop; float DividerBottom;
@@ -726,38 +1065,15 @@ float3 display_rgb(float3 rgb, uint feed) {
   if ((HdrMask & (1u << feed)) == 0) return rgb;
   return float3(hdr_channel(rgb.r), hdr_channel(rgb.g), hdr_channel(rgb.b));
 }
-// The main view's lights glow through the simulator's bloom (ch_bloom and the
-// convolve passes at 1/8 resolution, blended by its tonemapper): the whole HDR
-// image is blurred and a small share of the blur replaces the image. The
-// camera views run no post-processing, so their taxi and runway lights showed
-// as points without the light they cast. The same physically based bloom
-// before exposure: a Gaussian of the HDR feed (sigma 3 texels, 7 x 7 bilinear
-// taps two texels apart, so every texel and a one-pixel light count), mixed in
-// by energy. A uniform image is unchanged.
-static const float BloomStrength = 0.04;
-static const float BloomSigma = 3.0;
-float3 bloom_rgb(Texture2D<float4> image, float2 uv) {
-  float width, height;
-  image.GetDimensions(width, height);
-  float2 texel = 1.0 / float2(width, height);
-  float3 sum = 0;
-  float total = 0;
-  [unroll] for (int y = -3; y <= 3; ++y) {
-    [unroll] for (int x = -3; x <= 3; ++x) {
-      float2 offset = float2(x, y) * 2;
-      float weight = exp(-dot(offset, offset) / (2 * BloomSigma * BloomSigma));
-      float3 tap = image.SampleLevel(LinearClamp, uv + (offset + 0.5) * texel, 0).rgb;
-      // A non-finite texel must not spread; hdr_channel still reports it in place.
-      sum += (all(isfinite(tap)) ? clamp(tap, 0, 65504) : 0) * weight;
-      total += weight;
-    }
-  }
-  return sum / total;
-}
-float3 feed_rgb(Texture2D<float4> image, float2 uv, uint feed) {
+// The simulator's tonemapper mixes 10% of its bloom into the HDR image before
+// exposure: lerp(image, bloom, 0.1) (1.8.16.0, PIX 2026-10-02; lens dirt off).
+// The bloom of each HDR feed comes from BloomShader; HdrMask bits 4..6 say it
+// was recorded. A uniform image is unchanged.
+static const float BloomMix = 0.1;
+float3 feed_rgb(Texture2D<float4> image, Texture2D<float4> bloom, float2 uv, uint feed) {
   float3 rgb = image.SampleLevel(LinearClamp, uv, 0).rgb;
-  if ((HdrMask & (1u << feed)) == 0 || !all(isfinite(rgb))) return rgb;
-  return lerp(rgb, bloom_rgb(image, uv), BloomStrength);
+  if ((HdrMask & (17u << feed)) != (17u << feed) || !all(isfinite(rgb))) return rgb;
+  return lerp(rgb, bloom.SampleLevel(LinearClamp, uv, 0).rgb, BloomMix);
 }
 // Alpha 1 flags a display-referred camera code: the PFD stamp stores this byte
 // on UNORM and sRGB views alike. Overlays use ui_pixel.
@@ -845,7 +1161,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float right = side_borders ? 768.0 - nose_border : 768.0;
     float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
     float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
-    return camera_pixel(feed_rgb(Nose, uv, 0), 0);
+    return camera_pixel(feed_rgb(Nose, NoseBloom, uv, 0), 0);
   }
   if (position.y < TailTop) return ui_pixel(float3(0, 0, 0));
   if (SplitBottom != 0) {
@@ -860,17 +1176,21 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
                        (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
-      return camera_pixel(feed_rgb(TailLeft, uv, 1), 1);
-    return camera_pixel(feed_rgb(TailRight, uv, 2), 2);
+      return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
+    return camera_pixel(feed_rgb(TailRight, TailRightBloom, uv, 2), 2);
   }
   float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
-  return camera_pixel(feed_rgb(TailLeft, uv, 1), 1);
+  return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
 }
 )";
 
   Reference<ID3D12Device> device_;
   Reference<ID3D12RootSignature> root_signature_;
   Reference<ID3D12PipelineState> pipeline_;
+  Reference<ID3D12RootSignature> bloom_signature_;
+  Reference<ID3D12PipelineState> down_pipeline_;
+  Reference<ID3D12PipelineState> up_pipeline_;
+  std::array<Pyramid, 3> pyramids_;
   Reference<ID3D12DescriptorHeap> srv_heap_;
   Reference<ID3D12DescriptorHeap> rtv_heap_;
   Reference<ID3D12Resource> output_;
