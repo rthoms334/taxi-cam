@@ -47,6 +47,8 @@ constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s
 // A table is read at most once a second, only when a newer copy exists. An
 // exposure older than two seconds (no copies, the setting off, or the main
 // view not rendering) returns the camera images to Taxi Cam's exposure.
+// The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
+double last_ambient = -1;
 struct ToneFeed {
   std::uint64_t exposure_copies = 0, table_copies = 0;
   std::uint64_t exposure_ms = 0, table_ms = 0;
@@ -986,6 +988,7 @@ DWORD run_impl() {
     const double display_light =
         settings.camera_tone && light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
     scene_runtime::set_screen_scale(key, display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f);
+    last_ambient = light.valid ? light.ambient : -1.0;
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1401,10 +1404,10 @@ DWORD run_impl() {
       const auto tone_copies = win::tone_status();
       char tone_detail[320];
       std::snprintf(tone_detail, sizeof(tone_detail),
-                    "Camera tone: enabled=%d active=%d exposure=%.6g screen_scale=%.6g exposure_copies=%llu table_copies=%llu "
-                    "source_changes=%llu readback_failed=%d",
+                    "Camera tone: enabled=%d active=%d exposure=%.6g screen_scale=%.6g ambient=%.6g exposure_copies=%llu "
+                    "table_copies=%llu source_changes=%llu readback_failed=%d",
                     settings.camera_tone ? 1 : 0, output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure),
-                    static_cast<double>(output.screen_scale), static_cast<unsigned long long>(tone_copies.exposure_copies),
+                    static_cast<double>(output.screen_scale), last_ambient, static_cast<unsigned long long>(tone_copies.exposure_copies),
                     static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
                     tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);

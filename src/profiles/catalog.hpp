@@ -346,7 +346,11 @@ inline constexpr auto make_pmdg_777 =
       // (F:MapRange). The shared ph_base_gbuffer emissive path (PIX 2026-10-02)
       // gives 148.8235 x 11 = 1637.06 by day, matched bit for bit, with no screen
       // filter or glass; the lower EICASCDU uses 150 (0.8% brighter).
-      p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f};
+      // Not enabled: at night (screen_scale 0.717, 2026-10-02) the ND came out
+      // brighter and flatter than the tone-curve path, so the night display
+      // light or an added surface light term differs from this model. Decoded
+      // values: {148.8235f, 200, 2000, 0.15f, 11.0f}.
+      p.display_light = {};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 =
