@@ -7,7 +7,9 @@
         "New: the camera views show the current weather. Under clouds or overcast they used to show a clear, sunny sky. With Camera views > Camera weather on (the default), the views draw as far as the main view at every speed, also while taxiing, which can cost some frame rate; turn it off to get the clear sky and the 1,000 m taxi distance back.",
         "At night the taxiway, runway and other bright lights in the camera views now glow like in the main view. The simulator adds its bloom only to the main view, so Taxi Cam applies the same bloom, with the simulator's own filter and strength, to each camera image; before, the lights showed as points without the light they cast.",
         "New: Display > Match main view lighting (on by default) lights the camera images like the main view, day and night. Turn it off to use Taxi Cam's exposure and night boost controls.",
-        "MSFS no longer closes while loading a flight when it runs under a graphics debugger such as PIX with Taxi Cam installed."
+        "MSFS no longer closes while loading a flight when it runs under a graphics debugger such as PIX with Taxi Cam installed.",
+        "At night the camera views no longer hide distant lights behind fog that is not there. A new camera view started with its haze fully opaque and cleared it only very slowly, so lights a few hundred metres away hardly showed; with Match main view lighting on, each camera's haze now starts clear like the main view's and then follows the real weather.",
+        "PMDG 777: the navigation display is found automatically again after a flight loads. A short-lived texture during loading could leave the display texture parked as the lower display, so cameras only appeared after pressing Detect."
       ]
     },
     {
