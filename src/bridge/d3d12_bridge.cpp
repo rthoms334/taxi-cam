@@ -1376,19 +1376,20 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
 }  // namespace tone
 // Camera fog: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
 // one eighth of the view's width and height). The density pass blends each
-// frame with a history volume. A view's three volumes are created back to
-// back: the integrated volume (index 0, read by lights and the scene), then
-// the history pair. Volumes created after the bridge attached are grouped at
-// creation, and each volume's UNORDERED_ACCESS exits are counted, for the
-// Camera fog line.
+// frame with a history volume. A view has three: the integrated volume that
+// the lights and the scene read, and a history pair. Volumes created after the
+// bridge attached are grouped at creation, and each volume's UNORDERED_ACCESS
+// exits are counted (metadata only), for the Camera fog line.
 //
 // History reset (2026-10-02, live readout): a new view's history starts at
 // transmittance 0 and the blend (3-12% per frame) climbs out of it slowly, so
 // camera views show dense fog that dims distant lights by orders of magnitude.
 // The main view sits at exactly 1 in clear air, which the blend keeps. Each
 // camera volume (size: a camera output's size / 8) is therefore written once
-// with the main view's clear-air texel at its first exit; the simulator's own
-// blending then follows the real fog from there.
+// with the main view's clear-air texel at its first guarded exit
+// (before_legacy_uav); the simulator's own blending then follows the real fog
+// from there. Volumes of any other size, such as the main view's, are never
+// written or read.
 namespace fog {
 struct Volume {
   std::atomic<ID3D12Resource*> resource{nullptr};
@@ -1396,7 +1397,6 @@ struct Volume {
   std::atomic<std::uint32_t> group{0}, index{0};  // group 0: not seen created
   std::atomic<std::uint64_t> exits{0};
   std::atomic<bool> reset{false};  // history reset already applied to this volume
-  std::atomic<ULONGLONG> sampled_ms{0};
 };
 struct State {
   std::array<Volume, 48> volumes;
@@ -1409,18 +1409,11 @@ struct State {
   std::atomic<std::uint64_t> resets{0};
   std::atomic<ID3D12Resource*> clear_source{nullptr};
   std::atomic<bool> clear_failed{false};
-  // Centre texel column of each integrated volume, at most once a second:
-  // one 64-slice column per volume slot, read by the status log.
-  std::atomic<ID3D12Resource*> samples{nullptr};
-  std::atomic<bool> samples_failed{false};
   std::mutex creation;
 };
 // R 1023 (transmittance 1), G 0, B 580 and A 3: the main view's volume at night.
 constexpr std::uint32_t ClearTexel = 1023u | (580u << 20) | (3u << 30);
 constexpr UINT64 ClearBytes = 16ull << 20;
-constexpr UINT SampleSlices = 64;
-constexpr UINT64 SampleBytes = 256ull * SampleSlices;
-constexpr ULONGLONG SampleIntervalMs = 1000;
 State& state() noexcept {
   static State value;
   return value;
@@ -1448,7 +1441,6 @@ Volume* slot(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
   v.index.store(0, std::memory_order_relaxed);
   v.exits.store(0, std::memory_order_relaxed);
   v.reset.store(false, std::memory_order_relaxed);
-  v.sampled_ms.store(0, std::memory_order_relaxed);
   v.width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
   v.height.store(d.Height, std::memory_order_relaxed);
   v.resource.store(resource, std::memory_order_release);
@@ -1470,7 +1462,6 @@ void created(IUnknown* object) noexcept {
   v->height.store(d.Height, std::memory_order_relaxed);
   v->exits.store(0, std::memory_order_relaxed);
   v->reset.store(false, std::memory_order_relaxed);
-  v->sampled_ms.store(0, std::memory_order_relaxed);
   auto* last = s.last_created.exchange(v, std::memory_order_acq_rel);
   if (last && last != v && last->width.load(std::memory_order_relaxed) == d.Width &&
       last->height.load(std::memory_order_relaxed) == d.Height && last->group.load(std::memory_order_relaxed) &&
@@ -1542,74 +1533,15 @@ ID3D12Resource* clear_source() noexcept {
   s.clear_source.store(created, std::memory_order_release);
   return created;
 }
-ID3D12Resource* samples() noexcept {
-  auto& s = state();
-  if (auto* existing = s.samples.load(std::memory_order_acquire))
-    return existing;
-  if (s.samples_failed.load(std::memory_order_relaxed))
-    return nullptr;
-  const std::unique_lock lock(s.creation, std::try_to_lock);
-  if (!lock.owns_lock())
-    return nullptr;
-  if (auto* existing = s.samples.load(std::memory_order_acquire))
-    return existing;
-  auto* device = registry().device;
-  if (!device)
-    return nullptr;
-  D3D12_HEAP_PROPERTIES heap{};
-  heap.Type = D3D12_HEAP_TYPE_READBACK;
-  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
-  D3D12_RESOURCE_DESC buffer{};
-  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer.Width = SampleBytes * std::tuple_size_v<decltype(State::volumes)>;
-  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
-  buffer.SampleDesc.Count = 1;
-  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-  ID3D12Resource* created = nullptr;
-  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                             IID_PPV_ARGS(&created)))) {
-    s.samples_failed.store(true, std::memory_order_relaxed);
-    return nullptr;
-  }
-  s.samples.store(created, std::memory_order_release);
-  return created;
-}
-// The integrated volume is in UNORDERED_ACCESS at its exit.
-void sample(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d, Volume& v) noexcept {
-  const auto now = GetTickCount64();
-  if (now - v.sampled_ms.load(std::memory_order_relaxed) < SampleIntervalMs || d.DepthOrArraySize != SampleSlices)
-    return;
-  auto* destination = samples();
-  if (!destination)
-    return;
-  v.sampled_ms.store(now, std::memory_order_relaxed);
-  const auto index = static_cast<UINT64>(&v - state().volumes.data());
-  D3D12_RESOURCE_BARRIER barrier{};
-  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-  barrier.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                        D3D12_RESOURCE_STATE_COPY_SOURCE};
-  list->ResourceBarrier(1, &barrier);
-  D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
-  target.pResource = destination;
-  target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-  target.PlacedFootprint = {index * SampleBytes, {d.Format, 1, 1, SampleSlices, 256}};
-  origin.pResource = resource;
-  origin.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-  const UINT x = static_cast<UINT>(d.Width / 2), y = d.Height / 2;
-  const D3D12_BOX box{x, y, 0, x + 1, y + 1, SampleSlices};
-  list->CopyTextureRegion(&target, 0, 0, 0, &origin, &box);
-  std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-  list->ResourceBarrier(1, &barrier);
-}
 // Writes the whole volume with the clear-air texel. The volume is in
 // UNORDERED_ACCESS at its exit and is returned to it.
-void write_clear_air(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
+bool write_clear_air(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
   const UINT pitch = (static_cast<UINT>(d.Width) * 4 + 255) & ~255u;
   if (UINT64{pitch} * d.Height * d.DepthOrArraySize > ClearBytes)
-    return;
+    return false;
   auto* source = clear_source();
   if (!source)
-    return;
+    return false;
   D3D12_RESOURCE_BARRIER barrier{};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   barrier.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -1624,29 +1556,42 @@ void write_clear_air(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, 
   list->CopyTextureRegion(&target, 0, 0, 0, &origin, nullptr);
   std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
   list->ResourceBarrier(1, &barrier);
+  return true;
 }
-// Before the simulator's own UNORDERED_ACCESS exit of a volume, inside the
-// owned-work guard.
-void exit(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) noexcept {
+// Metadata only, from observe_legacy: counts each volume's UNORDERED_ACCESS
+// exits. No GPU work.
+void count_exit(ID3D12Resource* resource) noexcept {
   const auto d = tone::description(resource);
   if (!volume_shape(d))
     return;
+  if (auto* v = slot(resource, d))
+    v->exits.fetch_add(1, std::memory_order_relaxed);
+}
+// From before_legacy_uav, inside the owned-work guard: the observer delivers
+// this exit only in a valid recording of an enabled observer, outside any
+// pass, after prior GPU work (the fog compute's own dispatches, see
+// observe_gpu_work), in a certain batch of at most 256 barriers with no
+// earlier transition of this volume, so the volume is in UNORDERED_ACCESS
+// when the injected copy runs. Any camera volume, so creation grouping is not
+// needed: the integrated volume is rewritten every frame and only this
+// frame's copy is affected.
+void reset_history(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   auto& s = state();
-  auto* v = slot(resource, d);
-  if (!v)
+  if (!s.history_reset.load(std::memory_order_relaxed) || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return;
-  v->exits.fetch_add(1, std::memory_order_relaxed);
-  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+  const auto d = tone::description(b.pResource);
+  if (!volume_shape(d) || !camera_volume(d))
     return;
-  // Any camera volume, so creation grouping is not needed: the integrated
-  // volume is rewritten every frame and only this frame's copy is affected.
-  if (s.history_reset.load(std::memory_order_relaxed) && !v->reset.load(std::memory_order_relaxed) && camera_volume(d)) {
-    v->reset.store(true, std::memory_order_relaxed);
-    write_clear_air(list, resource, d);
+  auto* v = slot(b.pResource, d);
+  bool expected = false;
+  if (!v || !v->reset.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+    return;
+  // A copy that could not be recorded (upload buffer not ready) is retried at
+  // the next exit.
+  if (write_clear_air(list, b.pResource, d))
     s.resets.fetch_add(1, std::memory_order_relaxed);
-  }
-  if (v->index.load(std::memory_order_relaxed) == 0)
-    sample(list, resource, d, *v);
+  else
+    v->reset.store(false, std::memory_order_relaxed);
 }
 }  // namespace fog
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
@@ -1662,6 +1607,7 @@ void before_legacy_uav(void*, ID3D12GraphicsCommandList* list, std::uint64_t, co
     return;
   const OwnedWork guard;
   tone::table_exit(list, b);
+  fog::reset_history(list, b);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
   if (idle_callback())
@@ -1706,10 +1652,8 @@ void observe_legacy(void*,
                     std::uint32_t scope) noexcept {
   forget_cloud_scene(list, id);
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && b.Transition.pResource &&
-      b.Transition.StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && b.Transition.StateAfter != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
-    const OwnedWork guard;
-    fog::exit(list, b.Transition.pResource);
-  }
+      b.Transition.StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && b.Transition.StateAfter != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    fog::count_exit(b.Transition.pResource);
   if (registry().live_backfill.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
       (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
     consider_live_resource(list, b.Transition.pResource,
@@ -3617,9 +3561,15 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
       if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native))) {
         if constexpr (std::is_same_v<Action, StateDisjointGpuWork>)
           item->submission_proof.state_disjoint_work(Slot);
-        else if constexpr (std::is_same_v<Action, ComputeGpuWork>)
+        else if constexpr (std::is_same_v<Action, ComputeGpuWork>) {
           item->submission_proof.compute_work(Slot);
-        else if constexpr (std::is_same_v<Action, GpuWork>)
+          // A nonempty Dispatch is prior GPU work for the barrier observer, as
+          // a draw is. The simulator's froxel fog runs in compute-only prefixes
+          // of its recordings, so their UAV exits need this to be delivered.
+          if constexpr (Slot == 14)
+            if ((... && (args != 0)))
+              boundary::observe_gpu_work(reinterpret_cast<ID3D12GraphicsCommandList*>(native), item->id);
+        } else if constexpr (std::is_same_v<Action, GpuWork>)
           item->submission_proof.gpu_work(Slot);
         else
           Action::apply(*item, args...);
@@ -3965,28 +3915,6 @@ void fog_volumes(char* text, std::size_t size) noexcept {
     if (n < 0)
       break;
     used += n;
-    // Integrated transmittance (R/1023) at the view centre for slices 1, 2,
-    // 4, 8 and 16 (about 12, 50, 200, 800 and 3100 m), from the last sample.
-    auto* buffer = f.samples.load(std::memory_order_acquire);
-    if (buffer && v.index.load(std::memory_order_relaxed) == 0 && v.sampled_ms.load(std::memory_order_relaxed) &&
-        static_cast<std::size_t>(used) < size) {
-      const auto index = static_cast<UINT64>(&v - f.volumes.data());
-      const D3D12_RANGE range{static_cast<SIZE_T>(index * fog::SampleBytes), static_cast<SIZE_T>((index + 1) * fog::SampleBytes)};
-      void* mapped = nullptr;
-      if (SUCCEEDED(buffer->Map(0, &range, &mapped))) {
-        const auto* bytes = static_cast<const unsigned char*>(mapped) + range.Begin;
-        const auto t = [&](unsigned slice) {
-          std::uint32_t texel = 0;
-          std::memcpy(&texel, bytes + 256u * slice, 4);
-          return (texel & 1023u) / 1023.0;
-        };
-        const int m = std::snprintf(text + used, size - used, " T=%.3f/%.3f/%.3f/%.3f/%.3f", t(1), t(2), t(4), t(8), t(16));
-        const D3D12_RANGE none{0, 0};
-        buffer->Unmap(0, &none);
-        if (m > 0)
-          used += m;
-      }
-    }
   }
 }
 void set_fog_history_reset(bool enabled) noexcept {

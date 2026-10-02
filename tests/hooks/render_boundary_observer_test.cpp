@@ -582,6 +582,19 @@ int main() {
     check_legacy(1, &transition, 0, "Draw inside resuming pass authorized capture");
     extended->EndRenderPass();
     check_legacy(1, &transition, 1, "Completed ordinary resumed pass did not authorize later transition");
+    // A dispatch reported by the owner's own hook is prior work outside a pass,
+    // as a draw is, but only for the exact current generation.
+    obs::successful_reset(list, 1);
+    obs::observe_gpu_work(list, 9);
+    check_legacy(1, &transition, 0, "Stale-generation dispatch authorized capture");
+    obs::observe_gpu_work(reinterpret_cast<ID3D12GraphicsCommandList*>(&unknown), 1);
+    check_legacy(1, &transition, 0, "Unknown-list dispatch authorized capture");
+    obs::observe_gpu_work(list, 1);
+    check_legacy(1, &transition, 1, "Reported dispatch did not establish prior GPU work");
+    extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS);
+    extended->EndRenderPass();
+    obs::observe_gpu_work(list, 1);
+    check_legacy(1, &transition, 0, "Dispatch after a suspended pass authorized capture");
     for (UINT access = 4; access <= 6; ++access) {
       obs::successful_reset(list, 1);
       list->DrawInstanced(3, 1, 0, 0);

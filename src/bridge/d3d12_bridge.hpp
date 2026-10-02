@@ -185,8 +185,7 @@ struct CloudMergeStatus {
 CloudMergeStatus cloud_merge_status() noexcept;
 // Camera fog: whether the history reset is on and how many volumes it wrote,
 // then each froxel fog volume as WxH@address g<creation group>.<index>:UAV
-// exits (group 0: created before the bridge attached), integrated volumes with
-// T= transmittance samples.
+// exits (group 0: created before the bridge attached).
 void fog_volumes(char* text, std::size_t size) noexcept;
 // Camera fog: write each camera view's fog history once with clear air, so it
 // starts where the main view sits instead of at opaque (Match main view lighting).

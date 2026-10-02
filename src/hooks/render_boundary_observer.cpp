@@ -1185,6 +1185,13 @@ Result repair_protection() noexcept {
 bool recording_allows_injection(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
   return list && generation && same_safe(list, generation);
 }
+void observe_gpu_work(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  if (!list || !generation || !enabled.load(std::memory_order_acquire))
+    return;
+  // observe_work repeats the pass/validity checks under the shard lock.
+  if (const auto identity = lookup(list); identity.generation == generation && !identity.prior_work)
+    observe_work(list);
+}
 bool operational() noexcept {
   return enabled.load(std::memory_order_acquire);
 }
