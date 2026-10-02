@@ -183,6 +183,14 @@ struct CloudMergeStatus {
   std::uint64_t redirects = 0, refusals = 0;
 };
 CloudMergeStatus cloud_merge_status() noexcept;
+// Camera lights: per-feed energy factors for the simulator's light sprites in
+// the camera views (1 or less: unchanged), and twins/failures/boosted binds.
+void set_light_factors(const std::array<float, 3>& factors) noexcept;
+struct LightStatus {
+  unsigned twins = 0;
+  std::uint64_t failures = 0, boosts = 0;
+};
+LightStatus light_status() noexcept;
 // Camera tone: copies of the main view's eye-adaptation exposure and 64^3
 // tone-curve table, made at the simulator's own state exits while enabled.
 // Counts are cumulative for the bridge lifetime.

@@ -112,6 +112,8 @@ struct List : Metadata {
   // bridge-owned RTVs for the redirected cloud merge (cloud_merge.hpp).
   View cloud_scene{}, cloud_previous{};
   ID3D12DescriptorHeap* cloud_rtvs{};
+  // Camera lights: this bridge set the blend factor for a light twin.
+  bool light_boosted = false;
   ~List() override {
     if (snapshot_rtvs)
       snapshot_rtvs->Release();
@@ -1238,6 +1240,80 @@ List* metadata_list(ID3D12GraphicsCommandList* native, std::uint64_t id, std::sh
 }
 void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = true) noexcept;
 void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
+// Camera lights (PIX 2026-10-02, 1.8.16.0). The simulator draws runway and
+// taxiway lights as additive sprites (vh/ph_billboard_lights, blend ONE/ONE)
+// whose star is a fixed number of render pixels and whose energy scales with
+// the view's render pixels per unit tangent squared (U[1].x = W H 4/(9 pi)).
+// Per degree the camera views therefore get the main view's light, but each
+// star is (camera/main pixel density)^2 as bright: about 1/20 on the 777 nose
+// view, so its lights were dim dots. For every light pipeline the bridge
+// creates a twin whose source blend is the blend factor; in a camera view's
+// recording the light draws use the twin with that camera's factor.
+namespace lights {
+struct Twin {
+  ID3D12PipelineState* original = nullptr;  // retained, so its address is never reused
+  ID3D12PipelineState* twin = nullptr;
+};
+struct State {
+  std::mutex creation;
+  std::array<Twin, 32> twins{};
+  std::atomic<unsigned> count{0};
+  std::array<std::atomic<float>, 3> factors{};
+  std::atomic<std::uint64_t> twins_created{0}, twin_failures{0}, boosts{0};
+};
+State& state() noexcept {
+  static State value;
+  return value;
+}
+ID3D12PipelineState* twin_of(ID3D12PipelineState* pipeline) noexcept {
+  auto& s = state();
+  const unsigned n = s.count.load(std::memory_order_acquire);
+  for (unsigned i = 0; i < n; ++i)
+    if (s.twins[i].original == pipeline)
+      return s.twins[i].twin;
+  return nullptr;
+}
+bool named(const D3D12_SHADER_BYTECODE& code, const char* name) noexcept {
+  if (!code.pShaderBytecode || code.BytecodeLength < 32 || code.BytecodeLength > (1u << 22))
+    return false;
+  const auto* bytes = static_cast<const char*>(code.pShaderBytecode);
+  const std::size_t length = std::strlen(name);
+  for (std::size_t i = 0; i + length <= code.BytecodeLength; ++i)
+    if (bytes[i] == name[0] && std::memcmp(bytes + i, name, length) == 0)
+      return true;
+  return false;
+}
+// Inside the creation hook's owned-work guard, after the native creation.
+template <class Create>
+void observe_pipeline(ID3D12Device* device,
+                      const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+                      ID3D12PipelineState* created,
+                      Create create) noexcept {
+  const auto& blend = desc.BlendState.RenderTarget[0];
+  if (!created || desc.NumRenderTargets != 1 || !blend.BlendEnable || blend.SrcBlend != D3D12_BLEND_ONE ||
+      blend.DestBlend != D3D12_BLEND_ONE || blend.BlendOp != D3D12_BLEND_OP_ADD || desc.BlendState.IndependentBlendEnable ||
+      !(named(desc.PS, "ph_billboard_lights") || named(desc.VS, "vh_billboard_lights")))
+    return;
+  auto& s = state();
+  const std::lock_guard lock(s.creation);
+  const unsigned n = s.count.load(std::memory_order_relaxed);
+  if (n == s.twins.size()) {
+    s.twin_failures.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  auto twin_desc = desc;
+  twin_desc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_BLEND_FACTOR;
+  ID3D12PipelineState* twin = nullptr;
+  if (FAILED(create(device, &twin_desc, IID_PPV_ARGS(&twin))) || !twin) {
+    s.twin_failures.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  created->AddRef();
+  s.twins[n] = {created, twin};
+  s.count.store(n + 1, std::memory_order_release);
+  s.twins_created.fetch_add(1, std::memory_order_relaxed);
+}
+}  // namespace lights
 // Camera tone: the main view's eye-adaptation exposure and tone-curve table
 // (1.8.16.0, PIX 2026-10-02). ph_lumadaptation writes the exposure into a
 // 1 x 1 R32G32_FLOAT render target; the simulator moves it out of
@@ -2417,7 +2493,30 @@ const std::array<void*, 10> CreationWrappers{
     reinterpret_cast<void*>(&Creation<8, decltype(&ID3D12Device10::CreatePlacedResource2)>::call),
     reinterpret_cast<void*>(&Creation<9, decltype(&ID3D12Device10::CreateReservedResource2)>::call)};
 
-NativeSlot root_creation, rtv_creation, dsv_creation, descriptor_copy, descriptor_copy_simple, create_list, create_list1;
+NativeSlot root_creation, rtv_creation, dsv_creation, descriptor_copy, descriptor_copy_simple, create_list, create_list1, pso_creation;
+HRESULT STDMETHODCALLTYPE pso_create(ID3D12Device* device,
+                                     const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
+                                     REFIID iid,
+                                     void** out) noexcept {
+  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
+  const hook_timing::Scope timing(hook_timing::device);
+  const bool observe = !owned_depth && registry().ready && same_device(device) && desc;
+  const OwnedWork guard;
+  const auto forward = pso_creation.forward<F>();
+  const auto hr = hook_timing::forward(forward, device, desc, iid, out);
+  if (observe && SUCCEEDED(hr) && out && *out)
+    observe_safely([&] {
+      ID3D12PipelineState* created{};
+      if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&created)))) {
+        lights::observe_pipeline(device, *desc, created,
+                                 [&](ID3D12Device* d, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* twin, REFIID id, void** result) {
+                                   return forward(d, twin, id, result);
+                                 });
+        created->Release();
+      }
+    });
+  return hr;
+}
 HRESULT STDMETHODCALLTYPE root_create(ID3D12Device* device, UINT node, const void* blob, SIZE_T bytes, REFIID iid, void** out) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const void*, SIZE_T, REFIID, void**);
   const hook_timing::Scope timing(hook_timing::device);
@@ -2787,6 +2886,7 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->pending_rt = {};
     item->cloud_scene = {};
     item->cloud_previous = {};
+    item->light_boosted = false;
     item->raw_rtvs = {};
     item->raw_dsv = {};
     item->raw_rtv_count = 0;
@@ -2827,7 +2927,37 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   return hr;
 }
 struct Pipeline {
-  static void apply(List& l, ID3D12PipelineState* p) { l.graphics.bind_pipeline(p); }
+  static void apply(List& l, ID3D12PipelineState* p) {
+    l.graphics.bind_pipeline(p);
+    boost_lights(l, p);
+  }
+  // Runs right after the simulator's own SetPipelineState, inside the
+  // owned-work guard. Its light pipeline follows the bind of the view's scene
+  // target, so a camera output there identifies a camera view's light draws.
+  static void boost_lights(List& l, ID3D12PipelineState* p) noexcept {
+    auto* twin = lights::twin_of(p);
+    if (!twin) {
+      if (l.light_boosted) {
+        const float ones[4]{1, 1, 1, 1};
+        l.native->OMSetBlendFactor(ones);
+        l.light_boosted = false;
+      }
+      return;
+    }
+    if (!l.count || !l.targets[0].resource || !l.targets[0].resource->alive)
+      return;
+    const int feed = scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(l.targets[0].resource->native));
+    if (feed < 0 || feed >= 3)
+      return;
+    const float factor = lights::state().factors[feed].load(std::memory_order_relaxed);
+    if (!(factor > 1.001f) || !(factor <= 4096))
+      return;
+    l.native->SetPipelineState(twin);
+    const float blend[4]{factor, factor, factor, 1};
+    l.native->OMSetBlendFactor(blend);
+    l.light_boosted = true;
+    lights::state().boosts.fetch_add(1, std::memory_order_relaxed);
+  }
 };
 struct PipelineStateObject {
   static void apply(List& l, ID3D12StateObject*) { l.graphics.invalidate("state_object_binding_not_restorable"); }
@@ -2843,6 +2973,7 @@ struct ClearState {
     l.pending_pfds = {};
     l.pending_rt = {};
     l.cloud_scene = {};
+    l.light_boosted = false;
     l.raw_rtvs = {};
     l.raw_dsv = {};
     l.raw_rtv_count = 0;
@@ -3570,6 +3701,7 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   ok &= descriptor_copy_simple.install(device, 24, reinterpret_cast<void*>(&descriptors_simple));
   ok &= create_list.install(device, 12, reinterpret_cast<void*>(&list_create));
   ok &= create_list1.install(device, 51, reinterpret_cast<void*>(&list_create1));
+  ok &= pso_creation.install(device, 10, reinterpret_cast<void*>(&pso_create));
   r.ready = ok;
   r.error = ok ? "native_graphics_ready" : "native_hook_installation_failed";
   if (ok) {
@@ -3662,6 +3794,15 @@ bool read_tone_table(std::uint32_t* table) noexcept {
   const D3D12_RANGE none{0, 0};
   buffer->Unmap(0, &none);
   return stable;
+}
+void set_light_factors(const std::array<float, 3>& factors) noexcept {
+  for (unsigned i = 0; i < 3; ++i)
+    lights::state().factors[i].store(factors[i], std::memory_order_relaxed);
+}
+LightStatus light_status() noexcept {
+  auto& s = lights::state();
+  return {s.count.load(std::memory_order_relaxed), s.twin_failures.load(std::memory_order_relaxed),
+          s.boosts.load(std::memory_order_relaxed)};
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();

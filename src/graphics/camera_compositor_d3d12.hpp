@@ -136,12 +136,15 @@ class CameraCompositorD3D12 {
   // back the camera's scene light and the simulator exposes and tonemaps it
   // once, like the world outside. scale is 1 / (display light at full code in
   // texel units). Takes precedence over the tone curve; 0 turns it off.
-  bool set_screen_scale(float scale) noexcept {
-    if (!std::isfinite(scale) || scale < 0 || scale > 1e6f) {
+  // floor: light already falling on the display, as a fraction of its
+  // full-code light; it is subtracted so the display adds it back.
+  bool set_screen_scale(float scale, float floor = 0) noexcept {
+    if (!std::isfinite(scale) || scale < 0 || scale > 1e6f || !std::isfinite(floor) || floor < 0 || floor >= 1) {
       screen_scale_ = 0;
       return false;
     }
     screen_scale_ = scale;
+    screen_floor_ = floor;
     return true;
   }
   float screen_scale() const noexcept { return screen_scale_; }
@@ -675,7 +678,7 @@ class CameraCompositorD3D12 {
   static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
   static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
   static constexpr UINT ToneBit = 256;
-  static constexpr UINT RootConstants = 38;
+  static constexpr UINT RootConstants = 39;
   static constexpr UINT ScreenBit = 512;
   HRESULT initialize_tone_curve() noexcept {
     D3D12_HEAP_PROPERTIES properties{};
@@ -745,6 +748,7 @@ class CameraCompositorD3D12 {
       float display_scale;
       float ambient;
       float taxi_exposure;
+      float screen_floor;
     } display{hdr,
               exposure,
               reference_guides_ ? 1u : 0u,
@@ -754,7 +758,8 @@ class CameraCompositorD3D12 {
               static_cast<float>(11190.6 * 16 * 300e-4) * main_exposure_,
               display_scale_,
               ambient_,
-              std::exp2(exposure_ev_)};
+              std::exp2(exposure_ev_),
+              screen_floor_};
     static_assert(sizeof(display) == RootConstants * sizeof(UINT));
     private_list->SetGraphicsRoot32BitConstants(1, RootConstants, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1095,7 +1100,9 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  // Live lighting inputs (set_light_inputs): the simulator's main-view exposure
  // times its 11190.6 x 16 x 0.03 scale (0: none), the decoded display's scale
  // (0: none), A:AMBIENT LIGHT SENSOR (-1: none) and Taxi Cam's exposure.
- float MainExposure; float DisplayScale; float Ambient; float TaxiExposure; };
+ float MainExposure; float DisplayScale; float Ambient; float TaxiExposure;
+ // Light already falling on the display, as a fraction of its full-code light.
+ float ScreenFloor; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -1284,7 +1291,7 @@ float3 simulator_rgb(float3 rgb) {
 // which use only the lowest codes, from banding.
 static float2 PixelPosition;
 float3 screen_rgb(float3 rgb) {
-  float3 linear_light = saturate(max(rgb, 0) * Exposure);
+  float3 linear_light = saturate(max(rgb, 0) * Exposure - ScreenFloor);
   float noise = frac(52.9829189 * frac(dot(PixelPosition, float2(0.06711056, 0.00583715)))) - 0.5;
   return saturate(float3(srgb_code(linear_light.r), srgb_code(linear_light.g), srgb_code(linear_light.b)) + noise / 255);
 }
@@ -1426,6 +1433,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   unsigned char* tone_mapped_ = nullptr;
   float tone_exposure_ = 0;
   float screen_scale_ = 0;
+  float screen_floor_ = 0;
   float main_exposure_ = 0;
   float display_scale_ = 0;
   float ambient_ = -1;

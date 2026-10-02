@@ -520,14 +520,15 @@ bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* tabl
   }
   return true;
 }
-bool set_screen_scale(std::uint64_t key, float scale) {
-  if (!std::isfinite(scale) || scale < 0)
+bool set_screen_scale(std::uint64_t key, float scale, float floor) {
+  if (!std::isfinite(scale) || scale < 0 || !std::isfinite(floor) || floor < 0 || floor >= 1)
     return false;
   const std::lock_guard lock(runtime().mutex);
   auto* item = find(key);
   if (!item || item->status.failed)
     return false;
   item->status.screen_scale = scale;
+  item->status.screen_floor = floor;
   return true;
 }
 void set_light_inputs(std::uint64_t key, float main_exposure, float display_scale, float ambient) {
@@ -696,7 +697,7 @@ void service() {
         item.status.tone_exposure > 0)
       item.tone_table_pending = false;
     item.status.tone_active = item.output.tone_curve_active();
-    item.output.set_screen_scale(item.status.screen_scale);
+    item.output.set_screen_scale(item.status.screen_scale, item.status.screen_floor);
     item.output.set_light_inputs(item.status.main_exposure, item.status.display_scale, item.status.ambient);
     if (item.shader_pending) {
       item.shader_pending = false;

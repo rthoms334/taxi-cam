@@ -53,6 +53,8 @@ constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s
 // The built-in source is written beside it as compositor.default.hlsl to copy.
 // No file, no change. Deleting the file keeps the last loaded shader.
 struct DevShader {
+  // dev\lights.txt: one number multiplying the camera light factors (1).
+  double light_scale = 1;
   std::uint64_t next_ms = 0;
   FILETIME written{};
   std::uint64_t bytes = 0;
@@ -75,6 +77,16 @@ struct DevShader {
         DWORD written_bytes = 0;
         WriteFile(file, source, static_cast<DWORD>(std::strlen(source)), &written_bytes, nullptr);
         CloseHandle(file);
+      }
+    }
+    {
+      const auto lights_path = directory + L"\\lights.txt";
+      light_scale = 1;
+      if (FILE* file = _wfopen(lights_path.c_str(), L"r")) {
+        double value = 0;
+        if (std::fscanf(file, "%lf", &value) == 1 && value > 0 && value < 1000)
+          light_scale = value;
+        std::fclose(file);
       }
     }
     const auto path = directory + L"\\compositor.hlsl";
@@ -102,6 +114,7 @@ struct DevShader {
 };
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
+std::array<float, 3> last_light_factors{};
 struct ToneFeed {
   std::uint64_t exposure_copies = 0, table_copies = 0;
   std::uint64_t exposure_ms = 0, table_ms = 0;
@@ -1041,11 +1054,33 @@ DWORD run_impl() {
     // it once. Camera texels hold scene light / 16.
     const double display_light = light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
     const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
-    scene_runtime::set_screen_scale(key, settings.camera_tone && drawing->display_light_enabled ? display_scale : 0.0f);
+    scene_runtime::set_screen_scale(
+        key, settings.camera_tone && drawing->display_light_enabled ? display_scale : 0.0f,
+        light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);
     last_ambient = light.valid ? light.ambient : -1.0;
     scene_runtime::set_light_inputs(key, tone.fresh_exposure(now), display_scale, static_cast<float>(last_ambient));
     static DevShader dev_shader;
     dev_shader.poll(key, now);
+    // Camera lights (lights namespace in d3d12_bridge.cpp): each camera's light
+    // sprites get the energy the main view's pixel density gives them, from the
+    // camera's render height and vertical lens. 866.8 render pixels per unit
+    // tangent is the main view measured in the 777 capture (1707 x 913 render,
+    // 0.97 rad); dev\lights.txt can scale the result while tuning.
+    {
+      std::array<float, 3> factors{};
+      if (settings.camera_tone)
+        for (unsigned i = 0; i < 3; ++i) {
+          const double lens = settings.mounts[i][5];
+          const double height = drawing->camera_panes[i][1];
+          if (!(lens > 0.05 && lens < 3.0) || !(height > 0))
+            continue;
+          const double density = height / (2 * std::tan(lens / 2));
+          const double ratio = 866.8 / density;
+          factors[i] = static_cast<float>(std::clamp(ratio * ratio * dev_shader.light_scale, 1.0, 64.0));
+        }
+      win::set_light_factors(factors);
+      last_light_factors = factors;
+    }
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1468,6 +1503,15 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
                     tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);
+      {
+        const auto light_status = win::light_status();
+        char light_detail[200];
+        std::snprintf(light_detail, sizeof(light_detail), "Camera lights: twins=%u failures=%llu boosts=%llu factors=%.3g/%.3g/%.3g",
+                      light_status.twins, static_cast<unsigned long long>(light_status.failures),
+                      static_cast<unsigned long long>(light_status.boosts), static_cast<double>(last_light_factors[0]),
+                      static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
+        log_status(status, light_detail);
+      }
       if (output.shader_reloads || output.shader_reload_failures) {
         char shader_detail[400];
         std::snprintf(shader_detail, sizeof(shader_detail), "Dev shader: reloads=%llu failures=%llu error=%.300s",
