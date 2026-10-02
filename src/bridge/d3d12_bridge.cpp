@@ -1460,6 +1460,7 @@ struct Volume {
   std::atomic<std::uint32_t> group{0}, index{0};  // group 0: not seen created
   std::atomic<std::uint64_t> exits{0};
   std::atomic<bool> reset{false};  // dev reset already applied to this history volume
+  std::atomic<ULONGLONG> sampled_ms{0};
 };
 struct State {
   std::array<Volume, 48> volumes;
@@ -1469,11 +1470,18 @@ struct State {
   std::atomic<std::uint64_t> copies{0}, clears{0}, resets{0};
   std::atomic<ID3D12Resource*> clear_source{nullptr};
   std::atomic<bool> clear_failed{false};
+  // Centre texel column of each integrated volume, at most once a second:
+  // one 64-slice column per volume slot, read by the status log.
+  std::atomic<ID3D12Resource*> samples{nullptr};
+  std::atomic<bool> samples_failed{false};
   std::mutex creation;
 };
 // R 1023 (transmittance 1), G 0, B 580 and A 3: the main view's volume at night.
 constexpr std::uint32_t ClearTexel = 1023u | (580u << 20) | (3u << 30);
 constexpr UINT64 ClearBytes = 16ull << 20;
+constexpr UINT SampleSlices = 64;
+constexpr UINT64 SampleBytes = 256ull * SampleSlices;
+constexpr ULONGLONG SampleIntervalMs = 1000;
 State& state() noexcept {
   static State value;
   return value;
@@ -1583,6 +1591,65 @@ ID3D12Resource* clear_source() noexcept {
   s.clear_source.store(created, std::memory_order_release);
   return created;
 }
+ID3D12Resource* samples() noexcept {
+  auto& s = state();
+  if (auto* existing = s.samples.load(std::memory_order_acquire))
+    return existing;
+  if (s.samples_failed.load(std::memory_order_relaxed))
+    return nullptr;
+  const std::unique_lock lock(s.creation, std::try_to_lock);
+  if (!lock.owns_lock())
+    return nullptr;
+  if (auto* existing = s.samples.load(std::memory_order_acquire))
+    return existing;
+  auto* device = registry().device;
+  if (!device)
+    return nullptr;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = SampleBytes * std::tuple_size_v<decltype(State::volumes)>;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* created = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&created)))) {
+    s.samples_failed.store(true, std::memory_order_relaxed);
+    return nullptr;
+  }
+  s.samples.store(created, std::memory_order_release);
+  return created;
+}
+// The integrated volume is in UNORDERED_ACCESS at its exit.
+void sample(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d, Volume& v) noexcept {
+  const auto now = GetTickCount64();
+  if (now - v.sampled_ms.load(std::memory_order_relaxed) < SampleIntervalMs || d.DepthOrArraySize != SampleSlices)
+    return;
+  auto* destination = samples();
+  if (!destination)
+    return;
+  v.sampled_ms.store(now, std::memory_order_relaxed);
+  const auto index = static_cast<UINT64>(&v - state().volumes.data());
+  D3D12_RESOURCE_BARRIER barrier{};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE};
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
+  target.pResource = destination;
+  target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  target.PlacedFootprint = {index * SampleBytes, {d.Format, 1, 1, SampleSlices, 256}};
+  origin.pResource = resource;
+  origin.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  const UINT x = static_cast<UINT>(d.Width / 2), y = d.Height / 2;
+  const D3D12_BOX box{x, y, 0, x + 1, y + 1, SampleSlices};
+  list->CopyTextureRegion(&target, 0, 0, 0, &origin, &box);
+  std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+  list->ResourceBarrier(1, &barrier);
+}
 void clear(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
   const UINT pitch = (static_cast<UINT>(d.Width) * 4 + 255) & ~255u;
   if (UINT64{pitch} * d.Height * d.DepthOrArraySize > ClearBytes)
@@ -1622,6 +1689,7 @@ void exit(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) noexcept {
   if (v->index.load(std::memory_order_relaxed) == 0) {
     if (v->group.load(std::memory_order_relaxed) && s.clear.load(std::memory_order_relaxed) && !main_view(*v))
       clear(list, resource, d);
+    sample(list, resource, d, *v);
     return;
   }
   if (s.reset.load(std::memory_order_relaxed) && !v->reset.load(std::memory_order_relaxed)) {
@@ -4033,6 +4101,28 @@ void fog_volumes(char* text, std::size_t size) noexcept {
     if (n < 0)
       break;
     used += n;
+    // Integrated transmittance (R/1023) at the view centre for slices 1, 2,
+    // 4, 8 and 16 (about 12, 50, 200, 800 and 3100 m), from the last sample.
+    auto* buffer = f.samples.load(std::memory_order_acquire);
+    if (buffer && v.index.load(std::memory_order_relaxed) == 0 && v.sampled_ms.load(std::memory_order_relaxed) &&
+        static_cast<std::size_t>(used) < size) {
+      const auto index = static_cast<UINT64>(&v - f.volumes.data());
+      const D3D12_RANGE range{static_cast<SIZE_T>(index * fog::SampleBytes), static_cast<SIZE_T>((index + 1) * fog::SampleBytes)};
+      void* mapped = nullptr;
+      if (SUCCEEDED(buffer->Map(0, &range, &mapped))) {
+        const auto* bytes = static_cast<const unsigned char*>(mapped) + range.Begin;
+        const auto t = [&](unsigned slice) {
+          std::uint32_t texel = 0;
+          std::memcpy(&texel, bytes + 256u * slice, 4);
+          return (texel & 1023u) / 1023.0;
+        };
+        const int m = std::snprintf(text + used, size - used, " T=%.3f/%.3f/%.3f/%.3f/%.3f", t(1), t(2), t(4), t(8), t(16));
+        const D3D12_RANGE none{0, 0};
+        buffer->Unmap(0, &none);
+        if (m > 0)
+          used += m;
+      }
+    }
   }
 }
 void set_fog_dev(bool copy, bool clear, bool reset) noexcept {
