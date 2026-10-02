@@ -189,6 +189,9 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept;
 struct LightStatus {
   unsigned twins = 0;
   std::uint64_t failures = 0, boosts = 0;
+  // Pipeline creations seen: graphics descriptions, streams, library loads of
+  // each kind, and streams the bridge could not parse.
+  std::uint64_t graphics = 0, streams = 0, library_graphics = 0, library_streams = 0, unparsed = 0;
 };
 LightStatus light_status() noexcept;
 // Camera tone: copies of the main view's eye-adaptation exposure and 64^3

@@ -1505,11 +1505,17 @@ DWORD run_impl() {
       log_status(status, tone_detail);
       {
         const auto light_status = win::light_status();
-        char light_detail[200];
-        std::snprintf(light_detail, sizeof(light_detail), "Camera lights: twins=%u failures=%llu boosts=%llu factors=%.3g/%.3g/%.3g",
+        char light_detail[320];
+        std::snprintf(light_detail, sizeof(light_detail),
+                      "Camera lights: twins=%u failures=%llu boosts=%llu factors=%.3g/%.3g/%.3g pipelines=%llu/%llu/%llu/%llu "
+                      "unparsed=%llu",
                       light_status.twins, static_cast<unsigned long long>(light_status.failures),
                       static_cast<unsigned long long>(light_status.boosts), static_cast<double>(last_light_factors[0]),
-                      static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
+                      static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]),
+                      static_cast<unsigned long long>(light_status.graphics), static_cast<unsigned long long>(light_status.streams),
+                      static_cast<unsigned long long>(light_status.library_graphics),
+                      static_cast<unsigned long long>(light_status.library_streams),
+                      static_cast<unsigned long long>(light_status.unparsed));
         log_status(status, light_detail);
       }
       if (output.shader_reloads || output.shader_reload_failures) {
