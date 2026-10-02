@@ -175,6 +175,14 @@ bool graphics_ready() noexcept;
 // observed. PFD state omitted while idle needs real successful Reset to resume.
 void set_graphics_observation_demand(bool enabled) noexcept;
 void set_graphics_diagnostics_enabled(bool enabled) noexcept;
+// Camera weather: a camera view's cloud composite goes into that view's image
+// (cloud_merge.hpp). Counts are cumulative for the bridge lifetime.
+void set_cloud_merge_enabled(bool enabled) noexcept;
+struct CloudMergeStatus {
+  bool enabled = false;
+  std::uint64_t redirects = 0, refusals = 0;
+};
+CloudMergeStatus cloud_merge_status() noexcept;
 GraphicsStatus graphics_status() noexcept;
 // One bridge.log line: registry and capture-manager lock holds since the last
 // call (count, total and longest per source line or acquiring address) and

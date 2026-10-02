@@ -974,6 +974,7 @@ void build_controls() {
       button(L"Forward 1 m", 333 + i * 10, x + (feed_count == 3 ? 120 : 160), 488, feed_count == 3 ? 110 : 146);
     }
     button(L"Reset camera mounts", 359, 260, 594, 240);
+    toggle(L"Camera weather", 236, s.camera_weather, 260, 644, 240);
   } else if (page == 2) {
     edit(s.exposure, 201, 840, 210, 120);
     toggle(L"Auto exposure", 222, s.automatic_exposure, 785, 318, 190);
@@ -1212,6 +1213,10 @@ void draw_page(HDC dc) {
       text(dc, L"Position relative to the aircraft datum", x + 12, 397, width - 24, 22, small, Muted);
     }
     text(dc, L"Positive pitch looks up. Positive yaw looks right.", 530, 594, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
+    text(dc,
+         L"Camera weather shows the clouds and overcast light in the camera views; they then draw as far as the main view, also while "
+         L"taxiing.",
+         530, 646, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 2) {
     const int ys[]{144, 267, 390, 510};
     const wchar_t* names[]{L"Daytime exposure", L"Automatic night exposure", L"Maximum night boost", L"Camera frame rate"};
@@ -1681,6 +1686,8 @@ bool is_on(int id, const win::Settings& s) {
       return s.single_camera;
     case 235:
       return s.dynamic_tail;
+    case 236:
+      return s.camera_weather;
     case 229:
       return s.scene_test;
     default:
@@ -2049,7 +2056,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_connection();
         return 0;
       }
-      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235) {
+      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235 || id == 236) {
         if (!apply(false))
           return 0;
         auto s = draft();
@@ -2084,6 +2091,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           s.single_camera = !s.single_camera;
         if (id == 235)
           s.dynamic_tail = !s.dynamic_tail;
+        if (id == 236)
+          s.camera_weather = !s.camera_weather;
         if (id == 229)
           s.scene_test = !s.scene_test;
         publish(s);

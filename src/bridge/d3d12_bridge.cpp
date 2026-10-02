@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 #include "../graphics/calibration_d3d12.hpp"
+#include "../graphics/cloud_merge.hpp"
 #include "../graphics/d3d12_command_list9.hpp"
 #include "../graphics/metadata_batch_cache.hpp"
 #include "../graphics/native_device_identity.hpp"
@@ -105,11 +106,18 @@ struct List : Metadata {
   bool raw_om_known = false, raw_has_dsv = false;
   ID3D12DescriptorHeap* snapshot_rtvs{};
   ID3D12DescriptorHeap* snapshot_dsvs{};
+  // Camera weather: target 0 of the latest bind when it is a camera output (any
+  // barrier forgets it), the value before the current bind, and three
+  // bridge-owned RTVs for the redirected cloud merge (cloud_merge.hpp).
+  View cloud_scene{}, cloud_previous{};
+  ID3D12DescriptorHeap* cloud_rtvs{};
   ~List() override {
     if (snapshot_rtvs)
       snapshot_rtvs->Release();
     if (snapshot_dsvs)
       snapshot_dsvs->Release();
+    if (cloud_rtvs)
+      cloud_rtvs->Release();
   }
   UINT count{};
   DXGI_FORMAT depth = DXGI_FORMAT_UNKNOWN;
@@ -284,6 +292,10 @@ struct Registry {
   // PassBegin reports that reached the manager's global path: the pass bound
   // no RTV, or bound RTVs the bridge could not resolve to tracked resources.
   std::atomic<std::uint64_t> pass_no_targets{}, pass_unresolved_targets{};
+  // Camera weather (cloud_merge.hpp): whether camera cloud merges are sent into
+  // the camera output, how many were, and how many could not be.
+  std::atomic<bool> cloud_merge_enabled{};
+  std::atomic<std::uint64_t> cloud_merge_redirects{}, cloud_merge_refusals{};
   // Recordings invalidated on the next hit after a contended find_list miss,
   // and lists admitted mid-recording (unobserved, awaiting their Reset).
   std::atomic<std::uint64_t> contended_invalidations{}, unobserved_admissions{};
@@ -1259,11 +1271,21 @@ void stage_copy_model(List* list, ID3D12Resource* target, PfdCopyProof::Mode mod
   if (const auto item = resource(target); item && item->alive)
     list->copy_proof.observe_transition({reinterpret_cast<std::uint64_t>(target), item->id}, model, reason);
 }
+// Any barrier may move the camera output out of the render-target state, so a
+// following cloud merge is left as the simulator bound it.
+void forget_cloud_scene(ID3D12GraphicsCommandList* list, std::uint64_t id) noexcept {
+  if (!registry().cloud_merge_enabled.load(std::memory_order_relaxed))
+    return;
+  std::shared_ptr<List> fallback;
+  if (auto* item = metadata_list(list, id, fallback))
+    item->cloud_scene = {};
+}
 void observe_legacy(void*,
                     ID3D12GraphicsCommandList* list,
                     std::uint64_t id,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
+  forget_cloud_scene(list, id);
   if (registry().live_backfill.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
       (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
     consider_live_resource(list, b.Transition.pResource,
@@ -1340,6 +1362,7 @@ void observe_enhanced(void*,
                       std::uint64_t id,
                       const D3D12_TEXTURE_BARRIER& b,
                       std::uint32_t scope) noexcept {
+  forget_cloud_scene(list, id);
   if (registry().live_backfill.load(std::memory_order_relaxed) &&
       (b.LayoutBefore == D3D12_BARRIER_LAYOUT_RENDER_TARGET || b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET))
     consider_live_resource(
@@ -2617,6 +2640,8 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->pfd_dirty = false;
     item->pending_pfds = {};
     item->pending_rt = {};
+    item->cloud_scene = {};
+    item->cloud_previous = {};
     item->raw_rtvs = {};
     item->raw_dsv = {};
     item->raw_rtv_count = 0;
@@ -2672,6 +2697,7 @@ struct ClearState {
     l.pfd_dirty = false;
     l.pending_pfds = {};
     l.pending_rt = {};
+    l.cloud_scene = {};
     l.raw_rtvs = {};
     l.raw_dsv = {};
     l.raw_rtv_count = 0;
@@ -2892,8 +2918,65 @@ struct Targets {
                      const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
     flush_pfd(l.native, l.id);
     record(l, count, handles, contiguous, depth, true);
+    l.cloud_previous = std::exchange(l.cloud_scene, View{});
+    if (registry().cloud_merge_enabled.load(std::memory_order_relaxed) && l.count && cloud_target(l.targets[0]).camera_output)
+      l.cloud_scene = l.targets[0];
   }
-  static void apply(List&, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*) {}
+  static void apply(List& l,
+                    UINT count,
+                    const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
+                    BOOL contiguous,
+                    const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+    redirect_cloud_merge(l, count, handles, contiguous, depth);
+  }
+  static cloud_merge::Target cloud_target(const View& view) noexcept {
+    if (!view.resource || !view.resource->alive)
+      return {};
+    const auto handle = reinterpret_cast<std::uint64_t>(view.resource->native);
+    return {
+        handle, view.format, view.mip, view.resource->desc.Width, view.resource->desc.Height, scene_handoff().observed_feed(handle) >= 0};
+  }
+  // Runs right after the simulator's own bind, inside the owned-work guard, so
+  // the calls below reach the runtime directly. The camera output is still
+  // bound as a render target from the previous bind (no barrier since), and the
+  // merge pipeline expects exactly these three formats, so target 0 becomes a
+  // bridge-owned view of the camera output and the other two are copied.
+  static void redirect_cloud_merge(List& l,
+                                   UINT count,
+                                   const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
+                                   BOOL contiguous,
+                                   const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+    auto& r = registry();
+    const View previous = std::exchange(l.cloud_previous, View{});
+    if (!r.cloud_merge_enabled.load(std::memory_order_relaxed) || !previous.resource || count != 3 || !handles || l.count != 3)
+      return;
+    const cloud_merge::Target bound[3]{cloud_target(l.targets[0]), cloud_target(l.targets[1]), cloud_target(l.targets[2])};
+    if (!cloud_merge::camera_merge_bind(cloud_target(previous), count, depth != nullptr, bound))
+      return;
+    if (!l.cloud_rtvs) {
+      D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 3, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+      if (FAILED(r.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&l.cloud_rtvs)))) {
+        l.cloud_rtvs = nullptr;
+        r.cloud_merge_refusals.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    }
+    const auto base = l.cloud_rtvs->GetCPUDescriptorHandleForHeapStart();
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 3> rtvs{};
+    for (UINT i = 0; i < 3; ++i)
+      rtvs[i] = {base.ptr + SIZE_T{i} * r.rtv_stride};
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = previous.format;
+    view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    r.device->CreateRenderTargetView(previous.resource->native, &view, rtvs[0]);
+    for (UINT i = 1; i < 3; ++i)
+      r.device->CopyDescriptorsSimple(1, rtvs[i], {contiguous ? handles[0].ptr + SIZE_T{i} * r.rtv_stride : handles[i].ptr},
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    l.native->OMSetRenderTargets(3, rtvs.data(), FALSE, nullptr);
+    l.targets[0] = previous;
+    l.targets[0].rtv = rtvs[0].ptr;
+    r.cloud_merge_redirects.fetch_add(1, std::memory_order_relaxed);
+  }
 };
 void pass_targets(void*,
                   ID3D12GraphicsCommandList* native,
@@ -2906,6 +2989,7 @@ void pass_targets(void*,
     return;
   item->queries.invalidate();
   item->pending_rt = {};
+  item->cloud_scene = {};
   flush_pfd(native, id, false);
   if (count > 8 || (count && !targets)) {
     item->pfd_dirty = false;
@@ -3386,6 +3470,14 @@ void set_graphics_observation_demand(bool enabled) noexcept {
 }
 void set_graphics_diagnostics_enabled(bool enabled) noexcept {
   registry().diagnostics_enabled.store(enabled, std::memory_order_relaxed);
+}
+void set_cloud_merge_enabled(bool enabled) noexcept {
+  registry().cloud_merge_enabled.store(enabled, std::memory_order_relaxed);
+}
+CloudMergeStatus cloud_merge_status() noexcept {
+  const auto& r = registry();
+  return {r.cloud_merge_enabled.load(std::memory_order_relaxed), r.cloud_merge_redirects.load(std::memory_order_relaxed),
+          r.cloud_merge_refusals.load(std::memory_order_relaxed)};
 }
 std::uint64_t frame_pulse() noexcept {
   return registry().frame_pulse.load(std::memory_order_relaxed) + queue_hook::total_statistics().calls;

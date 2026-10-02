@@ -54,7 +54,7 @@ bool same_preferences(const Settings& a, const Settings& b) {
          a.auto_profile == b.auto_profile && a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper &&
          a.tail_corner == b.tail_corner && a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi &&
          a.auto_detect == b.auto_detect && a.single_camera == b.single_camera && a.dynamic_tail == b.dynamic_tail &&
-         a.calibration_budget == b.calibration_budget && a.mounts == b.mounts;
+         a.camera_weather == b.camera_weather && a.calibration_budget == b.calibration_budget && a.mounts == b.mounts;
 }
 
 Settings customized(const profiles::AircraftProfile& profile) {
@@ -158,6 +158,21 @@ void parked_rate_persists_and_defaults() {
   patch(path, L"display", L"dynamic_tail", nullptr);
   require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 0,
           "A profile without dynamic_tail loads with it off");
+  // Camera weather: on by default and saved with its revision; a saved off is
+  // kept, and a proof-of-concept profile (no revision) loads with it on once.
+  require(loaded.camera_weather == 1 && ini(path, L"display", L"camera_weather") == L"1" &&
+              ini(path, L"display", L"camera_weather_revision") == L"1",
+          "Camera weather saves on by default with its revision");
+  saved.camera_weather = 0;
+  require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_weather == 0,
+          "A saved camera weather off is kept");
+  patch(path, L"display", L"camera_weather_revision", nullptr);
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_weather == 1,
+          "A proof-of-concept profile without the revision loads with camera weather on");
+  patch(path, L"display", L"camera_weather", nullptr);
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_weather == 1,
+          "A profile without camera_weather loads with it on");
+  saved.camera_weather = 1;
 }
 
 void all_profiles_migrate_once() {

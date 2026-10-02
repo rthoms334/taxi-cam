@@ -819,9 +819,14 @@ DWORD run_impl() {
     }
     // Taxiing, the views keep their own 1000 m far; from the take-off roll on
     // they draw as far as the main view so the ground stays visible in flight.
-    // Atomic only; the observer applies it before each pose refresh.
+    // Camera weather needs the main view's far at every speed: the cloud
+    // raymarch ends each sky ray at the far plane, below the cloud base at
+    // 1000 m. It also sends each camera's cloud merge into the camera image.
+    // Atomics only; the observer applies the far before each pose refresh.
+    const bool camera_weather = settings.camera_weather != 0;
     far_follows_main = native_camera::follow_main_far(far_follows_main, speed.valid, speed.knots);
-    native_camera::request_scene_main_far(far_follows_main);
+    native_camera::request_scene_main_far(camera_weather || far_follows_main);
+    win::set_cloud_merge_enabled(camera_weather);
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
       for (unsigned i = 0; i < mounts.size(); ++i) {
@@ -1339,6 +1344,14 @@ DWORD run_impl() {
           scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2], scene.draw_clip[1][0],
           scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1], scene.draw_clip[2][2]);
       log_status(status, clip_detail);
+      // Camera weather: cloud merges sent into a camera image, and those that
+      // could not be (no descriptor heap); cumulative for this bridge.
+      const auto clouds = win::cloud_merge_status();
+      char weather_detail[160];
+      std::snprintf(weather_detail, sizeof(weather_detail), "Camera weather: enabled=%d cloud_merges=%llu refused=%llu",
+                    clouds.enabled ? 1 : 0, static_cast<unsigned long long>(clouds.redirects),
+                    static_cast<unsigned long long>(clouds.refusals));
+      log_status(status, weather_detail);
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
       char mount_detail[448];

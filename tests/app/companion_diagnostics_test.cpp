@@ -242,6 +242,19 @@ int main() {
     require(std::wstring(label) == L"Dynamic tail rate: On", "Dynamic tail label reflects its state");
     command(235);
     require(current.dynamic_tail == 0, "Dynamic tail rate can be turned back off");
+    // Camera weather is an ordinary camera setting on the Camera views page.
+    require(!GetDlgItem(window, 236), "Camera weather is not a Diagnostics control");
+    page = 1;
+    build_controls();
+    require(GetDlgItem(window, 236) && current.camera_weather == 1 && is_on(236, current), "Camera weather starts on");
+    command(236);
+    require(current.camera_weather == 0 && !is_on(236, current), "Camera weather can be turned off");
+    GetDlgItemTextW(window, 236, label, 96);
+    require(std::wstring(label) == L"Camera weather: Off", "Camera weather label reflects its state");
+    command(236);
+    require(current.camera_weather == 1, "Camera weather can be turned back on");
+    page = 4;
+    build_controls();
     SetDlgItemTextW(window, 203, L"1024");
     command(500);
     require(current.scene_test == 1 && current.calibration_budget == 1024, "Save applies the calibration budget without stopping scenes");
