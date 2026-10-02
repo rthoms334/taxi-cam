@@ -191,8 +191,12 @@ CloudMergeStatus cloud_merge_status() noexcept;
 void set_light_factors(const std::array<float, 3>& factors) noexcept;
 // Dev only: also repeat light-shaped camera draws made with other pipelines.
 void set_light_all(bool all) noexcept;
-// Diagnostic: froxel fog volumes as WxH@address:UAV exits, comma separated.
+// Camera fog: the copy switch and copies made, then each froxel fog volume as
+// WxH@address g<creation group>.<index>:UAV exits (group 0: created before
+// the bridge attached).
 void fog_volumes(char* text, std::size_t size) noexcept;
+// Dev only: copy a camera view's fog result into its history partner.
+void set_fog_copy(bool copy) noexcept;
 struct LightStatus {
   bool learnt = false;
   unsigned confirmations = 0;

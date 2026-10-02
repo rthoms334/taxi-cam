@@ -1441,18 +1441,30 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
   s.table_copies.fetch_add(1, std::memory_order_relaxed);
 }
 }  // namespace tone
-// Diagnostic: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
-// width and height one eighth of the view) and how often each leaves
-// UNORDERED_ACCESS. A view whose temporal history is never written shows one
-// volume of its size that is never exited.
+// Camera fog: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
+// one eighth of the view's width and height). The density pass blends each
+// frame with a history volume; the main view swaps its history pair every
+// frame. A view's three volumes are created back to back: the history pair,
+// then the integrated volume. Volumes created after the bridge attached (the
+// camera views') are grouped at creation. Each volume's UNORDERED_ACCESS exits
+// are counted. With the dev copy switch, a pair member's exit first copies it
+// into its partner, so the next frame's history is this frame's result.
 namespace fog {
 struct Volume {
   std::atomic<ID3D12Resource*> resource{nullptr};
   std::atomic<std::uint32_t> width{0}, height{0};
+  std::atomic<std::uint32_t> group{0}, index{0};  // group 0: not seen created
   std::atomic<std::uint64_t> exits{0};
 };
-std::array<Volume, 24>& volumes() noexcept {
-  static std::array<Volume, 24> value;
+struct State {
+  std::array<Volume, 48> volumes;
+  std::atomic<Volume*> last_created{nullptr};
+  std::atomic<std::uint32_t> groups{0};
+  std::atomic<bool> copy{false};
+  std::atomic<std::uint64_t> copies{0};
+};
+State& state() noexcept {
+  static State value;
   return value;
 }
 bool volume_shape(const D3D12_RESOURCE_DESC& d) noexcept {
@@ -1460,7 +1472,7 @@ bool volume_shape(const D3D12_RESOURCE_DESC& d) noexcept {
          d.Format == DXGI_FORMAT_R10G10B10A2_UNORM && !(d.Width == 64 && d.Height == 64);
 }
 Volume* slot(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
-  for (auto& v : volumes()) {
+  for (auto& v : state().volumes) {
     ID3D12Resource* seen = v.resource.load(std::memory_order_acquire);
     if (!seen && v.resource.compare_exchange_strong(seen, resource, std::memory_order_acq_rel)) {
       v.width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
@@ -1472,15 +1484,80 @@ Volume* slot(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
   }
   return nullptr;
 }
-void note(ID3D12Resource* resource) noexcept {
+void created(IUnknown* object) noexcept {
+  ID3D12Resource* resource = nullptr;
+  if (FAILED(object->QueryInterface(IID_PPV_ARGS(&resource))))
+    return;
+  const auto d = tone::description(resource);
+  resource->Release();
+  if (!volume_shape(d))
+    return;
+  auto& s = state();
+  auto* v = slot(resource, d);
+  if (!v)
+    return;
+  v->width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
+  v->height.store(d.Height, std::memory_order_relaxed);
+  v->exits.store(0, std::memory_order_relaxed);
+  auto* last = s.last_created.exchange(v, std::memory_order_acq_rel);
+  if (last && last != v && last->width.load(std::memory_order_relaxed) == d.Width &&
+      last->height.load(std::memory_order_relaxed) == d.Height && last->group.load(std::memory_order_relaxed) &&
+      last->index.load(std::memory_order_relaxed) < 2) {
+    v->group.store(last->group.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    v->index.store(last->index.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  } else {
+    v->group.store(s.groups.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    v->index.store(0, std::memory_order_relaxed);
+  }
+}
+// The other member of a complete creation group's history pair.
+Volume* partner(const Volume& v) noexcept {
+  const auto group = v.group.load(std::memory_order_relaxed);
+  const auto index = v.index.load(std::memory_order_relaxed);
+  if (!group || index > 1)
+    return nullptr;
+  Volume* other = nullptr;
+  bool complete = false;
+  for (auto& o : state().volumes) {
+    if (o.group.load(std::memory_order_relaxed) != group || &o == &v)
+      continue;
+    const auto i = o.index.load(std::memory_order_relaxed);
+    if (i == 1 - index)
+      other = &o;
+    complete = complete || i == 2;
+  }
+  return complete ? other : nullptr;
+}
+// Before the simulator's own UNORDERED_ACCESS exit of a volume, inside the
+// owned-work guard. Both volumes rest as shader resources between uses.
+void exit(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) noexcept {
   const auto d = tone::description(resource);
   if (!volume_shape(d))
     return;
-  if (auto* v = slot(resource, d))
-    v->exits.fetch_add(1, std::memory_order_relaxed);
+  auto& s = state();
+  auto* v = slot(resource, d);
+  if (!v)
+    return;
+  v->exits.fetch_add(1, std::memory_order_relaxed);
+  if (!s.copy.load(std::memory_order_relaxed) || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+    return;
+  auto* other = partner(*v);
+  ID3D12Resource* history = other ? other->resource.load(std::memory_order_acquire) : nullptr;
+  if (!history || history == resource)
+    return;
+  constexpr auto Resting = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  D3D12_RESOURCE_BARRIER barriers[2]{};
+  barriers[0].Type = barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barriers[0].Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE};
+  barriers[1].Transition = {history, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, Resting, D3D12_RESOURCE_STATE_COPY_DEST};
+  list->ResourceBarrier(2, barriers);
+  list->CopyResource(history, resource);
+  std::swap(barriers[0].Transition.StateBefore, barriers[0].Transition.StateAfter);
+  std::swap(barriers[1].Transition.StateBefore, barriers[1].Transition.StateAfter);
+  list->ResourceBarrier(2, barriers);
+  s.copies.fetch_add(1, std::memory_order_relaxed);
 }
-// Volumes first seen as an SRV-only partner are not visible here; a pair with
-// one entry missing reads as a history that is never written.
 }  // namespace fog
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   if (idle_callback())
@@ -1495,7 +1572,6 @@ void before_legacy_uav(void*, ID3D12GraphicsCommandList* list, std::uint64_t, co
     return;
   const OwnedWork guard;
   tone::table_exit(list, b);
-  fog::note(b.pResource);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
   if (idle_callback())
@@ -1539,6 +1615,11 @@ void observe_legacy(void*,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
   forget_cloud_scene(list, id);
+  if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && b.Transition.pResource &&
+      b.Transition.StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && b.Transition.StateAfter != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+    const OwnedWork guard;
+    fog::exit(list, b.Transition.pResource);
+  }
   if (registry().live_backfill.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
       (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
     consider_live_resource(list, b.Transition.pResource,
@@ -2556,6 +2637,7 @@ struct Creation<I, HRESULT (STDMETHODCALLTYPE C::*)(Args...)> {
         observe_safely([&] {
           observe_resource(reinterpret_cast<ID3D12Device*>(self), static_cast<IUnknown*>(*out), model(std::get<StateArgs[I]>(tuple)),
                            true);
+          fog::created(static_cast<IUnknown*>(*out));
         });
     }
     return hr;
@@ -3837,21 +3919,25 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept {
     lights::state().factors[i].store(factors[i], std::memory_order_relaxed);
 }
 void fog_volumes(char* text, std::size_t size) noexcept {
-  std::size_t used = 0;
-  if (size)
-    text[0] = 0;
-  for (auto& v : fog::volumes()) {
-    if (!v.resource.load(std::memory_order_relaxed) || used >= size)
+  auto& f = fog::state();
+  int used = std::snprintf(text, size, "copy=%d copies=%llu", f.copy.load(std::memory_order_relaxed) ? 1 : 0,
+                           static_cast<unsigned long long>(f.copies.load(std::memory_order_relaxed)));
+  for (auto& v : f.volumes) {
+    if (used < 0 || static_cast<std::size_t>(used) >= size || !v.resource.load(std::memory_order_relaxed))
       break;
-    const int n = std::snprintf(text + used, size - used, "%s%ux%u@%llx:%llu", used ? "," : "", v.width.load(std::memory_order_relaxed),
+    const int n = std::snprintf(text + used, size - used, " %ux%u@%llx g%u.%u:%llu", v.width.load(std::memory_order_relaxed),
                                 v.height.load(std::memory_order_relaxed),
                                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(v.resource.load(std::memory_order_relaxed)) &
                                                                 0xffffff),
+                                v.group.load(std::memory_order_relaxed), v.index.load(std::memory_order_relaxed),
                                 static_cast<unsigned long long>(v.exits.load(std::memory_order_relaxed)));
     if (n < 0)
       break;
-    used += static_cast<std::size_t>(n);
+    used += n;
   }
+}
+void set_fog_copy(bool copy) noexcept {
+  fog::state().copy.store(copy, std::memory_order_relaxed);
 }
 void set_light_all(bool all) noexcept {
   lights::state().all.store(all, std::memory_order_relaxed);
