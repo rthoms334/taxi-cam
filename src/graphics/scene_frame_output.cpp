@@ -78,6 +78,18 @@ bool SceneFrameOutput::set_tone_curve(float exposure, const std::uint32_t* table
 bool SceneFrameOutput::set_screen_scale(float scale) noexcept {
   return compositor_ && !prepared_ && !failed_ && compositor_->set_screen_scale(scale);
 }
+bool SceneFrameOutput::set_light_inputs(float main_exposure, float display_scale, float ambient) noexcept {
+  if (!compositor_ || prepared_ || failed_)
+    return false;
+  compositor_->set_light_inputs(main_exposure, display_scale, ambient);
+  return true;
+}
+bool SceneFrameOutput::reload_shader(const char* source, std::size_t size) noexcept {
+  return compositor_ && !prepared_ && !failed_ && SUCCEEDED(compositor_->reload_shader(source, size));
+}
+const char* SceneFrameOutput::compositor_error() const noexcept {
+  return compositor_ ? compositor_->last_error() : "";
+}
 bool SceneFrameOutput::tone_curve_active() const noexcept {
   return compositor_ && compositor_->tone_curve_active();
 }

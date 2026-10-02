@@ -47,6 +47,59 @@ constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s
 // A table is read at most once a second, only when a newer copy exists. An
 // exposure older than two seconds (no copies, the setting off, or the main
 // view not rendering) returns the camera images to Taxi Cam's exposure.
+// Development loop: a camera output shader at
+// %LOCALAPPDATA%\Taxi Cam\dev\compositor.hlsl replaces the built-in one,
+// checked once a second, so lighting changes show while the simulator runs.
+// The built-in source is written beside it as compositor.default.hlsl to copy.
+// No file, no change. Deleting the file keeps the last loaded shader.
+struct DevShader {
+  std::uint64_t next_ms = 0;
+  FILETIME written{};
+  std::uint64_t bytes = 0;
+  bool template_written = false;
+  void poll(std::uint64_t key, std::uint64_t now) {
+    if (now < next_ms)
+      return;
+    next_ms = now + 1000;
+    wchar_t base[32768]{};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
+    if (!n || n >= 32700)
+      return;
+    const std::wstring directory = std::wstring(base) + L"\\Taxi Cam\\dev";
+    if (!template_written && GetFileAttributesW(directory.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      template_written = true;
+      const auto path = directory + L"\\compositor.default.hlsl";
+      HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (file != INVALID_HANDLE_VALUE) {
+        const char* source = CameraCompositorD3D12::built_in_shader();
+        DWORD written_bytes = 0;
+        WriteFile(file, source, static_cast<DWORD>(std::strlen(source)), &written_bytes, nullptr);
+        CloseHandle(file);
+      }
+    }
+    const auto path = directory + L"\\compositor.hlsl";
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
+      return;
+    const std::uint64_t size = (std::uint64_t{data.nFileSizeHigh} << 32) | data.nFileSizeLow;
+    if (size == bytes && CompareFileTime(&data.ftLastWriteTime, &written) == 0)
+      return;
+    if (!size || size > (1u << 20))
+      return;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+      return;
+    std::string source(static_cast<std::size_t>(size), '\0');
+    DWORD read = 0;
+    const bool complete = ReadFile(file, source.data(), static_cast<DWORD>(size), &read, nullptr) && read == size;
+    CloseHandle(file);
+    if (!complete)
+      return;
+    bytes = size;
+    written = data.ftLastWriteTime;
+    scene_runtime::reload_shader(key, source);
+  }
+};
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
 struct ToneFeed {
@@ -55,6 +108,7 @@ struct ToneFeed {
   float exposure = 0;
   std::vector<std::uint32_t> table;
   bool table_sent = false;
+  float fresh_exposure(std::uint64_t now) const noexcept { return exposure_ms && now - exposure_ms <= 2000 ? exposure : 0.0f; }
   void update(std::uint64_t key, bool enabled, std::uint64_t now) {
     win::set_tone_capture_enabled(enabled);
     const auto status = win::tone_status();
@@ -985,10 +1039,13 @@ DWORD run_impl() {
     // scene light divided by the display's own full-code light, so the display
     // gives the scene light back and the main view exposes, tonemaps and blooms
     // it once. Camera texels hold scene light / 16.
-    const double display_light =
-        settings.camera_tone && light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
-    scene_runtime::set_screen_scale(key, display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f);
+    const double display_light = light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
+    const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
+    scene_runtime::set_screen_scale(key, settings.camera_tone && drawing->display_light_enabled ? display_scale : 0.0f);
     last_ambient = light.valid ? light.ambient : -1.0;
+    scene_runtime::set_light_inputs(key, tone.fresh_exposure(now), display_scale, static_cast<float>(last_ambient));
+    static DevShader dev_shader;
+    dev_shader.poll(key, now);
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1411,6 +1468,13 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
                     tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);
+      if (output.shader_reloads || output.shader_reload_failures) {
+        char shader_detail[400];
+        std::snprintf(shader_detail, sizeof(shader_detail), "Dev shader: reloads=%llu failures=%llu error=%.300s",
+                      static_cast<unsigned long long>(output.shader_reloads),
+                      static_cast<unsigned long long>(output.shader_reload_failures), output.shader_error.data());
+        log_status(status, shader_detail);
+      }
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
       char mount_detail[448];

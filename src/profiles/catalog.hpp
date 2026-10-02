@@ -111,8 +111,10 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
-  // Decoded camera-display brightness (Match main view lighting).
+  // Decoded camera-display brightness. Always given to the output shader as
+  // DisplayScale; it drives the camera image only when enabled.
   DisplayLight display_light{};
+  bool display_light_enabled = false;
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -348,9 +350,8 @@ inline constexpr auto make_pmdg_777 =
       // filter or glass; the lower EICASCDU uses 150 (0.8% brighter).
       // Not enabled: at night (screen_scale 0.717, 2026-10-02) the ND came out
       // brighter and flatter than the tone-curve path, so the night display
-      // light or an added surface light term differs from this model. Decoded
-      // values: {148.8235f, 200, 2000, 0.15f, 11.0f}.
-      p.display_light = {};
+      // light or an added surface light term differs from this model.
+      p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 =

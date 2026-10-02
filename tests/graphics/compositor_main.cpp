@@ -511,6 +511,12 @@ void bloom_case(ID3D12Device* device, Result& result) {
           "The bloom did not spread a light into its neighbourhood");
   readback->Unmap(0, nullptr);
   result.bloom_codes = {centre, close, mid, distant};
+  // Development reload: the built-in source compiles again; a broken one is
+  // refused and the working pipeline stays.
+  const char* built_in = Compositor::built_in_shader();
+  require(SUCCEEDED(compositor.reload_shader(built_in, std::strlen(built_in))) &&
+              FAILED(compositor.reload_shader("float4 ps_main() : SV_Target {", 30)) && std::strlen(compositor.last_error()) > 0,
+          "A development shader reload was not handled");
   compositor.release();
 }
 

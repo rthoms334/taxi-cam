@@ -130,6 +130,7 @@ class CameraCompositorD3D12 {
     return true;
   }
   void clear_tone_curve() noexcept { tone_exposure_ = 0; }
+  static const char* built_in_shader() noexcept { return Shader; }
   // Scene light for an aircraft display (ScreenShader notes): the camera's HDR
   // texels times `scale`, so that the display's own emissive conversion gives
   // back the camera's scene light and the simulator exposes and tonemaps it
@@ -144,6 +145,38 @@ class CameraCompositorD3D12 {
     return true;
   }
   float screen_scale() const noexcept { return screen_scale_; }
+  // Live lighting inputs for every pass of the output shader, whichever mode
+  // is selected: the simulator's main-view exposure (0: none), the decoded
+  // display's camera-texel-to-code scale (0: none) and A:AMBIENT LIGHT SENSOR.
+  void set_light_inputs(float main_exposure, float display_scale, float ambient) noexcept {
+    main_exposure_ = std::isfinite(main_exposure) && main_exposure > 0 ? main_exposure : 0;
+    display_scale_ = std::isfinite(display_scale) && display_scale > 0 ? display_scale : 0;
+    ambient_ = std::isfinite(ambient) ? ambient : -1;
+  }
+  // Development: replaces the output shader with `source` (same entry points,
+  // bindings and constants as Shader). The previous pipeline is retained
+  // until release, so recordings that still use it stay valid. A failed
+  // compile keeps the current pipeline; last_error() has the compiler text.
+  HRESULT reload_shader(const char* source, std::size_t size) noexcept {
+    if (!pipeline_.get() || !source || !size)
+      return fail(E_INVALIDARG, "A compiled compositor and shader source are required.");
+    if (retired_count_ == retired_pipelines_.size())
+      return fail(E_OUTOFMEMORY, "Too many shader reloads; restart the simulator to reload again.");
+    Reference<ID3DBlob> vertex;
+    Reference<ID3DBlob> pixel;
+    HRESULT status = compile("vs_main", "vs_5_0", vertex.put(), false, source, size);
+    if (FAILED(status) || FAILED(status = compile("ps_main", "ps_5_0", pixel.put(), false, source, size)))
+      return status;
+    auto pipeline = output_pipeline_description(vertex.get(), pixel.get());
+    ID3D12PipelineState* created = nullptr;
+    status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&created));
+    if (FAILED(status))
+      return fail(status, "Creating the reloaded compositor pipeline failed.");
+    retired_pipelines_[retired_count_++] = pipeline_.get();
+    *pipeline_.put() = created;
+    error_[0] = '\0';
+    return S_OK;
+  }
   bool tone_curve_active() const noexcept { return tone_exposure_ > 0 && (tone_ready_ || tone_pending_); }
 
   HRESULT initialize(ID3D12Device* device) noexcept {
@@ -374,6 +407,9 @@ class CameraCompositorD3D12 {
     srv_heap_.reset();
     rtv_heap_.reset();
     pipeline_.reset();
+    for (std::size_t index = 0; index < retired_count_; ++index)
+      retired_pipelines_[index]->Release();
+    retired_count_ = 0;
     root_signature_.reset();
     down_pipeline_.reset();
     up_pipeline_.reset();
@@ -405,6 +441,7 @@ class CameraCompositorD3D12 {
     srv_heap_.abandon();
     rtv_heap_.abandon();
     pipeline_.abandon();
+    retired_count_ = 0;
     root_signature_.abandon();
     down_pipeline_.abandon();
     up_pipeline_.abandon();
@@ -638,6 +675,7 @@ class CameraCompositorD3D12 {
   static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
   static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
   static constexpr UINT ToneBit = 256;
+  static constexpr UINT RootConstants = 38;
   static constexpr UINT ScreenBit = 512;
   HRESULT initialize_tone_curve() noexcept {
     D3D12_HEAP_PROPERTIES properties{};
@@ -703,9 +741,22 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-    } display{hdr, exposure, reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
-    static_assert(sizeof(display) == 34 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 34, &display, 0);
+      float main_exposure;
+      float display_scale;
+      float ambient;
+      float taxi_exposure;
+    } display{hdr,
+              exposure,
+              reference_guides_ ? 1u : 0u,
+              ground_speed_,
+              ground_speed_mode,
+              composition_,
+              static_cast<float>(11190.6 * 16 * 300e-4) * main_exposure_,
+              display_scale_,
+              ambient_,
+              std::exp2(exposure_ev_)};
+    static_assert(sizeof(display) == RootConstants * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, RootConstants, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -803,10 +854,15 @@ class CameraCompositorD3D12 {
     return status;
   }
 
-  HRESULT compile(const char* entry, const char* profile, ID3DBlob** bytecode, bool bloom = false) noexcept {
+  HRESULT compile(const char* entry,
+                  const char* profile,
+                  ID3DBlob** bytecode,
+                  bool bloom = false,
+                  const char* replacement = nullptr,
+                  std::size_t replacement_size = 0) noexcept {
     Reference<ID3DBlob> diagnostics;
-    const char* source = bloom ? BloomShader : Shader;
-    const std::size_t size = bloom ? sizeof(BloomShader) - 1 : sizeof(Shader) - 1;
+    const char* source = replacement ? replacement : bloom ? BloomShader : Shader;
+    const std::size_t size = replacement ? replacement_size : bloom ? sizeof(BloomShader) - 1 : sizeof(Shader) - 1;
     const HRESULT status = D3DCompile(source, size, bloom ? "camera_bloom" : "camera_compositor", nullptr, nullptr, entry, profile,
                                       D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
                                       bytecode, diagnostics.put());
@@ -834,7 +890,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 34;
+    parameters[1].Constants.Num32BitValues = RootConstants;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_DESCRIPTOR_RANGE tone_range{};
     tone_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -872,6 +928,14 @@ class CameraCompositorD3D12 {
     status = compile("ps_main", "ps_5_0", pixel.put());
     if (FAILED(status))
       return status;
+    auto pipeline = output_pipeline_description(vertex.get(), pixel.get());
+    status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(pipeline_.put()));
+    if (FAILED(status))
+      return fail(status, "Creating the compositor pipeline failed.");
+    return initialize_bloom_pipelines(pipeline);
+  }
+
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC output_pipeline_description(ID3DBlob* vertex, ID3DBlob* pixel) const noexcept {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline{};
     pipeline.pRootSignature = root_signature_.get();
     pipeline.VS = {vertex->GetBufferPointer(), vertex->GetBufferSize()};
@@ -896,10 +960,7 @@ class CameraCompositorD3D12 {
     pipeline.NumRenderTargets = 1;
     pipeline.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pipeline.SampleDesc.Count = 1;
-    status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(pipeline_.put()));
-    if (FAILED(status))
-      return fail(status, "Creating the compositor pipeline failed.");
-    return initialize_bloom_pipelines(pipeline);
+    return pipeline;
   }
 
   // Two single-SRV tables (t0 source, t1 previous level) and eight constants.
@@ -1030,7 +1091,11 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder;
+ // Live lighting inputs (set_light_inputs): the simulator's main-view exposure
+ // times its 11190.6 x 16 x 0.03 scale (0: none), the decoded display's scale
+ // (0: none), A:AMBIENT LIGHT SENSOR (-1: none) and Taxi Cam's exposure.
+ float MainExposure; float DisplayScale; float Ambient; float TaxiExposure; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -1361,6 +1426,11 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   unsigned char* tone_mapped_ = nullptr;
   float tone_exposure_ = 0;
   float screen_scale_ = 0;
+  float main_exposure_ = 0;
+  float display_scale_ = 0;
+  float ambient_ = -1;
+  std::array<ID3D12PipelineState*, 256> retired_pipelines_{};
+  std::size_t retired_count_ = 0;
   bool tone_pending_ = false;
   bool tone_ready_ = false;
   Reference<ID3D12DescriptorHeap> srv_heap_;
