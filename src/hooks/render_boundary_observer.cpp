@@ -372,8 +372,8 @@ void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
   std::uint64_t changes = 0;
   const auto identity = lookup(list, changes);
   hook_timing::forward(original, list, indices, instances, first_index, vertex_offset, first_instance);
-  if (indices && instances && identity.generation && callbacks.draw_indexed_repeats && enabled.load(std::memory_order_acquire) &&
-      !identity.invalid) {
+  // Repeating a draw needs no capture or pass proof: only a known recording.
+  if (indices && instances && identity.generation && callbacks.draw_indexed_repeats && enabled.load(std::memory_order_acquire)) {
     const UINT repeats = (std::min)(callbacks.draw_indexed_repeats(callbacks.context, list, identity.generation, indices, instances,
                                                                    first_index, vertex_offset, first_instance),
                                     63u);

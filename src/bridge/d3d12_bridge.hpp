@@ -186,12 +186,13 @@ CloudMergeStatus cloud_merge_status() noexcept;
 // Camera lights: per-feed energy factors for the simulator's light sprites in
 // the camera views (below 1.5: unchanged); whether the light pipeline is
 // learnt, confirmations of the current candidate, cloud-merge anchors seen,
-// and light draws repeated with their extra copies.
+// light-shaped draws seen at all and after one, and light draws repeated with their
+// extra copies.
 void set_light_factors(const std::array<float, 3>& factors) noexcept;
 struct LightStatus {
   bool learnt = false;
   unsigned confirmations = 0;
-  std::uint64_t anchors = 0, repeated_draws = 0, extra_draws = 0;
+  std::uint64_t anchors = 0, shaped = 0, sightings = 0, repeated_draws = 0, extra_draws = 0;
 };
 LightStatus light_status() noexcept;
 // Camera tone: copies of the main view's eye-adaptation exposure and 64^3

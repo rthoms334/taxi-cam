@@ -112,12 +112,12 @@ struct List : Metadata {
   // bridge-owned RTVs for the redirected cloud merge (cloud_merge.hpp).
   View cloud_scene{}, cloud_previous{};
   ID3D12DescriptorHeap* cloud_rtvs{};
-  // Camera lights: 1 after a camera cloud merge, 2 after the camera scene is
-  // bound again; the next pipeline is a light candidate (lights namespace).
-  // `pipeline` is the bound pipeline and `light_feed` the camera it draws for.
-  unsigned light_anchor = 0;
+  // Camera lights (lights namespace): the bound pipeline, the camera whose
+  // cloud merge this recording drew (-1: none), and whether the first
+  // light-shaped draw since that merge is still to come.
   ID3D12PipelineState* pipeline = nullptr;
-  ID3D12PipelineState* light_candidate = nullptr;
+  int light_feed = -1;
+  bool light_anchor = false;
   ~List() override {
     if (snapshot_rtvs)
       snapshot_rtvs->Release();
@@ -1254,17 +1254,18 @@ void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*
 //
 // The light pipeline is learnt, not created here: the simulator builds its
 // pipelines before the bridge attaches. In a camera recording the light pass
-// follows the cloud merge (cloud_merge.hpp): the camera scene is bound again,
-// the light pipeline is set, and its draws are single-instance indexed quads
-// from index 0 (index counts a multiple of 6). A pipeline that shows this
-// three times becomes the light pipeline; a different one starts again.
+// follows the cloud merge (cloud_merge.hpp), which also names the camera: the
+// first single-instance indexed-quad draw from index 0 after it (index count a
+// multiple of 6) is drawn with the light pipeline. A pipeline seen there three
+// times becomes the light pipeline; a different one starts again. Its draws in
+// a recording that had a camera cloud merge are that camera's light draws.
 namespace lights {
 struct State {
   std::array<std::atomic<float>, 3> factors{};
   std::atomic<ID3D12PipelineState*> pipeline{nullptr};
   std::atomic<ID3D12PipelineState*> candidate{nullptr};
   std::atomic<unsigned> confirmations{0};
-  std::atomic<std::uint64_t> anchors{0}, repeated_draws{0}, extra_draws{0};
+  std::atomic<std::uint64_t> anchors{0}, shaped{0}, sightings{0}, repeated_draws{0}, extra_draws{0};
 };
 State& state() noexcept {
   static State value;
@@ -1707,19 +1708,19 @@ UINT light_repeats(void*,
   if (!lights::light_draw(indices, instances, first_index, vertex_offset, first_instance))
     return 0;
   auto& s = lights::state();
+  s.shaped.fetch_add(1, std::memory_order_relaxed);
   const OwnedWork guard;
   std::shared_ptr<List> fallback;
   auto* l = metadata_list(native, id, fallback);
   if (!l || !l->pipeline)
     return 0;
-  if (l->light_candidate == l->pipeline) {
-    l->light_candidate = nullptr;
+  if (l->light_anchor) {
+    l->light_anchor = false;
+    s.sightings.fetch_add(1, std::memory_order_relaxed);
     lights::confirm(l->pipeline);
   }
-  if (l->pipeline != s.pipeline.load(std::memory_order_acquire) || !l->count || !l->targets[0].resource || !l->targets[0].resource->alive)
-    return 0;
-  const int feed = scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(l->targets[0].resource->native));
-  if (feed < 0 || feed >= 3)
+  const int feed = l->light_feed;
+  if (l->pipeline != s.pipeline.load(std::memory_order_acquire) || feed < 0 || feed >= 3)
     return 0;
   const float factor = s.factors[feed].load(std::memory_order_relaxed);
   if (!(factor >= 1.5f) || !(factor <= 64))
@@ -2874,9 +2875,9 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->pending_rt = {};
     item->cloud_scene = {};
     item->cloud_previous = {};
-    item->light_anchor = 0;
     item->pipeline = nullptr;
-    item->light_candidate = nullptr;
+    item->light_feed = -1;
+    item->light_anchor = false;
     item->raw_rtvs = {};
     item->raw_dsv = {};
     item->raw_rtv_count = 0;
@@ -2920,8 +2921,6 @@ struct Pipeline {
   static void apply(List& l, ID3D12PipelineState* p) {
     l.graphics.bind_pipeline(p);
     l.pipeline = p;
-    l.light_candidate = l.light_anchor == 2 ? p : nullptr;
-    l.light_anchor = 0;
   }
 };
 struct PipelineStateObject {
@@ -2938,9 +2937,8 @@ struct ClearState {
     l.pending_pfds = {};
     l.pending_rt = {};
     l.cloud_scene = {};
-    l.light_anchor = 0;
     l.pipeline = nullptr;
-    l.light_candidate = nullptr;
+    l.light_anchor = false;
     l.raw_rtvs = {};
     l.raw_dsv = {};
     l.raw_rtv_count = 0;
@@ -3162,11 +3160,8 @@ struct Targets {
     flush_pfd(l.native, l.id);
     record(l, count, handles, contiguous, depth, true);
     l.cloud_previous = std::exchange(l.cloud_scene, View{});
-    const bool camera_output = l.count && cloud_target(l.targets[0]).camera_output;
-    if (camera_output)
+    if (l.count && cloud_target(l.targets[0]).camera_output)
       l.cloud_scene = l.targets[0];
-    // Camera lights: the camera scene bound again after its cloud merge.
-    l.light_anchor = l.light_anchor == 1 && camera_output ? 2 : (l.light_anchor == 1 ? 1 : 0);
   }
   static void apply(List& l,
                     UINT count,
@@ -3199,7 +3194,8 @@ struct Targets {
     const cloud_merge::Target bound[3]{cloud_target(l.targets[0]), cloud_target(l.targets[1]), cloud_target(l.targets[2])};
     if (!cloud_merge::camera_merge_bind(cloud_target(previous), count, depth != nullptr, bound))
       return;
-    l.light_anchor = 1;
+    l.light_anchor = true;
+    l.light_feed = scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(previous.resource->native));
     lights::state().anchors.fetch_add(1, std::memory_order_relaxed);
     if (!r.cloud_merge_enabled.load(std::memory_order_relaxed))
       return;
@@ -3775,8 +3771,8 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept {
 LightStatus light_status() noexcept {
   auto& s = lights::state();
   return {s.pipeline.load(std::memory_order_relaxed) != nullptr, s.confirmations.load(std::memory_order_relaxed),
-          s.anchors.load(std::memory_order_relaxed), s.repeated_draws.load(std::memory_order_relaxed),
-          s.extra_draws.load(std::memory_order_relaxed)};
+          s.anchors.load(std::memory_order_relaxed), s.shaped.load(std::memory_order_relaxed), s.sightings.load(std::memory_order_relaxed),
+          s.repeated_draws.load(std::memory_order_relaxed), s.extra_draws.load(std::memory_order_relaxed)};
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();

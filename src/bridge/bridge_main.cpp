@@ -1507,8 +1507,10 @@ DWORD run_impl() {
         const auto light_status = win::light_status();
         char light_detail[320];
         std::snprintf(light_detail, sizeof(light_detail),
-                      "Camera lights: learnt=%d confirmations=%u anchors=%llu repeated_draws=%llu extra_draws=%llu factors=%.3g/%.3g/%.3g",
+                      "Camera lights: learnt=%d confirmations=%u anchors=%llu shaped=%llu sightings=%llu repeated_draws=%llu extra_draws=%llu "
+                      "factors=%.3g/%.3g/%.3g",
                       light_status.learnt ? 1 : 0, light_status.confirmations, static_cast<unsigned long long>(light_status.anchors),
+                      static_cast<unsigned long long>(light_status.shaped), static_cast<unsigned long long>(light_status.sightings),
                       static_cast<unsigned long long>(light_status.repeated_draws),
                       static_cast<unsigned long long>(light_status.extra_draws), static_cast<double>(last_light_factors[0]),
                       static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
