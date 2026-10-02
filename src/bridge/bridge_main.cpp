@@ -75,10 +75,6 @@ unsigned dev_feed_limit(std::uint64_t now) {
   return limit;
 }
 struct DevShader {
-  // dev\fog.txt: words `copy` (each camera fog result into its history),
-  // `clear` (camera integrated fog overwritten with clear air) and `reset`
-  // (each camera fog history set to clear air once).
-  bool fog_copy = false, fog_clear = false, fog_reset = false;
   std::uint64_t next_ms = 0;
   FILETIME written{};
   std::uint64_t bytes = 0;
@@ -101,19 +97,6 @@ struct DevShader {
         DWORD written_bytes = 0;
         WriteFile(file, source, static_cast<DWORD>(std::strlen(source)), &written_bytes, nullptr);
         CloseHandle(file);
-      }
-    }
-    {
-      const auto fog_path = directory + L"\\fog.txt";
-      fog_copy = fog_clear = fog_reset = false;
-      if (FILE* file = _wfopen(fog_path.c_str(), L"r")) {
-        char word[8]{};
-        while (std::fscanf(file, "%7s", word) == 1) {
-          fog_copy = fog_copy || std::strcmp(word, "copy") == 0;
-          fog_clear = fog_clear || std::strcmp(word, "clear") == 0;
-          fog_reset = fog_reset || std::strcmp(word, "reset") == 0;
-        }
-        std::fclose(file);
       }
     }
     const auto path = directory + L"\\compositor.hlsl";
@@ -1089,7 +1072,7 @@ DWORD run_impl() {
     scene_runtime::set_light_inputs(key, tone.fresh_exposure(now), display_scale, static_cast<float>(last_ambient));
     static DevShader dev_shader;
     dev_shader.poll(key, now);
-    win::set_fog_dev(dev_shader.fog_copy, dev_shader.fog_clear, dev_shader.fog_reset);
+    // Match main view lighting starts each camera's fog history at clear air.
     win::set_fog_history_reset(settings.camera_tone != 0);
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
@@ -1513,7 +1496,7 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
                     tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);
-      char fog_detail[1200] = "Camera fog: volumes=";
+      char fog_detail[1200] = "Camera fog: ";
       win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
       log_status(status, fog_detail);
       if (output.shader_reloads || output.shader_reload_failures) {

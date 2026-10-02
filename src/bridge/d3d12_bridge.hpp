@@ -183,14 +183,11 @@ struct CloudMergeStatus {
   std::uint64_t redirects = 0, refusals = 0;
 };
 CloudMergeStatus cloud_merge_status() noexcept;
-// Camera fog: the copy switch and copies made, then each froxel fog volume as
-// WxH@address g<creation group>.<index>:UAV exits (group 0: created before
-// the bridge attached).
+// Camera fog: whether the history reset is on and how many volumes it wrote,
+// then each froxel fog volume as WxH@address g<creation group>.<index>:UAV
+// exits (group 0: created before the bridge attached), integrated volumes with
+// T= transmittance samples.
 void fog_volumes(char* text, std::size_t size) noexcept;
-// Dev only: copy a camera view's fog result into its history partner,
-// overwrite camera views' integrated fog with clear air, and reset each camera
-// fog history once to clear air.
-void set_fog_dev(bool copy, bool clear, bool reset) noexcept;
 // Camera fog: write each camera view's fog history once with clear air, so it
 // starts where the main view sits instead of at opaque (Match main view lighting).
 void set_fog_history_reset(bool enabled) noexcept;
