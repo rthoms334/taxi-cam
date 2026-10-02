@@ -83,6 +83,8 @@ On **Display**, adjust brightness, automatic night exposure and ground-speed tex
 
 On **Reference guides**, **Marking colour** changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Save changes** to retain the colour for the selected aircraft profile.
 
+With **Display → Match main view lighting** on (the default), the camera views use the simulator's own exposure and tone curve, so they look like the main view by day and at night; turn it off to use the exposure and night boost controls instead.
+
 All aircraft start with **−8 EV** daytime exposure, **Auto exposure** enabled, **8 EV** maximum night boost and the same green ground-speed colour. This update's installer writes **−8** into existing `settings.ini` and known aircraft profile INIs once (`exposure_revision=1` on `settings.ini`); later changes you make are kept. This update also sets existing profiles' maximum night boost to **8** once, when each profile is first loaded. Other saved preferences are preserved, including the Auto exposure choice. Later changes to the night boost remain saved normally. GS displays whole knots by dropping the fractional part: 12.9 knots displays as 12.
 
 ### Identifying the PFDs

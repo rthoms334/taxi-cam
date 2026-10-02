@@ -78,6 +78,10 @@ struct Snapshot {
   std::uint32_t patch_requests = 0;
   std::uint64_t patch_draws = 0;
   float display_exposure_ev = -8.8f;
+  // The simulator's main-view exposure for the camera images (0: Taxi Cam's
+  // exposure), and whether the latest composition used its tone curve.
+  float tone_exposure = 0;
+  bool tone_active = false;
   float ground_speed_knots = 0;
   bool ground_speed_valid = false;
   // False skips the GS overlay entirely (PMDG 777: no readout, no black box).
@@ -98,6 +102,10 @@ bool prepare(std::uint64_t key);
 // Format-26 SDR display exposure only; finite EV is clamped to [-16, +4].
 // Applied to the next completed source pair without restarting the scene.
 bool set_display_exposure(std::uint64_t key, float ev);
+// The simulator's tone mapping for the next compositions: its main-view
+// exposure (0 returns to Taxi Cam's) and, when new, its 64^3 tone-curve table
+// (copied here; R10G10B10A2 texels, x fastest).
+bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* table);
 // A fresh public SimConnect sample; unavailable samples render GS --.
 void set_ground_speed(std::uint64_t key, float knots, bool valid);
 // Skip the GS overlay entirely (no glyphs, no black panel). Font fixtures

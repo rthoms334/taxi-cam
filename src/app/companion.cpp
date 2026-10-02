@@ -976,10 +976,11 @@ void build_controls() {
     button(L"Reset camera mounts", 359, 260, 594, 240);
     toggle(L"Camera weather", 236, s.camera_weather, 260, 644, 240);
   } else if (page == 2) {
-    edit(s.exposure, 201, 840, 210, 120);
-    toggle(L"Auto exposure", 222, s.automatic_exposure, 785, 318, 190);
-    edit(s.night_boost, 202, 840, 430, 120);
-    edit(s.camera_rate, 200, 840, 547, 120);
+    toggle(L"Match main view lighting", 237, s.camera_tone, 715, 130, 275);
+    edit(s.exposure, 201, 840, 251, 120);
+    toggle(L"Auto exposure", 222, s.automatic_exposure, 785, 344, 190);
+    edit(s.night_boost, 202, 840, 443, 120);
+    edit(s.camera_rate, 200, 840, 539, 120);
     button(L"Ground-speed colour", 231, 740, 630, 235);
     const auto* display_profile = profiles::find(s.profile);
     EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
@@ -1218,16 +1219,22 @@ void draw_page(HDC dc) {
          L"taxiing.",
          530, 646, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 2) {
-    const int ys[]{144, 267, 390, 510};
+    panel(dc, 244, 122, 766, 92);
+    text(dc, L"Main view lighting", 264, 130, 440, 29, heading);
+    text(dc,
+         L"Use the simulator's own exposure and tone curve for the camera images, so they look like the main view by day and at night. "
+         L"Turn off to use the exposure controls below.",
+         264, 168, 715, 41, small, Muted, DT_LEFT | DT_WORDBREAK);
+    const int ys[]{222, 318, 414, 510};
     const wchar_t* names[]{L"Daytime exposure", L"Automatic night exposure", L"Maximum night boost", L"Camera frame rate"};
     const wchar_t* descriptions[]{L"Exposure compensation in EV. Your calibrated baseline is −8.8.",
                                   L"Gradually brighten the camera display as ambient light drops.",
                                   L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
                                   L"Per camera, 5–60; default 10. Parked aircraft refresh twice a second; higher rates are capped."};
     for (int i = 0; i < 4; ++i) {
-      panel(dc, 244, ys[i], 766, 105);
-      text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);
-      text(dc, descriptions[i], 264, ys[i] + 49, 525, 41, small, Muted, DT_LEFT | DT_WORDBREAK);
+      panel(dc, 244, ys[i], 766, 88);
+      text(dc, names[i], 264, ys[i] + 8, 515, 29, heading);
+      text(dc, descriptions[i], 264, ys[i] + 40, 525, 41, small, Muted, DT_LEFT | DT_WORDBREAK);
     }
     wchar_t value[96];
     std::swprintf(value, 96, L"Currently applied exposure: %.2f EV", sample.exposure);
@@ -1688,6 +1695,8 @@ bool is_on(int id, const win::Settings& s) {
       return s.dynamic_tail;
     case 236:
       return s.camera_weather;
+    case 237:
+      return s.camera_tone;
     case 229:
       return s.scene_test;
     default:
@@ -2056,7 +2065,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_connection();
         return 0;
       }
-      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235 || id == 236) {
+      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235 || id == 236 || id == 237) {
         if (!apply(false))
           return 0;
         auto s = draft();
@@ -2093,6 +2102,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           s.dynamic_tail = !s.dynamic_tail;
         if (id == 236)
           s.camera_weather = !s.camera_weather;
+        if (id == 237)
+          s.camera_tone = !s.camera_tone;
         if (id == 229)
           s.scene_test = !s.scene_test;
         publish(s);

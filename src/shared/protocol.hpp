@@ -18,7 +18,8 @@ namespace taxi_camera::standalone {
 // Protocol 17: the 60-knot cutoff is gone: Status drops speed_inhibited and the
 // notification log drops the speed_cutoff event.
 // Protocol 18: Settings camera_weather (clouds and overcast light in the camera views).
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 18;
+// Protocol 19: Settings camera_tone (camera views use the main view's exposure and tone curve).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 19;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -59,6 +60,12 @@ struct Settings {
   // so the camera views show the current clouds and overcast light. 0 keeps
   // the 1000 m taxi distance and the clear sky. Saved per aircraft profile.
   std::uint32_t camera_weather = 1;
+  // Protocol 19: 1 gives the camera views the simulator's own main-view
+  // exposure (eye adaptation) and tone curve, so they look like the main view
+  // by day and at night; Exposure and night boost then do not apply to the
+  // camera image. 0 keeps Taxi Cam's exposure control and night boost. Saved
+  // per aircraft profile.
+  std::uint32_t camera_tone = 1;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -112,7 +119,8 @@ inline bool valid_settings(const Settings& s) noexcept {
         return false;
   const auto* profile = profiles::find(s.profile);
   if (s.auto_profile > 1 || s.notifications > 1 || !profile || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
-      s.scene_test > 1 || s.dynamic_tail > 1 || s.camera_weather > 1 || s.calibration_budget < 64 || s.calibration_budget > 16384)
+      s.scene_test > 1 || s.dynamic_tail > 1 || s.camera_weather > 1 || s.camera_tone > 1 || s.calibration_budget < 64 ||
+      s.calibration_budget > 16384)
     return false;
   const auto sides = profiles::side_mask(*profile);
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))

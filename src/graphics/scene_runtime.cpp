@@ -1,12 +1,14 @@
 #include "scene_runtime.hpp"
 #include "../bridge/native_hooks.hpp"
 #include "../hooks/render_boundary_observer.hpp"
+#include "camera_compositor_d3d12.hpp"
 #include "scene_frame_output.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <mutex>
+#include <vector>
 
 namespace taxi_camera::scene_runtime {
 namespace {
@@ -37,6 +39,9 @@ struct Device {
   profiles::Composition composition{};
   Snapshot status;
   std::uint32_t patch_profile = 1;
+  // Latest simulator tone-curve table, until the composition accepts it.
+  std::vector<std::uint32_t> tone_table;
+  bool tone_table_pending = false;
 };
 struct Runtime {
   std::mutex mutex;
@@ -496,6 +501,20 @@ bool set_display_exposure(std::uint64_t key, float ev) {
   item->status.display_exposure_ev = std::clamp(ev, -16.0f, 4.0f);
   return true;
 }
+bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* table) {
+  if (!std::isfinite(exposure) || exposure < 0)
+    return false;
+  const std::lock_guard lock(runtime().mutex);
+  auto* item = find(key);
+  if (!item || item->status.failed)
+    return false;
+  item->status.tone_exposure = exposure;
+  if (table) {
+    item->tone_table.assign(table, table + CameraCompositorD3D12::ToneTableTexels);
+    item->tone_table_pending = true;
+  }
+  return true;
+}
 void set_ground_speed(std::uint64_t key, float knots, bool valid) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
@@ -642,6 +661,11 @@ void service() {
     const bool speed_ready = item.status.ground_speed_overlay
                                  ? item.output.set_ground_speed(item.status.ground_speed_knots, item.status.ground_speed_valid)
                                  : item.output.hide_ground_speed();
+    // A refused table (composition still executing) is offered again next time.
+    if (item.output.set_tone_curve(item.status.tone_exposure, item.tone_table_pending ? item.tone_table.data() : nullptr) &&
+        item.status.tone_exposure > 0)
+      item.tone_table_pending = false;
+    item.status.tone_active = item.output.tone_curve_active();
     if (!item.output.set_display_exposure(item.status.display_exposure_ev) || !speed_ready ||
         !item.output.prepare(first.resource, scene_format(first.resource), second.resource, scene_format(second.resource), right,
                              scene_format(right))) {

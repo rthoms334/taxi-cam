@@ -132,6 +132,14 @@ struct Callbacks {
   // including buffer/global-only, empty and malformed calls. No resource model
   // is implied; consumers without a complete enhanced model must invalidate.
   void (*enhanced_call)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
+  // Optional. Same delivery rules and injection contract as before_legacy, for
+  // a non-split transition from UNORDERED_ACCESS instead of RENDER_TARGET
+  // (batches of at most 256 barriers only). Injection must restore the
+  // identical UNORDERED_ACCESS state before returning.
+  void (*before_legacy_uav)(void*,
+                            ID3D12GraphicsCommandList*,
+                            std::uint64_t object_generation,
+                            const D3D12_RESOURCE_TRANSITION_BARRIER&) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;

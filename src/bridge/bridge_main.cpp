@@ -6,6 +6,7 @@
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
 #include "../camera/view_clip.hpp"
+#include "../graphics/camera_compositor_d3d12.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
@@ -41,6 +42,40 @@ std::atomic<bool> notifications_enabled{};
 // status line and the log.
 SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
+// Match main view lighting: hands the simulator's main-view exposure and
+// tone-curve table, as the graphics hooks copied them, to the composition.
+// A table is read at most once a second, only when a newer copy exists. An
+// exposure older than two seconds (no copies, the setting off, or the main
+// view not rendering) returns the camera images to Taxi Cam's exposure.
+struct ToneFeed {
+  std::uint64_t exposure_copies = 0, table_copies = 0;
+  std::uint64_t exposure_ms = 0, table_ms = 0;
+  float exposure = 0;
+  std::vector<std::uint32_t> table;
+  bool table_sent = false;
+  void update(std::uint64_t key, bool enabled, std::uint64_t now) {
+    win::set_tone_capture_enabled(enabled);
+    const auto status = win::tone_status();
+    if (status.exposure_copies != exposure_copies && status.exposure_valid) {
+      exposure_copies = status.exposure_copies;
+      exposure = status.exposure;
+      exposure_ms = now;
+    }
+    const bool fresh = enabled && exposure_ms && now - exposure_ms <= 2000;
+    const std::uint32_t* offered = nullptr;
+    if (fresh && status.table_copies != table_copies && now - table_ms >= 1000) {
+      table.resize(CameraCompositorD3D12::ToneTableTexels);
+      if (win::read_tone_table(table.data())) {
+        table_copies = status.table_copies;
+        table_ms = now;
+        table_sent = true;
+        offered = table.data();
+      }
+    }
+    // The curve needs a table: until one is read, the exposure is not sent.
+    scene_runtime::set_tone_curve(key, fresh && table_sent ? exposure : 0.0f, offered);
+  }
+};
 void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
   if (!notifications_enabled.load(std::memory_order_acquire) || !admit_toast(limiter, event, now))
     return;
@@ -942,6 +977,8 @@ DWORD run_impl() {
     const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
                                          light.ambient, light.sample_ms);
     scene_runtime::set_display_exposure(key, display.applied_ev);
+    static ToneFeed tone;
+    tone.update(key, settings.camera_tone != 0, now);
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1352,6 +1389,17 @@ DWORD run_impl() {
                     clouds.enabled ? 1 : 0, static_cast<unsigned long long>(clouds.redirects),
                     static_cast<unsigned long long>(clouds.refusals));
       log_status(status, weather_detail);
+      // Match main view lighting: the simulator exposure in use (0: Taxi Cam's
+      // exposure), copies of its exposure and table, and resource changes.
+      const auto tone_copies = win::tone_status();
+      char tone_detail[256];
+      std::snprintf(tone_detail, sizeof(tone_detail),
+                    "Camera tone: enabled=%d active=%d exposure=%.6g exposure_copies=%llu table_copies=%llu source_changes=%llu "
+                    "readback_failed=%d",
+                    settings.camera_tone ? 1 : 0, output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure),
+                    static_cast<unsigned long long>(tone_copies.exposure_copies), static_cast<unsigned long long>(tone_copies.table_copies),
+                    static_cast<unsigned long long>(tone_copies.source_changes), tone_copies.readback_failed ? 1 : 0);
+      log_status(status, tone_detail);
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
       char mount_detail[448];

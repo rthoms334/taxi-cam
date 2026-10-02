@@ -36,8 +36,9 @@ namespace taxi_camera {
 // nothing; it restores both input mip-zero states and leaves output COPY_SOURCE.
 // RGB is sampled as declared by the typed SRV (sRGB views decode to linear).
 // R11G11B10_FLOAT feeds receive the simulator's own bloom (see BloomShader),
-// then exposure, per-channel Reinhard compression and sRGB encoding for this
-// SDR display. Other formats retain their sampled RGB.
+// then either the simulator's own exposure and tone curve (set_tone_curve) or
+// Taxi Cam's exposure with per-channel Reinhard compression, and sRGB encoding
+// for this SDR display. Other formats retain their sampled RGB.
 // This explicit display conversion is not simulator exposure/color calibration.
 // Each feed stretches over its full region. Output alpha is a per-pixel encoding
 // flag for the PFD stamp, not coverage: 1 marks camera pixels (display-referred
@@ -105,6 +106,31 @@ class CameraCompositorD3D12 {
     exposure_ev_ = std::clamp(ev, MinimumExposureEv, MaximumExposureEv);
     return true;
   }
+  // The simulator's main-view tone mapping for HDR feeds (ToneShader notes):
+  // its eye-adaptation exposure (the 1 x 1 ph_lumadaptation value) and its
+  // 64^3 tone-curve table (R10G10B10A2 texels, x fastest, then y, then z).
+  // A null table keeps the last one; the curve applies once a table exists.
+  // Exposure is a recorded root constant. A table is copied into the upload
+  // buffer at once, so like set_inputs it requires that no recording made by
+  // this compositor is still executing. Non-finite or non-positive exposure
+  // is refused and the Taxi Cam exposure applies until clear or a valid call.
+  static constexpr UINT ToneTexels = 64;
+  static constexpr std::size_t ToneTableTexels = std::size_t{ToneTexels} * ToneTexels * ToneTexels;
+  bool set_tone_curve(float exposure, const std::uint32_t* table) noexcept {
+    if (!std::isfinite(exposure) || exposure <= 0 || exposure > 1e6f || !tone_mapped_) {
+      tone_exposure_ = 0;
+      return false;
+    }
+    tone_exposure_ = exposure;
+    if (table) {
+      for (UINT slice = 0; slice < ToneTexels * ToneTexels; ++slice)
+        std::memcpy(tone_mapped_ + std::size_t{slice} * ToneRowPitch, table + std::size_t{slice} * ToneTexels, ToneTexels * 4);
+      tone_pending_ = true;
+    }
+    return true;
+  }
+  void clear_tone_curve() noexcept { tone_exposure_ = 0; }
+  bool tone_curve_active() const noexcept { return tone_exposure_ > 0 && (tone_ready_ || tone_pending_); }
 
   HRESULT initialize(ID3D12Device* device) noexcept {
     if (!device)
@@ -151,6 +177,9 @@ class CameraCompositorD3D12 {
     rtv_ = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
     device->CreateRenderTargetView(output_.get(), nullptr, rtv_);
     ++statistics_.descriptor_writes;
+    status = initialize_tone_curve();
+    if (FAILED(status))
+      return initialization_failed(status, "Creating the tone-curve table failed.");
     error_[0] = '\0';
     return S_OK;
   }
@@ -258,6 +287,21 @@ class CameraCompositorD3D12 {
         record_bloom(private_list, index);
       hdr |= 16u << index;
     }
+    if (tone_pending_) {
+      transition(private_list, tone_table_.get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+      D3D12_TEXTURE_COPY_LOCATION destination{}, source{};
+      destination.pResource = tone_table_.get();
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      source.pResource = tone_upload_.get();
+      source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      source.PlacedFootprint.Footprint = {ToneFormat, ToneTexels, ToneTexels, ToneTexels, ToneRowPitch};
+      private_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      transition(private_list, tone_table_.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      tone_pending_ = false;
+      tone_ready_ = true;
+    }
+    if (tone_exposure_ > 0 && tone_ready_)
+      hdr |= ToneBit;
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     draw_output(private_list, hdr, ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u));
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -318,6 +362,13 @@ class CameraCompositorD3D12 {
     down_pipeline_.reset();
     up_pipeline_.reset();
     bloom_signature_.reset();
+    if (tone_mapped_ && tone_upload_.get())
+      tone_upload_->Unmap(0, nullptr);
+    tone_mapped_ = nullptr;
+    tone_upload_.reset();
+    tone_table_.reset();
+    tone_exposure_ = 0;
+    tone_pending_ = tone_ready_ = false;
     device_.reset();
     formats_ = {};
     input_descriptions_ = {};
@@ -342,6 +393,9 @@ class CameraCompositorD3D12 {
     down_pipeline_.abandon();
     up_pipeline_.abandon();
     bloom_signature_.abandon();
+    tone_mapped_ = nullptr;
+    tone_upload_.abandon();
+    tone_table_.abandon();
     device_.abandon();
   }
 
@@ -401,7 +455,8 @@ class CameraCompositorD3D12 {
   // MaxLevels scene-mip and MaxLevels bloom-mip views. RTVs: the output, then
   // the same per-feed mip layout.
   static constexpr UINT MaxLevels = 14;
-  static constexpr UINT SrvCount = 6 + 3 * 2 * MaxLevels;
+  static constexpr UINT ToneSlot = 6 + 3 * 2 * MaxLevels;
+  static constexpr UINT SrvCount = ToneSlot + 1;
   static constexpr UINT RtvCount = 1 + 3 * 2 * MaxLevels;
   static constexpr DXGI_FORMAT BloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
   static constexpr UINT pyramid_slot(std::size_t feed, bool bloom, UINT level) noexcept {
@@ -564,6 +619,51 @@ class CameraCompositorD3D12 {
     }
   }
 
+  static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+  static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
+  static constexpr UINT ToneBit = 256;
+  HRESULT initialize_tone_curve() noexcept {
+    D3D12_HEAP_PROPERTIES properties{};
+    properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    texture.Width = texture.Height = ToneTexels;
+    texture.DepthOrArraySize = ToneTexels;
+    texture.MipLevels = 1;
+    texture.Format = ToneFormat;
+    texture.SampleDesc.Count = 1;
+    texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    HRESULT status = device_->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &texture,
+                                                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(tone_table_.put()));
+    if (FAILED(status))
+      return status;
+    properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = UINT64{ToneRowPitch} * ToneTexels * ToneTexels;
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    status = device_->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                              IID_PPV_ARGS(tone_upload_.put()));
+    if (FAILED(status))
+      return status;
+    const D3D12_RANGE none{0, 0};
+    void* mapped = nullptr;
+    status = tone_upload_->Map(0, &none, &mapped);
+    if (FAILED(status))
+      return status;
+    tone_mapped_ = static_cast<unsigned char*>(mapped);
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = ToneFormat;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.Texture3D.MipLevels = 1;
+    device_->CreateShaderResourceView(tone_table_.get(), &view, srv_cpu(ToneSlot));
+    return S_OK;
+  }
+
   // Ground-speed modes in the shader constants: 0 unavailable, 1 valid,
   // 2 hidden, and 3 the waiting page.
   static constexpr UINT WaitingPageMode = 3;
@@ -573,6 +673,10 @@ class CameraCompositorD3D12 {
     ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
     private_list->SetDescriptorHeaps(1, heaps);
     private_list->SetGraphicsRootDescriptorTable(0, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    private_list->SetGraphicsRootDescriptorTable(2, srv_gpu(ToneSlot));
+    // The simulator's exposure chain: scene units (16 x texel), its adapted
+    // exposure, and its fixed 11190.6 and 300/10^4 scales (ToneShader notes).
+    const float exposure = (hdr & ToneBit) ? static_cast<float>(11190.6 * 16 * 300e-4) * tone_exposure_ : std::exp2(exposure_ev_);
     const struct {
       UINT hdr_mask;
       float exposure;
@@ -580,7 +684,7 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-    } display{hdr, std::exp2(exposure_ev_), reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
+    } display{hdr, exposure, reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
     static_assert(sizeof(display) == 34 * sizeof(UINT));
     private_list->SetGraphicsRoot32BitConstants(1, 34, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -705,7 +809,7 @@ class CameraCompositorD3D12 {
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     range.NumDescriptors = 6;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-    std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
+    std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[0].DescriptorTable.NumDescriptorRanges = 1;
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
@@ -713,6 +817,14 @@ class CameraCompositorD3D12 {
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[1].Constants.Num32BitValues = 34;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_DESCRIPTOR_RANGE tone_range{};
+    tone_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    tone_range.NumDescriptors = 1;
+    tone_range.BaseShaderRegister = 6;
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[2].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[2].DescriptorTable.pDescriptorRanges = &tone_range;
+    parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -890,6 +1002,7 @@ Texture2D<float4> TailRight : register(t2);
 Texture2D<float4> NoseBloom : register(t3);
 Texture2D<float4> TailLeftBloom : register(t4);
 Texture2D<float4> TailRightBloom : register(t5);
+Texture3D<float4> ToneCurve : register(t6);
 SamplerState LinearClamp : register(s0);
 cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGuides; uint GroundSpeed; uint GroundSpeedValid;
  float NoseHeight; float TailTop; float DividerTop; float DividerBottom;
@@ -1061,8 +1174,25 @@ float hdr_channel(float value) {
   float mapped = exposed / (1 + exposed);
   return mapped <= 0.0031308 ? 12.92 * mapped : 1.055 * pow(max(mapped, 0), 1.0 / 2.4) - 0.055;
 }
+float srgb_code(float value) {
+  return value <= 0.0031308 ? 12.92 * value : 1.055 * pow(max(value, 0), 1.0 / 2.4) - 0.055;
+}
+// ToneShader notes. The simulator's tonemapper (1.8.16.0, PIX 2026-10-02):
+// x = scene light x adapted exposure (Exposure holds 11190.6 x 16 x E x 0.03),
+// its 64^3 table read at log2(1 + x) / 13.4501 (texel centres), decoded back
+// to display light, a C1 shoulder from 0.22, then sRGB. Its +-0.5/255 dither
+// is not reproduced. Non-finite channels keep the Reinhard path's handling.
+float3 simulator_rgb(float3 rgb) {
+  float3 x = max(rgb, 0) * Exposure;
+  float3 u = log2(1 + x) / 13.4501 * (63.0 / 64) + 0.5 / 64;
+  float3 y = (exp2(ToneCurve.SampleLevel(LinearClamp, u, 0).rgb * 13.4501) - 1) / 11190.6 * (1e4 / 300);
+  y = y < 0.22 ? y : 0.22 + 0.78 * (1 - exp2(-1.84961 * (y - 0.22)));
+  y = saturate(y);
+  return float3(srgb_code(y.r), srgb_code(y.g), srgb_code(y.b));
+}
 float3 display_rgb(float3 rgb, uint feed) {
   if ((HdrMask & (1u << feed)) == 0) return rgb;
+  if ((HdrMask & 256u) != 0 && all(isfinite(rgb))) return simulator_rgb(rgb);
   return float3(hdr_channel(rgb.r), hdr_channel(rgb.g), hdr_channel(rgb.b));
 }
 // The simulator's tonemapper mixes 10% of its bloom into the HDR image before
@@ -1191,6 +1321,12 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   Reference<ID3D12PipelineState> down_pipeline_;
   Reference<ID3D12PipelineState> up_pipeline_;
   std::array<Pyramid, 3> pyramids_;
+  Reference<ID3D12Resource> tone_table_;
+  Reference<ID3D12Resource> tone_upload_;
+  unsigned char* tone_mapped_ = nullptr;
+  float tone_exposure_ = 0;
+  bool tone_pending_ = false;
+  bool tone_ready_ = false;
   Reference<ID3D12DescriptorHeap> srv_heap_;
   Reference<ID3D12DescriptorHeap> rtv_heap_;
   Reference<ID3D12Resource> output_;

@@ -2,6 +2,7 @@
 #include <dxgi1_6.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -1237,12 +1238,155 @@ List* metadata_list(ID3D12GraphicsCommandList* native, std::uint64_t id, std::sh
 }
 void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = true) noexcept;
 void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
+// Camera tone: the main view's eye-adaptation exposure and tone-curve table
+// (1.8.16.0, PIX 2026-10-02). ph_lumadaptation writes the exposure into a
+// 1 x 1 R32G32_FLOAT render target; the simulator moves it out of
+// RENDER_TARGET every frame. Its tone-curve table is a 64^3 R10G10B10A2 UAV
+// texture regenerated every frame and moved out of UNORDERED_ACCESS. Each is
+// the only texture of its description in the captures. At those exits the
+// bridge copies them, in the simulator's own recording and with the state
+// restored exactly, into one process-lifetime readback buffer the control
+// loop reads. Each exit re-reads the live resource's description, so another
+// texture at a reused address is never copied.
+namespace tone {
+constexpr UINT64 TableOffset = 512;
+constexpr UINT TableTexels = 64;
+constexpr UINT RowPitch = 256;
+constexpr UINT64 TableBytes = UINT64{RowPitch} * TableTexels * TableTexels;
+constexpr ULONGLONG TableIntervalMs = 500;
+struct Source {
+  std::atomic<bool> enabled{false};
+  std::atomic<ID3D12Resource*> readback{};
+  std::atomic<bool> failed{false};
+  std::mutex creation;
+  std::atomic<ID3D12Resource*> exposure_source{}, table_source{};
+  std::atomic<std::uint64_t> exposure_copies{}, table_copies{}, source_changes{};
+  std::atomic<ULONGLONG> table_ms{};
+};
+Source& source() noexcept {
+  static Source value;
+  return value;
+}
+D3D12_RESOURCE_DESC description(ID3D12Resource* resource) noexcept {
+  D3D12_RESOURCE_DESC desc{};
+#if defined(__MINGW32__)
+  resource->GetDesc(&desc);
+#else
+  desc = resource->GetDesc();
+#endif
+  return desc;
+}
+bool exposure_shape(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Width == 1 && d.Height == 1 && d.DepthOrArraySize == 1 &&
+         d.MipLevels == 1 && d.Format == DXGI_FORMAT_R32G32_FLOAT && d.SampleDesc.Count == 1 &&
+         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+}
+bool table_shape(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && d.Width == TableTexels && d.Height == TableTexels &&
+         d.DepthOrArraySize == TableTexels && d.MipLevels == 1 && d.Format == DXGI_FORMAT_R10G10B10A2_UNORM && d.SampleDesc.Count == 1 &&
+         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
+}
+// Called inside the owned-work guard. Creation never blocks a recording thread.
+ID3D12Resource* readback() noexcept {
+  auto& s = source();
+  if (auto* existing = s.readback.load(std::memory_order_acquire))
+    return existing;
+  if (s.failed.load(std::memory_order_relaxed))
+    return nullptr;
+  const std::unique_lock lock(s.creation, std::try_to_lock);
+  if (!lock.owns_lock())
+    return nullptr;
+  if (auto* existing = s.readback.load(std::memory_order_acquire))
+    return existing;
+  auto* device = registry().device;
+  if (!device)
+    return nullptr;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = TableOffset + TableBytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* created = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&created)))) {
+    s.failed.store(true, std::memory_order_relaxed);
+    return nullptr;
+  }
+  // Retained for the process: recorded copies may still be executing.
+  s.readback.store(created, std::memory_order_release);
+  return created;
+}
+void copy(ID3D12GraphicsCommandList* list,
+          ID3D12Resource* resource,
+          D3D12_RESOURCE_STATES state,
+          ID3D12Resource* destination,
+          UINT64 offset,
+          const D3D12_SUBRESOURCE_FOOTPRINT& footprint) noexcept {
+  D3D12_RESOURCE_BARRIER barrier{};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition = {resource, 0, state, D3D12_RESOURCE_STATE_COPY_SOURCE};
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
+  target.pResource = destination;
+  target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  target.PlacedFootprint = {offset, footprint};
+  origin.pResource = resource;
+  origin.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  list->CopyTextureRegion(&target, 0, 0, 0, &origin, nullptr);
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barrier.Transition.StateAfter = state;
+  list->ResourceBarrier(1, &barrier);
+}
+void note_source(std::atomic<ID3D12Resource*>& slot, ID3D12Resource* resource) noexcept {
+  if (slot.exchange(resource, std::memory_order_relaxed) != resource)
+    source().source_changes.fetch_add(1, std::memory_order_relaxed);
+}
+// Before the simulator's own RENDER_TARGET exit (boundary before_legacy rules).
+void exposure_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  auto& s = source();
+  if (!s.enabled.load(std::memory_order_relaxed) || !exposure_shape(description(b.pResource)))
+    return;
+  auto* destination = readback();
+  if (!destination)
+    return;
+  note_source(s.exposure_source, b.pResource);
+  copy(list, b.pResource, D3D12_RESOURCE_STATE_RENDER_TARGET, destination, 0, {DXGI_FORMAT_R32G32_FLOAT, 1, 1, 1, RowPitch});
+  s.exposure_copies.fetch_add(1, std::memory_order_relaxed);
+}
+// Before the simulator's own UNORDERED_ACCESS exit, at most twice a second.
+void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  auto& s = source();
+  const auto now = GetTickCount64();
+  if (!s.enabled.load(std::memory_order_relaxed) || now - s.table_ms.load(std::memory_order_relaxed) < TableIntervalMs ||
+      !table_shape(description(b.pResource)))
+    return;
+  auto* destination = readback();
+  if (!destination)
+    return;
+  s.table_ms.store(now, std::memory_order_relaxed);
+  note_source(s.table_source, b.pResource);
+  copy(list, b.pResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, destination, TableOffset,
+       {DXGI_FORMAT_R10G10B10A2_UNORM, TableTexels, TableTexels, TableTexels, RowPitch});
+  s.table_copies.fetch_add(1, std::memory_order_relaxed);
+}
+}  // namespace tone
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   if (idle_callback())
     return;
   const OwnedWork guard;
+  tone::exposure_exit(list, b);
   copy_pending_pfd(list, id, b.pResource);
   runtime::manager().record_render_target_before_transition(list, b.pResource, true, id);
+}
+void before_legacy_uav(void*, ID3D12GraphicsCommandList* list, std::uint64_t, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  if (idle_callback())
+    return;
+  const OwnedWork guard;
+  tone::table_exit(list, b);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
   if (idle_callback())
@@ -1927,7 +2071,8 @@ const boundary::Callbacks Boundaries{nullptr,
                                      metadata_begin,
                                      metadata_end,
                                      submission_pass_began,
-                                     submission_enhanced};
+                                     submission_enhanced,
+                                     before_legacy_uav};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -3473,6 +3618,50 @@ void set_graphics_diagnostics_enabled(bool enabled) noexcept {
 }
 void set_cloud_merge_enabled(bool enabled) noexcept {
   registry().cloud_merge_enabled.store(enabled, std::memory_order_relaxed);
+}
+void set_tone_capture_enabled(bool enabled) noexcept {
+  tone::source().enabled.store(enabled, std::memory_order_relaxed);
+}
+ToneStatus tone_status() noexcept {
+  auto& s = tone::source();
+  ToneStatus status;
+  status.enabled = s.enabled.load(std::memory_order_relaxed);
+  status.readback_failed = s.failed.load(std::memory_order_relaxed);
+  status.exposure_copies = s.exposure_copies.load(std::memory_order_relaxed);
+  status.table_copies = s.table_copies.load(std::memory_order_relaxed);
+  status.source_changes = s.source_changes.load(std::memory_order_relaxed);
+  auto* buffer = s.readback.load(std::memory_order_acquire);
+  if (!buffer || !status.exposure_copies)
+    return status;
+  // A copy may land while this reads: the next read sees the newer value.
+  const D3D12_RANGE range{0, 8};
+  void* mapped = nullptr;
+  if (FAILED(buffer->Map(0, &range, &mapped)) || !mapped)
+    return status;
+  float exposure[2]{};
+  std::memcpy(exposure, mapped, sizeof(exposure));
+  const D3D12_RANGE none{0, 0};
+  buffer->Unmap(0, &none);
+  status.exposure = exposure[0];
+  status.exposure_valid = std::isfinite(exposure[0]) && exposure[0] > 0;
+  return status;
+}
+bool read_tone_table(std::uint32_t* table) noexcept {
+  auto& s = tone::source();
+  auto* buffer = s.readback.load(std::memory_order_acquire);
+  if (!table || !buffer || !s.table_copies.load(std::memory_order_relaxed))
+    return false;
+  const D3D12_RANGE range{static_cast<SIZE_T>(tone::TableOffset), static_cast<SIZE_T>(tone::TableOffset + tone::TableBytes)};
+  void* mapped = nullptr;
+  if (FAILED(buffer->Map(0, &range, &mapped)) || !mapped)
+    return false;
+  const auto* source = static_cast<const unsigned char*>(mapped) + tone::TableOffset;
+  // Two equal reads: a copy landing in between cannot leave a mixed table.
+  std::memcpy(table, source, tone::TableBytes);
+  const bool stable = std::memcmp(table, source, tone::TableBytes) == 0;
+  const D3D12_RANGE none{0, 0};
+  buffer->Unmap(0, &none);
+  return stable;
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();

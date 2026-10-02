@@ -183,6 +183,19 @@ struct CloudMergeStatus {
   std::uint64_t redirects = 0, refusals = 0;
 };
 CloudMergeStatus cloud_merge_status() noexcept;
+// Camera tone: copies of the main view's eye-adaptation exposure and 64^3
+// tone-curve table, made at the simulator's own state exits while enabled.
+// Counts are cumulative for the bridge lifetime.
+void set_tone_capture_enabled(bool enabled) noexcept;
+struct ToneStatus {
+  bool enabled = false, readback_failed = false, exposure_valid = false;
+  float exposure = 0;
+  std::uint64_t exposure_copies = 0, table_copies = 0, source_changes = 0;
+};
+ToneStatus tone_status() noexcept;
+// The latest copied table, 64^3 R10G10B10A2 texels with x fastest. False when
+// none was copied or a copy landed during the read.
+bool read_tone_table(std::uint32_t* table) noexcept;
 GraphicsStatus graphics_status() noexcept;
 // One bridge.log line: registry and capture-manager lock holds since the last
 // call (count, total and longest per source line or acquiring address) and
