@@ -1009,6 +1009,10 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
   LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
   const auto result = set_owned_view_aa(view, image, runtime.contract.layout, enabled);
   if (!result.complete) {
+    // A clear whose write landed but whose reread failed may have left the bit
+    // clear: keep the view owed a restore. Over-noting is harmless.
+    if (!enabled && result.write_attempted)
+      runtime.cleared_aa.note(runtime.renderer, view.view_address);
     runtime.stage_error = result.error;
     runtime.aa_error = result.error;
     ++runtime.aa_refusals;
