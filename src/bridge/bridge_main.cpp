@@ -78,7 +78,7 @@ struct DevShader {
   // dev\lights.txt: a number multiplying the camera light factors (1), then
   // optionally `all` to repeat every light-shaped camera draw.
   double light_scale = 1;
-  bool light_all = false;
+  bool light_all = false, light_noocc = false;
   // dev\fog.txt: words `copy` (each camera fog result into its history),
   // `clear` (camera integrated fog overwritten with clear air) and `reset`
   // (each camera fog history set to clear air once).
@@ -110,13 +110,16 @@ struct DevShader {
     {
       const auto lights_path = directory + L"\\lights.txt";
       light_scale = 1;
-      light_all = false;
+      light_all = light_noocc = false;
       if (FILE* file = _wfopen(lights_path.c_str(), L"r")) {
         double value = 0;
         char word[8]{};
         if (std::fscanf(file, "%lf", &value) == 1 && value > 0 && value < 1000)
           light_scale = value;
-        light_all = std::fscanf(file, "%7s", word) == 1 && std::strcmp(word, "all") == 0;
+        while (std::fscanf(file, "%7s", word) == 1) {
+          light_all = light_all || std::strcmp(word, "all") == 0;
+          light_noocc = light_noocc || std::strcmp(word, "noocc") == 0;
+        }
         std::fclose(file);
       }
     }
@@ -1126,6 +1129,7 @@ DWORD run_impl() {
         }
       win::set_light_factors(factors);
       win::set_light_all(dev_shader.light_all);
+      win::set_light_occlusion_off(dev_shader.light_noocc);
       win::set_fog_dev(dev_shader.fog_copy, dev_shader.fog_clear, dev_shader.fog_reset);
       win::set_fog_history_reset(settings.camera_tone != 0);
       last_light_factors = factors;
@@ -1557,12 +1561,13 @@ DWORD run_impl() {
         char light_detail[320];
         std::snprintf(light_detail, sizeof(light_detail),
                       "Camera lights: learnt=%d confirmations=%u anchors=%llu shaped=%llu sightings=%llu repeated_draws=%llu extra_draws=%llu "
-                      "other_draws=%llu other_pipelines=%u factors=%.3g/%.3g/%.3g",
+                      "other_draws=%llu other_pipelines=%u occlusion_clears=%llu factors=%.3g/%.3g/%.3g",
                       light_status.learnt ? 1 : 0, light_status.confirmations, static_cast<unsigned long long>(light_status.anchors),
                       static_cast<unsigned long long>(light_status.shaped), static_cast<unsigned long long>(light_status.sightings),
                       static_cast<unsigned long long>(light_status.repeated_draws),
                       static_cast<unsigned long long>(light_status.extra_draws),
                       static_cast<unsigned long long>(light_status.other_draws), light_status.other_pipelines,
+                      static_cast<unsigned long long>(win::light_occlusion_clears()),
                       static_cast<double>(last_light_factors[0]),
                       static_cast<double>(last_light_factors[1]), static_cast<double>(last_light_factors[2]));
         log_status(status, light_detail);

@@ -1441,6 +1441,109 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
   s.table_copies.fetch_add(1, std::memory_order_relaxed);
 }
 }  // namespace tone
+// Dev experiment: the light pass tests each light against the view's depth
+// pyramid (R32_FLOAT, several mips, built from the view's own depth earlier in
+// its frame). With `noocc` in dev\lights.txt, the top level of every pyramid
+// of the camera's output size is written with 0 (far, reverse depth) at the
+// camera's cloud merge, just before its light draws, so no light is occluded.
+// Later passes of that camera frame also see the cleared level.
+namespace occlusion {
+struct State {
+  std::array<std::atomic<ID3D12Resource*>, 16> pyramids{};
+  std::array<std::atomic<std::uint32_t>, 16> sizes{};  // width << 16 | height
+  std::atomic<unsigned> next{0};
+  std::atomic<bool> enabled{false}, failed{false};
+  std::atomic<ID3D12Resource*> zeros{nullptr};
+  std::atomic<std::uint64_t> cleared{0};
+  std::mutex creation;
+};
+State& state() noexcept {
+  static State value;
+  return value;
+}
+constexpr UINT64 ZeroBytes = 4ull << 20;
+void note(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
+  if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.Format != DXGI_FORMAT_R32_FLOAT || d.MipLevels < 2 ||
+      d.DepthOrArraySize != 1 || !(d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) || d.Width > 4096 || d.Height > 4096)
+    return;
+  auto& s = state();
+  const auto i = s.next.fetch_add(1, std::memory_order_relaxed) % s.pyramids.size();
+  s.sizes[i].store(static_cast<std::uint32_t>(d.Width << 16) | d.Height, std::memory_order_relaxed);
+  s.pyramids[i].store(resource, std::memory_order_release);
+}
+ID3D12Resource* zeros() noexcept {
+  auto& s = state();
+  if (auto* existing = s.zeros.load(std::memory_order_acquire))
+    return existing;
+  if (s.failed.load(std::memory_order_relaxed))
+    return nullptr;
+  const std::unique_lock lock(s.creation, std::try_to_lock);
+  if (!lock.owns_lock())
+    return nullptr;
+  if (auto* existing = s.zeros.load(std::memory_order_acquire))
+    return existing;
+  auto* device = registry().device;
+  if (!device)
+    return nullptr;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = ZeroBytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* created = nullptr;
+  void* mapped = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                             IID_PPV_ARGS(&created))) ||
+      FAILED(created->Map(0, nullptr, &mapped))) {
+    if (created)
+      created->Release();
+    s.failed.store(true, std::memory_order_relaxed);
+    return nullptr;
+  }
+  std::memset(mapped, 0, ZeroBytes);
+  created->Unmap(0, nullptr);
+  s.zeros.store(created, std::memory_order_release);
+  return created;
+}
+// At the camera's cloud merge, inside the owned-work guard. The pyramids rest
+// as shader resources between their build and their readers.
+void clear(ID3D12GraphicsCommandList* list, std::uint64_t width, std::uint32_t height) noexcept {
+  auto& s = state();
+  if (!s.enabled.load(std::memory_order_relaxed))
+    return;
+  const auto size = static_cast<std::uint32_t>(width << 16) | height;
+  const UINT pitch = (static_cast<UINT>(width) * 4 + 255) & ~255u;
+  if (UINT64{pitch} * height > ZeroBytes)
+    return;
+  ID3D12Resource* source = nullptr;
+  for (unsigned i = 0; i < s.pyramids.size(); ++i) {
+    auto* pyramid = s.pyramids[i].load(std::memory_order_acquire);
+    if (!pyramid || s.sizes[i].load(std::memory_order_relaxed) != size)
+      continue;
+    if (!source && !(source = zeros()))
+      return;
+    constexpr auto Resting = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = {pyramid, 0, Resting, D3D12_RESOURCE_STATE_COPY_DEST};
+    list->ResourceBarrier(1, &barrier);
+    D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
+    target.pResource = pyramid;
+    target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    origin.pResource = source;
+    origin.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    origin.PlacedFootprint = {0, {DXGI_FORMAT_R32_FLOAT, static_cast<UINT>(width), height, 1, pitch}};
+    list->CopyTextureRegion(&target, 0, 0, 0, &origin, nullptr);
+    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    list->ResourceBarrier(1, &barrier);
+    s.cleared.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+}  // namespace occlusion
 // Camera fog: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
 // one eighth of the view's width and height). The density pass blends each
 // frame with a history volume; the main view swaps its history pair every
@@ -1531,6 +1634,7 @@ void created(IUnknown* object) noexcept {
     return;
   const auto d = tone::description(resource);
   resource->Release();
+  occlusion::note(resource, d);
   if (!volume_shape(d))
     return;
   auto& s = state();
@@ -3552,6 +3656,8 @@ struct Targets {
     l.light_anchor = true;
     l.light_feed = scene_handoff().observed_feed(reinterpret_cast<std::uint64_t>(previous.resource->native));
     lights::state().anchors.fetch_add(1, std::memory_order_relaxed);
+    // A render-target bind: always a direct list.
+    occlusion::clear(l.native, previous.resource->desc.Width, previous.resource->desc.Height);
     if (!r.cloud_merge_enabled.load(std::memory_order_relaxed))
       return;
     if (!l.cloud_rtvs) {
@@ -4182,6 +4288,12 @@ void set_fog_dev(bool copy, bool clear, bool reset) noexcept {
 }
 void set_light_all(bool all) noexcept {
   lights::state().all.store(all, std::memory_order_relaxed);
+}
+void set_light_occlusion_off(bool off) noexcept {
+  occlusion::state().enabled.store(off, std::memory_order_relaxed);
+}
+std::uint64_t light_occlusion_clears() noexcept {
+  return occlusion::state().cleared.load(std::memory_order_relaxed);
 }
 LightStatus light_status() noexcept {
   auto& s = lights::state();

@@ -191,6 +191,10 @@ CloudMergeStatus cloud_merge_status() noexcept;
 void set_light_factors(const std::array<float, 3>& factors) noexcept;
 // Dev only: also repeat light-shaped camera draws made with other pipelines.
 void set_light_all(bool all) noexcept;
+// Dev only: clear camera depth pyramids before their light draws (occlusion
+// off), and how many clears were recorded.
+void set_light_occlusion_off(bool off) noexcept;
+std::uint64_t light_occlusion_clears() noexcept;
 // Camera fog: the copy switch and copies made, then each froxel fog volume as
 // WxH@address g<creation group>.<index>:UAV exits (group 0: created before
 // the bridge attached).
