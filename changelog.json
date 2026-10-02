@@ -5,6 +5,7 @@
       "date": "2026-10-02",
       "changes": [
         "New: the camera views show the current weather. Under clouds or overcast they used to show a clear, sunny sky. With Camera views > Camera weather on (the default), the views draw as far as the main view at every speed, also while taxiing, which can cost some frame rate; turn it off to get the clear sky and the 1,000 m taxi distance back.",
+        "At night the taxiway, runway and other bright lights in the camera views now glow like in the main view. The camera images get the same kind of bloom the simulator gives the main view; before, the lights showed as points without the light they cast.",
         "MSFS no longer closes while loading a flight when it runs under a graphics debugger such as PIX with Taxi Cam installed."
       ]
     },

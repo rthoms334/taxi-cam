@@ -34,8 +34,9 @@ namespace taxi_camera {
 // resources/formats change. record allocates, compiles, uploads and reads back
 // nothing; it restores both input mip-zero states and leaves output COPY_SOURCE.
 // RGB is sampled as declared by the typed SRV (sRGB views decode to linear).
-// R11G11B10_FLOAT feeds receive exposure, per-channel Reinhard compression and
-// sRGB encoding for this SDR display. Other formats retain their sampled RGB.
+// R11G11B10_FLOAT feeds receive the main view's physically based bloom, then
+// exposure, per-channel Reinhard compression and sRGB encoding for this SDR
+// display. Other formats retain their sampled RGB.
 // This explicit display conversion is not simulator exposure/color calibration.
 // Each feed stretches over its full region. Output alpha is a per-pixel encoding
 // flag for the PFD stamp, not coverage: 1 marks camera pixels (display-referred
@@ -725,6 +726,39 @@ float3 display_rgb(float3 rgb, uint feed) {
   if ((HdrMask & (1u << feed)) == 0) return rgb;
   return float3(hdr_channel(rgb.r), hdr_channel(rgb.g), hdr_channel(rgb.b));
 }
+// The main view's lights glow through the simulator's bloom (ch_bloom and the
+// convolve passes at 1/8 resolution, blended by its tonemapper): the whole HDR
+// image is blurred and a small share of the blur replaces the image. The
+// camera views run no post-processing, so their taxi and runway lights showed
+// as points without the light they cast. The same physically based bloom
+// before exposure: a Gaussian of the HDR feed (sigma 3 texels, 7 x 7 bilinear
+// taps two texels apart, so every texel and a one-pixel light count), mixed in
+// by energy. A uniform image is unchanged.
+static const float BloomStrength = 0.04;
+static const float BloomSigma = 3.0;
+float3 bloom_rgb(Texture2D<float4> image, float2 uv) {
+  float width, height;
+  image.GetDimensions(width, height);
+  float2 texel = 1.0 / float2(width, height);
+  float3 sum = 0;
+  float total = 0;
+  [unroll] for (int y = -3; y <= 3; ++y) {
+    [unroll] for (int x = -3; x <= 3; ++x) {
+      float2 offset = float2(x, y) * 2;
+      float weight = exp(-dot(offset, offset) / (2 * BloomSigma * BloomSigma));
+      float3 tap = image.SampleLevel(LinearClamp, uv + (offset + 0.5) * texel, 0).rgb;
+      // A non-finite texel must not spread; hdr_channel still reports it in place.
+      sum += (all(isfinite(tap)) ? clamp(tap, 0, 65504) : 0) * weight;
+      total += weight;
+    }
+  }
+  return sum / total;
+}
+float3 feed_rgb(Texture2D<float4> image, float2 uv, uint feed) {
+  float3 rgb = image.SampleLevel(LinearClamp, uv, 0).rgb;
+  if ((HdrMask & (1u << feed)) == 0 || !all(isfinite(rgb))) return rgb;
+  return lerp(rgb, bloom_rgb(image, uv), BloomStrength);
+}
 // Alpha 1 flags a display-referred camera code: the PFD stamp stores this byte
 // on UNORM and sRGB views alike. Overlays use ui_pixel.
 float4 camera_pixel(float3 rgb, uint feed) { return float4(display_rgb(rgb, feed), 1); }
@@ -811,7 +845,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float right = side_borders ? 768.0 - nose_border : 768.0;
     float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
     float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
-    return camera_pixel(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0);
+    return camera_pixel(feed_rgb(Nose, uv, 0), 0);
   }
   if (position.y < TailTop) return ui_pixel(float3(0, 0, 0));
   if (SplitBottom != 0) {
@@ -826,11 +860,11 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
                        (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
-      return camera_pixel(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1);
-    return camera_pixel(TailRight.SampleLevel(LinearClamp, uv, 0).rgb, 2);
+      return camera_pixel(feed_rgb(TailLeft, uv, 1), 1);
+    return camera_pixel(feed_rgb(TailRight, uv, 2), 2);
   }
   float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
-  return camera_pixel(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1);
+  return camera_pixel(feed_rgb(TailLeft, uv, 1), 1);
 }
 )";
 
