@@ -195,9 +195,10 @@ void set_light_all(bool all) noexcept;
 // WxH@address g<creation group>.<index>:UAV exits (group 0: created before
 // the bridge attached).
 void fog_volumes(char* text, std::size_t size) noexcept;
-// Dev only: copy a camera view's fog result into its history partner, and
-// overwrite camera views' integrated fog with clear air.
-void set_fog_dev(bool copy, bool clear) noexcept;
+// Dev only: copy a camera view's fog result into its history partner,
+// overwrite camera views' integrated fog with clear air, and reset each camera
+// fog history once to clear air.
+void set_fog_dev(bool copy, bool clear, bool reset) noexcept;
 struct LightStatus {
   bool learnt = false;
   unsigned confirmations = 0;

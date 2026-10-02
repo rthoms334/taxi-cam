@@ -1451,20 +1451,22 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
 // pair member's exit first copy it into its partner, so the next frame's
 // history is this frame's result; `clear` overwrites the integrated volume of
 // every group but the most used one (the main view) with the main view's
-// clear-air texel, transmittance 1.
+// clear-air texel, transmittance 1; `reset` overwrites each camera history
+// volume once with that texel and then leaves the simulator's blending alone.
 namespace fog {
 struct Volume {
   std::atomic<ID3D12Resource*> resource{nullptr};
   std::atomic<std::uint32_t> width{0}, height{0};
   std::atomic<std::uint32_t> group{0}, index{0};  // group 0: not seen created
   std::atomic<std::uint64_t> exits{0};
+  std::atomic<bool> reset{false};  // dev reset already applied to this history volume
 };
 struct State {
   std::array<Volume, 48> volumes;
   std::atomic<Volume*> last_created{nullptr};
   std::atomic<std::uint32_t> groups{0};
-  std::atomic<bool> copy{false}, clear{false};
-  std::atomic<std::uint64_t> copies{0}, clears{0};
+  std::atomic<bool> copy{false}, clear{false}, reset{false};
+  std::atomic<std::uint64_t> copies{0}, clears{0}, resets{0};
   std::atomic<ID3D12Resource*> clear_source{nullptr};
   std::atomic<bool> clear_failed{false};
   std::mutex creation;
@@ -1621,6 +1623,18 @@ void exit(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) noexcept {
     if (v->group.load(std::memory_order_relaxed) && s.clear.load(std::memory_order_relaxed) && !main_view(*v))
       clear(list, resource, d);
     return;
+  }
+  if (s.reset.load(std::memory_order_relaxed) && !v->reset.load(std::memory_order_relaxed)) {
+    const auto group = v->group.load(std::memory_order_relaxed);
+    const Volume* integrated = nullptr;
+    for (auto& o : s.volumes)
+      if (o.group.load(std::memory_order_relaxed) == group && o.index.load(std::memory_order_relaxed) == 0)
+        integrated = &o;
+    if (group && integrated && !main_view(*integrated)) {
+      v->reset.store(true, std::memory_order_relaxed);
+      clear(list, resource, d);
+      s.resets.fetch_add(1, std::memory_order_relaxed);
+    }
   }
   if (!s.copy.load(std::memory_order_relaxed))
     return;
@@ -4003,9 +4017,10 @@ void set_light_factors(const std::array<float, 3>& factors) noexcept {
 }
 void fog_volumes(char* text, std::size_t size) noexcept {
   auto& f = fog::state();
-  int used = std::snprintf(text, size, "copy=%d copies=%llu clear=%d clears=%llu", f.copy.load(std::memory_order_relaxed) ? 1 : 0,
-                           static_cast<unsigned long long>(f.copies.load(std::memory_order_relaxed)),
-                           f.clear.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.clears.load(std::memory_order_relaxed)));
+  int used = std::snprintf(text, size, "copy=%d copies=%llu clear=%d clears=%llu reset=%d resets=%llu",
+                           f.copy.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.copies.load(std::memory_order_relaxed)),
+                           f.clear.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.clears.load(std::memory_order_relaxed)),
+                           f.reset.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(f.resets.load(std::memory_order_relaxed)));
   for (auto& v : f.volumes) {
     if (used < 0 || static_cast<std::size_t>(used) >= size || !v.resource.load(std::memory_order_relaxed))
       break;
@@ -4020,9 +4035,16 @@ void fog_volumes(char* text, std::size_t size) noexcept {
     used += n;
   }
 }
-void set_fog_dev(bool copy, bool clear) noexcept {
-  fog::state().copy.store(copy, std::memory_order_relaxed);
-  fog::state().clear.store(clear, std::memory_order_relaxed);
+void set_fog_dev(bool copy, bool clear, bool reset) noexcept {
+  auto& f = fog::state();
+  f.copy.store(copy, std::memory_order_relaxed);
+  f.clear.store(clear, std::memory_order_relaxed);
+  // Turning reset off re-arms it, so each switch-on resets every history once.
+  if (!reset && f.reset.exchange(false, std::memory_order_relaxed))
+    for (auto& v : f.volumes)
+      v.reset.store(false, std::memory_order_relaxed);
+  if (reset)
+    f.reset.store(true, std::memory_order_relaxed);
 }
 void set_light_all(bool all) noexcept {
   lights::state().all.store(all, std::memory_order_relaxed);
