@@ -4,15 +4,14 @@
       "version": "1.0.0",
       "date": "2026-10-03",
       "changes": [
-        "Taxi Cam 1.0: the camera views now look like the main view, with the real weather, the simulator's own lighting and its runway and taxiway lights.",
-        "Weather: the camera views show the current sky, clouds and haze. Under clouds or overcast they used to show a clear, sunny sky. To draw the clouds they now draw as far as the main view at every speed (before, 1,000 m below 60 knots), which can cost some frame rate.",
-        "Lighting: the camera images now always get the main view's exposure, tone curve and bloom, day and night, so bright lights glow as they do outside the window. There is no setting for it.",
-        "Removed: the Match main view lighting, Exposure, Automatic exposure and Night boost settings. They no longer had any effect, because the camera views now always follow the main view. Values saved for them are ignored.",
-        "Lights: at night the camera views show the simulator's runway, taxiway and other lights like the main view, and they stay steady while taxiing. Taxi Cam copied each camera image before the simulator had drawn its lights, so most were missing and the rest flickered. Checked at night on the PMDG 777-300ER; other aircraft have not been checked yet.",
-        "Lights: distant lights are no longer hidden behind haze that is not there. A new camera view started with its haze fully opaque and cleared it only very slowly; each camera's haze now starts clear like the main view's and then follows the real weather.",
-        "PMDG 777: the navigation display is found automatically again after a flight loads. A short-lived texture during loading could leave the display texture parked as the lower display, so cameras only appeared after pressing Detect.",
-        "The PLEASE WAIT page no longer flashes up at random while parked. At the low parked camera rate one skipped camera frame made the picture count as stale after a second; the page now waits for several missed camera frames in a row (3 s while parked).",
-        "MSFS no longer closes while loading a flight when it runs under a graphics debugger such as PIX with Taxi Cam installed."
+        "Taxi Cam 1.0: the camera views now look like the main view, with the real weather, the simulator's lighting and its runway and taxiway lights.",
+        "Weather: the camera views show the current sky, clouds and haze, and draw as far as the main view at every speed.",
+        "Lighting: the camera views always use the main view's exposure, tone curve and bloom, day and night.",
+        "Lights: runway, taxiway and other lights now appear in the camera views like the main view and stay steady while taxiing.",
+        "Lights: distant lights are no longer hidden behind haze that is not there.",
+        "PMDG 777: the navigation display is found automatically again after a flight loads.",
+        "The PLEASE WAIT page no longer flashes up at random while parked.",
+        "Removed: the Exposure, Automatic exposure and Night boost settings, now that the camera views use the main view's lighting."
       ]
     },
     {
