@@ -1250,7 +1250,19 @@ void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*
 // restored exactly, into one process-lifetime readback buffer the control
 // loop reads. Each exit re-reads the live resource's description, so another
 // texture at a reused address is never copied.
+//
+// The copies run in the simulator's own submissions, so no bridge fence can
+// follow them. Each table copy alternates between two slots and is followed,
+// in the same recording, by a WriteBufferImmediate MARKER_OUT of its sequence
+// number into that slot's marker: the GPU writes it only after the copy has
+// completed. The reader takes the slot with the newest written marker, which
+// a later copy cannot be writing (that copy goes to the other slot, and the
+// one after it is recorded at least TableIntervalMs later). The exposure is
+// one aligned 32-bit float the reader only accepts when finite and positive:
+// a read before the first copy completes sees the zeroed buffer and is
+// refused; afterwards it sees the previous or the newest exposure.
 namespace tone {
+constexpr UINT64 MarkerOffset = 256;
 constexpr UINT64 TableOffset = 512;
 constexpr UINT TableTexels = 64;
 constexpr UINT RowPitch = 256;
@@ -1264,6 +1276,10 @@ struct Source {
   std::atomic<ID3D12Resource*> exposure_source{}, table_source{};
   std::atomic<std::uint64_t> exposure_copies{}, table_copies{}, source_changes{};
   std::atomic<ULONGLONG> table_ms{};
+  // Sequence of the last recorded table copy; slot = sequence & 1.
+  std::atomic<std::uint32_t> table_sequence{};
+  // Command list types whose WriteBufferImmediate the device supports (OPTIONS3).
+  std::atomic<std::uint32_t> marker_lists{};
 };
 Source& source() noexcept {
   static Source value;
@@ -1308,7 +1324,7 @@ ID3D12Resource* readback() noexcept {
   heap.CreationNodeMask = heap.VisibleNodeMask = 1;
   D3D12_RESOURCE_DESC buffer{};
   buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buffer.Width = TableOffset + TableBytes;
+  buffer.Width = TableOffset + 2 * TableBytes;
   buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
   buffer.SampleDesc.Count = 1;
   buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -1318,6 +1334,9 @@ ID3D12Resource* readback() noexcept {
     s.failed.store(true, std::memory_order_relaxed);
     return nullptr;
   }
+  D3D12_FEATURE_DATA_D3D12_OPTIONS3 options{};
+  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options, sizeof(options))))
+    s.marker_lists.store(static_cast<std::uint32_t>(options.WriteBufferImmediateSupportFlags), std::memory_order_relaxed);
   // Retained for the process: recorded copies may still be executing.
   s.readback.store(created, std::memory_order_release);
   return created;
@@ -1369,10 +1388,26 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
   auto* destination = readback();
   if (!destination)
     return;
+  // The completion marker needs WriteBufferImmediate; without it no copy is
+  // recorded, because nothing could prove it complete.
+  const auto type = list->GetType();
+  if (type > D3D12_COMMAND_LIST_TYPE_COPY || !(s.marker_lists.load(std::memory_order_relaxed) & (1u << type)))
+    return;
+  ID3D12GraphicsCommandList2* marked = nullptr;
+  if (FAILED(list->QueryInterface(IID_PPV_ARGS(&marked))) || !marked)
+    return;
   s.table_ms.store(now, std::memory_order_relaxed);
   note_source(s.table_source, b.pResource);
-  copy(list, b.pResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, destination, TableOffset,
+  auto sequence = s.table_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (!sequence)  // Zero means "no completed copy"; skip it on wrap.
+    sequence = s.table_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  const UINT slot = sequence & 1u;
+  copy(list, b.pResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, destination, TableOffset + slot * TableBytes,
        {DXGI_FORMAT_R10G10B10A2_UNORM, TableTexels, TableTexels, TableTexels, RowPitch});
+  const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER marker{destination->GetGPUVirtualAddress() + MarkerOffset + 4 * slot, sequence};
+  const D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
+  marked->WriteBufferImmediate(1, &marker, &mode);
+  marked->Release();
   s.table_copies.fetch_add(1, std::memory_order_relaxed);
 }
 }  // namespace tone
@@ -3827,7 +3862,8 @@ ToneStatus tone_status() noexcept {
   auto* buffer = s.readback.load(std::memory_order_acquire);
   if (!buffer || !status.exposure_copies)
     return status;
-  // A copy may land while this reads: the next read sees the newer value.
+  // Not fenced (see namespace tone): one aligned float, zero until the first
+  // copy completes and refused below until then.
   const D3D12_RANGE range{0, 8};
   void* mapped = nullptr;
   if (FAILED(buffer->Map(0, &range, &mapped)) || !mapped)
@@ -3845,17 +3881,29 @@ bool read_tone_table(std::uint32_t* table) noexcept {
   auto* buffer = s.readback.load(std::memory_order_acquire);
   if (!table || !buffer || !s.table_copies.load(std::memory_order_relaxed))
     return false;
-  const D3D12_RANGE range{static_cast<SIZE_T>(tone::TableOffset), static_cast<SIZE_T>(tone::TableOffset + tone::TableBytes)};
+  const D3D12_RANGE range{static_cast<SIZE_T>(tone::MarkerOffset), static_cast<SIZE_T>(tone::TableOffset + 2 * tone::TableBytes)};
   void* mapped = nullptr;
   if (FAILED(buffer->Map(0, &range, &mapped)) || !mapped)
     return false;
-  const auto* source = static_cast<const unsigned char*>(mapped) + tone::TableOffset;
-  // Two equal reads: a copy landing in between cannot leave a mixed table.
-  std::memcpy(table, source, tone::TableBytes);
-  const bool stable = std::memcmp(table, source, tone::TableBytes) == 0;
+  const auto* base = static_cast<const unsigned char*>(mapped);
+  const auto markers = [&] {
+    std::array<std::uint32_t, 2> value{};
+    std::memcpy(value.data(), base + tone::MarkerOffset, sizeof(value));
+    return value;
+  };
+  // Only a slot whose completion marker the GPU wrote is read (see namespace
+  // tone); markers are zero until then. The newest is never being rewritten.
+  const auto before = markers();
+  const UINT slot = before[1] > before[0] ? 1u : 0u;
+  bool complete = before[slot] != 0;
+  if (complete) {
+    const auto* source = base + tone::TableOffset + slot * tone::TableBytes;
+    std::memcpy(table, source, tone::TableBytes);
+    complete = markers() == before && std::memcmp(table, source, tone::TableBytes) == 0;
+  }
   const D3D12_RANGE none{0, 0};
   buffer->Unmap(0, &none);
-  return stable;
+  return complete;
 }
 FogStatus fog_status() noexcept {
   auto& f = fog::state();
