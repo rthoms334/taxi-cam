@@ -397,11 +397,10 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Controller button bindings validation failed.' }
     & (Join-Path $taskRoot 'tests/installer/exe_xml_test.ps1')
     $updaterTest = Join-Path $out 'updater-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/updater_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lbcrypt' '-lshell32' '-o' $updaterTest
+    & $compiler @common (Join-Path $taskRoot 'tests/app/updater_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lbcrypt' '-lshell32' '-lwinhttp' '-o' $updaterTest
     if ($LASTEXITCODE -ne 0) { throw 'Updater test compilation failed.' }
     & $updaterTest
     if ($LASTEXITCODE -ne 0) { throw 'Updater tests failed.' }
-    & (Join-Path $taskRoot 'tests/app/updater_test.ps1')
     $observerTest = Join-Path $out 'pfd-state-observer-test.exe'
     & $compiler @common '-DTAXI_PFD_STATE_OBSERVER_VALIDATION' (Join-Path $taskRoot 'tests/hooks/pfd_state_observer_test.cpp') (Join-Path $taskRoot 'src/hooks/pfd_state_observer.cpp') '-o' $observerTest
     if ($LASTEXITCODE -ne 0) { throw 'PFD state observer test compilation failed.' }

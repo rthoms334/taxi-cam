@@ -58,7 +58,6 @@ The on-demand [performance sampler](../tools/performance/README.md) has separate
 
 Additional focused checks remain available:
 
-- `tests/app/updater_test.ps1`: selection of current and legacy installer filenames, exact release URLs, version ordering, duplicate rejection and digest/checksum validation.
 - `tests/graphics/scene_capture_build.ps1`: capture packet pixels, producer/consumer fences and storage reuse; see [capture contracts](../docs/scene-capture-validation.md).
 - `tests/graphics/scene_capture_manager_test.ps1`: recording lifetime, submission receipts and capture publication.
 - `tests/graphics/scene_frame_output_test.ps1`: stable output composition and synchronization.
