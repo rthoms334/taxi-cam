@@ -23,7 +23,8 @@ enum class SimEvent : unsigned {
   aircraft_mismatch,
   camera_startup_failed,
   capture_paused,
-  hook_storm,  // Registration failures exceeded the safe rate; disarmed for the session.
+  hook_storm,   // Registration failures exceeded the safe rate; disarmed for the session.
+  stalls_held,  // Repeated watchdog trips; cameras stay off until requested again.
   count
 };
 
@@ -57,6 +58,8 @@ inline constexpr SimMessage sim_message_for(SimEvent event) noexcept {
       return {"Taxi Cam: camera capture paused; waiting for verified GPU state.", 6.0f, false};
     case SimEvent::hook_storm:
       return {"Taxi Cam: native hook failures exceeded the safe rate; cameras disarmed for this session.", 12.0f, true};
+    case SimEvent::stalls_held:
+      return {"Taxi Cam: repeated simulator stalls; cameras stay off. Turn them off and on again to retry.", 12.0f, true};
     default:
       return {};
   }
@@ -74,6 +77,7 @@ inline constexpr bool sim_event_toasts(SimEvent event) noexcept {
     case SimEvent::presentation_stalled:   // Watchdog tripped; hooks released.
     case SimEvent::camera_startup_failed:  // Cameras stopped and will not retry.
     case SimEvent::hook_storm:             // Disarmed for the process; needs a simulator restart.
+    case SimEvent::stalls_held:            // Cameras stay off until the pilot asks again.
       return true;
     default:
       return false;
@@ -81,10 +85,9 @@ inline constexpr bool sim_event_toasts(SimEvent event) noexcept {
 }
 
 inline constexpr const char* sim_event_name(SimEvent event) noexcept {
-  constexpr const char* names[]{
-      "bridge_connected", "cameras_ready",        "connection_stopped", "simulator_unsupported", "presentation_stalled",
-      "cameras_disarmed", "presentation_resumed", "aircraft_mismatch",  "camera_startup_failed", "capture_paused",
-      "hook_storm"};
+  constexpr const char* names[]{"bridge_connected",      "cameras_ready",    "connection_stopped",   "simulator_unsupported",
+                                "presentation_stalled",  "cameras_disarmed", "presentation_resumed", "aircraft_mismatch",
+                                "camera_startup_failed", "capture_paused",   "hook_storm",           "stalls_held"};
   return static_cast<unsigned>(event) < static_cast<unsigned>(SimEvent::count) ? names[static_cast<unsigned>(event)] : "invalid_event";
 }
 

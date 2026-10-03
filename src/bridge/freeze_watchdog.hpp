@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 namespace taxi_camera {
@@ -13,10 +14,20 @@ namespace taxi_camera {
 // sim_frames counts SIMCONNECT_PERIOD_SIM_FRAME telemetry packets; it stops in
 // menus and while paused, so on its own it can only substitute for the pulse
 // while no direct queue has been observed yet.
+//
+// A stall that returns each time the cameras re-arm would cycle for as long as
+// they stay requested (issue 97: one trip about every 8 s on an A350, every
+// 22-74 s on a PMDG 777). Only trips while cameras are requested count. After
+// HoldTrips of them within HoldWindowMs, resumed frames hold the gate closed
+// instead of re-arming while cameras are still requested, until the host calls
+// release() for a fresh request. Trips with nothing requested (flight loading)
+// neither count nor hold.
 class FreezeWatchdog {
  public:
   static constexpr std::uint64_t StallMs = 3000;
   static constexpr std::uint64_t RecoveryMs = 5000;
+  static constexpr unsigned HoldTrips = 3;
+  static constexpr std::uint64_t HoldWindowMs = 300000;
   struct Sample {
     std::uint64_t now_ms = 0;
     std::uint64_t frame_pulse = 0;
@@ -25,10 +36,16 @@ class FreezeWatchdog {
     bool sim_frames_expected = false;  // Flight session ready: SIM_FRAME should flow.
     bool armed = false;                // Bridge connected with hooks installed.
     bool worker_alive = false;         // Bridge worker heartbeat is recent.
+    // Cameras requested before the watchdog gate. A whole-simulator stall
+    // makes flight readiness lapse within a second, which clears the request,
+    // so a trip uses the value from the last sample that saw progress.
+    bool cameras_wanted = false;
   };
   struct Decision {
     bool trip = false;
     bool recover = false;
+    // Frames resumed after repeated trips; the gate stays closed until release().
+    bool hold = false;
     // SIM_FRAME stopped while presentation continued: pause or menu, logged once.
     bool telemetry_stall_noted = false;
     // Hooked lists and queues went quiet while SIM_FRAME continued: flight
@@ -61,6 +78,8 @@ class FreezeWatchdog {
       sim_since_ = sample.now_ms;
       telemetry_noted_ = false;
     }
+    if (pulse_advanced || (!sample.pulse_available && sim_advanced))
+      wanted_at_progress_ = sample.cameras_wanted;
     const auto pulse_stalled_ms = sample.pulse_available && sample.now_ms >= pulse_since_ ? sample.now_ms - pulse_since_ : 0;
     const auto sim_stalled_ms = sample.now_ms >= sim_since_ ? sample.now_ms - sim_since_ : 0;
     const bool pulse_stalled = sample.pulse_available && pulse_stalled_ms >= StallMs;
@@ -73,15 +92,21 @@ class FreezeWatchdog {
     const bool telemetry_stalled = sample.sim_frames_expected && sim_stalled;
     if (tripped_) {
       const bool progressing = sample.pulse_available ? pulse_advanced : sim_advanced;
-      if (!progressing) {
+      if (held_ || !progressing) {
         recover_since_ = 0;
         return decision;
       }
       if (!recover_since_)
         recover_since_ = sample.now_ms;
       else if (sample.now_ms - recover_since_ >= RecoveryMs) {
-        tripped_ = false;
         recover_since_ = 0;
+        if (sample.cameras_wanted && recent_trips(sample.now_ms) >= HoldTrips) {
+          held_ = true;
+          decision.hold = true;
+          decision.reason = "repeated_stalls";
+          return decision;
+        }
+        tripped_ = false;
         decision.recover = true;
         decision.reason = "presentation_resumed";
       }
@@ -89,6 +114,8 @@ class FreezeWatchdog {
     }
     if ((pulse_stalled && (sim_stalled || !sim_known)) || (!sample.pulse_available && telemetry_stalled)) {
       tripped_ = true;
+      if (wanted_at_progress_)
+        trip_ms_[counted_++ % HoldTrips] = sample.now_ms ? sample.now_ms : 1;
       ++trips_;
       recover_since_ = 0;
       decision.trip = true;
@@ -112,15 +139,40 @@ class FreezeWatchdog {
     return decision;
   }
 
+  // A fresh pilot request after a hold. Frames have already run for the
+  // recovery window, so the gate re-arms at once. Trip history is kept: one
+  // more stall inside the window holds again after that stall's recovery.
+  Decision release() noexcept {
+    Decision decision;
+    if (!held_)
+      return decision;
+    held_ = tripped_ = false;
+    recover_since_ = 0;
+    decision.recover = true;
+    decision.reason = "released_after_hold";
+    return decision;
+  }
+
+  // Trips while cameras were requested, inside the hold window.
+  unsigned recent_trips(std::uint64_t now_ms) const noexcept {
+    unsigned count = 0;
+    for (const auto at : trip_ms_)
+      count += at && now_ms >= at && now_ms - at < HoldWindowMs;
+    return count;
+  }
   bool tripped() const noexcept { return tripped_; }
+  bool held() const noexcept { return held_; }
   unsigned trips() const noexcept { return trips_; }
 
  private:
   std::uint64_t last_pulse_ = 0, pulse_since_ = 0;
   std::uint64_t last_sim_ = 0, sim_since_ = 0;
   std::uint64_t recover_since_ = 0;
-  unsigned trips_ = 0;
+  std::array<std::uint64_t, HoldTrips> trip_ms_{};  // Latest counted trip times; 0 is empty.
+  unsigned trips_ = 0, counted_ = 0;
   bool tripped_ = false;
+  bool held_ = false;
+  bool wanted_at_progress_ = false;
   bool telemetry_noted_ = false;
   bool presentation_noted_ = false;
 };
