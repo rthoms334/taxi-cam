@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.0.1",
+      "date": "2026-10-03",
+      "changes": [
+        "PMDG 777: the camera pictures are no longer almost white in daylight. The display cannot shine as brightly as sunlit ground, so by day Taxi Cam now fits the picture into the display's brightness range. Night pictures are unchanged."
+      ]
+    },
+    {
       "version": "1.0.0",
       "date": "2026-10-03",
       "changes": [
