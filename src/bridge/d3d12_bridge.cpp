@@ -2,6 +2,7 @@
 #include <dxgi1_6.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -16,6 +17,7 @@
 #include <utility>
 #include <vector>
 #include "../graphics/calibration_d3d12.hpp"
+#include "../graphics/cloud_merge.hpp"
 #include "../graphics/d3d12_command_list9.hpp"
 #include "../graphics/metadata_batch_cache.hpp"
 #include "../graphics/native_device_identity.hpp"
@@ -105,11 +107,18 @@ struct List : Metadata {
   bool raw_om_known = false, raw_has_dsv = false;
   ID3D12DescriptorHeap* snapshot_rtvs{};
   ID3D12DescriptorHeap* snapshot_dsvs{};
+  // Camera weather: target 0 of the latest bind when it is a camera output (any
+  // barrier forgets it), the value before the current bind, and three
+  // bridge-owned RTVs for the redirected cloud merge (cloud_merge.hpp).
+  View cloud_scene{}, cloud_previous{};
+  ID3D12DescriptorHeap* cloud_rtvs{};
   ~List() override {
     if (snapshot_rtvs)
       snapshot_rtvs->Release();
     if (snapshot_dsvs)
       snapshot_dsvs->Release();
+    if (cloud_rtvs)
+      cloud_rtvs->Release();
   }
   UINT count{};
   DXGI_FORMAT depth = DXGI_FORMAT_UNKNOWN;
@@ -284,6 +293,12 @@ struct Registry {
   // PassBegin reports that reached the manager's global path: the pass bound
   // no RTV, or bound RTVs the bridge could not resolve to tracked resources.
   std::atomic<std::uint64_t> pass_no_targets{}, pass_unresolved_targets{};
+  // Camera weather (cloud_merge.hpp): camera cloud merges sent into the camera
+  // output, and those that could not be. cloud_scene_seen is set when a list
+  // first holds a camera output as its cloud_scene; until then barriers skip
+  // the list lookup that forgets it.
+  std::atomic<std::uint64_t> cloud_merge_redirects{}, cloud_merge_refusals{};
+  std::atomic<bool> cloud_scene_seen{};
   // Recordings invalidated on the next hit after a contended find_list miss,
   // and lists admitted mid-recording (unobserved, awaiting their Reset).
   std::atomic<std::uint64_t> contended_invalidations{}, unobserved_admissions{};
@@ -1225,12 +1240,372 @@ List* metadata_list(ID3D12GraphicsCommandList* native, std::uint64_t id, std::sh
 }
 void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = true) noexcept;
 void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
+// Camera tone: the main view's eye-adaptation exposure and tone-curve table
+// (1.8.16.0, PIX 2026-10-02). ph_lumadaptation writes the exposure into a
+// 1 x 1 R32G32_FLOAT render target; the simulator moves it out of
+// RENDER_TARGET every frame. Its tone-curve table is a 64^3 R10G10B10A2 UAV
+// texture regenerated every frame and moved out of UNORDERED_ACCESS. Each is
+// the only texture of its description in the captures. At those exits the
+// bridge copies them, in the simulator's own recording and with the state
+// restored exactly, into one process-lifetime readback buffer the control
+// loop reads. Each exit re-reads the live resource's description, so another
+// texture at a reused address is never copied.
+//
+// The copies run in the simulator's own submissions, so no bridge fence can
+// follow them. Each table copy alternates between two slots and is followed,
+// in the same recording, by a WriteBufferImmediate MARKER_OUT of its sequence
+// number into that slot's marker: the GPU writes it only after the copy has
+// completed. The reader takes the slot with the newest written marker, which
+// a later copy cannot be writing (that copy goes to the other slot, and the
+// one after it is recorded at least TableIntervalMs later). The exposure is
+// one aligned 32-bit float the reader only accepts when finite and positive:
+// a read before the first copy completes sees the zeroed buffer and is
+// refused; afterwards it sees the previous or the newest exposure.
+namespace tone {
+constexpr UINT64 MarkerOffset = 256;
+constexpr UINT64 TableOffset = 512;
+constexpr UINT TableTexels = 64;
+constexpr UINT RowPitch = 256;
+constexpr UINT64 TableBytes = UINT64{RowPitch} * TableTexels * TableTexels;
+constexpr ULONGLONG TableIntervalMs = 500;
+struct Source {
+  std::atomic<bool> enabled{false};
+  std::atomic<ID3D12Resource*> readback{};
+  std::atomic<bool> failed{false};
+  std::mutex creation;
+  std::atomic<ID3D12Resource*> exposure_source{}, table_source{};
+  std::atomic<std::uint64_t> exposure_copies{}, table_copies{}, source_changes{};
+  std::atomic<ULONGLONG> table_ms{};
+  // Sequence of the last recorded table copy; slot = sequence & 1.
+  std::atomic<std::uint32_t> table_sequence{};
+  // Command list types whose WriteBufferImmediate the device supports (OPTIONS3).
+  std::atomic<std::uint32_t> marker_lists{};
+};
+Source& source() noexcept {
+  static Source value;
+  return value;
+}
+D3D12_RESOURCE_DESC description(ID3D12Resource* resource) noexcept {
+  D3D12_RESOURCE_DESC desc{};
+#if defined(__MINGW32__)
+  resource->GetDesc(&desc);
+#else
+  desc = resource->GetDesc();
+#endif
+  return desc;
+}
+bool exposure_shape(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Width == 1 && d.Height == 1 && d.DepthOrArraySize == 1 &&
+         d.MipLevels == 1 && d.Format == DXGI_FORMAT_R32G32_FLOAT && d.SampleDesc.Count == 1 &&
+         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+}
+bool table_shape(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && d.Width == TableTexels && d.Height == TableTexels &&
+         d.DepthOrArraySize == TableTexels && d.MipLevels == 1 && d.Format == DXGI_FORMAT_R10G10B10A2_UNORM && d.SampleDesc.Count == 1 &&
+         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
+}
+// Called inside the owned-work guard. Creation never blocks a recording thread.
+ID3D12Resource* readback() noexcept {
+  auto& s = source();
+  if (auto* existing = s.readback.load(std::memory_order_acquire))
+    return existing;
+  if (s.failed.load(std::memory_order_relaxed))
+    return nullptr;
+  const std::unique_lock lock(s.creation, std::try_to_lock);
+  if (!lock.owns_lock())
+    return nullptr;
+  if (auto* existing = s.readback.load(std::memory_order_acquire))
+    return existing;
+  auto* device = registry().device;
+  if (!device)
+    return nullptr;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = TableOffset + 2 * TableBytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* created = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&created)))) {
+    s.failed.store(true, std::memory_order_relaxed);
+    return nullptr;
+  }
+  D3D12_FEATURE_DATA_D3D12_OPTIONS3 options{};
+  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options, sizeof(options))))
+    s.marker_lists.store(static_cast<std::uint32_t>(options.WriteBufferImmediateSupportFlags), std::memory_order_relaxed);
+  // Retained for the process: recorded copies may still be executing.
+  s.readback.store(created, std::memory_order_release);
+  return created;
+}
+void copy(ID3D12GraphicsCommandList* list,
+          ID3D12Resource* resource,
+          D3D12_RESOURCE_STATES state,
+          ID3D12Resource* destination,
+          UINT64 offset,
+          const D3D12_SUBRESOURCE_FOOTPRINT& footprint) noexcept {
+  D3D12_RESOURCE_BARRIER barrier{};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition = {resource, 0, state, D3D12_RESOURCE_STATE_COPY_SOURCE};
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
+  target.pResource = destination;
+  target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  target.PlacedFootprint = {offset, footprint};
+  origin.pResource = resource;
+  origin.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  list->CopyTextureRegion(&target, 0, 0, 0, &origin, nullptr);
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barrier.Transition.StateAfter = state;
+  list->ResourceBarrier(1, &barrier);
+}
+void note_source(std::atomic<ID3D12Resource*>& slot, ID3D12Resource* resource) noexcept {
+  if (slot.exchange(resource, std::memory_order_relaxed) != resource)
+    source().source_changes.fetch_add(1, std::memory_order_relaxed);
+}
+// Before the simulator's own RENDER_TARGET exit (boundary before_legacy rules).
+void exposure_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  auto& s = source();
+  if (!s.enabled.load(std::memory_order_relaxed) || !exposure_shape(description(b.pResource)))
+    return;
+  auto* destination = readback();
+  if (!destination)
+    return;
+  note_source(s.exposure_source, b.pResource);
+  copy(list, b.pResource, D3D12_RESOURCE_STATE_RENDER_TARGET, destination, 0, {DXGI_FORMAT_R32G32_FLOAT, 1, 1, 1, RowPitch});
+  s.exposure_copies.fetch_add(1, std::memory_order_relaxed);
+}
+// Before the simulator's own UNORDERED_ACCESS exit, at most twice a second.
+void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  auto& s = source();
+  const auto now = GetTickCount64();
+  if (!s.enabled.load(std::memory_order_relaxed) || now - s.table_ms.load(std::memory_order_relaxed) < TableIntervalMs ||
+      !table_shape(description(b.pResource)))
+    return;
+  auto* destination = readback();
+  if (!destination)
+    return;
+  // The completion marker needs WriteBufferImmediate; without it no copy is
+  // recorded, because nothing could prove it complete.
+  const auto type = list->GetType();
+  if (type > D3D12_COMMAND_LIST_TYPE_COPY || !(s.marker_lists.load(std::memory_order_relaxed) & (1u << type)))
+    return;
+  ID3D12GraphicsCommandList2* marked = nullptr;
+  if (FAILED(list->QueryInterface(IID_PPV_ARGS(&marked))) || !marked)
+    return;
+  s.table_ms.store(now, std::memory_order_relaxed);
+  note_source(s.table_source, b.pResource);
+  auto sequence = s.table_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (!sequence)  // Zero means "no completed copy"; skip it on wrap.
+    sequence = s.table_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  const UINT slot = sequence & 1u;
+  copy(list, b.pResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, destination, TableOffset + slot * TableBytes,
+       {DXGI_FORMAT_R10G10B10A2_UNORM, TableTexels, TableTexels, TableTexels, RowPitch});
+  const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER marker{destination->GetGPUVirtualAddress() + MarkerOffset + 4 * slot, sequence};
+  const D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
+  marked->WriteBufferImmediate(1, &marker, &mode);
+  marked->Release();
+  s.table_copies.fetch_add(1, std::memory_order_relaxed);
+}
+}  // namespace tone
+// Camera fog: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
+// one eighth of the view's width and height). The density pass blends each
+// frame with a history volume. A view has three: the integrated volume that
+// the lights and the scene read, and a history pair.
+//
+// History reset (2026-10-02, live readout): a new view's history starts at
+// transmittance 0 and the blend (3-12% per frame) climbs out of it slowly, so
+// camera views show dense fog that dims distant lights by orders of magnitude.
+// The main view sits at exactly 1 in clear air, which the blend keeps. Each
+// camera volume (size: a camera output's size / 8) is therefore written once
+// with the main view's clear-air texel at its first guarded exit
+// (before_legacy_uav); the simulator's own blending then follows the real fog
+// from there. Volumes of any other size, such as the main view's, are never
+// written or read.
+namespace fog {
+struct Volume {
+  std::atomic<ID3D12Resource*> resource{nullptr};
+  std::atomic<bool> reset{false};  // history reset already applied to this volume
+};
+struct State {
+  std::array<Volume, 48> volumes;  // camera volumes seen at a guarded exit
+  // Camera output sizes in fog cells ((width/8) << 16 | height/8, rounded up).
+  std::array<std::atomic<std::uint32_t>, 4> cameras{};
+  std::atomic<unsigned> next_camera{0}, evict{0};
+  std::atomic<std::uint64_t> resets{0};
+  std::atomic<ID3D12Resource*> clear_source{nullptr};
+  std::atomic<bool> clear_failed{false};
+  std::mutex creation;
+};
+// R 1023 (transmittance 1), G 0, B 580 and A 3: the main view's volume at night.
+constexpr std::uint32_t ClearTexel = 1023u | (580u << 20) | (3u << 30);
+constexpr UINT64 ClearBytes = 16ull << 20;
+State& state() noexcept {
+  static State value;
+  return value;
+}
+bool volume_shape(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && d.DepthOrArraySize == 64 && d.MipLevels == 1 &&
+         d.Format == DXGI_FORMAT_R10G10B10A2_UNORM && !(d.Width == 64 && d.Height == 64);
+}
+Volume* slot(ID3D12Resource* resource) noexcept {
+  for (auto& v : state().volumes) {
+    ID3D12Resource* seen = v.resource.load(std::memory_order_acquire);
+    if (!seen && v.resource.compare_exchange_strong(seen, resource, std::memory_order_acq_rel))
+      return &v;
+    if (seen == resource)
+      return &v;
+  }
+  // Full: recycle slots in turn (views are recreated by resizes and CAM
+  // toggles). A recycled live volume may be reset once more.
+  auto& v = state().volumes[state().evict.fetch_add(1, std::memory_order_relaxed) % state().volumes.size()];
+  v.reset.store(false, std::memory_order_relaxed);
+  v.resource.store(resource, std::memory_order_release);
+  return &v;
+}
+// From every observed resource creation: a resource created at the address of
+// a tracked volume is a new one (a recreated view), so its history is reset
+// again at its first guarded exit.
+void created(IUnknown* object) noexcept {
+  ID3D12Resource* resource = nullptr;
+  if (FAILED(object->QueryInterface(IID_PPV_ARGS(&resource))))
+    return;
+  resource->Release();
+  for (auto& v : state().volumes)
+    if (v.resource.load(std::memory_order_acquire) == resource) {
+      v.reset.store(false, std::memory_order_relaxed);
+      return;
+    }
+}
+std::uint32_t cells(std::uint64_t width, std::uint32_t height) noexcept {
+  return static_cast<std::uint32_t>(((width + 7) / 8) << 16) | ((height + 7) / 8);
+}
+void note_camera_output(std::uint64_t width, std::uint32_t height) noexcept {
+  auto& s = state();
+  const auto value = cells(width, height);
+  for (auto& c : s.cameras)
+    if (c.load(std::memory_order_relaxed) == value)
+      return;
+  s.cameras[s.next_camera.fetch_add(1, std::memory_order_relaxed) % s.cameras.size()].store(value, std::memory_order_relaxed);
+}
+bool camera_volume(const D3D12_RESOURCE_DESC& d) noexcept {
+  const auto value = static_cast<std::uint32_t>(d.Width << 16) | d.Height;
+  for (auto& c : state().cameras)
+    if (c.load(std::memory_order_relaxed) == value)
+      return true;
+  return false;
+}
+// One upload buffer of clear texels, kept for the process (copies may still
+// be executing). Creation never blocks a recording thread.
+ID3D12Resource* clear_source() noexcept {
+  auto& s = state();
+  if (auto* existing = s.clear_source.load(std::memory_order_acquire))
+    return existing;
+  if (s.clear_failed.load(std::memory_order_relaxed))
+    return nullptr;
+  const std::unique_lock lock(s.creation, std::try_to_lock);
+  if (!lock.owns_lock())
+    return nullptr;
+  if (auto* existing = s.clear_source.load(std::memory_order_acquire))
+    return existing;
+  auto* device = registry().device;
+  if (!device)
+    return nullptr;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = ClearBytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* created = nullptr;
+  void* mapped = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                             IID_PPV_ARGS(&created))) ||
+      FAILED(created->Map(0, nullptr, &mapped))) {
+    if (created)
+      created->Release();
+    s.clear_failed.store(true, std::memory_order_relaxed);
+    return nullptr;
+  }
+  auto* texels = static_cast<std::uint32_t*>(mapped);
+  for (UINT64 i = 0; i < ClearBytes / 4; ++i)
+    texels[i] = ClearTexel;
+  created->Unmap(0, nullptr);
+  s.clear_source.store(created, std::memory_order_release);
+  return created;
+}
+// Writes the whole volume with the clear-air texel. The volume is in
+// UNORDERED_ACCESS at its exit and is returned to it.
+bool write_clear_air(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
+  const UINT pitch = (static_cast<UINT>(d.Width) * 4 + 255) & ~255u;
+  if (UINT64{pitch} * d.Height * d.DepthOrArraySize > ClearBytes)
+    return false;
+  auto* source = clear_source();
+  if (!source)
+    return false;
+  D3D12_RESOURCE_BARRIER barrier{};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_COPY_DEST};
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION target{}, origin{};
+  target.pResource = resource;
+  target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  origin.pResource = source;
+  origin.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  origin.PlacedFootprint = {0, {d.Format, static_cast<UINT>(d.Width), d.Height, d.DepthOrArraySize, pitch}};
+  list->CopyTextureRegion(&target, 0, 0, 0, &origin, nullptr);
+  std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+  list->ResourceBarrier(1, &barrier);
+  return true;
+}
+// From before_legacy_uav, inside the owned-work guard: the observer delivers
+// this exit only in a valid recording of an enabled observer, outside any
+// pass, after prior GPU work (the fog compute's own dispatches, see
+// observe_gpu_work), in a certain batch of at most 256 barriers with no
+// earlier transition of this volume, so the volume is in UNORDERED_ACCESS
+// when the injected copy runs. Any camera volume, history or integrated: the
+// integrated volume is rewritten every frame and only this frame's copy is
+// affected.
+void reset_history(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  auto& s = state();
+  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+    return;
+  const auto d = tone::description(b.pResource);
+  if (!volume_shape(d) || !camera_volume(d))
+    return;
+  auto* v = slot(b.pResource);
+  bool expected = false;
+  if (!v || !v->reset.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+    return;
+  // A copy that could not be recorded (upload buffer not ready) is retried at
+  // the next exit.
+  if (write_clear_air(list, b.pResource, d))
+    s.resets.fetch_add(1, std::memory_order_relaxed);
+  else
+    v->reset.store(false, std::memory_order_relaxed);
+}
+}  // namespace fog
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   if (idle_callback())
     return;
   const OwnedWork guard;
+  tone::exposure_exit(list, b);
   copy_pending_pfd(list, id, b.pResource);
   runtime::manager().record_render_target_before_transition(list, b.pResource, true, id);
+}
+void before_legacy_uav(void*, ID3D12GraphicsCommandList* list, std::uint64_t, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  if (idle_callback())
+    return;
+  const OwnedWork guard;
+  tone::table_exit(list, b);
+  fog::reset_history(list, b);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
   if (idle_callback())
@@ -1259,11 +1634,22 @@ void stage_copy_model(List* list, ID3D12Resource* target, PfdCopyProof::Mode mod
   if (const auto item = resource(target); item && item->alive)
     list->copy_proof.observe_transition({reinterpret_cast<std::uint64_t>(target), item->id}, model, reason);
 }
+// Any barrier may move the camera output out of the render-target state, so a
+// following cloud merge is left as the simulator bound it. Before any list has
+// held a camera output, recordings need no lookup here.
+void forget_cloud_scene(ID3D12GraphicsCommandList* list, std::uint64_t id) noexcept {
+  if (!registry().cloud_scene_seen.load(std::memory_order_relaxed))
+    return;
+  std::shared_ptr<List> fallback;
+  if (auto* item = metadata_list(list, id, fallback))
+    item->cloud_scene = {};
+}
 void observe_legacy(void*,
                     ID3D12GraphicsCommandList* list,
                     std::uint64_t id,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
+  forget_cloud_scene(list, id);
   if (registry().live_backfill.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
       (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
     consider_live_resource(list, b.Transition.pResource,
@@ -1340,6 +1726,7 @@ void observe_enhanced(void*,
                       std::uint64_t id,
                       const D3D12_TEXTURE_BARRIER& b,
                       std::uint32_t scope) noexcept {
+  forget_cloud_scene(list, id);
   if (registry().live_backfill.load(std::memory_order_relaxed) &&
       (b.LayoutBefore == D3D12_BARRIER_LAYOUT_RENDER_TARGET || b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET))
     consider_live_resource(
@@ -1904,7 +2291,8 @@ const boundary::Callbacks Boundaries{nullptr,
                                      metadata_begin,
                                      metadata_end,
                                      submission_pass_began,
-                                     submission_enhanced};
+                                     submission_enhanced,
+                                     before_legacy_uav};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -2232,6 +2620,7 @@ struct Creation<I, HRESULT (STDMETHODCALLTYPE C::*)(Args...)> {
         observe_safely([&] {
           observe_resource(reinterpret_cast<ID3D12Device*>(self), static_cast<IUnknown*>(*out), model(std::get<StateArgs[I]>(tuple)),
                            true);
+          fog::created(static_cast<IUnknown*>(*out));
         });
     }
     return hr;
@@ -2617,6 +3006,8 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->pfd_dirty = false;
     item->pending_pfds = {};
     item->pending_rt = {};
+    item->cloud_scene = {};
+    item->cloud_previous = {};
     item->raw_rtvs = {};
     item->raw_dsv = {};
     item->raw_rtv_count = 0;
@@ -2672,6 +3063,7 @@ struct ClearState {
     l.pfd_dirty = false;
     l.pending_pfds = {};
     l.pending_rt = {};
+    l.cloud_scene = {};
     l.raw_rtvs = {};
     l.raw_dsv = {};
     l.raw_rtv_count = 0;
@@ -2892,8 +3284,71 @@ struct Targets {
                      const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
     flush_pfd(l.native, l.id);
     record(l, count, handles, contiguous, depth, true);
+    l.cloud_previous = std::exchange(l.cloud_scene, View{});
+    if (l.count && cloud_target(l.targets[0]).camera_output) {
+      l.cloud_scene = l.targets[0];
+      auto& seen = registry().cloud_scene_seen;
+      if (!seen.load(std::memory_order_relaxed))
+        seen.store(true, std::memory_order_relaxed);
+    }
   }
-  static void apply(List&, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*) {}
+  static void apply(List& l,
+                    UINT count,
+                    const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
+                    BOOL contiguous,
+                    const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+    redirect_cloud_merge(l, count, handles, contiguous, depth);
+  }
+  static cloud_merge::Target cloud_target(const View& view) noexcept {
+    if (!view.resource || !view.resource->alive)
+      return {};
+    const auto handle = reinterpret_cast<std::uint64_t>(view.resource->native);
+    const bool camera = scene_handoff().observed_feed(handle) >= 0;
+    if (camera)
+      fog::note_camera_output(view.resource->desc.Width, view.resource->desc.Height);
+    return {handle, view.format, view.mip, view.resource->desc.Width, view.resource->desc.Height, camera};
+  }
+  // Runs right after the simulator's own bind, inside the owned-work guard, so
+  // the calls below reach the runtime directly. The camera output is still
+  // bound as a render target from the previous bind (no barrier since), and the
+  // merge pipeline expects exactly these three formats, so target 0 becomes a
+  // bridge-owned view of the camera output and the other two are copied.
+  static void redirect_cloud_merge(List& l,
+                                   UINT count,
+                                   const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
+                                   BOOL contiguous,
+                                   const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+    auto& r = registry();
+    const View previous = std::exchange(l.cloud_previous, View{});
+    if (!previous.resource || count != 3 || !handles || l.count != 3)
+      return;
+    const cloud_merge::Target bound[3]{cloud_target(l.targets[0]), cloud_target(l.targets[1]), cloud_target(l.targets[2])};
+    if (!cloud_merge::camera_merge_bind(cloud_target(previous), count, depth != nullptr, bound))
+      return;
+    if (!l.cloud_rtvs) {
+      D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 3, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+      if (FAILED(r.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&l.cloud_rtvs)))) {
+        l.cloud_rtvs = nullptr;
+        r.cloud_merge_refusals.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    }
+    const auto base = l.cloud_rtvs->GetCPUDescriptorHandleForHeapStart();
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 3> rtvs{};
+    for (UINT i = 0; i < 3; ++i)
+      rtvs[i] = {base.ptr + SIZE_T{i} * r.rtv_stride};
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = previous.format;
+    view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    r.device->CreateRenderTargetView(previous.resource->native, &view, rtvs[0]);
+    for (UINT i = 1; i < 3; ++i)
+      r.device->CopyDescriptorsSimple(1, rtvs[i], {contiguous ? handles[0].ptr + SIZE_T{i} * r.rtv_stride : handles[i].ptr},
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    l.native->OMSetRenderTargets(3, rtvs.data(), FALSE, nullptr);
+    l.targets[0] = previous;
+    l.targets[0].rtv = rtvs[0].ptr;
+    r.cloud_merge_redirects.fetch_add(1, std::memory_order_relaxed);
+  }
 };
 void pass_targets(void*,
                   ID3D12GraphicsCommandList* native,
@@ -2906,6 +3361,7 @@ void pass_targets(void*,
     return;
   item->queries.invalidate();
   item->pending_rt = {};
+  item->cloud_scene = {};
   flush_pfd(native, id, false);
   if (count > 8 || (count && !targets)) {
     item->pfd_dirty = false;
@@ -3105,9 +3561,15 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
       if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native))) {
         if constexpr (std::is_same_v<Action, StateDisjointGpuWork>)
           item->submission_proof.state_disjoint_work(Slot);
-        else if constexpr (std::is_same_v<Action, ComputeGpuWork>)
+        else if constexpr (std::is_same_v<Action, ComputeGpuWork>) {
           item->submission_proof.compute_work(Slot);
-        else if constexpr (std::is_same_v<Action, GpuWork>)
+          // A nonempty Dispatch is prior GPU work for the barrier observer, as
+          // a draw is. The simulator's froxel fog runs in compute-only prefixes
+          // of its recordings, so their UAV exits need this to be delivered.
+          if constexpr (Slot == 14)
+            if ((... && (args != 0)))
+              boundary::observe_gpu_work(reinterpret_cast<ID3D12GraphicsCommandList*>(native), item->id);
+        } else if constexpr (std::is_same_v<Action, GpuWork>)
           item->submission_proof.gpu_work(Slot);
         else
           Action::apply(*item, args...);
@@ -3386,6 +3848,74 @@ void set_graphics_observation_demand(bool enabled) noexcept {
 }
 void set_graphics_diagnostics_enabled(bool enabled) noexcept {
   registry().diagnostics_enabled.store(enabled, std::memory_order_relaxed);
+}
+void set_tone_capture_enabled(bool enabled) noexcept {
+  tone::source().enabled.store(enabled, std::memory_order_relaxed);
+}
+ToneStatus tone_status() noexcept {
+  auto& s = tone::source();
+  ToneStatus status;
+  status.readback_failed = s.failed.load(std::memory_order_relaxed);
+  status.exposure_copies = s.exposure_copies.load(std::memory_order_relaxed);
+  status.table_copies = s.table_copies.load(std::memory_order_relaxed);
+  status.source_changes = s.source_changes.load(std::memory_order_relaxed);
+  auto* buffer = s.readback.load(std::memory_order_acquire);
+  if (!buffer || !status.exposure_copies)
+    return status;
+  // Not fenced (see namespace tone): one aligned float, zero until the first
+  // copy completes and refused below until then.
+  const D3D12_RANGE range{0, 8};
+  void* mapped = nullptr;
+  if (FAILED(buffer->Map(0, &range, &mapped)) || !mapped)
+    return status;
+  float exposure[2]{};
+  std::memcpy(exposure, mapped, sizeof(exposure));
+  const D3D12_RANGE none{0, 0};
+  buffer->Unmap(0, &none);
+  status.exposure = exposure[0];
+  status.exposure_valid = std::isfinite(exposure[0]) && exposure[0] > 0;
+  return status;
+}
+bool read_tone_table(std::uint32_t* table) noexcept {
+  auto& s = tone::source();
+  auto* buffer = s.readback.load(std::memory_order_acquire);
+  if (!table || !buffer || !s.table_copies.load(std::memory_order_relaxed))
+    return false;
+  const D3D12_RANGE range{static_cast<SIZE_T>(tone::MarkerOffset), static_cast<SIZE_T>(tone::TableOffset + 2 * tone::TableBytes)};
+  void* mapped = nullptr;
+  if (FAILED(buffer->Map(0, &range, &mapped)) || !mapped)
+    return false;
+  const auto* base = static_cast<const unsigned char*>(mapped);
+  const auto markers = [&] {
+    std::array<std::uint32_t, 2> value{};
+    std::memcpy(value.data(), base + tone::MarkerOffset, sizeof(value));
+    return value;
+  };
+  // Only a slot whose completion marker the GPU wrote is read (see namespace
+  // tone); markers are zero until then. The newest is never being rewritten.
+  const auto before = markers();
+  const UINT slot = before[1] > before[0] ? 1u : 0u;
+  bool complete = before[slot] != 0;
+  if (complete) {
+    const auto* source = base + tone::TableOffset + slot * tone::TableBytes;
+    std::memcpy(table, source, tone::TableBytes);
+    complete = markers() == before && std::memcmp(table, source, tone::TableBytes) == 0;
+  }
+  const D3D12_RANGE none{0, 0};
+  buffer->Unmap(0, &none);
+  return complete;
+}
+FogStatus fog_status() noexcept {
+  auto& f = fog::state();
+  FogStatus status;
+  status.resets = f.resets.load(std::memory_order_relaxed);
+  for (auto& v : f.volumes)
+    status.volumes += v.resource.load(std::memory_order_relaxed) != nullptr;
+  return status;
+}
+CloudMergeStatus cloud_merge_status() noexcept {
+  const auto& r = registry();
+  return {r.cloud_merge_redirects.load(std::memory_order_relaxed), r.cloud_merge_refusals.load(std::memory_order_relaxed)};
 }
 std::uint64_t frame_pulse() noexcept {
   return registry().frame_pulse.load(std::memory_order_relaxed) + queue_hook::total_statistics().calls;

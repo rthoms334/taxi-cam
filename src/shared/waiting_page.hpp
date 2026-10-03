@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include "../profiles/catalog.hpp"
@@ -9,6 +10,18 @@ namespace taxi_camera::standalone {
 // 2026-10-01: every 3-5 s in flight), not switched off and on by the pilot.
 // The separate missing/stale camera image rule still shows the page.
 inline constexpr std::uint64_t WaitingPageResumeMs = 3000;
+
+// Camera-image age that brings the page back while a side stays on. A composed
+// image needs a new frame from every feed, so one skipped frame delays it by a
+// whole feed interval; at the 2 Hz parked floor that already passes a second
+// (live PMDG 777, 2026-10-03: a third of requested frames not drawn near 60 fps
+// and the page flashed at random). Six intervals of the slowest feed (tails at
+// half rate under nose priority), never under WaitingPageStaleMs.
+inline constexpr std::uint64_t waiting_stale_ms(unsigned rate, bool nose_priority) noexcept {
+  const std::uint64_t per_second = std::max(rate, 1u);
+  const std::uint64_t interval = (1000 + per_second - 1) / per_second * (nose_priority ? 2 : 1);
+  return std::max<std::uint64_t>(profiles::WaitingPageStaleMs, 6 * interval);
+}
 
 // Per-side minimum PLEASE WAIT time. The clock starts when a side is first
 // admitted for display writes and resets when that side stops drawing, so each

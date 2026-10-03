@@ -1,5 +1,4 @@
 #pragma once
-#include <cmath>
 #include <cstdint>
 
 namespace taxi_camera::native_camera {
@@ -11,9 +10,9 @@ namespace taxi_camera::native_camera {
 // rendering depth range, render-context scaling and the shared object-LOD
 // viewer list read. The engine's own SetFar (RVA 66859263) writes both far
 // values. Taxi Cam's views are created with a 1000 m far, so after take-off
-// they stop drawing the ground; the main view's camera carries the
-// simulator's own distance. See docs/architecture.md
-// (camera draw distance).
+// they stop drawing the ground and the cloud raymarch ends each sky ray below
+// the cloud base; the main view's camera carries the simulator's own
+// distance. See docs/architecture.md (camera draw distance, camera weather).
 inline constexpr std::uint64_t kCameraNearOffset = 0x5F0, kCameraFarOffset = 0x5F4, kCameraDefaultFarOffset = 0x5F8;
 
 struct CameraClip {
@@ -30,26 +29,13 @@ bool plausible_camera_clip(const CameraClip& clip) noexcept;
 // overflow or a failed read; the values are not judged.
 bool read_camera_clip(std::uint64_t camera_address, CameraClip& clip) noexcept;
 
-// Above kMainViewFarKnots ground speed the views draw as far as the main view;
-// they return to their own far below kOwnFarKnots. The gap keeps a speed
-// hovering near 60 kt from switching back and forth.
-inline constexpr double kMainViewFarKnots = 60, kOwnFarKnots = 55;
-
-// Next follow-the-main-view state from public GROUND VELOCITY. Missing or
-// nonfinite speed keeps the previous state.
-inline bool follow_main_far(bool previous, bool speed_valid, double knots) noexcept {
-  if (!speed_valid || !std::isfinite(knots) || knots < 0)
-    return previous;
-  return previous ? knots >= kOwnFarKnots : knots > kMainViewFarKnots;
-}
-
-// The far pair (+0x5F4, +0x5F8) a Taxi Cam camera should carry. With
-// follow_main and a plausible main-view clip: the main view's two far values,
-// so the camera draws as far as the main view. Otherwise the camera's own
-// values as first observed (restored after following). The near plane is
-// never part of the target. False when the needed input is implausible; the
-// caller then writes nothing.
-bool camera_far_target(const CameraClip& own, const CameraClip& main, bool follow_main, CameraClip& target) noexcept;
+// The far pair (+0x5F4, +0x5F8) a Taxi Cam camera should carry. With a
+// plausible main-view clip: the main view's two far values, so the camera
+// draws as far as the main view. Otherwise (main view not yet known) the
+// camera's own values as first observed. The near plane is never part of the
+// target. False when the needed input is implausible; the caller then writes
+// nothing.
+bool camera_far_target(const CameraClip& own, const CameraClip& main, CameraClip& target) noexcept;
 
 struct CameraClipResult {
   bool complete = false;

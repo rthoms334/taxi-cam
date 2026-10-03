@@ -4,6 +4,7 @@
 #include "../shared/bounded_lock.hpp"
 #include "../shared/camera_rate.hpp"
 #include "../shared/lock_hold_stats.hpp"
+#include "capture_phase.hpp"
 #include "owned_gpu_timing.hpp"
 #include "pfd_submission_pool.hpp"
 #include "scene_capture_d3d12.hpp"
@@ -64,6 +65,16 @@ class SceneCaptureManager {
     std::uint64_t matched_copies = 0, width = 0;
     std::uint32_t height = 0, format = 0, mips = 0;
     const char* last_refusal = "not_observed";
+  };
+  // Per feed: ordered batches that drew the published camera image in a
+  // render-target state, those that drew it exactly once (the deferred-lighting
+  // submission) and the most draws seen in one batch; one-draw batches the
+  // capture-phase hold kept back; queue-tail captures by the batch they
+  // followed (capture_phase::Kind).
+  struct CapturePhaseDiagnostic {
+    std::uint64_t batches = 0, one_draw = 0, held = 0;
+    std::uint32_t max_draws = 0;
+    std::array<std::uint64_t, capture_phase::KindCount> captures{};
   };
   // Every writer of a global source-model wipe (Tracker::invalidate_all or
   // clear) names itself. A skipped bounded wait is never a writer: skipped
@@ -127,6 +138,7 @@ class SceneCaptureManager {
     std::array<CopyDiagnostic, 3> copies{};
     std::uint64_t source_candidates = 0, source_draws = 0, tail_submissions = 0, tail_captures = 0;
     const char* tail_status = "not_started";
+    std::array<CapturePhaseDiagnostic, 3> phases{};
     std::uint64_t unknown_submitted_lists = 0, invalid_source_recordings = 0, scoped_source_invalidations = 0;
     // Limited global reports (PassBegin, PassState, unsupported work) on a list
     // that never named a published camera source; nothing was retired.
@@ -507,6 +519,9 @@ class SceneCaptureManager {
   // Under mutex_: the filter from live candidates only, after retirements.
   void rebuild_source_filter() noexcept;
   bool prepare_tail(Packet&, Device&) noexcept;
+  // Under mutex_. A hold describes one feed's source; a wipe, retirement or
+  // rearm loses the order it relies on (forget), lifecycle changes reset it.
+  void forget_capture_phase() noexcept;
   // Packet slots in the order a new capture should try them: idle packets
   // already holding this device's texture shape, then empty slots, then the
   // rest. First-fit released and recreated a texture under mutex_ whenever
@@ -567,6 +582,11 @@ class SceneCaptureManager {
   bool gpu_timing_enabled_ = false;
   std::uint32_t source_rate_ = kDefaultCameraRate;
   std::array<std::uint64_t, 3> last_tail_us_{};
+  struct PhaseFeed {
+    source_state::Key source;
+    capture_phase::Feed state;
+  };
+  std::array<PhaseFeed, 3> phase_feeds_{};
   Transaction transaction_;
   std::uint64_t next_token_ = 0, next_receipt_ = 0;
   Statistics stats_;

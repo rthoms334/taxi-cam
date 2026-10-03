@@ -175,6 +175,32 @@ bool graphics_ready() noexcept;
 // observed. PFD state omitted while idle needs real successful Reset to resume.
 void set_graphics_observation_demand(bool enabled) noexcept;
 void set_graphics_diagnostics_enabled(bool enabled) noexcept;
+// Camera weather: a camera view's cloud composite goes into that view's image
+// (cloud_merge.hpp). Counts are cumulative for the bridge lifetime.
+struct CloudMergeStatus {
+  std::uint64_t redirects = 0, refusals = 0;
+};
+CloudMergeStatus cloud_merge_status() noexcept;
+// Camera fog: history resets written (cumulative for the bridge lifetime) and
+// camera fog volumes tracked (at most 48).
+struct FogStatus {
+  std::uint64_t resets = 0;
+  unsigned volumes = 0;
+};
+FogStatus fog_status() noexcept;
+// Camera tone: copies of the main view's eye-adaptation exposure and 64^3
+// tone-curve table, made at the simulator's own state exits once enabled.
+// Counts are cumulative for the bridge lifetime.
+void set_tone_capture_enabled(bool enabled) noexcept;
+struct ToneStatus {
+  bool readback_failed = false, exposure_valid = false;
+  float exposure = 0;
+  std::uint64_t exposure_copies = 0, table_copies = 0, source_changes = 0;
+};
+ToneStatus tone_status() noexcept;
+// The latest copied table, 64^3 R10G10B10A2 texels with x fastest. False when
+// none was copied or a copy landed during the read.
+bool read_tone_table(std::uint32_t* table) noexcept;
 GraphicsStatus graphics_status() noexcept;
 // One bridge.log line: registry and capture-manager lock holds since the last
 // call (count, total and longest per source line or acquiring address) and

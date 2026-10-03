@@ -53,7 +53,6 @@ int main() {
     Settings settings;
     require(valid_settings(settings), "Default settings are valid");
     settings.camera_rate = 60;
-    settings.exposure = -7.3f;
     settings.follow_taxi = 0;
     settings.manual_mask = 3;
     settings.mounts[0][2] = 27.25;
@@ -123,7 +122,7 @@ int main() {
     require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
     change = setup.observe(true, false, control.owner_pid() + 1, 2);
     require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
-    require(ProtocolVersion == 17 &&control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 21 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol11 guide coordinates roundtrip");
@@ -194,8 +193,8 @@ int main() {
         require(control.connected(now), "Both PFDs stay requested during live heartbeat");
         require(control.owner_pid() == GetCurrentProcessId(), "Contention does not invent an owner change");
         const auto& held = control.settings();
-        require(held.manual_mask == 3 && held.camera_rate == 60 && held.exposure == settings.exposure && held.mounts == settings.mounts &&
-                    held.route_request == 12 && held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
+        require(held.manual_mask == 3 && held.camera_rate == 60 && held.mounts == settings.mounts && held.route_request == 12 &&
+                    held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
                     held.tail_upper == settings.tail_upper && held.tail_corner == settings.tail_corner &&
                     held.tail_inner == settings.tail_inner && held.guide_color == settings.guide_color &&
                     held.speed_color == settings.speed_color,

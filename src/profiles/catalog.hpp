@@ -52,6 +52,30 @@ inline constexpr Composition A350EtacsA35K = [] {
   c.tail_inner = {0.37f, 0.855f};
   return c;
 }();
+// How bright the aircraft's camera display shines, in the simulator's scene
+// units for a full code (sRGB-decoded 1): emissive x the gain its behaviour
+// maps from A:AMBIENT LIGHT SENSOR, linear between the two lux values and
+// clamped outside them. emissive 0: not decoded for this aircraft.
+// floor_low/high: light that falls on the display (cockpit lighting, sun), as
+// a fraction of its full-code light, interpolated on the same ambient mapping.
+struct DisplayLight {
+  float emissive = 0;
+  float lux_low = 0, lux_high = 0, gain_low = 0, gain_high = 0;
+  float floor_low = 0, floor_high = 0;
+};
+inline double display_ambient_position(const DisplayLight& d, double ambient) noexcept {
+  return ambient <= d.lux_low ? 0 : ambient >= d.lux_high ? 1 : (ambient - d.lux_low) / (d.lux_high - d.lux_low);
+}
+inline double display_full_light(const DisplayLight& d, double ambient) noexcept {
+  if (!(d.emissive > 0) || !(d.lux_high > d.lux_low) || ambient != ambient)
+    return 0;
+  return d.emissive * (d.gain_low + (d.gain_high - d.gain_low) * display_ambient_position(d, ambient));
+}
+inline double display_floor(const DisplayLight& d, double ambient) noexcept {
+  if (ambient != ambient || !(d.lux_high > d.lux_low))
+    return 0;
+  return d.floor_low + (d.floor_high - d.floor_low) * display_ambient_position(d, ambient);
+}
 struct AircraftProfile {
   std::uint32_t id;
   std::string_view key;
@@ -76,6 +100,8 @@ struct AircraftProfile {
   // Target pixels: the outer display region is black around this camera inset.
   DisplayInsets camera_padding{16, 12, 16, 0};
   PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
+  // Daytime EV of Taxi Cam's fallback exposure (DisplayExposureController),
+  // used only while the camera images cannot take the main view's lighting.
   float exposure = -8.f;
   // Measured PFD redraws per second per side (bridge stamps/s ÷ 2). Composing
   // faster than this cannot reach the screen. 0 = not measured: only the
@@ -97,6 +123,9 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
+  // Decoded camera-display brightness, used to match the main view's lighting;
+  // emissive 0: not decoded for this aircraft.
+  DisplayLight display_light{};
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -325,6 +354,16 @@ inline constexpr auto make_pmdg_777 =
       // picture. Bottom inset stays 0; leftover working-image rows under the squares
       // are black. L/R stay 0.
       p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
+      // PMDG773ER_VC.gltf material DUS emissiveFactor 148.8235 (150 x 253/255);
+      // 77W_Cockpit_Behavior.xml: (A:AMBIENT LIGHT SENSOR) 200 2000 0.15 11.0
+      // (F:MapRange). The shared ph_base_gbuffer emissive path (PIX 2026-10-02)
+      // gives 148.8235 x 11 = 1637.06 by day, matched bit for bit, with no screen
+      // filter or glass; the lower EICASCDU uses 150 (0.8% brighter).
+      // Live calibration (2026-10-02, night, ambient 0.64): a code ramp on the ND
+      // read back from the main view fits this light with a floor of 0.0013 of
+      // full-code light (30 points, 1.2 codes RMS); the day capture's offset is
+      // about 0.013. With these the ND's ground and sky matched the window.
+      p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f, 0.0013f, 0.0134f};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 =

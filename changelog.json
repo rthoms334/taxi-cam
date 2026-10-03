@@ -1,6 +1,20 @@
 {
   "releases": [
     {
+      "version": "1.0.0",
+      "date": "2026-10-03",
+      "changes": [
+        "Taxi Cam 1.0: the camera views now look like the main view, with the real weather, the simulator's lighting and its runway and taxiway lights.",
+        "Weather: the camera views show the current sky, clouds and haze, and draw as far as the main view at every speed.",
+        "Lighting: the camera views always use the main view's exposure, tone curve and bloom, day and night.",
+        "Lights: runway, taxiway and other lights now appear in the camera views like the main view and stay steady while taxiing.",
+        "Lights: distant lights are no longer hidden behind haze that is not there.",
+        "PMDG 777: the navigation display is found automatically again after a flight loads.",
+        "The PLEASE WAIT page no longer flashes up at random while parked.",
+        "Removed: the Exposure, Automatic exposure and Night boost settings, now that the camera views use the main view's lighting."
+      ]
+    },
+    {
       "version": "0.9.50",
       "date": "2026-10-01",
       "changes": [

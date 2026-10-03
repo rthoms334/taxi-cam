@@ -55,9 +55,9 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 
    On the PMDG 777, use the glareshield display select panel: select **L INBD**, **R INBD** or **LWR CTR**, then press **CAM** (labelled INOP). That display shows the cameras until you press **CAM** again with the same display selected. PMDG's data broadcast setting is not needed. The keyboard shortcuts add displays manually. If the lower DU shows the cameras on the wrong screen, pick its texture under **LOWER DU TEXTURE** in **PFD routing**; its automatic choice is not yet verified.
 
-Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the cameras. The page also returns while the camera image is missing or more than a second old. The text uses the ground-speed colour on the Airbus aircraft and is white on the PMDG 777.
+Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the cameras. The page also returns while the camera image is missing or stale: more than a second old, or more than six camera intervals at a low camera rate (3 s at the 2 Hz parked rate). The text uses the ground-speed colour on the Airbus aircraft and is white on the PMDG 777.
 
-The cameras stay on at any speed, including in flight, and Taxi Cam never turns the TAXI buttons off by itself. While taxiing, the camera views draw up to 1,000 m away. Above **60 knots** they draw as far as the main view, so the ground stays visible after take-off. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
+The cameras stay on at any speed, including in flight, and Taxi Cam never turns the TAXI buttons off by itself. The camera views show the current clouds and overcast light and draw as far as the main view at every speed, so the ground stays visible after take-off. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 
 Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. On the A340-600 and A340-300, **Ctrl + Shift + D** toggles the lower ECAM (SD). In **Settings → Overview → Flight-deck control**, select **Shortcuts and buttons…** to configure or disable them. The same editor can also assign a joystick, button box or gamepad button to each action. On aircraft with working TAXI buttons, shortcuts and controller buttons also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard shortcuts and controller buttons](docs/keyboard-shortcuts.md) for details.
 
@@ -77,13 +77,15 @@ Set your camera views first, then open **Reference guides** to position the nose
 
 Choose **Apply live** to preview the positions, then **Save changes** to keep them. To restore the defaults, choose **Reset guide positions** and save. The guides may need realigning if you change the camera view.
 
-### Brightness and smoothness
+### Camera rate and colours
 
-On **Display**, adjust brightness, automatic night exposure and ground-speed text colour (when the profile draws GS; the PMDG 777 keeps ground speed off). **Camera frame rate** accepts **5–60** (minimum **5**), with a default of **10**. This version's installer writes **10** into existing settings so a saved 15 becomes 10; later changes you make are kept. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance: below about 20 fps each camera updates at most about a quarter as often as the simulator draws a frame, whatever the setting. While the aircraft is parked the cameras update twice a second to save frame time, and they return to this rate as soon as it moves. **Diagnostics → Dynamic tail rate** (off by default) lets the tail camera skip every other update while rolling straight on a slow simulator (below about 24 fps), so fewer frames carry an extra view; in turns both cameras update equally. Choose **Save changes** when finished.
+On **Display**, set the camera frame rate and the ground-speed text colour (when the profile draws GS; the PMDG 777 keeps ground speed off). **Camera frame rate** accepts **5–60** (minimum **5**), with a default of **10**. This version's installer writes **10** into existing settings so a saved 15 becomes 10; later changes you make are kept. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance: below about 20 fps each camera updates at most about a quarter as often as the simulator draws a frame, whatever the setting. While the aircraft is parked the cameras update twice a second to save frame time, and they return to this rate as soon as it moves. **Diagnostics → Dynamic tail rate** (off by default) lets the tail camera skip every other update while rolling straight on a slow simulator (below about 24 fps), so fewer frames carry an extra view; in turns both cameras update equally. Choose **Save changes** when finished.
 
 On **Reference guides**, **Marking colour** changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Save changes** to retain the colour for the selected aircraft profile.
 
-All aircraft start with **−8 EV** daytime exposure, **Auto exposure** enabled, **8 EV** maximum night boost and the same green ground-speed colour. This update's installer writes **−8** into existing `settings.ini` and known aircraft profile INIs once (`exposure_revision=1` on `settings.ini`); later changes you make are kept. This update also sets existing profiles' maximum night boost to **8** once, when each profile is first loaded. Other saved preferences are preserved, including the Auto exposure choice. Later changes to the night boost remain saved normally. GS displays whole knots by dropping the fractional part: 12.9 knots displays as 12.
+The camera views always use the main view's lighting: the simulator's own exposure, tone curve and bloom, so they look like the main view by day and at night. There are no brightness settings. Until the simulator's exposure is available, for example in the first moments after a flight loads, Taxi Cam exposes the camera images itself and brightens them automatically as the ambient light drops.
+
+All aircraft start with the same green ground-speed colour. Exposure and night boost settings saved by earlier versions are ignored. GS displays whole knots by dropping the fractional part: 12.9 knots displays as 12.
 
 ### Identifying the PFDs
 
@@ -97,9 +99,9 @@ Assignments apply immediately and belong to the current flight; texture IDs can 
 
 ## Known issues and limitations
 
-- **Night lighting:** Runway and taxiway lights can look very faint or be difficult to see. Improving their visibility is on the roadmap.
+- **Night lighting:** Runway and taxiway lights in the camera views have been checked at night only on the PMDG 777-300ER, where they now look like the main view's. On other aircraft they may still look faint.
 - **DLSS camera movement:** Slight aircraft movement can remain in the A350 lower view while taxiing with DLSS. TAA does not exhibit this movement. If the cameras do not recover after changing graphics settings and Taxi Cam asks for a restart, restart MSFS.
-- **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. Try a lower camera frame rate if needed.
+- **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. The camera views draw as far as the main view at every speed, so taxiing can cost more than with the 1,000 m distance of earlier versions. Try a lower camera frame rate if needed.
 
 Please report unexpected behaviour using **Report a bug**.
 

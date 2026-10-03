@@ -13,7 +13,6 @@ int main() {
   previous.taxi_desired_mask = 2;
   Settings selected;
   selected.mounts[0][2] = 27.123;
-  selected.exposure = -7.5f;
   selected.left_id = 123;
   selected.right_id = 124;
   selected.manual_mask = selected.calibration_mask = 3;
@@ -23,7 +22,7 @@ int main() {
   assert(selected.aircraft_session_epoch == 12 && !selected.left_id && !selected.right_id && !selected.route_request);
   assert(!selected.manual_mask && !selected.calibration_mask && !selected.scene_test);
   assert(selected.taxi_request == 35 && !selected.taxi_selected_mask && !selected.taxi_desired_mask);
-  assert(selected.mounts[0][2] == 27.123 && selected.exposure == -7.5f);
+  assert(selected.mounts[0][2] == 27.123);
   // Reselecting the displayed profile must be a new action without resetting calibration.
   auto retry = selected;
   assert(prepare_profile_selection(retry, selected, false));

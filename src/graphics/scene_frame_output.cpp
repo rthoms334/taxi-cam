@@ -66,6 +66,21 @@ SceneFrameOutput::Patch SceneFrameOutput::patch(DXGI_FORMAT format, UINT width, 
 bool SceneFrameOutput::set_display_exposure(float ev) noexcept {
   return compositor_ && !prepared_ && !failed_ && compositor_->set_display_exposure(ev);
 }
+bool SceneFrameOutput::set_tone_curve(float exposure, const std::uint32_t* table) noexcept {
+  if (!compositor_ || prepared_ || failed_ || (table && !idle()))
+    return false;
+  if (!(exposure > 0)) {
+    compositor_->clear_tone_curve();
+    return true;
+  }
+  return compositor_->set_tone_curve(exposure, table);
+}
+bool SceneFrameOutput::set_screen_scale(float scale, float floor) noexcept {
+  return compositor_ && !prepared_ && !failed_ && compositor_->set_screen_scale(scale, floor);
+}
+bool SceneFrameOutput::tone_curve_active() const noexcept {
+  return compositor_ && compositor_->tone_curve_active();
+}
 bool SceneFrameOutput::set_composition(const profiles::Composition& layout) noexcept {
   if (!compositor_ || prepared_ || failed_)
     return false;

@@ -347,10 +347,63 @@ void interleaved_draw_compression() {
         for (std::uint64_t key = 1; key <= 4; ++key) {
           const auto expected = original.state({key, 7});
           state_is(deduplicated, {key, 7}, expected.model, expected.drawn);
+          require(deduplicated.state({key, 7}).draws == expected.draws, "compressed draw count differs from the raw stream");
         }
       }
     }
   }
+}
+
+void draw_counts() {
+  // One camera render in two submissions: the deferred list draws once, the
+  // forward list fifty times. Each batch counts only its own draws.
+  Tracker tracker;
+  require(tracker.register_source(nose, Model::legacy_rt) && tracker.register_source(tail, Model::legacy_rt), "count registration refused");
+  Recording deferred, forward;
+  require(deferred.append({nose, Kind::draw}) && deferred.count == 1 && deferred.effects[0].draws == 1, "single draw not counted");
+  for (unsigned i = 0; i < 50; ++i)
+    require(forward.append({nose, Kind::draw}) && forward.append({tail, Kind::draw}), "forward draw refused");
+  require(forward.count == 2 && forward.effects[0].draws == 50 && forward.effects[1].draws == 50,
+          "interleaved draws were not counted on their own collapsed evidence");
+  tracker.begin_batch();
+  require(tracker.apply(deferred) && tracker.state(nose).draws == 1 && tracker.state(tail).draws == 0, "deferred batch count");
+  tracker.begin_batch();
+  require(tracker.state(nose).draws == 0 && !tracker.state(nose).drawn, "batch boundary kept a draw count");
+  require(tracker.apply(forward) && tracker.state(nose).draws == 50 && tracker.state(tail).draws == 50, "forward batch count");
+  // Both lists in one batch, and a replay of the same immutable recording.
+  tracker.begin_batch();
+  require(tracker.apply(deferred) && tracker.apply(forward) && tracker.state(nose).draws == 51, "two-list batch count");
+  require(tracker.apply(deferred) && tracker.state(nose).draws == 52, "replayed recording was not counted again");
+  // A state effect stops the collapse; entering RT restarts the count.
+  Recording entry;
+  require(entry.append({nose, Kind::draw}) && entry.append({nose, Kind::legacy_rt}) && entry.append({nose, Kind::draw}) &&
+              entry.append({nose, Kind::draw}) && entry.count == 3 && entry.effects[2].draws == 2,
+          "draws after a transition joined the earlier evidence");
+  require(tracker.apply(entry) && tracker.state(nose).draws == 2 && tracker.state(nose).drawn, "RT entry did not restart the count");
+  // Draws outside a render-target model are not counted.
+  require(tracker.apply(record({{nose, Kind::other}, {nose, Kind::draw}})), "non-RT draw refused structurally");
+  state_is(tracker, nose, Model::other, false);
+  require(tracker.state(nose).draws == 0, "a non-RT draw was counted");
+  // Transitions carry no count and still collapse when consecutively identical.
+  Recording states;
+  require(states.append({nose, Kind::legacy_rt, 9}) && states.append({nose, Kind::legacy_rt}) && states.count == 1 &&
+              states.effects[0].draws == 0,
+          "a state effect carried a draw count");
+  // Saturation: neither the evidence nor the batch total wraps.
+  Recording many;
+  require(many.append({nose, Kind::draw}), "saturation setup refused");
+  many.effects[0].draws = UINT32_MAX - 1;
+  require(many.append({nose, Kind::draw}) && many.append({nose, Kind::draw}) && many.effects[0].draws == UINT32_MAX,
+          "collapsed draw count wrapped");
+  require(tracker.apply(record({{nose, Kind::legacy_rt}})) && tracker.apply(many) && tracker.apply(many) &&
+              tracker.state(nose).draws == UINT32_MAX,
+          "batch draw count wrapped");
+  // Wipes and retirements clear the count with the draw evidence.
+  tracker.retire_live_models();
+  require(tracker.state(nose).draws == 0 && tracker.rearm_retained_rt() == 2 && tracker.state(nose).draws == 0, "retire kept a count");
+  require(tracker.apply(deferred) && tracker.state(nose).draws == 1, "count after rearm");
+  tracker.invalidate_all();
+  require(tracker.state(nose).draws == 0, "wipe kept a count");
 }
 
 void source_bounds() {
@@ -389,6 +442,7 @@ int main() {
   barrier_other_clears_retained_rt();
   recording_bounds();
   interleaved_draw_compression();
+  draw_counts();
   source_bounds();
   std::printf("PASS: %u source-state checks; pure submitted-order evidence, no graphics/process APIs.\n", checks);
 }

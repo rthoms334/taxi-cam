@@ -40,37 +40,6 @@ inline std::wstring settings_path(const Settings& s) {
       name += wchar_t(c);
   return folder + L"\\" + name + L".ini";
 }
-inline bool migrate_night_boost(const std::wstring& source, const std::wstring& destination) {
-  // Patch a copy so calibration, unknown keys and the selected aircraft remain
-  // intact. A legacy fallback is copied into the modern path, never rewritten.
-  const auto temporary = destination + L".night-boost.tmp";
-  if (!CopyFileW(source.c_str(), temporary.c_str(), FALSE))
-    return false;
-  wchar_t boost[32], revision[16];
-  std::swprintf(boost, 32, L"%.9g", kDefaultNightBoostEv);
-  std::swprintf(revision, 16, L"%u", kNightBoostPreferenceRevision);
-  bool ok = WritePrivateProfileStringW(L"display", L"night_boost", boost, temporary.c_str()) &&
-            WritePrivateProfileStringW(L"display", L"night_boost_revision", revision, temporary.c_str());
-  // The profile API reports zero for a cache flush as well as for failures.
-  WritePrivateProfileStringW(nullptr, nullptr, nullptr, temporary.c_str());
-  if (ok) {
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    ok = file != INVALID_HANDLE_VALUE;
-    if (ok) {
-      ok = FlushFileBuffers(file) != FALSE;
-      CloseHandle(file);
-    }
-  }
-  if (ok)
-    ok = MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-  if (!ok) {
-    // CopyFile carries read-only attributes too. Remove them only from our
-    // failed temporary copy so a later retry cannot be blocked by that file.
-    SetFileAttributesW(temporary.c_str(), FILE_ATTRIBUTE_NORMAL);
-    DeleteFileW(temporary.c_str());
-  }
-  return ok;
-}
 // Global [messages] notifications; protocol 10 saved the same choice as
 // [messages] in_simulator. A file with only the legacy key keeps the user's
 // choice; save_settings writes the new key and removes the legacy one.
@@ -94,7 +63,6 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   value.profile = profile->id;
   value.follow_taxi = profile->taxi_control == profiles::TaxiControl::manual_only ? 0u : 1u;
   value.mounts = profile->mounts;
-  value.exposure = profile->exposure;
   value.speed_color = profile->composition.speed_color;
   reset_guide_settings(value, *profile);
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, (settings_directory() + L"\\settings.ini").c_str());
@@ -148,7 +116,8 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
     const double value = read(section, key, fallback);
     return value >= 0 && value <= 16384 && std::floor(value) == value ? static_cast<UINT>(value) : fallback;
   };
-  value.enabled = integer(L"service", L"enabled", 1);
+  // enabled is runtime connection state (Connect/Disconnect). Profiles saved
+  // by earlier versions hold a [service] enabled key; it is ignored.
   value.follow_taxi = profile->taxi_control == profiles::TaxiControl::manual_only ? 0u : integer(L"service", L"follow_taxi", 1);
   // PMDG 777 profiles were manual-only and saved follow_taxi=0. The CAM button
   // now drives them: turn cockpit control on once; later choices are kept.
@@ -169,7 +138,6 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   value.single_camera = integer(L"display", L"single_camera", 0);
   value.dynamic_tail = integer(L"display", L"dynamic_tail", 0) ? 1u : 0u;
   value.calibration_budget = integer(L"display", L"calibration_budget", 4096);
-  value.automatic_exposure = integer(L"display", L"automatic_exposure", 1);
   constexpr const wchar_t* color_keys[]{L"speed_red", L"speed_green", L"speed_blue"};
   for (unsigned c = 0; c < 3; ++c)
     value.speed_color[c] = static_cast<float>(read(L"display", color_keys[c], value.speed_color[c]));
@@ -184,11 +152,6 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   guide(value.tail_upper, L"tail_upper_x", L"tail_upper_y");
   guide(value.tail_corner, L"tail_corner_x", L"tail_corner_y");
   guide(value.tail_inner, L"tail_inner_x", L"tail_inner_y");
-  value.exposure = static_cast<float>(read(L"display", L"exposure", profile->exposure));
-  const double boost_revision = read(L"display", L"night_boost_revision", 0);
-  const bool migrate_boost =
-      boost_revision < kNightBoostPreferenceRevision || boost_revision > UINT32_MAX || std::floor(boost_revision) != boost_revision;
-  value.night_boost = migrate_boost ? kDefaultNightBoostEv : static_cast<float>(read(L"display", L"night_boost", kDefaultNightBoostEv));
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
   constexpr std::array<const wchar_t*, 3> sections{L"nose", L"tail", L"wing_right"};
   for (unsigned i = 0; i < 3; ++i)
@@ -204,10 +167,6 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   }
   if (!valid_settings(value))
     return false;
-  // A failed preference write must not discard valid calibration. Apply the
-  // release default in memory and retry persistence on the next profile load.
-  if (migrate_boost)
-    migrate_night_boost(path, destination);
   s = value;
   return true;
 }
@@ -221,22 +180,19 @@ inline bool save_settings(const Settings& s) {
   const auto& w = s.mounts[2];
   const int count = std::swprintf(
       text, 4096,
-      L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
+      L"[service]\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
       L"[display]\r\ncamera_rate=%u\r\nparked_rate=%u\r\nparked_rate_revision=%u\r\nsingle_camera=%u\r\ndynamic_tail=%u\r\n"
-      L"automatic_exposure=%u\r\n"
-      L"exposure=%.9g\r\nnight_boost=%.9g\r\nnight_boost_revision=%u\r\ncalibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\n"
-      L"speed_blue=%.9g\r\n"
+      L"calibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\nspeed_blue=%.9g\r\n"
       L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
       L"nose_dot_x=%.9g\r\nnose_dot_y=%.9g\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\n"
       L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
       L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
-      s.enabled, s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_rate, s.parked_rate, kParkedRateRevision, s.single_camera,
-      s.dynamic_tail, s.automatic_exposure, s.exposure, s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget,
-      s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2], s.nose_dot[0],
-      s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1],
-      n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
+      s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_rate, s.parked_rate, kParkedRateRevision, s.single_camera, s.dynamic_tail,
+      s.calibration_budget, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2],
+      s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1],
+      n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
   if (count <= 0)
     return false;
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

@@ -31,11 +31,14 @@ namespace taxi_camera {
 //   until the next serialized record. The caller owns output-copy synchronization.
 //
 // initialize compiles/allocates once. set_inputs writes descriptors only when
-// resources/formats change. record allocates, compiles, uploads and reads back
+// resources/formats change, and then (re)allocates each HDR feed's bloom
+// pyramid for its size. record allocates, compiles, uploads and reads back
 // nothing; it restores both input mip-zero states and leaves output COPY_SOURCE.
 // RGB is sampled as declared by the typed SRV (sRGB views decode to linear).
-// R11G11B10_FLOAT feeds receive exposure, per-channel Reinhard compression and
-// sRGB encoding for this SDR display. Other formats retain their sampled RGB.
+// R11G11B10_FLOAT feeds receive the simulator's own bloom (see BloomShader),
+// then either the simulator's own exposure and tone curve (set_tone_curve) or
+// Taxi Cam's exposure with per-channel Reinhard compression, and sRGB encoding
+// for this SDR display. Other formats retain their sampled RGB.
 // This explicit display conversion is not simulator exposure/color calibration.
 // Each feed stretches over its full region. Output alpha is a per-pixel encoding
 // flag for the PFD stamp, not coverage: 1 marks camera pixels (display-referred
@@ -103,6 +106,48 @@ class CameraCompositorD3D12 {
     exposure_ev_ = std::clamp(ev, MinimumExposureEv, MaximumExposureEv);
     return true;
   }
+  // The simulator's main-view tone mapping for HDR feeds (ToneShader notes):
+  // its eye-adaptation exposure (the 1 x 1 ph_lumadaptation value) and its
+  // 64^3 tone-curve table (R10G10B10A2 texels, x fastest, then y, then z).
+  // A null table keeps the last one; the curve applies once a table exists.
+  // Exposure is a recorded root constant. A table is copied into the upload
+  // buffer at once, so like set_inputs it requires that no recording made by
+  // this compositor is still executing. Non-finite or non-positive exposure
+  // is refused and the Taxi Cam exposure applies until clear or a valid call.
+  static constexpr UINT ToneTexels = 64;
+  static constexpr std::size_t ToneTableTexels = std::size_t{ToneTexels} * ToneTexels * ToneTexels;
+  bool set_tone_curve(float exposure, const std::uint32_t* table) noexcept {
+    if (!std::isfinite(exposure) || exposure <= 0 || exposure > 1e6f || !tone_mapped_) {
+      tone_exposure_ = 0;
+      return false;
+    }
+    tone_exposure_ = exposure;
+    if (table) {
+      for (UINT slice = 0; slice < ToneTexels * ToneTexels; ++slice)
+        std::memcpy(tone_mapped_ + std::size_t{slice} * ToneRowPitch, table + std::size_t{slice} * ToneTexels, ToneTexels * 4);
+      tone_pending_ = true;
+    }
+    return true;
+  }
+  void clear_tone_curve() noexcept { tone_exposure_ = 0; }
+  // Scene light for an aircraft display (ScreenShader notes): the camera's HDR
+  // texels times `scale`, so that the display's own emissive conversion gives
+  // back the camera's scene light and the simulator exposes and tonemaps it
+  // once, like the world outside. scale is 1 / (display light at full code in
+  // texel units). Takes precedence over the tone curve; 0 turns it off.
+  // floor: light already falling on the display, as a fraction of its
+  // full-code light; it is subtracted so the display adds it back.
+  bool set_screen_scale(float scale, float floor = 0) noexcept {
+    if (!std::isfinite(scale) || scale < 0 || scale > 1e6f || !std::isfinite(floor) || floor < 0 || floor >= 1) {
+      screen_scale_ = 0;
+      return false;
+    }
+    screen_scale_ = scale;
+    screen_floor_ = floor;
+    return true;
+  }
+  float screen_scale() const noexcept { return screen_scale_; }
+  bool tone_curve_active() const noexcept { return tone_exposure_ > 0 && (tone_ready_ || tone_pending_); }
 
   HRESULT initialize(ID3D12Device* device) noexcept {
     if (!device)
@@ -118,13 +163,13 @@ class CameraCompositorD3D12 {
 
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 3;
+    heap.NumDescriptors = SrvCount;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     status = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(srv_heap_.put()));
     if (FAILED(status))
-      return initialization_failed(status, "Creating the three-source SRV heap failed.");
+      return initialization_failed(status, "Creating the source and bloom SRV heap failed.");
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    heap.NumDescriptors = 1;
+    heap.NumDescriptors = RtvCount;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     status = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtv_heap_.put()));
     if (FAILED(status))
@@ -149,6 +194,9 @@ class CameraCompositorD3D12 {
     rtv_ = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
     device->CreateRenderTargetView(output_.get(), nullptr, rtv_);
     ++statistics_.descriptor_writes;
+    status = initialize_tone_curve();
+    if (FAILED(status))
+      return initialization_failed(status, "Creating the tone-curve table failed.");
     error_[0] = '\0';
     return S_OK;
   }
@@ -198,6 +246,22 @@ class CameraCompositorD3D12 {
     }
     formats_ = formats;
     input_descriptions_ = descriptions;
+    for (std::size_t index = 0; index < resources.size(); ++index) {
+      const bool hdr = formats[index] == DXGI_FORMAT_R11G11B10_FLOAT;
+      if (index == 2 && shared_bottom) {
+        bloom_view(2, hdr ? pyramids_[1].bloom.get() : nullptr);
+        continue;
+      }
+      if (!hdr) {
+        pyramids_[index].reset();
+        bloom_view(index, nullptr);
+        continue;
+      }
+      if (FAILED(prepare_pyramid(index, descriptions[index]))) {
+        pyramids_[index].reset();
+        bloom_view(index, nullptr);
+      }
+    }
     statistics_.descriptor_writes += shared_bottom ? 2u : 3u;
     ++statistics_.input_changes;
     error_[0] = '\0';
@@ -230,9 +294,34 @@ class CameraCompositorD3D12 {
         continue;
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
+    UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
+               (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
+    for (UINT index = 0; index < 3; ++index) {
+      const UINT source = index == 2 && shared_bottom ? 1u : index;
+      if (!(hdr & (1u << index)) || pyramids_[source].levels < 2)
+        continue;
+      if (index == source)
+        record_bloom(private_list, index);
+      hdr |= 16u << index;
+    }
+    if (tone_pending_) {
+      transition(private_list, tone_table_.get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+      D3D12_TEXTURE_COPY_LOCATION destination{}, source{};
+      destination.pResource = tone_table_.get();
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      source.pResource = tone_upload_.get();
+      source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      source.PlacedFootprint.Footprint = {ToneFormat, ToneTexels, ToneTexels, ToneTexels, ToneRowPitch};
+      private_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      transition(private_list, tone_table_.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      tone_pending_ = false;
+      tone_ready_ = true;
+    }
+    if (screen_scale_ > 0)
+      hdr |= ScreenBit;
+    else if (tone_exposure_ > 0 && tone_ready_)
+      hdr |= ToneBit;
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    const UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
-                     (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
     draw_output(private_list, hdr, ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u));
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     for (std::size_t index = 0; index < inputs_.size(); ++index) {
@@ -266,6 +355,8 @@ class CameraCompositorD3D12 {
       view.Texture2D.MipLevels = 1;
       for (std::size_t index = 0; index < inputs_.size(); ++index, handle.ptr += stride)
         device_->CreateShaderResourceView(nullptr, &view, handle);
+      for (std::size_t index = 0; index < pyramids_.size(); ++index)
+        bloom_view(index, nullptr);
       null_inputs_ = true;
     }
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -280,11 +371,23 @@ class CameraCompositorD3D12 {
   void release() noexcept {
     for (auto& input : inputs_)
       input.reset();
+    for (auto& pyramid : pyramids_)
+      pyramid.reset();
     output_.reset();
     srv_heap_.reset();
     rtv_heap_.reset();
     pipeline_.reset();
     root_signature_.reset();
+    down_pipeline_.reset();
+    up_pipeline_.reset();
+    bloom_signature_.reset();
+    if (tone_mapped_ && tone_upload_.get())
+      tone_upload_->Unmap(0, nullptr);
+    tone_mapped_ = nullptr;
+    tone_upload_.reset();
+    tone_table_.reset();
+    tone_exposure_ = 0;
+    tone_pending_ = tone_ready_ = false;
     device_.reset();
     formats_ = {};
     input_descriptions_ = {};
@@ -297,11 +400,21 @@ class CameraCompositorD3D12 {
   void abandon() noexcept {
     for (auto& input : inputs_)
       input.abandon();
+    for (auto& pyramid : pyramids_) {
+      pyramid.scene.abandon();
+      pyramid.bloom.abandon();
+    }
     output_.abandon();
     srv_heap_.abandon();
     rtv_heap_.abandon();
     pipeline_.abandon();
     root_signature_.abandon();
+    down_pipeline_.abandon();
+    up_pipeline_.abandon();
+    bloom_signature_.abandon();
+    tone_mapped_ = nullptr;
+    tone_upload_.abandon();
+    tone_table_.abandon();
     device_.abandon();
   }
 
@@ -344,6 +457,234 @@ class CameraCompositorD3D12 {
 
   bool same_device(ID3D12DeviceChild* child) const noexcept { return same_native_device(child, device_.get()); }
 
+  // The simulator's bloom, per HDR feed (BloomShader): image levels 1..L
+  // (scene: mip k holds image level k+1) and the bloom chain (bloom: mip k at
+  // the same size). Both start at half the input size and go down to 1 x 1.
+  struct Pyramid {
+    Reference<ID3D12Resource> scene;
+    Reference<ID3D12Resource> bloom;
+    UINT width = 0, height = 0, levels = 0;
+    void reset() noexcept {
+      scene.reset();
+      bloom.reset();
+      width = height = levels = 0;
+    }
+  };
+  // SRVs: three inputs, the output shader's three bloom views, then per feed
+  // MaxLevels scene-mip and MaxLevels bloom-mip views. RTVs: the output, then
+  // the same per-feed mip layout.
+  static constexpr UINT MaxLevels = 14;
+  static constexpr UINT ToneSlot = 6 + 3 * 2 * MaxLevels;
+  static constexpr UINT SrvCount = ToneSlot + 1;
+  static constexpr UINT RtvCount = 1 + 3 * 2 * MaxLevels;
+  static constexpr DXGI_FORMAT BloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  static constexpr UINT pyramid_slot(std::size_t feed, bool bloom, UINT level) noexcept {
+    return static_cast<UINT>(feed) * 2 * MaxLevels + (bloom ? MaxLevels : 0) + level;
+  }
+  D3D12_CPU_DESCRIPTOR_HANDLE srv_cpu(UINT index) const noexcept {
+    auto handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += SIZE_T{index} * device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return handle;
+  }
+  D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu(UINT index) const noexcept {
+    auto handle = srv_heap_->GetGPUDescriptorHandleForHeapStart();
+    handle.ptr += UINT64{index} * device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return handle;
+  }
+  D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu(UINT index) const noexcept {
+    auto handle = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += SIZE_T{index} * device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    return handle;
+  }
+  static UINT mip_size(UINT base, UINT level) noexcept { return (std::max)(1u, base >> level); }
+
+  // The output shader's bloom view of feed `index` (t3..t5); null when absent.
+  void bloom_view(std::size_t index, ID3D12Resource* bloom) noexcept {
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = BloomFormat;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(bloom, &view, srv_cpu(3 + static_cast<UINT>(index)));
+  }
+
+  // Allocates feed `index`'s pyramid when its size changes and writes its views.
+  HRESULT prepare_pyramid(std::size_t index, const D3D12_RESOURCE_DESC& input) noexcept {
+    auto& pyramid = pyramids_[index];
+    const UINT width = (std::max)(1u, static_cast<UINT>(input.Width) >> 1);
+    const UINT height = (std::max)(1u, input.Height >> 1);
+    UINT levels = 1;
+    while (levels < MaxLevels && ((std::max)(width, height) >> levels) > 0)
+      ++levels;
+    if (pyramid.scene.get() && pyramid.width == width && pyramid.height == height) {
+      bloom_view(index, pyramid.bloom.get());
+      return S_OK;
+    }
+    pyramid.reset();
+    D3D12_HEAP_PROPERTIES properties{};
+    properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture.Width = width;
+    texture.Height = height;
+    texture.DepthOrArraySize = 1;
+    texture.MipLevels = static_cast<UINT16>(levels);
+    texture.Format = BloomFormat;
+    texture.SampleDesc.Count = 1;
+    texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    for (auto* target : {&pyramid.scene, &pyramid.bloom}) {
+      const HRESULT status = device_->CreateCommittedResource(
+          &properties, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(target->put()));
+      if (FAILED(status)) {
+        pyramid.reset();
+        return status;
+      }
+    }
+    for (UINT level = 0; level < levels; ++level) {
+      for (const bool bloom : {false, true}) {
+        auto* resource = bloom ? pyramid.bloom.get() : pyramid.scene.get();
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = BloomFormat;
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.Texture2D.MostDetailedMip = level;
+        view.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(resource, &view, srv_cpu(6 + pyramid_slot(index, bloom, level)));
+        D3D12_RENDER_TARGET_VIEW_DESC target{};
+        target.Format = BloomFormat;
+        target.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        target.Texture2D.MipSlice = level;
+        device_->CreateRenderTargetView(resource, &target, rtv_cpu(1 + pyramid_slot(index, bloom, level)));
+      }
+    }
+    pyramid.width = width;
+    pyramid.height = height;
+    pyramid.levels = levels;
+    bloom_view(index, pyramid.bloom.get());
+    return S_OK;
+  }
+
+  struct BloomPass {
+    float target_texel[2];
+    float source_texel[2];
+    float previous_size[2];
+    float tent_weight;
+    float previous_weight;
+  };
+  void bloom_pass(ID3D12GraphicsCommandList* list,
+                  ID3D12Resource* target,
+                  UINT rtv,
+                  UINT level,
+                  UINT width,
+                  UINT height,
+                  UINT source,
+                  UINT previous,
+                  const BloomPass& constants) noexcept {
+    transition(list, target, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET, level);
+    list->SetGraphicsRootDescriptorTable(0, srv_gpu(source));
+    list->SetGraphicsRootDescriptorTable(1, srv_gpu(previous));
+    list->SetGraphicsRoot32BitConstants(2, 8, &constants, 0);
+    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    const auto handle = rtv_cpu(rtv);
+    list->OMSetRenderTargets(1, &handle, FALSE, nullptr);
+    list->DrawInstanced(3, 1, 0, 0);
+    transition(list, target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, level);
+  }
+
+  // ch_generate_mips_filtered for image levels 1..L, then ch_bloom's chain from
+  // the coarsest level down to the half-size bloom the output shader samples.
+  void record_bloom(ID3D12GraphicsCommandList* list, std::size_t index) noexcept {
+    const auto& pyramid = pyramids_[index];
+    const UINT levels = pyramid.levels;
+    list->SetGraphicsRootSignature(bloom_signature_.get());
+    ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
+    list->SetDescriptorHeaps(1, heaps);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->SetPipelineState(down_pipeline_.get());
+    UINT source_width = static_cast<UINT>(input_descriptions_[index].Width);
+    UINT source_height = input_descriptions_[index].Height;
+    for (UINT level = 0; level < levels; ++level) {
+      const UINT width = mip_size(pyramid.width, level), height = mip_size(pyramid.height, level);
+      const BloomPass constants{{1.f / width, 1.f / height}, {1.f / source_width, 1.f / source_height}, {}, 0, 0};
+      const UINT source = level ? 6 + pyramid_slot(index, false, level - 1) : static_cast<UINT>(index);
+      bloom_pass(list, pyramid.scene.get(), 1 + pyramid_slot(index, false, level), level, width, height, source, source, constants);
+      source_width = width;
+      source_height = height;
+    }
+    // bloom[k] = c/(k+1) tent(image level k+1) + B-spline(previous), with
+    // c = 1/H(L) so the level weights 1/m sum to one. The coarsest step's
+    // previous is image level L itself, weighted c/L.
+    double harmonic = 0;
+    for (UINT m = 1; m <= levels; ++m)
+      harmonic += 1.0 / m;
+    const double c = 1.0 / harmonic;
+    list->SetPipelineState(up_pipeline_.get());
+    for (UINT level = levels - 1; level-- > 0;) {
+      const bool first = level == levels - 2;
+      const UINT width = mip_size(pyramid.width, level), height = mip_size(pyramid.height, level);
+      const UINT previous_width = mip_size(pyramid.width, level + 1), previous_height = mip_size(pyramid.height, level + 1);
+      const BloomPass constants{{1.f / width, 1.f / height},
+                                {1.f / previous_width, 1.f / previous_height},
+                                {static_cast<float>(previous_width), static_cast<float>(previous_height)},
+                                static_cast<float>(c / (level + 1)),
+                                first ? static_cast<float>(c / levels) : 1.f};
+      bloom_pass(list, pyramid.bloom.get(), 1 + pyramid_slot(index, true, level), level, width, height,
+                 6 + pyramid_slot(index, false, level), 6 + pyramid_slot(index, !first, level + 1), constants);
+    }
+  }
+
+  static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+  static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
+  static constexpr UINT ToneBit = 256;
+  static constexpr UINT RootConstants = 35;
+  static constexpr UINT ScreenBit = 512;
+  HRESULT initialize_tone_curve() noexcept {
+    D3D12_HEAP_PROPERTIES properties{};
+    properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    texture.Width = texture.Height = ToneTexels;
+    texture.DepthOrArraySize = ToneTexels;
+    texture.MipLevels = 1;
+    texture.Format = ToneFormat;
+    texture.SampleDesc.Count = 1;
+    texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    HRESULT status = device_->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &texture,
+                                                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(tone_table_.put()));
+    if (FAILED(status))
+      return status;
+    properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = UINT64{ToneRowPitch} * ToneTexels * ToneTexels;
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    status = device_->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                              IID_PPV_ARGS(tone_upload_.put()));
+    if (FAILED(status))
+      return status;
+    const D3D12_RANGE none{0, 0};
+    void* mapped = nullptr;
+    status = tone_upload_->Map(0, &none, &mapped);
+    if (FAILED(status))
+      return status;
+    tone_mapped_ = static_cast<unsigned char*>(mapped);
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = ToneFormat;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.Texture3D.MipLevels = 1;
+    device_->CreateShaderResourceView(tone_table_.get(), &view, srv_cpu(ToneSlot));
+    return S_OK;
+  }
+
   // Ground-speed modes in the shader constants: 0 unavailable, 1 valid,
   // 2 hidden, and 3 the waiting page.
   static constexpr UINT WaitingPageMode = 3;
@@ -353,6 +694,12 @@ class CameraCompositorD3D12 {
     ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
     private_list->SetDescriptorHeaps(1, heaps);
     private_list->SetGraphicsRootDescriptorTable(0, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    private_list->SetGraphicsRootDescriptorTable(2, srv_gpu(ToneSlot));
+    // The simulator's exposure chain: scene units (16 x texel), its adapted
+    // exposure, and its fixed 11190.6 and 300/10^4 scales (ToneShader notes).
+    const float exposure = (hdr & ScreenBit) ? screen_scale_
+                           : (hdr & ToneBit) ? static_cast<float>(11190.6 * 16 * 300e-4) * tone_exposure_
+                                             : std::exp2(exposure_ev_);
     const struct {
       UINT hdr_mask;
       float exposure;
@@ -360,9 +707,16 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-    } display{hdr, std::exp2(exposure_ev_), reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
-    static_assert(sizeof(display) == 34 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 34, &display, 0);
+      float screen_floor;
+    } display{hdr,
+              exposure,
+              reference_guides_ ? 1u : 0u,
+              ground_speed_,
+              ground_speed_mode,
+              composition_,
+              screen_floor_};
+    static_assert(sizeof(display) == RootConstants * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, RootConstants, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -434,13 +788,14 @@ class CameraCompositorD3D12 {
   static void transition(ID3D12GraphicsCommandList* list,
                          ID3D12Resource* texture,
                          D3D12_RESOURCE_STATES before,
-                         D3D12_RESOURCE_STATES after) noexcept {
+                         D3D12_RESOURCE_STATES after,
+                         UINT subresource = 0) noexcept {
     if (before == after)
       return;
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = texture;
-    barrier.Transition.Subresource = 0;
+    barrier.Transition.Subresource = subresource;
     barrier.Transition.StateBefore = before;
     barrier.Transition.StateAfter = after;
     list->ResourceBarrier(1, &barrier);
@@ -459,9 +814,11 @@ class CameraCompositorD3D12 {
     return status;
   }
 
-  HRESULT compile(const char* entry, const char* profile, ID3DBlob** bytecode) noexcept {
+  HRESULT compile(const char* entry, const char* profile, ID3DBlob** bytecode, bool bloom = false) noexcept {
     Reference<ID3DBlob> diagnostics;
-    const HRESULT status = D3DCompile(Shader, sizeof(Shader) - 1, "camera_compositor", nullptr, nullptr, entry, profile,
+    const char* source = bloom ? BloomShader : Shader;
+    const std::size_t size = bloom ? sizeof(BloomShader) - 1 : sizeof(Shader) - 1;
+    const HRESULT status = D3DCompile(source, size, bloom ? "camera_bloom" : "camera_compositor", nullptr, nullptr, entry, profile,
                                       D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
                                       bytecode, diagnostics.put());
     ++statistics_.shader_compiles;
@@ -480,16 +837,24 @@ class CameraCompositorD3D12 {
   HRESULT initialize_pipeline() noexcept {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 3;
+    range.NumDescriptors = 6;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-    std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
+    std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[0].DescriptorTable.NumDescriptorRanges = 1;
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 34;
+    parameters[1].Constants.Num32BitValues = RootConstants;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_DESCRIPTOR_RANGE tone_range{};
+    tone_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    tone_range.NumDescriptors = 1;
+    tone_range.BaseShaderRegister = 6;
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[2].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[2].DescriptorTable.pDescriptorRanges = &tone_range;
+    parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -543,13 +908,131 @@ class CameraCompositorD3D12 {
     pipeline.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pipeline.SampleDesc.Count = 1;
     status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(pipeline_.put()));
-    return FAILED(status) ? fail(status, "Creating the compositor pipeline failed.") : S_OK;
+    if (FAILED(status))
+      return fail(status, "Creating the compositor pipeline failed.");
+    return initialize_bloom_pipelines(pipeline);
   }
+
+  // Two single-SRV tables (t0 source, t1 previous level) and eight constants.
+  HRESULT initialize_bloom_pipelines(D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline) noexcept {
+    std::array<D3D12_DESCRIPTOR_RANGE, 2> ranges{};
+    std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
+    for (UINT index = 0; index < 2; ++index) {
+      ranges[index].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+      ranges[index].NumDescriptors = 1;
+      ranges[index].BaseShaderRegister = index;
+      parameters[index].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      parameters[index].DescriptorTable.NumDescriptorRanges = 1;
+      parameters[index].DescriptorTable.pDescriptorRanges = &ranges[index];
+      parameters[index].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[2].Constants.Num32BitValues = 8;
+    parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC signature{};
+    signature.NumParameters = static_cast<UINT>(parameters.size());
+    signature.pParameters = parameters.data();
+    signature.NumStaticSamplers = 1;
+    signature.pStaticSamplers = &sampler;
+    Reference<ID3DBlob> serialized;
+    Reference<ID3DBlob> diagnostics;
+    HRESULT status = D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, serialized.put(), diagnostics.put());
+    if (FAILED(status))
+      return fail(status, "Serializing the bloom root signature failed.");
+    status =
+        device_->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(bloom_signature_.put()));
+    if (FAILED(status))
+      return fail(status, "Creating the bloom root signature failed.");
+    Reference<ID3DBlob> vertex;
+    Reference<ID3DBlob> down;
+    Reference<ID3DBlob> up;
+    if (FAILED(status = compile("vs_main", "vs_5_0", vertex.put(), true)) ||
+        FAILED(status = compile("ps_down", "ps_5_0", down.put(), true)) || FAILED(status = compile("ps_up", "ps_5_0", up.put(), true)))
+      return status;
+    pipeline.pRootSignature = bloom_signature_.get();
+    pipeline.VS = {vertex->GetBufferPointer(), vertex->GetBufferSize()};
+    pipeline.RTVFormats[0] = BloomFormat;
+    pipeline.PS = {down->GetBufferPointer(), down->GetBufferSize()};
+    status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(down_pipeline_.put()));
+    if (FAILED(status))
+      return fail(status, "Creating the bloom downsample pipeline failed.");
+    pipeline.PS = {up->GetBufferPointer(), up->GetBufferSize()};
+    status = device_->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(up_pipeline_.put()));
+    return FAILED(status) ? fail(status, "Creating the bloom upsample pipeline failed.") : S_OK;
+  }
+
+  // The simulator's bloom (1.8.16.0, PIX 2026-10-02, main view). The HDR image
+  // is box-filtered into mips (ch_generate_mips_filtered; its Reinhard
+  // weighting is off). ch_bloom then walks up from the coarsest mip; each step
+  // adds a 3 x 3 tent of the image mip at its size, weighted c/m, to a cubic
+  // B-spline upsample of the step before. The result is the sum over m of
+  // (1/m)/H(L) times image level m, with no threshold and no exposure, and the
+  // tonemapper mixes 10% of it into the image before exposure (BloomMix in
+  // Shader). The camera views run no post-processing, so Taxi Cam runs the same
+  // chain on each camera image at that image's own size.
+  static constexpr char BloomShader[] = R"(
+Texture2D<float4> Source : register(t0);
+Texture2D<float4> Previous : register(t1);
+SamplerState LinearClamp : register(s0);
+cbuffer Level : register(b0) { float2 TargetTexel; float2 SourceTexel; float2 PreviousSize; float TentWeight; float PreviousWeight; };
+float4 vs_main(uint id : SV_VertexID) : SV_Position {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+}
+// A non-finite camera texel must not spread through every level.
+float3 finite_tap(float2 uv) {
+  float3 tap = Source.SampleLevel(LinearClamp, uv, 0).rgb;
+  return all(isfinite(tap)) ? clamp(tap, 0, 65504) : 0;
+}
+// Four bilinear taps half a source texel around the target texel's centre.
+float4 ps_down(float4 position : SV_Position) : SV_Target {
+  float2 uv = position.xy * TargetTexel;
+  float2 h = 0.5 * SourceTexel;
+  return float4((finite_tap(uv + float2(h.x, h.y)) + finite_tap(uv + float2(-h.x, h.y)) + finite_tap(uv + float2(h.x, -h.y)) +
+                 finite_tap(uv - h)) * 0.25, 1);
+}
+// Tent: four bilinear taps on the target texel's corners. Previous: cubic
+// B-spline from four bilinear taps; SourceTexel holds its texel size here.
+float4 ps_up(float4 position : SV_Position) : SV_Target {
+  float2 corner = (position.xy - 0.5) * TargetTexel;
+  float3 tent = (Source.SampleLevel(LinearClamp, corner, 0).rgb + Source.SampleLevel(LinearClamp, corner + float2(TargetTexel.x, 0), 0).rgb +
+                 Source.SampleLevel(LinearClamp, corner + float2(0, TargetTexel.y), 0).rgb +
+                 Source.SampleLevel(LinearClamp, corner + TargetTexel, 0).rgb) * 0.25;
+  float2 p = position.xy * TargetTexel * PreviousSize - 0.5;
+  float2 f = frac(p);
+  float2 i = floor(p);
+  float2 f2 = f * f;
+  float2 f3 = f2 * f;
+  float2 w0 = (1 - 3 * f + 3 * f2 - f3) / 6;
+  float2 w1 = (4 - 6 * f2 + 3 * f3) / 6;
+  float2 w2 = (1 + 3 * f + 3 * f2 - 3 * f3) / 6;
+  float2 w3 = f3 / 6;
+  float2 g0 = w0 + w1;
+  float2 g1 = w2 + w3;
+  float2 h0 = (i - 0.5 + w1 / g0) * SourceTexel;
+  float2 h1 = (i + 1.5 + w3 / g1) * SourceTexel;
+  float3 cubic = g0.y * (g0.x * Previous.SampleLevel(LinearClamp, float2(h0.x, h0.y), 0).rgb +
+                         g1.x * Previous.SampleLevel(LinearClamp, float2(h1.x, h0.y), 0).rgb) +
+                 g1.y * (g0.x * Previous.SampleLevel(LinearClamp, float2(h0.x, h1.y), 0).rgb +
+                         g1.x * Previous.SampleLevel(LinearClamp, float2(h1.x, h1.y), 0).rgb);
+  return float4(TentWeight * tent + PreviousWeight * cubic, 1);
+}
+)";
 
   static constexpr char Shader[] = R"(
 Texture2D<float4> Nose : register(t0);
 Texture2D<float4> TailLeft : register(t1);
 Texture2D<float4> TailRight : register(t2);
+Texture2D<float4> NoseBloom : register(t3);
+Texture2D<float4> TailLeftBloom : register(t4);
+Texture2D<float4> TailRightBloom : register(t5);
+Texture3D<float4> ToneCurve : register(t6);
 SamplerState LinearClamp : register(s0);
 cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGuides; uint GroundSpeed; uint GroundSpeedValid;
  float NoseHeight; float TailTop; float DividerTop; float DividerBottom;
@@ -558,7 +1041,9 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder;
+ // Light already falling on the display, as a fraction of its full-code light.
+ float ScreenFloor; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -721,9 +1206,51 @@ float hdr_channel(float value) {
   float mapped = exposed / (1 + exposed);
   return mapped <= 0.0031308 ? 12.92 * mapped : 1.055 * pow(max(mapped, 0), 1.0 / 2.4) - 0.055;
 }
+float srgb_code(float value) {
+  return value <= 0.0031308 ? 12.92 * value : 1.055 * pow(max(value, 0), 1.0 / 2.4) - 0.055;
+}
+// ToneShader notes. The simulator's tonemapper (1.8.16.0, PIX 2026-10-02):
+// x = scene light x adapted exposure (Exposure holds 11190.6 x 16 x E x 0.03),
+// its 64^3 table read at log2(1 + x) / 13.4501 (texel centres), decoded back
+// to display light, a C1 shoulder from 0.22, then sRGB. Its +-0.5/255 dither
+// is not reproduced. Non-finite channels keep the Reinhard path's handling.
+float3 simulator_rgb(float3 rgb) {
+  float3 x = max(rgb, 0) * Exposure;
+  float3 u = log2(1 + x) / 13.4501 * (63.0 / 64) + 0.5 / 64;
+  float3 y = (exp2(ToneCurve.SampleLevel(LinearClamp, u, 0).rgb * 13.4501) - 1) / 11190.6 * (1e4 / 300);
+  y = y < 0.22 ? y : 0.22 + 0.78 * (1 - exp2(-1.84961 * (y - 0.22)));
+  y = saturate(y);
+  return float3(srgb_code(y.r), srgb_code(y.g), srgb_code(y.b));
+}
+// ScreenShader notes. The aircraft display turns each stored code into light
+// (sRGB decode times its own brightness) and the simulator then exposes and
+// tonemaps the cockpit, display included. Writing the camera's scene light
+// divided by the display's full-code light (Exposure) makes that conversion
+// return the scene light, so the camera image gets the main view's exposure,
+// tone curve and bloom exactly once. Light above the display's maximum clips.
+// The +-0.5/255 dither, like the simulator's own, keeps dark night gradients,
+// which use only the lowest codes, from banding.
+static float2 PixelPosition;
+float3 screen_rgb(float3 rgb) {
+  float3 linear_light = saturate(max(rgb, 0) * Exposure - ScreenFloor);
+  float noise = frac(52.9829189 * frac(dot(PixelPosition, float2(0.06711056, 0.00583715)))) - 0.5;
+  return saturate(float3(srgb_code(linear_light.r), srgb_code(linear_light.g), srgb_code(linear_light.b)) + noise / 255);
+}
 float3 display_rgb(float3 rgb, uint feed) {
   if ((HdrMask & (1u << feed)) == 0) return rgb;
+  if ((HdrMask & 512u) != 0 && all(isfinite(rgb))) return screen_rgb(rgb);
+  if ((HdrMask & 256u) != 0 && all(isfinite(rgb))) return simulator_rgb(rgb);
   return float3(hdr_channel(rgb.r), hdr_channel(rgb.g), hdr_channel(rgb.b));
+}
+// The simulator's tonemapper mixes 10% of its bloom into the HDR image before
+// exposure: lerp(image, bloom, 0.1) (1.8.16.0, PIX 2026-10-02; lens dirt off).
+// The bloom of each HDR feed comes from BloomShader; HdrMask bits 4..6 say it
+// was recorded. A uniform image is unchanged.
+static const float BloomMix = 0.1;
+float3 feed_rgb(Texture2D<float4> image, Texture2D<float4> bloom, float2 uv, uint feed) {
+  float3 rgb = image.SampleLevel(LinearClamp, uv, 0).rgb;
+  if ((HdrMask & (17u << feed)) != (17u << feed) || !all(isfinite(rgb))) return rgb;
+  return lerp(rgb, bloom.SampleLevel(LinearClamp, uv, 0).rgb, BloomMix);
 }
 // Alpha 1 flags a display-referred camera code: the PFD stamp stores this byte
 // on UNORM and sRGB views alike. Overlays use ui_pixel.
@@ -750,6 +1277,7 @@ float4 split_bottom_t() {
   return ui_pixel(float3(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0));
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
+  PixelPosition = position.xy;
   // Mode 3 is the waiting page: no camera input is sampled.
   if (GroundSpeedValid == 3) return waiting_pixel(position.xy);
   // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
@@ -811,7 +1339,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float right = side_borders ? 768.0 - nose_border : 768.0;
     float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
     float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
-    return camera_pixel(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0);
+    return camera_pixel(feed_rgb(Nose, NoseBloom, uv, 0), 0);
   }
   if (position.y < TailTop) return ui_pixel(float3(0, 0, 0));
   if (SplitBottom != 0) {
@@ -826,17 +1354,29 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
                        (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
-      return camera_pixel(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1);
-    return camera_pixel(TailRight.SampleLevel(LinearClamp, uv, 0).rgb, 2);
+      return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
+    return camera_pixel(feed_rgb(TailRight, TailRightBloom, uv, 2), 2);
   }
   float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
-  return camera_pixel(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1);
+  return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
 }
 )";
 
   Reference<ID3D12Device> device_;
   Reference<ID3D12RootSignature> root_signature_;
   Reference<ID3D12PipelineState> pipeline_;
+  Reference<ID3D12RootSignature> bloom_signature_;
+  Reference<ID3D12PipelineState> down_pipeline_;
+  Reference<ID3D12PipelineState> up_pipeline_;
+  std::array<Pyramid, 3> pyramids_;
+  Reference<ID3D12Resource> tone_table_;
+  Reference<ID3D12Resource> tone_upload_;
+  unsigned char* tone_mapped_ = nullptr;
+  float tone_exposure_ = 0;
+  float screen_scale_ = 0;
+  float screen_floor_ = 0;
+  bool tone_pending_ = false;
+  bool tone_ready_ = false;
   Reference<ID3D12DescriptorHeap> srv_heap_;
   Reference<ID3D12DescriptorHeap> rtv_heap_;
   Reference<ID3D12Resource> output_;

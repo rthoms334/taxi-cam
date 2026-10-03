@@ -159,8 +159,13 @@ class TaxiButtonRoutes {
     if (separate_lower) {
       if (targets[0] == id && targets[1] == id)
         return true;
-      if (targets[0] || targets[1] || targets[2] == id)
+      if (targets[0] || targets[1] || (targets[2] == id && lower_explicit_))
         return false;
+      // An automatic lower guess (the next-highest texture) can be the display
+      // a later detection confirms, after a transient texture shifted the
+      // order. Only an explicit lower choice keeps the texture.
+      if (targets[2] == id)
+        targets[2] = detected_targets_[2] = 0;
       targets[0] = targets[1] = detected_targets_[0] = detected_targets_[1] = id;
       assigned_ = true;
       return true;

@@ -152,11 +152,10 @@ void guide_settings_tests() {
     edited.mounts[0][1] += 0.125;
     edited.speed_color = {0.25f, 0.5f, 0.75f};
     edited.guide_color = {profile->id * 0.0625f, 0.125f, 0.875f};
-    edited.exposure = -7.5f;
     assert(save_settings(edited));
     Settings loaded;
     assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, edited));
-    assert(loaded.mounts == edited.mounts && loaded.speed_color == edited.speed_color && loaded.exposure == edited.exposure);
+    assert(loaded.mounts == edited.mounts && loaded.speed_color == edited.speed_color);
     for (auto member : GuideMembers) {
       for (unsigned axis = 0; axis < 2; ++axis) {
         for (float value : {-0.001f, axis ? 1.001f : 0.501f, std::numeric_limits<float>::infinity(),
@@ -189,7 +188,7 @@ void guide_settings_tests() {
     auto reset = edited;
     reset_guide_settings(reset, *profile);
     assert(same_guides(reset, defaults) && reset.mounts == edited.mounts && reset.speed_color == edited.speed_color &&
-           reset.exposure == edited.exposure && reset.profile == edited.profile);
+           reset.profile == edited.profile);
 
     const auto path = settings_path(edited);
     constexpr const wchar_t* color_keys[]{L"guide_red", L"guide_green", L"guide_blue"};
@@ -255,23 +254,21 @@ int main() {
   } cleanup;
   Settings a380;
   a380.mounts[0][2] = 27.123;
-  a380.exposure = -9.1f;
   assert(save_settings(a380));
   Settings a350;
   assert(load_settings(a350, L"missing", 2));
   assert(a350.profile == 2 && a350.mounts == profiles::A359.mounts);
   a350.mounts[1][3] = -19.125;
-  a350.exposure = -7;
   a350.auto_profile = 0;
   a350.speed_color = {0.125f, 0.875f, 0.25f};
   assert(save_settings(a350));
   Settings loaded;
-  assert(load_settings(loaded, L"missing") && loaded.profile == 2 && loaded.mounts == a350.mounts && loaded.exposure == -7);
+  assert(load_settings(loaded, L"missing") && loaded.profile == 2 && loaded.mounts == a350.mounts);
   assert(loaded.speed_color == a350.speed_color && loaded.auto_profile == 0);
   auto invalid = loaded;
   invalid.speed_color[0] = 1.1f;
   assert(!valid_settings(invalid));
-  assert(load_settings(loaded, L"missing", 1) && loaded.mounts == a380.mounts && loaded.exposure == a380.exposure);
+  assert(load_settings(loaded, L"missing", 1) && loaded.mounts == a380.mounts);
   assert(settings_path(a380) != settings_path(a350));
   assert(profiles::matches_aircraft(profiles::A359, "A359 ULR"));
   assert(!profiles::matches_aircraft(profiles::A35K, "A359 ULR"));
@@ -356,7 +353,9 @@ int main() {
   assert(load_settings(pmdg_300, L"missing", profiles::Pmdg777300ER.id));
   assert(load_settings(pmdg_f, L"missing", profiles::Pmdg777F.id));
   assert(pmdg_300.mounts[0][2] == 22 && pmdg_f.mounts[0] == profiles::Pmdg777.mounts[0]);
-  assert(pmdg_300.exposure == -8.f && pmdg_f.exposure == -8.f && pmdg.exposure == -8.f);
+  // The fallback exposure's daytime EV is the shipped -8 on every aircraft.
+  for (const auto* profile : profiles::Catalog)
+    assert(profile->exposure == -8.f);
   assert(settings_path(pmdg_300) != settings_path(pmdg) && settings_path(pmdg_f) != settings_path(pmdg));
   assert(settings_path(pmdg_300) != settings_path(pmdg_f));
   {
@@ -373,7 +372,7 @@ int main() {
   Settings a346;
   assert(load_settings(a346, L"missing", profiles::AerosoftA346.id));
   assert(a346.profile == profiles::AerosoftA346.id && a346.follow_taxi && a346.mounts == profiles::AerosoftA346.mounts);
-  assert(a346.exposure == -8.f && a346.tail_corner == profiles::AerosoftA346.composition.tail_corner);
+  assert(a346.tail_corner == profiles::AerosoftA346.composition.tail_corner);
   assert((a346.tail_upper == std::array<float, 2>{0.28f, 0.72f} && a346.tail_corner == std::array<float, 2>{0.24f, 0.86f} &&
           a346.tail_inner == std::array<float, 2>{0.31f, 0.86f} && a346.nose_dot == profiles::A380.composition.nose_dot));
   assert(a346.mounts[0][1] == -2.5 && a346.mounts[0][2] == 23.33);
@@ -395,14 +394,10 @@ int main() {
   assert(ini_a380.mounts == profiles::IniA380.mounts && ini_a380.mounts != a380.mounts);
   assert(settings_path(ini_a380) != settings_path(a380));
   assert(settings_path(pmdg) != settings_path(ini_a380));
-  assert(ini_a380.exposure == -8.f);
-  // A partial saved profile inherits its own exposure; explicit calibration
-  // continues to override the shipped default.
+  // A partial saved profile inherits its own defaults.
   const auto ini_path_settings = settings_path(ini_a380);
-  assert(WritePrivateProfileStringW(L"service", L"enabled", L"1", ini_path_settings.c_str()));
-  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -8.f);
-  assert(WritePrivateProfileStringW(L"display", L"exposure", L"-10.25", ini_path_settings.c_str()));
-  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -10.25f);
+  assert(WritePrivateProfileStringW(L"service", L"auto_detect", L"1", ini_path_settings.c_str()));
+  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.mounts == profiles::IniA380.mounts);
   native_camera::AircraftIdentityCache identity;
   std::array<unsigned char, 296> packet{};
   std::array<std::uint32_t, 10> h{296, 0, 8, 5, 0, 5, 0, 0, 1, 1};

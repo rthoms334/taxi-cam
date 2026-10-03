@@ -1,3 +1,4 @@
+#include "../../src/app/settings_store.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -5,8 +6,8 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
-#include "../../src/app/settings_store.hpp"
 
 using namespace taxi_camera;
 using namespace taxi_camera::standalone;
@@ -20,6 +21,14 @@ void require(bool ok, const char* label) {
   if (!ok)
     throw std::runtime_error(label);
 }
+
+// [display] keys of the retired lighting settings, with values that differ
+// from what the camera views now always do.
+constexpr std::pair<const wchar_t*, const wchar_t*> RetiredKeys[]{{L"camera_tone", L"0"},
+                                                                  {L"automatic_exposure", L"0"},
+                                                                  {L"exposure", L"-3"},
+                                                                  {L"night_boost", L"7.5"},
+                                                                  {L"night_boost_revision", L"1"}};
 
 std::vector<char> contents(const std::wstring& path) {
   std::ifstream stream(std::filesystem::path(path), std::ios::binary);
@@ -49,18 +58,16 @@ void select_fixture(const std::wstring& name) {
 }
 
 bool same_preferences(const Settings& a, const Settings& b) {
-  return a.enabled == b.enabled && a.camera_rate == b.camera_rate && a.parked_rate == b.parked_rate &&
-         a.automatic_exposure == b.automatic_exposure && a.exposure == b.exposure && a.night_boost == b.night_boost &&
-         a.auto_profile == b.auto_profile && a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper &&
-         a.tail_corner == b.tail_corner && a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi &&
-         a.auto_detect == b.auto_detect && a.single_camera == b.single_camera && a.dynamic_tail == b.dynamic_tail &&
-         a.calibration_budget == b.calibration_budget && a.mounts == b.mounts;
+  return a.camera_rate == b.camera_rate && a.parked_rate == b.parked_rate && a.auto_profile == b.auto_profile &&
+         a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper && a.tail_corner == b.tail_corner &&
+         a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi && a.auto_detect == b.auto_detect &&
+         a.single_camera == b.single_camera && a.dynamic_tail == b.dynamic_tail && a.calibration_budget == b.calibration_budget &&
+         a.mounts == b.mounts;
 }
 
 Settings customized(const profiles::AircraftProfile& profile) {
   Settings value;
   require(load_settings(value, L"missing-installation", profile.id), "Load missing profile with defaults");
-  require(value.night_boost == 8.f, "Every missing aircraft profile defaults to night boost eight");
   value.enabled = 0;
   value.auto_profile = 0;
   value.follow_taxi = 0;
@@ -69,9 +76,6 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.parked_rate = 8;
   value.single_camera = 1;
   value.calibration_budget = 2048;
-  value.automatic_exposure = 0;
-  value.exposure = -6.25f;
-  value.night_boost = 2.5f;
   value.speed_color = {0.125f, 0.5f, 0.875f};
   value.nose_dot = {0.125f, 0.75f};
   value.tail_upper = {0.25f, 0.625f};
@@ -84,10 +88,13 @@ Settings customized(const profiles::AircraftProfile& profile) {
   return value;
 }
 
-std::wstring unmarked_profile(const Settings& value) {
+// A profile as builds with the lighting settings saved it, plus keys this
+// build does not know.
+std::wstring older_profile(const Settings& value) {
   require(save_settings(value), "Save isolated profile fixture");
   const auto path = settings_path(value);
-  patch(path, L"display", L"night_boost_revision", nullptr);
+  for (const auto& [key, saved] : RetiredKeys)
+    patch(path, L"display", key, saved);
   patch(path, L"display", L"future_display_preference", L"keep display value");
   patch(path, L"future_section", L"unrelated", L"keep section value");
   return path;
@@ -158,77 +165,69 @@ void parked_rate_persists_and_defaults() {
   patch(path, L"display", L"dynamic_tail", nullptr);
   require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 0,
           "A profile without dynamic_tail loads with it off");
+  // Camera weather is always on: a camera_weather key saved by a build that
+  // had the setting is ignored and dropped by the next save.
+  patch(path, L"display", L"camera_weather", L"0");
+  patch(path, L"display", L"camera_weather_revision", L"1");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && save_settings(saved) &&
+              ini(path, L"display", L"camera_weather") == L"<missing>" && ini(path, L"display", L"camera_weather_revision") == L"<missing>",
+          "A saved camera_weather key was not ignored and dropped");
 }
 
-void all_profiles_migrate_once() {
-  select_fixture(L"all-profiles");
+// The camera views always take the main view's lighting: the keys of the
+// retired lighting and exposure settings are ignored on every aircraft and
+// dropped by the next save; everything else in the profile is kept.
+void retired_lighting_keys_are_ignored() {
+  select_fixture(L"retired-lighting");
   for (const auto* profile : profiles::Catalog) {
-    auto expected = customized(*profile);
-    expected.night_boost = profile->id % 2 ? 4.f : 1.5f;
-    const auto path = unmarked_profile(expected);
+    const auto expected = customized(*profile);
+    const auto path = older_profile(expected);
     const auto selection = settings_override + L"\\settings.ini";
-    patch(selection, L"future_global", L"unrelated", L"keep global value");
+    patch(selection, L"display", L"exposure_revision", L"1");
     const auto global_before = contents(selection);
-    expected.night_boost = 8.f;
+    const auto before = contents(path);
     Settings loaded;
-    require(load_settings(loaded, L"missing-installation", profile->id), "Load an unmarked existing profile");
-    require(same_preferences(loaded, expected), "Migrate boost while preserving all other known preferences");
-    require(ini(path, L"display", L"night_boost") == L"8", "Persist forced night boost");
-    require(ini(path, L"display", L"night_boost_revision") == L"1", "Persist completed migration revision");
-    const auto persisted = contents(path);
-    require(contains_utf16(persisted, L"night_boost=8\r\n") && contains_utf16(persisted, L"night_boost_revision=1\r\n"),
-            "Corrected boost and revision are present in disk bytes, not just the profile API cache");
-    require(ini(path, L"display", L"future_display_preference") == L"keep display value" &&
-                ini(path, L"future_section", L"unrelated") == L"keep section value",
-            "Migration preserves unknown keys and sections");
-    require(contents(selection) == global_before, "Profile migration does not rewrite global settings");
-    require(GetFileAttributesW((path + L".night-boost.tmp").c_str()) == INVALID_FILE_ATTRIBUTES,
-            "Successful migration leaves no temporary file");
-    const auto after_first_load = contents(path);
     require(load_settings(loaded, L"missing-installation", profile->id) && same_preferences(loaded, expected),
-            "Already migrated profile reloads unchanged");
-    require(contents(path) == after_first_load, "Already migrated load does not rewrite profile");
-    loaded.night_boost = 0.5f;
-    require(save_settings(loaded), "User can save a different night boost after migration");
-    Settings edited;
-    require(load_settings(edited, L"missing-installation", profile->id) && same_preferences(edited, loaded),
-            "Subsequent user preferences survive reload");
-    require(ini(path, L"display", L"night_boost_revision") == L"1", "User save retains current migration marker");
+            "Retired lighting keys do not change the loaded preferences");
+    require(contents(path) == before && contents(selection) == global_before, "Loading does not rewrite the profile or settings.ini");
+    require(save_settings(loaded), "Save the profile again");
+    for (const auto& [key, saved] : RetiredKeys)
+      require(ini(path, L"display", key) == L"<missing>", "A save drops the retired lighting keys");
+    require(ini(path, L"display", L"future_display_preference") == L"<missing>",
+            "A save writes the profile from the known preferences only");
+    require(load_settings(loaded, L"missing-installation", profile->id) && same_preferences(loaded, expected),
+            "Preferences survive the save");
   }
 }
 
-void completed_revisions_preserve_custom_values() {
-  unsigned fixture{};
-  for (const auto* revision : {L"1", L"99"})
-    for (const float boost : {0.f, 2.5f, 8.f}) {
-      select_fixture(L"completed-" + std::to_wstring(++fixture));
-      auto expected = customized(profiles::A380);
-      expected.night_boost = boost;
-      require(save_settings(expected), "Save already migrated user preference");
-      const auto path = settings_path(expected);
-      patch(path, L"display", L"night_boost_revision", revision);
-      const auto before = contents(path);
-      Settings loaded;
-      require(load_settings(loaded, L"missing-installation", expected.profile) && same_preferences(loaded, expected),
-              "Current and future revisions preserve custom boost across its full range");
-      require(contents(path) == before, "Current and future migration markers prevent rewrites");
-      require(save_settings(loaded), "Save marked custom boost");
-      require(ini(path, L"display", L"night_boost_revision") == L"1", "Save writes supported migration revision");
-      require(load_settings(loaded, L"missing-installation", expected.profile) && same_preferences(loaded, expected),
-              "Save and reload preserve marked custom boost");
-    }
+// enabled is runtime connection state: a save does not write it, and a
+// [service] enabled key saved by an earlier version, even an invalid one, is
+// ignored and dropped by the next save.
+void saved_enabled_key_is_ignored() {
+  select_fixture(L"retired-enabled");
+  const auto saved = customized(profiles::A380);
+  require(save_settings(saved), "Save a profile with the connection off");
+  const auto path = settings_path(saved);
+  require(ini(path, L"service", L"enabled") == L"<missing>", "A save does not write the connection state");
+  for (const wchar_t* value : {L"0", L"7"}) {
+    patch(path, L"service", L"enabled", value);
+    Settings loaded;
+    require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.enabled == Settings{}.enabled &&
+                same_preferences(loaded, saved),
+            "A saved enabled key does not change the loaded settings");
+    require(save_settings(loaded) && ini(path, L"service", L"enabled") == L"<missing>", "A save drops the saved enabled key");
+  }
 }
 
-void rejected_preferences_do_not_migrate() {
+void rejected_preferences_are_left_unchanged() {
   select_fixture(L"invalid-preferences");
   const auto expected = customized(profiles::A359);
-  const auto path = unmarked_profile(expected);
+  const auto path = older_profile(expected);
   patch(path, L"nose", L"lens", L"0.01");
   const auto before = contents(path);
   const auto selection_before = contents(settings_override + L"\\settings.ini");
   Settings caller = expected;
-  caller.exposure = -3.f;
-  caller.night_boost = 7.f;
+  caller.camera_rate = 30;
   caller.route_request = 123;
   caller.calibration_mask = 2;
   const auto caller_before = caller;
@@ -236,90 +235,8 @@ void rejected_preferences_do_not_migrate() {
   require(same_preferences(caller, caller_before) && caller.route_request == caller_before.route_request &&
               caller.calibration_mask == caller_before.calibration_mask,
           "Invalid profile leaves caller preferences and session state unchanged");
-  require(contents(path) == before, "Invalid profile cannot be marked or rewritten by migration");
+  require(contents(path) == before, "Invalid profile is not rewritten");
   require(contents(settings_override + L"\\settings.ini") == selection_before, "Rejected load preserves global settings");
-}
-
-void incomplete_revisions_migrate() {
-  unsigned fixture{};
-  for (const auto* revision : {L"0", L"-1", L"0.5", L"1.5", L"1e100", L"4294967296", L"invalid"}) {
-    select_fixture(L"incomplete-" + std::to_wstring(++fixture));
-    auto expected = customized(profiles::A380);
-    const auto path = unmarked_profile(expected);
-    patch(path, L"display", L"night_boost_revision", revision);
-    expected.night_boost = 8.f;
-    Settings loaded;
-    require(load_settings(loaded, L"missing-installation", expected.profile) && same_preferences(loaded, expected),
-            "Old or malformed revision cannot suppress the required migration");
-    require(ini(path, L"display", L"night_boost_revision") == L"1", "Malformed revision is replaced after successful migration");
-  }
-}
-
-struct Handle {
-  HANDLE value = INVALID_HANDLE_VALUE;
-  ~Handle() {
-    if (value != INVALID_HANDLE_VALUE)
-      CloseHandle(value);
-  }
-};
-
-void failed_replacement_retries_without_losing_preferences() {
-  select_fixture(L"blocked-replacement");
-  auto expected = customized(profiles::A35K);
-  const auto path = unmarked_profile(expected);
-  const auto before = contents(path);
-  const auto selection_before = contents(settings_override + L"\\settings.ini");
-  expected.night_boost = 8.f;
-  {
-    // Allow reading/copying the original but deny its deletion or atomic replacement.
-    Handle lock{CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-                            nullptr)};
-    require(lock.value != INVALID_HANDLE_VALUE, "Hold original profile against replacement");
-    Settings loaded;
-    require(load_settings(loaded, L"missing-installation", expected.profile) && same_preferences(loaded, expected),
-            "Write failure still supplies corrected runtime boost and preserves user preferences");
-    require(contents(path) == before, "Failed atomic replacement leaves original profile byte-identical");
-    require(ini(path, L"display", L"night_boost_revision") == L"<missing>", "Failed migration remains eligible for retry");
-  }
-  Settings retried;
-  require(load_settings(retried, L"missing-installation", expected.profile) && same_preferences(retried, expected),
-          "Migration retries successfully once profile is writable");
-  require(ini(path, L"display", L"night_boost") == L"8" && ini(path, L"display", L"night_boost_revision") == L"1",
-          "Retry persists both corrected value and completed revision");
-  require(ini(path, L"future_section", L"unrelated") == L"keep section value", "Retry preserves unknown preferences");
-  require(contents(settings_override + L"\\settings.ini") == selection_before, "Write failure and retry preserve global settings");
-}
-
-struct FileAttributes {
-  std::wstring path;
-  DWORD original{};
-  ~FileAttributes() { SetFileAttributesW(path.c_str(), original); }
-};
-
-void readonly_profile_retries_without_losing_preferences() {
-  select_fixture(L"readonly-profile");
-  auto expected = customized(profiles::IniA380);
-  const auto path = unmarked_profile(expected);
-  const auto before = contents(path);
-  expected.night_boost = 8.f;
-  {
-    FileAttributes attributes{path, GetFileAttributesW(path.c_str())};
-    require(
-        attributes.original != INVALID_FILE_ATTRIBUTES && SetFileAttributesW(path.c_str(), attributes.original | FILE_ATTRIBUTE_READONLY),
-        "Make only the isolated profile read-only");
-    Settings loaded;
-    require(load_settings(loaded, L"missing-installation", expected.profile) && same_preferences(loaded, expected),
-            "Read-only profile still receives corrected boost in memory");
-    require(contents(path) == before && (GetFileAttributesW(path.c_str()) & FILE_ATTRIBUTE_READONLY),
-            "Read-only migration failure preserves original bytes and attributes");
-    require(GetFileAttributesW((path + L".night-boost.tmp").c_str()) == INVALID_FILE_ATTRIBUTES,
-            "Failed read-only temporary copy does not block future retries");
-  }
-  Settings retried;
-  require(load_settings(retried, L"missing-installation", expected.profile) && same_preferences(retried, expected),
-          "Migration succeeds after read-only attribute is removed");
-  require(ini(path, L"display", L"night_boost") == L"8" && ini(path, L"display", L"night_boost_revision") == L"1",
-          "Read-only retry persists the corrected boost and revision");
 }
 
 struct LocalAppDataOverride {
@@ -342,21 +259,19 @@ void legacy_import_preserves_original() {
   LocalAppDataOverride environment(local);
   settings_override = local + L"\\380 Taxi Cam";
   auto expected = customized(profiles::A359);
-  const auto legacy_path = unmarked_profile(expected);
+  const auto legacy_path = older_profile(expected);
   const auto original = contents(legacy_path);
   const auto original_selection = contents(settings_override + L"\\settings.ini");
   settings_override.clear();
-  expected.night_boost = 8.f;
   // Legacy profile import does not import the separate global automatic-selection preference.
   expected.auto_profile = 1;
   Settings loaded;
   require(load_settings(loaded, L"missing-installation", expected.profile) && same_preferences(loaded, expected),
-          "Legacy renamed-application profile imports calibration and migrates its boost");
+          "Legacy renamed-application profile imports calibration and preferences");
   const auto imported_path = settings_path(loaded);
-  require(imported_path != legacy_path && ini(imported_path, L"display", L"night_boost") == L"8" &&
-              ini(imported_path, L"display", L"night_boost_revision") == L"1",
-          "Imported profile receives durable migration in the current application directory");
-  require(contents(legacy_path) == original, "Legacy import and boost migration never modify the original profile");
+  require(imported_path != legacy_path && contents(imported_path) == original,
+          "The imported profile is a copy in the current application directory");
+  require(contents(legacy_path) == original, "Legacy import never modifies the original profile");
   require(contents(local + L"\\380 Taxi Cam\\settings.ini") == original_selection, "Legacy global settings remain untouched");
   require(ini(imported_path, L"future_section", L"unrelated") == L"keep section value", "Legacy unknown preferences survive import");
 }
@@ -367,23 +282,20 @@ int main() {
     wchar_t repository[32768]{};
     const auto length = GetCurrentDirectoryW(32768, repository);
     require(length && length < 32768, "Locate working directory for ignored fixture files");
-    fixture_root = std::wstring(repository) + L"\\build\\night-boost-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+    fixture_root = std::wstring(repository) + L"\\build\\settings-store-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
                    std::to_wstring(GetTickCount64());
     require(std::filesystem::create_directories(fixture_root), "Create ignored test root");
-    require(Settings{}.night_boost == 8.f && Settings{}.camera_rate == taxi_camera::kDefaultCameraRate &&
-                Settings{}.parked_rate == taxi_camera::kDefaultParkedCameraRate && valid_settings(Settings{}),
-            "Default night boost is eight, the shipped camera rate is ten and the parked floor is two");
+    require(Settings{}.camera_rate == taxi_camera::kDefaultCameraRate && Settings{}.parked_rate == taxi_camera::kDefaultParkedCameraRate &&
+                valid_settings(Settings{}),
+            "The shipped camera rate is ten and the parked floor is two");
     missing_rate_uses_shipped_default_without_rewriting_saved_fifteen();
     parked_rate_persists_and_defaults();
-    all_profiles_migrate_once();
-    completed_revisions_preserve_custom_values();
-    incomplete_revisions_migrate();
-    rejected_preferences_do_not_migrate();
-    failed_replacement_retries_without_losing_preferences();
-    readonly_profile_retries_without_losing_preferences();
+    retired_lighting_keys_are_ignored();
+    saved_enabled_key_is_ignored();
+    rejected_preferences_are_left_unchanged();
     legacy_import_preserves_original();
     settings_override.clear();
-    std::printf("PASS: %u night-boost migration checks (CPU/file fixtures only).\n", checks);
+    std::printf("PASS: %u settings store checks (CPU/file fixtures only).\n", checks);
     return 0;
   } catch (const std::exception& error) {
     settings_override.clear();

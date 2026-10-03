@@ -2,7 +2,6 @@
 
 #include <windows.h>
 
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -34,21 +33,12 @@ int main() {
                 "An implausible camera clip was accepted");
 
   CameraClip target;
-  ok &= require(camera_far_target(own, main_view, false, target) && target == own, "Taxi speed did not keep the camera's own far");
-  ok &= require(camera_far_target(own, main_view, true, target) && target.near_plane == own.near_plane && target.far_plane == 80000 &&
+  ok &= require(camera_far_target(own, main_view, target) && target.near_plane == own.near_plane && target.far_plane == 80000 &&
                     target.default_far == 120000,
-                "Flight speed did not give the camera the main view's far pair with its own near plane");
-  ok &= require(camera_far_target(own, {}, true, target) && target == own, "An unknown main view did not leave the camera's own far");
-  ok &= require(!camera_far_target(own, {0.01f, 0.04f, 1.0f}, true, target), "A main far inside the camera's near plane was accepted");
-  ok &= require(!camera_far_target({0, 1000, 1000}, main_view, true, target), "An implausible own camera produced a target");
-
-  // Speed switch: above 60 kt to the main view, back below 55 kt, missing speed holds.
-  ok &= require(!follow_main_far(false, true, 60) && follow_main_far(false, true, 60.01), "The main view far did not start above 60 kt");
-  ok &= require(follow_main_far(true, true, 58) && follow_main_far(true, true, 55) && !follow_main_far(true, true, 54.9),
-                "The own far did not return below 55 kt");
-  ok &= require(follow_main_far(true, false, 0) && !follow_main_far(false, false, 300) &&
-                    follow_main_far(true, true, std::numeric_limits<double>::quiet_NaN()) && !follow_main_far(false, true, -1),
-                "Missing or invalid speed changed the far state");
+                "A known main view did not give the camera its far pair with the camera's own near plane");
+  ok &= require(camera_far_target(own, {}, target) && target == own, "An unknown main view did not leave the camera's own far");
+  ok &= require(!camera_far_target(own, {0.01f, 0.04f, 1.0f}, target), "A main far inside the camera's near plane was accepted");
+  ok &= require(!camera_far_target({0, 1000, 1000}, main_view, target), "An implausible own camera produced a target");
 
   // A private read-write page stands in for the camera object.
   auto* camera = static_cast<unsigned char*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
@@ -63,7 +53,7 @@ int main() {
   auto result = apply_camera_far(address, own);
   ok &= require(result.complete && !result.write_attempted && result.after == own, "A camera already at its target was written");
 
-  camera_far_target(own, main_view, true, target);
+  camera_far_target(own, main_view, target);
   result = apply_camera_far(address, target);
   float next = 0;
   std::memcpy(&next, camera + kCameraNearOffset + 12, sizeof(next));
@@ -75,7 +65,7 @@ int main() {
 
   result = apply_camera_far(address, own);
   ok &= require(result.complete && result.write_attempted && read_camera_clip(address, read) && read == own,
-                "Slowing down did not restore the camera's own far");
+                "Returning to the camera's own far did not restore it");
 
   store(camera, 0, 1000, 1000);
   result = apply_camera_far(address, target);

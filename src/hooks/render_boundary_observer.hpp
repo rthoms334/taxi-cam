@@ -36,8 +36,9 @@ struct Callbacks {
   // plane zero). Caller must match scene identity and prove that the actual
   // color resource contains exactly one mip, layer, sample and plane.
   // Injection must restore the identical before state/layout before returning.
-  // A prior observed native draw outside a pass, or a completed ordinary pass,
-  // is required. This excludes transitions before a future first RESUMING pass.
+  // A prior observed native draw, copy or reported dispatch (observe_gpu_work)
+  // outside a pass, or a completed ordinary pass, is required. This excludes
+  // transitions before a future first RESUMING pass.
   // Any PRESERVE_LOCAL pass access invalidates the recording until Reset.
   void (*before_legacy)(void*,
                         ID3D12GraphicsCommandList*,
@@ -132,6 +133,14 @@ struct Callbacks {
   // including buffer/global-only, empty and malformed calls. No resource model
   // is implied; consumers without a complete enhanced model must invalidate.
   void (*enhanced_call)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
+  // Optional. Same delivery rules and injection contract as before_legacy, for
+  // a non-split transition from UNORDERED_ACCESS instead of RENDER_TARGET
+  // (batches of at most 256 barriers only). Injection must restore the
+  // identical UNORDERED_ACCESS state before returning.
+  void (*before_legacy_uav)(void*,
+                            ID3D12GraphicsCommandList*,
+                            std::uint64_t object_generation,
+                            const D3D12_RESOURCE_TRANSITION_BARRIER&) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;
@@ -176,6 +185,12 @@ bool operational() noexcept;
 // only recording/pass permission; callers must separately prove the bound RTV,
 // resource lifetime/state and complete graphics restoration.
 bool recording_allows_injection(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;
+// Metadata only. The caller's own hook saw one nonempty native Dispatch return
+// in this exact recording; the observer does not hook Dispatch itself. Outside
+// any active or suspended pass of a valid recording it is prior GPU work, as an
+// observed draw is: D3D12 allows no dispatch between a suspending and a
+// resuming pass, so no first RESUMING pass can follow it in this recording.
+void observe_gpu_work(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;
 Statistics statistics() noexcept;
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 // Test-only scalar state; never part of the production add-on interface.

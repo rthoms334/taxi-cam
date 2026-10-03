@@ -45,6 +45,9 @@ struct Result {
   std::uint64_t magenta_pixels = 0;
   std::uint64_t recolored_guide_pixels = 0;
   std::uint64_t night_rgb_checks = 0;
+  std::array<int, 4> bloom_codes{};
+  std::array<int, 3> tone_codes{};
+  std::uint64_t tone_checks = 0;
   Compositor::Statistics statistics;
 };
 
@@ -436,6 +439,211 @@ void pixel_case(ID3D12Device* device,
   }
 }
 
+// One bright texel on black HDR feeds: the simulator's bloom must light its
+// neighbourhood, symmetrically and falling off with distance, and leave the
+// light itself near its unbloomed level. Separate compositor so the shared
+// statistics above stay exact.
+void bloom_case(ID3D12Device* device, Result& result) {
+  Compositor compositor;
+  check(compositor.initialize(device), compositor.last_error());
+  std::array<Reference<ID3D12Resource>, 2> sources;
+  create_texture(device, texture_description(768, 255, DXGI_FORMAT_R11G11B10_FLOAT), sources[0].put());
+  create_texture(device, texture_description(768, 504, DXGI_FORMAT_R11G11B10_FLOAT), sources[1].put());
+  check(compositor.set_inputs(sources[0].get(), DXGI_FORMAT_R11G11B10_FLOAT, sources[1].get(), DXGI_FORMAT_R11G11B10_FLOAT),
+        compositor.last_error());
+  D3D12_DESCRIPTOR_HEAP_DESC heap{};
+  heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  heap.NumDescriptors = 2;
+  Reference<ID3D12DescriptorHeap> rtvs;
+  check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtvs.put())), "Create bloom-test RTVs");
+  const auto stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> handles{};
+  for (std::size_t index = 0; index < handles.size(); ++index) {
+    handles[index].ptr = rtvs->GetCPUDescriptorHandleForHeapStart().ptr + index * stride;
+    device->CreateRenderTargetView(sources[index].get(), nullptr, handles[index]);
+  }
+  const auto output_description = texture_description(Compositor::Width, Compositor::Height, DXGI_FORMAT_R8G8B8A8_UNORM);
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  UINT64 bytes = 0;
+  device->GetCopyableFootprints(&output_description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = bytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  const auto readback_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+  Reference<ID3D12Resource> readback;
+  check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(readback.put())),
+        "Create bloom-test readback");
+  PrivateSubmission submission(device);
+  auto* list = submission.list();
+  constexpr std::array<float, 4> Black{0, 0, 0, 0};
+  constexpr std::array<float, 4> Light{4096, 4096, 4096, 0};
+  const D3D12_RECT texel{384, 127, 385, 128};
+  list->ClearRenderTargetView(handles[0], Black.data(), 0, nullptr);
+  list->ClearRenderTargetView(handles[1], Black.data(), 0, nullptr);
+  list->ClearRenderTargetView(handles[0], Light.data(), 1, &texel);
+  check(compositor.record(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET), compositor.last_error());
+  D3D12_TEXTURE_COPY_LOCATION source{};
+  source.pResource = compositor.output();
+  source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  D3D12_TEXTURE_COPY_LOCATION destination{};
+  destination.pResource = readback.get();
+  destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  destination.PlacedFootprint = footprint;
+  list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+  submission.finish(compositor);
+  void* mapped = nullptr;
+  const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+  check(readback->Map(0, &range, &mapped), "Map bloom-test readback");
+  const auto code = [&](int dx, int dy) {
+    return static_cast<const unsigned char*>(mapped)[footprint.Offset + UINT64(127 + dy) * footprint.Footprint.RowPitch + 4 * (384 + dx)];
+  };
+  const int centre = code(0, 0), close = code(3, 0), mid = code(10, 0), distant = code(60, 0);
+  // Unbloomed, the light is 4096 * 2^-8.8 = 9.2 before Reinhard (code 244)
+  // and every other pixel is 0; nine tenths of it stays in place. The bloom
+  // starts at half size, so a light on an even column shares its texel with
+  // the column to its right and its halo sits half a pixel that way.
+  require(centre >= 230 && code(1, 0) >= close && close >= 8 && close > mid && mid >= distant && distant <= 2 && code(-3, 0) >= 4 &&
+              code(0, 3) >= 8 && code(0, -3) >= 8,
+          "The bloom did not spread a light into its neighbourhood");
+  readback->Unmap(0, nullptr);
+  result.bloom_codes = {centre, close, mid, distant};
+  compositor.release();
+}
+
+// The simulator tone mapping with an identity table: an independent CPU
+// model of its chain (exposure, log2 table coordinate, 10-bit texels with
+// linear filtering, decode, shoulder, sRGB) must match within two codes.
+unsigned char simulator_code(double value, double exposure) {
+  const double x = std::max(value, 0.0) * 11190.6 * 16 * 300e-4 * exposure;
+  const double texel = std::log2(1 + x) / 13.4501 * 63;
+  const auto low = std::min(static_cast<int>(texel), 62);
+  const double t = std::clamp(texel - low, 0.0, 1.0);
+  const auto stored = [](int index) { return std::floor(index / 63.0 * 1023 + 0.5) / 1023; };
+  const double table = stored(low) * (1 - t) + stored(low + 1) * t;
+  double y = (std::exp2(table * 13.4501) - 1) / 11190.6 * (1e4 / 300);
+  y = y < 0.22 ? y : 0.22 + 0.78 * (1 - std::exp2(-1.84961 * (y - 0.22)));
+  y = std::clamp(y, 0.0, 1.0);
+  y = y <= 0.0031308 ? 12.92 * y : 1.055 * std::pow(y, 1 / 2.4) - 0.055;
+  return static_cast<unsigned char>(std::floor(y * 255 + 0.5));
+}
+
+void tone_case(ID3D12Device* device, Result& result) {
+  Compositor compositor;
+  check(compositor.initialize(device), compositor.last_error());
+  require(!compositor.set_tone_curve(std::numeric_limits<float>::quiet_NaN(), nullptr) && !compositor.set_tone_curve(0, nullptr) &&
+              !compositor.tone_curve_active(),
+          "An invalid simulator exposure was accepted");
+  std::vector<std::uint32_t> table(Compositor::ToneTableTexels);
+  const auto unorm = [](UINT index) { return static_cast<std::uint32_t>(std::floor(index / 63.0 * 1023 + 0.5)); };
+  for (UINT z = 0; z < Compositor::ToneTexels; ++z)
+    for (UINT y = 0; y < Compositor::ToneTexels; ++y)
+      for (UINT x = 0; x < Compositor::ToneTexels; ++x)
+        table[(std::size_t{z} * Compositor::ToneTexels + y) * Compositor::ToneTexels + x] =
+            unorm(x) | unorm(y) << 10 | unorm(z) << 20 | 3u << 30;
+  constexpr float NightExposure = 0.0333458f;
+  require(compositor.set_tone_curve(NightExposure, table.data()) && compositor.tone_curve_active(), "A valid tone curve was refused");
+  std::array<Reference<ID3D12Resource>, 2> sources;
+  create_texture(device, texture_description(768, 255, DXGI_FORMAT_R11G11B10_FLOAT), sources[0].put());
+  create_texture(device, texture_description(768, 504, DXGI_FORMAT_R11G11B10_FLOAT), sources[1].put());
+  check(compositor.set_inputs(sources[0].get(), DXGI_FORMAT_R11G11B10_FLOAT, sources[1].get(), DXGI_FORMAT_R11G11B10_FLOAT),
+        compositor.last_error());
+  D3D12_DESCRIPTOR_HEAP_DESC heap{};
+  heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  heap.NumDescriptors = 2;
+  Reference<ID3D12DescriptorHeap> rtvs;
+  check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtvs.put())), "Create tone-test RTVs");
+  const auto stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> handles{};
+  for (std::size_t index = 0; index < handles.size(); ++index) {
+    handles[index].ptr = rtvs->GetCPUDescriptorHandleForHeapStart().ptr + index * stride;
+    device->CreateRenderTargetView(sources[index].get(), nullptr, handles[index]);
+  }
+  const auto output_description = texture_description(Compositor::Width, Compositor::Height, DXGI_FORMAT_R8G8B8A8_UNORM);
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  UINT64 bytes = 0;
+  device->GetCopyableFootprints(&output_description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = bytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  const auto readback_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+  Reference<ID3D12Resource> readback;
+  check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(readback.put())),
+        "Create tone-test readback");
+  PrivateSubmission submission(device);
+  ID3D12GraphicsCommandList* list = submission.list();
+  // Exactly representable R11G11B10 values from deep shadow to a bright light.
+  constexpr std::array<float, 4> Nose{0.00390625f, 0.03125f, 0.25f, 0};
+  constexpr std::array<float, 4> Tail{2, 0, 0.0009765625f, 0};
+  list->ClearRenderTargetView(handles[0], Nose.data(), 0, nullptr);
+  list->ClearRenderTargetView(handles[1], Tail.data(), 0, nullptr);
+  check(compositor.record(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET), compositor.last_error());
+  D3D12_TEXTURE_COPY_LOCATION source{};
+  source.pResource = compositor.output();
+  source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  D3D12_TEXTURE_COPY_LOCATION destination{};
+  destination.pResource = readback.get();
+  destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  destination.PlacedFootprint = footprint;
+  list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+  submission.finish(compositor);
+  void* mapped = nullptr;
+  const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+  check(readback->Map(0, &range, &mapped), "Map tone-test readback");
+  const auto* pixels = static_cast<const unsigned char*>(mapped) + footprint.Offset;
+  auto* nose = pixels + UINT64(127) * footprint.Footprint.RowPitch + 4 * 384;
+  auto* tail = pixels + UINT64(600) * footprint.Footprint.RowPitch + 4 * 200;
+  for (UINT channel = 0; channel < 3; ++channel) {
+    const int nose_expected = simulator_code(Nose[channel], NightExposure), tail_expected = simulator_code(Tail[channel], NightExposure);
+    if (std::abs(nose[channel] - nose_expected) > 2 || std::abs(tail[channel] - tail_expected) > 2)
+      std::fprintf(stderr, "tone channel %u: nose %d expected %d, tail %d expected %d\n", channel, nose[channel], nose_expected,
+                   tail[channel], tail_expected);
+    require(std::abs(nose[channel] - nose_expected) <= 2 && std::abs(tail[channel] - tail_expected) <= 2,
+            "The simulator tone curve differs from its CPU model");
+    result.tone_codes[channel] = nose[channel];
+    ++result.tone_checks;
+  }
+  readback->Unmap(0, nullptr);
+
+  // Display scene light: the texel times the scale, less the floor,
+  // sRGB-encoded, clipped at full code, with at most one code of dither. It
+  // takes precedence over the tone curve.
+  constexpr float Scale = 3.0f, Floor = 0.01f;
+  require(compositor.set_screen_scale(Scale) && !compositor.set_screen_scale(-1) && compositor.screen_scale() == 0 &&
+              !compositor.set_screen_scale(Scale, 1) && compositor.set_screen_scale(Scale, Floor),
+          "The display scale was not applied or an invalid one was accepted");
+  PrivateSubmission second(device);
+  list = second.list();
+  list->ClearRenderTargetView(handles[0], Nose.data(), 0, nullptr);
+  list->ClearRenderTargetView(handles[1], Tail.data(), 0, nullptr);
+  check(compositor.record(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET), compositor.last_error());
+  list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+  second.finish(compositor);
+  check(readback->Map(0, &range, &mapped), "Map display-scale readback");
+  pixels = static_cast<const unsigned char*>(mapped) + footprint.Offset;
+  nose = pixels + UINT64(127) * footprint.Footprint.RowPitch + 4 * 384;
+  tail = pixels + UINT64(600) * footprint.Footprint.RowPitch + 4 * 200;
+  const auto display_code = [](double value) {
+    const double y = std::clamp(value, 0.0, 1.0);
+    return static_cast<int>(std::floor((y <= 0.0031308 ? 12.92 * y : 1.055 * std::pow(y, 1 / 2.4) - 0.055) * 255 + 0.5));
+  };
+  for (UINT channel = 0; channel < 3; ++channel) {
+    require(std::abs(nose[channel] - display_code(Nose[channel] * Scale - Floor)) <= 1 &&
+                std::abs(tail[channel] - display_code(Tail[channel] * Scale - Floor)) <= 1,
+            "The display scene light differs from its CPU model");
+    ++result.tone_checks;
+  }
+  readback->Unmap(0, nullptr);
+  compositor.release();
+}
+
 Result run(bool force_warp) {
   Result result;
   Reference<ID3D12Debug> debug;
@@ -506,13 +714,15 @@ Result run(bool force_warp) {
   auto night = pairs.back();
   night[0].night = night[1].night = true;
   pixel_case(device.get(), compositor, generator, night, false, result,
-             {Compositor::DefaultExposureEv, Compositor::DefaultExposureEv + taxi_camera::DisplayExposureController::DefaultNightBoostEv});
+             {Compositor::DefaultExposureEv, Compositor::DefaultExposureEv + taxi_camera::DisplayExposureController::NightBoostEv});
   result.statistics = compositor.statistics();
-  require(result.statistics.shader_compiles == 2 && result.statistics.descriptor_writes == 28 && result.statistics.input_changes == 13 &&
+  require(result.statistics.shader_compiles == 5 && result.statistics.descriptor_writes == 28 && result.statistics.input_changes == 13 &&
               result.statistics.recordings == 22 && result.night_rgb_checks == 2 && result.float_pixels > 1000000 &&
               result.packed_float_pixels > 2900000 && result.magenta_pixels > 400 && result.recolored_guide_pixels > 400,
           "Unexpected compositor rebuild, descriptor update or recording count");
   compositor.release();
+  bloom_case(device.get(), result);
+  tone_case(device.get(), result);
   if (messages.get()) {
     for (UINT64 index = 0; index < messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++index) {
       SIZE_T bytes = 0;
@@ -541,7 +751,8 @@ int wmain(int argc, wchar_t** argv) {
         "\"checkedPixels\":%llu,\"dividerPixels\":%llu,\"preservedLowerPixels\":%llu,\"rejectionChecks\":%llu,"
         "\"msaaRejectionChecks\":%llu,\"shaderCompiles\":%llu,\"descriptorWrites\":%llu,\"inputChanges\":%llu,\"floatPixels\":%llu,"
         "\"packedFloatPixels\":%llu,\"exposureChecks\":%llu,\"magentaPixels\":%llu,\"nightRgbChecks\":%llu,\"referenceOverlay\":true,"
-        "\"hdrDisplayConversion\":true,\"liveGuideColor\":true,\"recoloredGuidePixels\":%llu}"
+        "\"hdrDisplayConversion\":true,\"liveGuideColor\":true,\"recoloredGuidePixels\":%llu,\"bloomCodes\":[%d,%d,%d,%d],\"toneCodes\":[%"
+        "d,%d,%d],\"toneChecks\":%llu}"
         "\n",
         result.warp ? "true" : "false", result.debug_layer ? "true" : "false", static_cast<unsigned long long>(result.debug_errors),
         static_cast<unsigned long long>(result.frames), static_cast<unsigned long long>(result.checked_pixels),
@@ -552,7 +763,9 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<unsigned long long>(result.statistics.input_changes), static_cast<unsigned long long>(result.float_pixels),
         static_cast<unsigned long long>(result.packed_float_pixels), static_cast<unsigned long long>(result.exposure_checks),
         static_cast<unsigned long long>(result.magenta_pixels), static_cast<unsigned long long>(result.night_rgb_checks),
-        static_cast<unsigned long long>(result.recolored_guide_pixels));
+        static_cast<unsigned long long>(result.recolored_guide_pixels), result.bloom_codes[0], result.bloom_codes[1], result.bloom_codes[2],
+        result.bloom_codes[3], result.tone_codes[0], result.tone_codes[1], result.tone_codes[2],
+        static_cast<unsigned long long>(result.tone_checks));
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());

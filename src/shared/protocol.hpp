@@ -7,7 +7,6 @@
 #include <cwchar>
 #include "../profiles/catalog.hpp"
 #include "camera_rate.hpp"
-#include "exposure_settings.hpp"
 #include "sim_messages.hpp"
 #include "version.hpp"
 
@@ -17,11 +16,15 @@ namespace taxi_camera::standalone {
 // Protocol 16: Settings dynamic_tail (nose priority while rolling straight).
 // Protocol 17: the 60-knot cutoff is gone: Status drops speed_inhibited and the
 // notification log drops the speed_cutoff event.
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 17;
+// Protocol 18: Settings camera_weather (clouds and overcast light in the camera views).
+// Protocol 19: Settings camera_tone (camera views use the main view's exposure and tone curve).
+// Protocol 20: Settings drops camera_weather (camera weather is always on).
+// Protocol 21: Settings drops camera_tone, automatic_exposure, exposure and
+// night_boost (the camera views always take the main view's lighting).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 21;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
-  std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
-  float exposure = profiles::A380.exposure, night_boost = kDefaultNightBoostEv;
+  std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
   std::uint64_t route_request{}, left_id{}, right_id{};
   std::uint64_t profile_request{};         // Session-only: selecting the same profile is an explicit retry.
   std::uint64_t aircraft_session_epoch{};  // Scope manual previews and texture IDs to the observed flight.
@@ -125,9 +128,7 @@ inline bool valid_settings(const Settings& s) noexcept {
   }
   if (s.parked_rate && (s.parked_rate < kMinimumParkedCameraRate || s.parked_rate > kMaximumCameraRate))
     return false;
-  return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate && s.automatic_exposure <= 1 &&
-         std::isfinite(s.exposure) && s.exposure >= -16 && s.exposure <= 4 && std::isfinite(s.night_boost) && s.night_boost >= 0 &&
-         s.night_boost <= 8;
+  return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate;
 }
 class Mailbox {
  public:

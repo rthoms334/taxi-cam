@@ -5,7 +5,7 @@
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
-#include "../camera/view_clip.hpp"
+#include "../graphics/camera_compositor_d3d12.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
@@ -41,6 +41,43 @@ std::atomic<bool> notifications_enabled{};
 // status line and the log.
 SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
+// The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
+double last_ambient = -1;
+// Camera tone: hands the simulator's main-view exposure and tone-curve table,
+// as the graphics hooks copied them, to the composition. A table is read at
+// most once a second, only when a newer copy exists. An exposure older than
+// two seconds (no copies, or the main view not rendering) returns the camera
+// images to Taxi Cam's fallback exposure.
+static_assert(DisplayExposureController::UnlitExposureEv == CameraCompositorD3D12::DefaultExposureEv);
+struct ToneFeed {
+  std::uint64_t exposure_copies = 0, table_copies = 0;
+  std::uint64_t exposure_ms = 0, table_ms = 0;
+  float exposure = 0;
+  std::vector<std::uint32_t> table;
+  bool table_sent = false;
+  void update(std::uint64_t key, std::uint64_t now) {
+    win::set_tone_capture_enabled(true);
+    const auto status = win::tone_status();
+    if (status.exposure_copies != exposure_copies && status.exposure_valid) {
+      exposure_copies = status.exposure_copies;
+      exposure = status.exposure;
+      exposure_ms = now;
+    }
+    const bool fresh = exposure_ms && now - exposure_ms <= 2000;
+    const std::uint32_t* offered = nullptr;
+    if (fresh && status.table_copies != table_copies && now - table_ms >= 1000) {
+      table.resize(CameraCompositorD3D12::ToneTableTexels);
+      if (win::read_tone_table(table.data())) {
+        table_copies = status.table_copies;
+        table_ms = now;
+        table_sent = true;
+        offered = table.data();
+      }
+    }
+    // The curve needs a table: until one is read, the exposure is not sent.
+    scene_runtime::set_tone_curve(key, fresh && table_sent ? exposure : 0.0f, offered);
+  }
+};
 void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
   if (!notifications_enabled.load(std::memory_order_acquire) || !admit_toast(limiter, event, now))
     return;
@@ -381,8 +418,6 @@ DWORD run_impl() {
   };
   std::uint64_t last_stop_sequence{};
   std::array<std::array<double, 6>, 3> applied_mounts{};
-  // Camera views draw as far as the main view above 60 kt (view_clip).
-  bool far_follows_main = false;
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -816,12 +851,8 @@ DWORD run_impl() {
       nose_priority = desired_priority;
       native_camera::request_scene_rate(rate, feeds, nose_priority);
       scene_runtime::manager().set_source_rate(rate);
+      scene_runtime::set_waiting_stale_ms(win::waiting_stale_ms(rate, nose_priority));
     }
-    // Taxiing, the views keep their own 1000 m far; from the take-off roll on
-    // they draw as far as the main view so the ground stays visible in flight.
-    // Atomic only; the observer applies it before each pose refresh.
-    far_follows_main = native_camera::follow_main_far(far_follows_main, speed.valid, speed.knots);
-    native_camera::request_scene_main_far(far_follows_main);
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
       for (unsigned i = 0; i < mounts.size(); ++i) {
@@ -934,9 +965,21 @@ DWORD run_impl() {
     scene_runtime::set_composition(key, composition);
     scene_runtime::set_reference_guides(key, drawing->reference_guides);
     const auto light = native_camera::get_lighting();
-    const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
-                                         light.ambient, light.sample_ms);
+    // The fallback exposure, used while the tone curve and the display scale
+    // are not: automatic from the ambient light with a fixed night boost.
+    const auto display = exposure.update(now, drawing->exposure, light.valid, light.ambient, light.sample_ms);
     scene_runtime::set_display_exposure(key, display.applied_ev);
+    static ToneFeed tone;
+    tone.update(key, now);
+    // On an aircraft whose display is decoded, the camera image is written as
+    // scene light divided by the display's own full-code light, so the display
+    // gives the scene light back and the main view exposes, tonemaps and blooms
+    // it once. Camera texels hold scene light / 16.
+    const double display_light = light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
+    const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
+    scene_runtime::set_screen_scale(
+        key, display_scale, light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);
+    last_ambient = light.valid ? light.ambient : -1.0;
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1330,15 +1373,67 @@ DWORD run_impl() {
       log_status(status, retention_detail);
       // Per camera and for the main view: near plane / culling far / default far, metres.
       char clip_detail[448];
-      std::snprintf(
-          clip_detail, sizeof(clip_detail),
-          "Camera draw distance: pose_proven=%d follow_main=%d writes=%llu "
-          "error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
-          scene.pose_session_proven ? 1 : 0, scene.follow_main_far ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
-          scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0], scene.main_clip[1],
-          scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2], scene.draw_clip[1][0],
-          scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1], scene.draw_clip[2][2]);
+      std::snprintf(clip_detail, sizeof(clip_detail),
+                    "Camera draw distance: pose_proven=%d writes=%llu "
+                    "error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
+                    scene.pose_session_proven ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
+                    scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0],
+                    scene.main_clip[1], scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2],
+                    scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
+                    scene.draw_clip[2][2]);
       log_status(status, clip_detail);
+      // Camera weather: cloud merges sent into a camera image, and those that
+      // could not be (no descriptor heap); cumulative for this bridge.
+      const auto clouds = win::cloud_merge_status();
+      char weather_detail[160];
+      std::snprintf(weather_detail, sizeof(weather_detail), "Camera weather: cloud_merges=%llu refused=%llu",
+                    static_cast<unsigned long long>(clouds.redirects), static_cast<unsigned long long>(clouds.refusals));
+      log_status(status, weather_detail);
+      // Camera tone: the simulator exposure in use (0: Taxi Cam's fallback
+      // exposure), copies of its exposure and table, and resource changes.
+      const auto tone_copies = win::tone_status();
+      char tone_detail[320];
+      std::snprintf(tone_detail, sizeof(tone_detail),
+                    "Camera tone: active=%d exposure=%.6g screen_scale=%.6g ambient=%.6g exposure_copies=%llu "
+                    "table_copies=%llu source_changes=%llu readback_failed=%d",
+                    output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure), static_cast<double>(output.screen_scale),
+                    last_ambient, static_cast<unsigned long long>(tone_copies.exposure_copies),
+                    static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
+                    tone_copies.readback_failed ? 1 : 0);
+      log_status(status, tone_detail);
+      // Camera fog: history resets written and camera fog volumes tracked.
+      const auto fog = win::fog_status();
+      char fog_detail[96];
+      std::snprintf(fog_detail, sizeof(fog_detail), "Camera fog: resets=%llu volumes=%u", static_cast<unsigned long long>(fog.resets),
+                    fog.volumes);
+      log_status(status, fog_detail);
+      // Capture phase, per feed nose/left/right since the bridge started:
+      // ordered batches that drew the camera image, those that drew it once
+      // (the deferred lighting) and the most draws in one batch; captures after
+      // a several-draw batch, the batch directly after a held one, or a one-draw
+      // batch after a lost hold; one-draw batches held.
+      char phase_detail[512];
+      auto phase_used = static_cast<std::size_t>(std::snprintf(phase_detail, sizeof(phase_detail), "Capture phase:"));
+      const auto append_phase = [&](const char* name, const auto& value) {
+        if (phase_used >= sizeof(phase_detail))
+          return;
+        const auto& feeds = output.capture.phases;
+        const auto written =
+            std::snprintf(phase_detail + phase_used, sizeof(phase_detail) - phase_used, " %s=%llu/%llu/%llu", name,
+                          static_cast<unsigned long long>(value(feeds[0])), static_cast<unsigned long long>(value(feeds[1])),
+                          static_cast<unsigned long long>(value(feeds[2])));
+        if (written > 0 && static_cast<std::size_t>(written) < sizeof(phase_detail) - phase_used)
+          phase_used += static_cast<std::size_t>(written);
+      };
+      using PhaseFeed = SceneCaptureManager::CapturePhaseDiagnostic;
+      append_phase("batches", [](const PhaseFeed& feed) { return feed.batches; });
+      append_phase("one_draw", [](const PhaseFeed& feed) { return feed.one_draw; });
+      append_phase("max_draws", [](const PhaseFeed& feed) { return feed.max_draws; });
+      for (std::size_t kind = 0; kind < capture_phase::KindCount; ++kind)
+        append_phase(capture_phase::kind_name(static_cast<capture_phase::Kind>(kind)),
+                     [kind](const PhaseFeed& feed) { return feed.captures[kind]; });
+      append_phase("held", [](const PhaseFeed& feed) { return feed.held; });
+      log_status(status, phase_detail);
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
       char mount_detail[448];

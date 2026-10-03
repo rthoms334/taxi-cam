@@ -281,6 +281,15 @@ int main() {
   lower.forget(269);
   assert(lower.adopt_single(268, true) && (lower.targets == Sides{268, 268, 271}));  // ND rebinds; lower kept.
   assert(lower.select_single(0, true) && (lower.targets == Sides{0, 0, 271}));
+  // A transient texture shifted the order: the automatic lower guess holds the
+  // display a later detection confirms. The display wins; explicit choices stay.
+  taxi_camera::TaxiButtonRoutes shifted;
+  assert(shifted.adopt_single(299, true) && shifted.adopt_lower(229));
+  shifted.forget(299);
+  assert(shifted.adopt_single(229, true) && (shifted.targets == Sides{229, 229, 0}));
+  assert(shifted.adopt_lower(228) && (shifted.targets == Sides{229, 229, 228}));
+  taxi_camera::TaxiButtonRoutes explicit_choice;
+  assert(explicit_choice.select_lower(229) && !explicit_choice.adopt_single(229, true) && (explicit_choice.targets == Sides{0, 0, 229}));
   // Without a separate lower texture every side still shares one texture.
   taxi_camera::TaxiButtonRoutes shared;
   assert(shared.adopt_single(55) && (shared.targets == Sides{55, 55, 55}));

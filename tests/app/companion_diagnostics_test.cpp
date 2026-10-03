@@ -242,6 +242,20 @@ int main() {
     require(std::wstring(label) == L"Dynamic tail rate: On", "Dynamic tail label reflects its state");
     command(235);
     require(current.dynamic_tail == 0, "Dynamic tail rate can be turned back off");
+    // Camera weather is always on: no control on the Camera views page.
+    page = 1;
+    build_controls();
+    require(!GetDlgItem(window, 236), "Camera weather has no control");
+    // The camera views always take the main view's lighting: the Display page
+    // has no lighting or exposure controls, only the camera rate and the
+    // ground-speed colour.
+    page = 2;
+    build_controls();
+    require(!GetDlgItem(window, 237) && !GetDlgItem(window, 201) && !GetDlgItem(window, 222) && !GetDlgItem(window, 202) &&
+                GetDlgItem(window, 200) && GetDlgItem(window, 231),
+            "Display has no lighting or exposure controls");
+    page = 4;
+    build_controls();
     SetDlgItemTextW(window, 203, L"1024");
     command(500);
     require(current.scene_test == 1 && current.calibration_budget == 1024, "Save applies the calibration budget without stopping scenes");

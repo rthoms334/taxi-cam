@@ -44,6 +44,13 @@ class SceneFrameOutput {
   // Serialized with prepare/submit. Changes only the next recording; a closed
   // prepared recording must first be submitted or discarded.
   bool set_display_exposure(float ev) noexcept;
+  // The simulator's tone mapping (CameraCompositorD3D12::set_tone_curve). A
+  // table is accepted only while no composition is executing (false otherwise;
+  // offer it again before the next prepare). Exposure 0 returns to Taxi Cam's.
+  bool set_tone_curve(float exposure, const std::uint32_t* table) noexcept;
+  bool tone_curve_active() const noexcept;
+  // CameraCompositorD3D12::set_screen_scale; 0 turns it off.
+  bool set_screen_scale(float scale, float floor) noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
   bool hide_ground_speed() noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;

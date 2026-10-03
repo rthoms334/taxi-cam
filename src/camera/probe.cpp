@@ -52,8 +52,6 @@ struct Runtime {
   std::atomic<bool> enabled{false};
   std::atomic<bool> suspended{false};
   std::atomic<unsigned> requested_settings{kDefaultCameraRate | (2u << 8)};
-  // True above 60 kt: the views draw as far as the main view (view_clip).
-  std::atomic<bool> follow_main_far{false};
   // Protected by mutex; never used directly by a native engine call.
   MountPair requested_mounts = default_mounts();
   const profiles::AircraftProfile* requested_profile = &profiles::A380;
@@ -98,8 +96,9 @@ struct Runtime {
   // view's camera as read at the last calibration match, valid only for the
   // aircraft session epoch and reset generation it was read in
   // (current_main_clip). own_clips holds each feed camera's values as first
-  // observed, so following the main view can be undone; clip_cameras is the
-  // camera they belong to.
+  // observed, the fallback while the main clip is unknown (before a
+  // calibration match, or after a flight, aircraft or session reset);
+  // clip_cameras is the camera they belong to.
   CameraClip main_clip{};
   std::uint64_t main_clip_epoch = 0, main_clip_resets = 0;
   std::array<std::uint64_t, kMaxCameraFeeds> clip_cameras{};
@@ -1001,6 +1000,10 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
   LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
   const auto result = disable_owned_view_aa(view, image, runtime.contract.layout);
   if (!result.complete) {
+    // A clear whose write landed but whose reread failed may have left the bit
+    // clear: keep the view owed a restore. Over-noting is harmless.
+    if (result.write_attempted)
+      runtime.cleared_aa.note(runtime.renderer, view.view_address);
     runtime.stage_error = result.error;
     return false;
   }
@@ -1023,9 +1026,9 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
   return true;
 }
 
-// Before update_view rebuilds the frustum: the main view's far distances above
-// 60 kt, otherwise the camera's own. A refusal leaves the camera as it was;
-// the pose still applies.
+// Before update_view rebuilds the frustum: the main view's far distances once
+// read for this aircraft session and reset generation, otherwise the camera's
+// own. A refusal leaves the camera as it was; the pose still applies.
 void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsigned feed) noexcept {
   if (feed >= kMaxCameraFeeds)
     return;
@@ -1039,8 +1042,7 @@ void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsi
     runtime.own_clips[feed] = own;
   }
   CameraClip target;
-  if (!camera_far_target(runtime.own_clips[feed], current_main_clip(runtime), runtime.follow_main_far.load(std::memory_order_acquire),
-                         target)) {
+  if (!camera_far_target(runtime.own_clips[feed], current_main_clip(runtime), target)) {
     runtime.clip_error = "clip_implausible_target";
     return;
   }
@@ -2741,7 +2743,6 @@ void observer(void* manager) noexcept {
       }
       const auto main_clip = current_main_clip(runtime);
       runtime.published.main_clip = {main_clip.near_plane, main_clip.far_plane, main_clip.default_far};
-      runtime.published.follow_main_far = runtime.follow_main_far.load(std::memory_order_acquire);
       for (unsigned i = 0; i < kMaxCameraFeeds; ++i) {
         const auto& mount = runtime.feed_mounts[i];
         runtime.published.mount_state[i] = !mount.node ? 0 : mount.lost ? 2 : 1;
@@ -2982,10 +2983,6 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
 void suspend_scene_rendering(bool suspended) noexcept {
   auto& runtime = state();
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
-}
-
-void request_scene_main_far(bool follow) noexcept {
-  state().follow_main_far.store(follow, std::memory_order_release);
 }
 
 void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {

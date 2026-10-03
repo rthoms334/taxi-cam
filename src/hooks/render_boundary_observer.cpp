@@ -539,9 +539,13 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
       for (UINT n = 0; n < count; ++n) {
         const auto& b = barriers[n];
         if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE || !b.Transition.pResource ||
-            b.Transition.StateBefore != D3D12_RESOURCE_STATE_RENDER_TARGET ||
-            b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ||
             (b.Transition.Subresource != 0 && b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES))
+          continue;
+        const bool target_exit =
+            b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET && b.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET;
+        const bool uav_exit = callbacks.before_legacy_uav && b.Transition.StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS &&
+                              b.Transition.StateAfter != D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        if (!target_exit && !uav_exit)
           continue;
         if (previous_legacy_change(n, barriers, b.Transition.pResource)) {
           ++batch_refusals;
@@ -550,7 +554,10 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
         if (!same_safe(list, identity.generation))
           break;
         ++legacy_candidates;
-        callbacks.before_legacy(callbacks.context, list, identity.generation, b.Transition);
+        if (target_exit)
+          callbacks.before_legacy(callbacks.context, list, identity.generation, b.Transition);
+        else
+          callbacks.before_legacy_uav(callbacks.context, list, identity.generation, b.Transition);
       }
   }
   // Preserve the exact count, pointer, order and flags; no replay or splitting.
@@ -902,7 +909,8 @@ bool same_callbacks(const Callbacks& a, const Callbacks& b) noexcept {
          a.after_copy_resource == b.after_copy_resource && a.after_copy_texture == b.after_copy_texture && a.after_draw == b.after_draw &&
          a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended &&
          a.selected_legacy_targets == b.selected_legacy_targets && a.metadata_begin == b.metadata_begin &&
-         a.metadata_end == b.metadata_end && a.pass_began == b.pass_began && a.enhanced_call == b.enhanced_call;
+         a.metadata_end == b.metadata_end && a.pass_began == b.pass_began && a.enhanced_call == b.enhanced_call &&
+         a.before_legacy_uav == b.before_legacy_uav;
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
   {
@@ -1064,16 +1072,28 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
   enabled.store(true, std::memory_order_release);
   return result("registered", 0, true);
 }
-void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
-  const auto key = registry_key(list);
+bool erase_identity(ID3D12GraphicsCommandList* key, std::uint64_t generation) noexcept {
   auto& shard = shard_for(key);
   const ShardLock lock(shard, true);
   auto& identities = shard.identities;
   const auto it = identities.find(key);
-  if (it != identities.end() && it->second.generation == generation) {
-    identities.erase(it);
-    identity_count.fetch_sub(1, std::memory_order_relaxed);
-  }
+  if (it == identities.end() || it->second.generation != generation)
+    return false;
+  identities.erase(it);
+  identity_count.fetch_sub(1, std::memory_order_relaxed);
+  return true;
+}
+// Runs from the list's private-data release while the runtime destroys it, so
+// the list is not called when its own pointer is the key: hooks register the
+// native list they receive, which is its own key. Only a registration under
+// another key (a proxy argument) pays registry_key's unwrap. Under PIX's GPU
+// capture layer, QueryInterface on a list in destruction raised an exception
+// through this noexcept path and aborted the simulator (2026-09-27).
+void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  if (erase_identity(list, generation) || !identity_count.load(std::memory_order_relaxed))
+    return;
+  if (const auto key = registry_key(list); key != list)
+    erase_identity(key, generation);
 }
 // Hooks receive the native list, which is normally its own registry key. An
 // entry under that exact pointer with the caller's generation belongs to this
@@ -1164,6 +1184,13 @@ Result repair_protection() noexcept {
 }
 bool recording_allows_injection(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
   return list && generation && same_safe(list, generation);
+}
+void observe_gpu_work(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  if (!list || !generation || !enabled.load(std::memory_order_acquire))
+    return;
+  // observe_work repeats the pass/validity checks under the shard lock.
+  if (const auto identity = lookup(list); identity.generation == generation && !identity.prior_work)
+    observe_work(list);
 }
 bool operational() noexcept {
   return enabled.load(std::memory_order_acquire);

@@ -13,6 +13,8 @@ namespace obs = taxi_camera::engine_hook::render_boundary;
 namespace {
 std::atomic<unsigned> protect_calls{0};
 std::atomic<unsigned> query_calls{0}, rpm_calls{0};
+// ReShade unwrap QueryInterface calls reaching the fake list.
+std::atomic<unsigned> unwrap_queries{0};
 unsigned metadata_begins = 0, metadata_ends = 0, metadata_depth = 0, metadata_errors = 0;
 bool retire_metadata = false, retire_metadata_begin = false;
 void metadata_begin(void*, ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
@@ -105,6 +107,8 @@ HRESULT STDMETHODCALLTYPE query(ID3D12GraphicsCommandList* list, REFIID iid, voi
   *result = nullptr;
   if (!interface_available)
     return E_NOINTERFACE;
+  if (std::memcmp(&iid, &taxi_camera::UnwrappedObjectId, sizeof(GUID)) == 0)
+    ++unwrap_queries;
   // ReShade's IID_UnwrappedObject returns the native command list and AddRefs.
   if (unwrap_proxy && list == unwrap_proxy && unwrap_native &&
       std::memcmp(&iid, &taxi_camera::UnwrappedObjectId, sizeof(GUID)) == 0) {
@@ -578,6 +582,19 @@ int main() {
     check_legacy(1, &transition, 0, "Draw inside resuming pass authorized capture");
     extended->EndRenderPass();
     check_legacy(1, &transition, 1, "Completed ordinary resumed pass did not authorize later transition");
+    // A dispatch reported by the owner's own hook is prior work outside a pass,
+    // as a draw is, but only for the exact current generation.
+    obs::successful_reset(list, 1);
+    obs::observe_gpu_work(list, 9);
+    check_legacy(1, &transition, 0, "Stale-generation dispatch authorized capture");
+    obs::observe_gpu_work(reinterpret_cast<ID3D12GraphicsCommandList*>(&unknown), 1);
+    check_legacy(1, &transition, 0, "Unknown-list dispatch authorized capture");
+    obs::observe_gpu_work(list, 1);
+    check_legacy(1, &transition, 1, "Reported dispatch did not establish prior GPU work");
+    extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS);
+    extended->EndRenderPass();
+    obs::observe_gpu_work(list, 1);
+    check_legacy(1, &transition, 0, "Dispatch after a suspended pass authorized capture");
     for (UINT access = 4; access <= 6; ++access) {
       obs::successful_reset(list, 1);
       list->DrawInstanced(3, 1, 0, 0);
@@ -1185,8 +1202,33 @@ int main() {
       require(obs::register_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&more[n]), 3, callbacks).ready, "Registry early refusal");
     require(!obs::register_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&more.back()), 3, callbacks).ready,
             "Registry cap not enforced");
+    // The destruction path never calls a list registered under its own
+    // pointer: PIX's capture layer aborted on QueryInterface during destruction.
+    const auto unwraps_before_destroy = unwrap_queries.load(), reads_before_destroy = rpm_calls.load();
     for (std::size_t n = 0; n < 8191; ++n)
       obs::unregister_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&more[n]), 3);
+    require(unwrap_queries == unwraps_before_destroy && rpm_calls == reads_before_destroy,
+            "Exact-key destroy called or read the dying list");
+    require(obs::register_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&more[0]), 4, callbacks).ready,
+            "Exact-key destroy left its identity registered");
+    obs::unregister_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&more[0]), 4);
+    {
+      // A proxy registration lives under the native key; destroying through the
+      // proxy still finds it through the unwrap, so the native address can be
+      // registered again.
+      Fake native_object{table.data()}, proxy_object{table.data()};
+      auto* native_list = reinterpret_cast<ID3D12GraphicsCommandList*>(&native_object);
+      auto* proxy = reinterpret_cast<ID3D12GraphicsCommandList*>(&proxy_object);
+      unwrap_proxy = proxy;
+      unwrap_native = native_list;
+      require(obs::register_list(proxy, 5, callbacks).ready, "Proxy registration refused");
+      const auto unwraps_before_proxy = unwrap_queries.load();
+      obs::unregister_list(proxy, 5);
+      require(unwrap_queries > unwraps_before_proxy, "Proxy destroy skipped the unwrap");
+      require(obs::register_list(native_list, 6, callbacks).ready, "Proxy destroy left its native identity registered");
+      obs::unregister_list(native_list, 6);
+      unwrap_proxy = unwrap_native = nullptr;
+    }
     const auto counters = obs::statistics();
     require(counters.legacy_candidates == evidence.legacy_callbacks && counters.enhanced_candidates == evidence.enhanced_callbacks &&
                 counters.batch_refusals > 0 && counters.pass_refusals > 0 && counters.metadata_truncated_calls >= 3 &&

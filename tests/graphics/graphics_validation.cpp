@@ -465,10 +465,14 @@ void active_profile_switch_case(bool warp) {
                    status.capture.completed, status.capture.tail_status, status.message);
     require(predicate() && !status.failed, label);
   };
+  // Like the simulator, two submissions draw the camera image (deferred
+  // lighting, then the forward pass); the capture follows the second.
   const auto draw_source = [&](UINT feed, UINT frame) {
     const auto pane = profiles::A380.camera_panes[feed];
-    generator.record(list.get(), rtvs[feed], pane[0], pane[1], false, frame, feed);
-    submit();
+    for (int submission = 0; submission < 2; ++submission) {
+      generator.record(list.get(), rtvs[feed], pane[0], pane[1], false, frame, feed);
+      submit();
+    }
   };
   const auto render_displays = [&](UINT offset, unsigned mask) {
     win::set_target_mask(mask);
@@ -1152,10 +1156,17 @@ void native_case(bool warp,
     check(allocator->Reset(), "Allocator Reset");
     check(list->Reset(allocator.get(), nullptr), "Observed native Reset");
   };
-  generator.record(list.get(), rtvs[0], pane_width, nose_height, false, 0, 0);
-  generator.record(list.get(), rtvs[1], pane_width, tail_height, false, 0, 1);
-  submit();
-  reset();
+  // Like the simulator, two submissions draw each camera image (deferred
+  // lighting, then the forward pass); the capture follows the second.
+  const auto draw_cameras = [&] {
+    for (int submission = 0; submission < 2; ++submission) {
+      generator.record(list.get(), rtvs[0], pane_width, nose_height, false, 0, 0);
+      generator.record(list.get(), rtvs[1], pane_width, tail_height, false, 0, 1);
+      submit();
+      reset();
+    }
+  };
+  draw_cameras();
   const auto deadline = GetTickCount64() + 10000;
   while (!runtime::snapshot(key).output && GetTickCount64() < deadline) {
     runtime::service();
@@ -1218,10 +1229,7 @@ void native_case(bool warp,
               after_interop.invalid_source_recordings, before_interop.unknown_submitted_lists, after_interop.unknown_submitted_lists);
   Sleep(20);  // Next permitted 60-Hz capture opportunity.
   const auto frames_before_interop = runtime::snapshot(key).frames;
-  generator.record(list.get(), rtvs[0], pane_width, nose_height, false, 0, 0);
-  generator.record(list.get(), rtvs[1], pane_width, tail_height, false, 0, 1);
-  submit();
-  reset();
+  draw_cameras();
   const auto interop_deadline = GetTickCount64() + 1000;
   while (runtime::snapshot(key).frames == frames_before_interop && GetTickCount64() < interop_deadline) {
     runtime::service();
