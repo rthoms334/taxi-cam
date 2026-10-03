@@ -95,17 +95,17 @@ struct DevShader {
     scene_runtime::reload_shader(key, source);
   }
 };
-// The first character of %LOCALAPPDATA%\Taxi Cam\dev\<name>, '0' when the file
-// is missing or empty, or 0 when LOCALAPPDATA cannot be read. Byte-order marks,
-// NULs and whitespace before it are skipped, so a UTF-16 file written by
+// The first character of %LOCALAPPDATA%\Taxi Cam\dev\<name>, absent when the
+// file is missing or empty, or 0 when LOCALAPPDATA cannot be read. Byte-order
+// marks, NULs and whitespace before it are skipped, so a UTF-16 file written by
 // Windows PowerShell also works.
-char read_dev_switch(const wchar_t* name) {
+char read_dev_switch(const wchar_t* name, char absent = '0') {
   wchar_t base[32768]{};
   const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
   if (!n || n >= 32700)
     return 0;
   const std::wstring path = std::wstring(base) + L"\\Taxi Cam\\dev\\" + name;
-  char mode = '0';
+  char mode = absent;
   HANDLE file =
       CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
   if (file != INVALID_HANDLE_VALUE) {
@@ -148,11 +148,14 @@ struct DevCameraAa {
     native_camera::request_scene_continuous(request.continuous);
   }
 };
-// Development switch: %LOCALAPPDATA%\Taxi Cam\dev\capture_phase.txt starting
-// with '1' makes each camera capture hold the complete render. A capture due
-// after a batch that drew the camera image once (the deferred lighting) waits
-// for the next batch that draws it (sky, clouds and lights). Anything else or
-// no file captures after the first drawing batch. Checked once a second.
+// Each camera capture holds the complete render: a capture due after a batch
+// that drew the camera image once (the deferred lighting) waits for the next
+// batch that draws it (sky, clouds and lights). Live on the PMDG 777
+// (2026-10-03) every capture had followed the deferred-only batch, and with
+// the hold the night lights looked like the main view's. For comparison,
+// %LOCALAPPDATA%\Taxi Cam\dev\capture_phase.txt starting with '0' captures
+// after the first drawing batch as before. Checked once a second, first at
+// bridge start, before any camera runs.
 struct DevCapturePhase {
   std::uint64_t next_ms = 0;
   int applied = -1;
@@ -160,10 +163,10 @@ struct DevCapturePhase {
     if (now < next_ms)
       return;
     next_ms = now + 1000;
-    const char mode = read_dev_switch(L"capture_phase.txt");
-    if (!mode || applied == (mode == '1'))
+    const char mode = read_dev_switch(L"capture_phase.txt", '1');
+    if (applied == (mode != '0'))
       return;
-    applied = mode == '1';
+    applied = mode != '0';
     scene_runtime::manager().set_capture_phase(applied != 0);
   }
 };
@@ -1576,7 +1579,7 @@ DWORD run_impl() {
                     feed_bit(1, 31), feed_bit(2, 31), feed_bit(0, 36), feed_bit(1, 36), feed_bit(2, 36),
                     static_cast<unsigned long long>(scene.aa_refusals), scene.aa_error && *scene.aa_error ? scene.aa_error : "none");
       log_status(status, aa_detail);
-      // Capture phase (dev\capture_phase.txt), per feed nose/left/right since the
+      // Capture phase (complete unless dev\capture_phase.txt says 0), per feed nose/left/right since the
       // bridge started: ordered batches that drew the camera image, those that
       // drew it once (the deferred lighting) and the most draws in one batch;
       // captures after a one-draw batch, a several-draw batch, the batch directly
