@@ -243,8 +243,24 @@ void guide_settings_tests() {
   assert(settings_path(saved[0]) != settings_path(saved[1]) && settings_path(saved[1]) != settings_path(saved[2]));
 }
 }  // namespace
+// Live PMDG 777 values (bridge.log, 2026-10-03): night passes the scene light
+// through unchanged; by day the display (0.18 of main-view light) cannot, so a
+// full code stands for the scene light the main view shows at DisplayWhite.
+void display_code_light_tests() {
+  const auto& light = profiles::Pmdg777300ER.display_light;
+  const double night = profiles::display_full_light(light, 0), day = profiles::display_full_light(light, 32000);
+  assert(std::abs(night - 22.3235) < 1e-3 && std::abs(day - 1637.06) < 0.01);
+  assert(profiles::display_code_light(night, 0.0333) == night);
+  assert(profiles::display_code_light(night, 0) == night && profiles::display_code_light(day, 0) == day);
+  assert(profiles::display_code_light(day, -1) == day && profiles::display_code_light(day, NAN) == day);
+  assert(std::abs(profiles::display_code_light(day, 0.000111153) - profiles::DisplayWhite / 0.000111153) < 1e-6);
+  assert(profiles::display_code_light(0, 0.000111153) == 0);
+  // Dusk (exposure 0.00146, full code 1125): still bright enough.
+  assert(profiles::display_code_light(1125, 0.00146) == 1125);
+}
 int main() {
   aircraft_swap_tests();
+  display_code_light_tests();
   using namespace standalone;
   wchar_t temporary[32768];
   assert(GetTempPathW(32768, temporary));

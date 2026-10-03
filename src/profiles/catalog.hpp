@@ -71,6 +71,24 @@ inline double display_full_light(const DisplayLight& d, double ambient) noexcept
     return 0;
   return d.emissive * (d.gain_low + (d.gain_high - d.gain_low) * display_ambient_position(d, ambient));
 }
+// The main view's display-referred light before its tone curve (scene light x
+// its exposure) that a full camera code may stand for when the display cannot
+// give the scene light back. The night PMDG 777 (full code 22.3, exposure
+// 0.0333: 0.74) stays above it, so its pass-through is unchanged.
+constexpr double DisplayWhite = 0.5;
+// The scene light a full camera code stands for: the display's full-code light
+// while that is enough, otherwise (daylight: 1637 x 0.000111 = 0.18) the
+// scene light the main view shows at DisplayWhite, so the camera image is
+// compressed into the display's range instead of clipping. exposure: the
+// simulator's main-view exposure (y = scene x exposure), 0 when unknown.
+inline double display_code_light(double full_light, double exposure) noexcept {
+  if (!(full_light > 0))
+    return 0;
+  if (!(exposure > 0) || !(exposure < 1e6))
+    return full_light;
+  const double white = DisplayWhite / exposure;
+  return white > full_light ? white : full_light;
+}
 inline double display_floor(const DisplayLight& d, double ambient) noexcept {
   if (ambient != ambient || !(d.lux_high > d.lux_low))
     return 0;

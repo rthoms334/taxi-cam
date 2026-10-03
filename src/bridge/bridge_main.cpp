@@ -77,6 +77,13 @@ struct ToneFeed {
     // The curve needs a table: until one is read, the exposure is not sent.
     scene_runtime::set_tone_curve(key, fresh && table_sent ? exposure : 0.0f, offered);
   }
+  // The exposure for the display's daylight range: held through the short
+  // gaps between copies, then 0 (pass-through) so a lost source cannot keep
+  // an old day or night exposure.
+  static constexpr std::uint64_t ScreenHoldMs = 10000;
+  float screen_exposure(std::uint64_t now) const noexcept {
+    return exposure_ms && now >= exposure_ms && now - exposure_ms <= ScreenHoldMs ? exposure : 0.0f;
+  }
 };
 void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
   if (!notifications_enabled.load(std::memory_order_acquire) || !admit_toast(limiter, event, now))
@@ -974,8 +981,13 @@ DWORD run_impl() {
     // On an aircraft whose display is decoded, the camera image is written as
     // scene light divided by the display's own full-code light, so the display
     // gives the scene light back and the main view exposes, tonemaps and blooms
-    // it once. Camera texels hold scene light / 16.
-    const double display_light = light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
+    // it once. Camera texels hold scene light / 16. By day the display is too
+    // dim for that (display_code_light), so the image is compressed into its
+    // range with the latest main-view exposure, held up to ten seconds.
+    const double display_light =
+        light.valid ? profiles::display_code_light(profiles::display_full_light(drawing->display_light, light.ambient),
+                                                   tone.screen_exposure(now))
+                    : 0.0;
     const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
     scene_runtime::set_screen_scale(
         key, display_scale, light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);

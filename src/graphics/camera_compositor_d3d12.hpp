@@ -1227,7 +1227,9 @@ float3 simulator_rgb(float3 rgb) {
 // tonemaps the cockpit, display included. Writing the camera's scene light
 // divided by the display's full-code light (Exposure) makes that conversion
 // return the scene light, so the camera image gets the main view's exposure,
-// tone curve and bloom exactly once. Light above the display's maximum clips.
+// tone curve and bloom exactly once. Light above the display's maximum clips;
+// by day the bridge passes a larger full-code light (profiles::
+// display_code_light) so the image is compressed into the display's range.
 // The +-0.5/255 dither, like the simulator's own, keeps dark night gradients,
 // which use only the lowest codes, from banding.
 static float2 PixelPosition;
