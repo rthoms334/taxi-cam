@@ -7,9 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <mutex>
-#include <string>
 #include <vector>
 
 namespace taxi_camera::scene_runtime {
@@ -41,9 +39,6 @@ struct Device {
   profiles::Composition composition{};
   Snapshot status;
   std::uint32_t patch_profile = 1;
-  // Development shader source waiting for the next composition.
-  std::string shader_source;
-  bool shader_pending = false;
   // Latest simulator tone-curve table, until the composition accepts it.
   std::vector<std::uint32_t> tone_table;
   bool tone_table_pending = false;
@@ -531,21 +526,6 @@ bool set_screen_scale(std::uint64_t key, float scale, float floor) {
   item->status.screen_floor = floor;
   return true;
 }
-void set_light_inputs(std::uint64_t key, float main_exposure, float display_scale, float ambient) {
-  const std::lock_guard lock(runtime().mutex);
-  if (auto* item = find(key)) {
-    item->status.main_exposure = main_exposure;
-    item->status.display_scale = display_scale;
-    item->status.ambient = ambient;
-  }
-}
-void reload_shader(std::uint64_t key, const std::string& source) {
-  const std::lock_guard lock(runtime().mutex);
-  if (auto* item = find(key)) {
-    item->shader_source = source;
-    item->shader_pending = true;
-  }
-}
 void set_ground_speed(std::uint64_t key, float knots, bool valid) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
@@ -698,17 +678,6 @@ void service() {
       item.tone_table_pending = false;
     item.status.tone_active = item.output.tone_curve_active();
     item.output.set_screen_scale(item.status.screen_scale, item.status.screen_floor);
-    item.output.set_light_inputs(item.status.main_exposure, item.status.display_scale, item.status.ambient);
-    if (item.shader_pending) {
-      item.shader_pending = false;
-      if (item.output.reload_shader(item.shader_source.data(), item.shader_source.size())) {
-        ++item.status.shader_reloads;
-        item.status.shader_error[0] = '\0';
-      } else {
-        ++item.status.shader_reload_failures;
-        std::snprintf(item.status.shader_error.data(), item.status.shader_error.size(), "%s", item.output.compositor_error());
-      }
-    }
     if (!item.output.set_display_exposure(item.status.display_exposure_ev) || !speed_ready ||
         !item.output.prepare(first.resource, scene_format(first.resource), second.resource, scene_format(second.resource), right,
                              scene_format(right))) {

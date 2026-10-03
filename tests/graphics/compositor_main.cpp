@@ -511,12 +511,6 @@ void bloom_case(ID3D12Device* device, Result& result) {
           "The bloom did not spread a light into its neighbourhood");
   readback->Unmap(0, nullptr);
   result.bloom_codes = {centre, close, mid, distant};
-  // Development reload: the built-in source compiles again; a broken one is
-  // refused and the working pipeline stays.
-  const char* built_in = Compositor::built_in_shader();
-  require(SUCCEEDED(compositor.reload_shader(built_in, std::strlen(built_in))) &&
-              FAILED(compositor.reload_shader("float4 ps_main() : SV_Target {", 30)) && std::strlen(compositor.last_error()) > 0,
-          "A development shader reload was not handled");
   compositor.release();
 }
 
@@ -618,12 +612,12 @@ void tone_case(ID3D12Device* device, Result& result) {
   }
   readback->Unmap(0, nullptr);
 
-  // Display scene light: the texel times the scale, sRGB-encoded, clipped at
-  // full code, with at most one code of dither. It takes precedence over the
-  // tone curve.
-  constexpr float Scale = 3.0f;
+  // Display scene light: the texel times the scale, less the floor,
+  // sRGB-encoded, clipped at full code, with at most one code of dither. It
+  // takes precedence over the tone curve.
+  constexpr float Scale = 3.0f, Floor = 0.01f;
   require(compositor.set_screen_scale(Scale) && !compositor.set_screen_scale(-1) && compositor.screen_scale() == 0 &&
-              compositor.set_screen_scale(Scale),
+              !compositor.set_screen_scale(Scale, 1) && compositor.set_screen_scale(Scale, Floor),
           "The display scale was not applied or an invalid one was accepted");
   PrivateSubmission second(device);
   list = second.list();
@@ -641,8 +635,8 @@ void tone_case(ID3D12Device* device, Result& result) {
     return static_cast<int>(std::floor((y <= 0.0031308 ? 12.92 * y : 1.055 * std::pow(y, 1 / 2.4) - 0.055) * 255 + 0.5));
   };
   for (UINT channel = 0; channel < 3; ++channel) {
-    require(std::abs(nose[channel] - display_code(Nose[channel] * Scale)) <= 1 &&
-                std::abs(tail[channel] - display_code(Tail[channel] * Scale)) <= 1,
+    require(std::abs(nose[channel] - display_code(Nose[channel] * Scale - Floor)) <= 1 &&
+                std::abs(tail[channel] - display_code(Tail[channel] * Scale - Floor)) <= 1,
             "The display scene light differs from its CPU model");
     ++result.tone_checks;
   }

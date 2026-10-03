@@ -755,13 +755,6 @@ void SceneCaptureManager::set_source_rate(std::uint32_t rate) noexcept {
   const std::lock_guard lock(mutex_);
   source_rate_ = rate < kMinimumParkedCameraRate ? kMinimumParkedCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
 }
-void SceneCaptureManager::set_capture_phase(bool hold) noexcept {
-  const std::lock_guard lock(mutex_);
-  if (capture_phase_ == hold)
-    return;
-  capture_phase_ = stats_.capture_phase = hold;
-  phase_feeds_ = {};
-}
 void SceneCaptureManager::forget_capture_phase() noexcept {
   for (auto& phase : phase_feeds_)
     capture_phase::forget(phase.state);
@@ -1585,7 +1578,7 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
       continue;
     }
     // Before any private recording: a held batch leaves no packet, lease or list work.
-    const auto phase_decision = capture_phase::decide(phase.state, capture_phase_, state.draws);
+    const auto phase_decision = capture_phase::decide(phase.state, state.draws);
     if (!phase_decision.capture) {
       ++diagnostic.held;
       stats_.tail_status = "awaiting_complete_render";

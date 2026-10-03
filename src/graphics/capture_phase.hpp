@@ -11,17 +11,21 @@ namespace taxi_camera::capture_phase {
 // merge, billboard lights, particles). A queue-tail capture taken after the
 // first holds none of the lights drawn over the ground.
 //
-// With the hold on, a capture that is due after a batch that drew the camera
-// image exactly once waits for the next batch that draws it, whatever its draw
-// count. A feed holds at most one batch between two captures, and a forgotten
-// hold stays spent, so the next drawing batch is never held: a view whose image
-// is written once per render is captured one render later, never stalled. A
-// hold covers only the drawing batch directly after it; the caller forgets it
-// when that batch records no capture.
-enum class Kind : std::uint8_t { after_one, after_multi, after_hold, forced };
-inline constexpr std::size_t KindCount = 4;
+// Live on the PMDG 777 (2026-10-03) every capture had followed that
+// deferred-only batch; capturing the complete render made the night lights
+// look like the main view's.
+//
+// A capture that is due after a batch that drew the camera image exactly once
+// waits for the next batch that draws it, whatever its draw count. A feed holds
+// at most one batch between two captures, and a forgotten hold stays spent, so
+// the next drawing batch is never held: a view whose image is written once per
+// render is captured one render later, never stalled. A hold covers only the
+// drawing batch directly after it; the caller forgets it when that batch
+// records no capture.
+enum class Kind : std::uint8_t { after_multi, after_hold, forced };
+inline constexpr std::size_t KindCount = 3;
 constexpr const char* kind_name(Kind kind) noexcept {
-  constexpr const char* names[]{"after_one", "after_multi", "after_hold", "forced"};
+  constexpr const char* names[]{"after_multi", "after_hold", "forced"};
   return static_cast<std::size_t>(kind) < KindCount ? names[static_cast<std::size_t>(kind)] : "invalid_kind";
 }
 struct Feed {
@@ -30,22 +34,19 @@ struct Feed {
 };
 struct Decision {
   bool capture = true;
-  Kind kind = Kind::after_one;
+  Kind kind = Kind::after_multi;  // Of a capture; a held batch has none.
 };
 // Called once the feed's capture interval has passed, for a batch that drew
 // its image `draws` times (at least one) in a render-target state.
-inline Decision decide(Feed& feed, bool hold, std::uint32_t draws) noexcept {
-  const auto kind = draws > 1 ? Kind::after_multi : Kind::after_one;
-  if (!hold)
-    return {true, kind};
+inline Decision decide(Feed& feed, std::uint32_t draws) noexcept {
   if (feed.held)
     return {true, Kind::after_hold};
   if (draws > 1)
-    return {true, kind};
+    return {true, Kind::after_multi};
   if (feed.spent)
     return {true, Kind::forced};
   feed.held = feed.spent = true;
-  return {false, kind};
+  return {false};
 }
 // The capture was recorded: the next interval may hold again.
 inline void captured(Feed& feed) noexcept {

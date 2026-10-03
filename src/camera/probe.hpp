@@ -96,7 +96,6 @@ struct ProbeSnapshot {
   // refusal ("" when none).
   std::array<std::array<float, 3>, kMaxCameraFeeds> draw_clip{};
   std::array<float, 3> main_clip{};
-  bool follow_main_far = false;
   // Camera mount on the aircraft Node (node_mount.hpp): whether this image's
   // parent contract resolved (and why not), per-feed state (0 world placement,
   // 1 attached, 2 lost), attach/restore/refusal counts, cameras taken back to
@@ -180,10 +179,6 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
 void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept;
-// Atomic only, consumed by the observer before each pose refresh. True gives
-// Taxi Cam's views the main view's far distances (above 60 kt, so they keep
-// drawing the ground after take-off); false restores each camera's own far.
-void request_scene_main_far(bool follow) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;

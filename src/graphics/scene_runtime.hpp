@@ -84,11 +84,6 @@ struct Snapshot {
   bool tone_active = false;
   // Camera texels to the aircraft display's codes (0: not used).
   float screen_scale = 0, screen_floor = 0;
-  // Output-shader lighting inputs (CameraCompositorD3D12::set_light_inputs).
-  float main_exposure = 0, display_scale = 0, ambient = -1;
-  // Development shader reloads applied, refused, and the last compiler text.
-  std::uint64_t shader_reloads = 0, shader_reload_failures = 0;
-  std::array<char, 256> shader_error{};
   float ground_speed_knots = 0;
   bool ground_speed_valid = false;
   // False skips the GS overlay entirely (PMDG 777: no readout, no black box).
@@ -99,7 +94,8 @@ struct Snapshot {
 SceneCaptureManager& manager();
 void set_gpu_timing_enabled(bool enabled);
 // Camera-image age that brings the PLEASE WAIT page back while a side stays on.
-// 0, the default, disables the age rule; the bridge sets WaitingPageStaleMs.
+// 0, the default, disables the age rule; the bridge sets waiting_stale_ms for the
+// camera rate in use (at least WaitingPageStaleMs).
 // Validation hosts that hold one composed image for a long time leave it off.
 void set_waiting_stale_ms(std::uint64_t ms);
 bool init_device(std::uint64_t key, ID3D12Device* device);
@@ -116,9 +112,6 @@ bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* tabl
 // Scene light for the aircraft display, which then shines it into the main
 // view (CameraCompositorD3D12::set_screen_scale); 0 turns it off.
 bool set_screen_scale(std::uint64_t key, float scale, float floor = 0);
-void set_light_inputs(std::uint64_t key, float main_exposure, float display_scale, float ambient);
-// Development: replaces the camera output shader before the next composition.
-void reload_shader(std::uint64_t key, const std::string& source);
 // A fresh public SimConnect sample; unavailable samples render GS --.
 void set_ground_speed(std::uint64_t key, float knots, bool valid);
 // Skip the GS overlay entirely (no glyphs, no black panel). Font fixtures

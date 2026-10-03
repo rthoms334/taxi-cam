@@ -76,11 +76,6 @@ int main() {
     require(!valid_settings(settings), "Dynamic tail rate accepts only 0 or 1");
     settings.dynamic_tail = 1;
     require(valid_settings(settings), "Dynamic tail rate can be turned on");
-    require(settings.camera_weather == 1, "Camera weather defaults on");
-    settings.camera_weather = 2;
-    require(!valid_settings(settings), "Camera weather accepts only 0 or 1");
-    settings.camera_weather = 0;
-    require(valid_settings(settings), "Camera weather can be turned off");
     require(settings.camera_tone == 1, "Match main view lighting defaults on");
     settings.camera_tone = 2;
     require(!valid_settings(settings), "Match main view lighting accepts only 0 or 1");
@@ -133,13 +128,12 @@ int main() {
     require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
     change = setup.observe(true, false, control.owner_pid() + 1, 2);
     require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
-    require(ProtocolVersion == 19 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 20 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol11 guide coordinates roundtrip");
     require(control.settings().parked_rate == settings.parked_rate, "Protocol11 parked floor roundtrip");
     require(control.settings().dynamic_tail == 1, "Protocol16 dynamic tail roundtrip");
-    require(control.settings().camera_weather == 0, "Protocol18 camera weather roundtrip");
     require(control.settings().camera_tone == 0, "Protocol19 camera tone roundtrip");
     require(control.settings().notifications == 0, "Protocol12 notification preference roundtrip");
     {

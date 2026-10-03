@@ -57,7 +57,7 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 
 Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the cameras. The page also returns while the camera image is missing or stale: more than a second old, or more than six camera intervals at a low camera rate (3 s at the 2 Hz parked rate). The text uses the ground-speed colour on the Airbus aircraft and is white on the PMDG 777.
 
-The cameras stay on at any speed, including in flight, and Taxi Cam never turns the TAXI buttons off by itself. With **Camera views → Camera weather** on (the default), the camera views show the current clouds and overcast light and draw as far as the main view at every speed. With it off they draw up to 1,000 m away while taxiing and show a clear sky; above **60 knots** they still draw as far as the main view, so the ground stays visible after take-off. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
+The cameras stay on at any speed, including in flight, and Taxi Cam never turns the TAXI buttons off by itself. The camera views show the current clouds and overcast light and draw as far as the main view at every speed, so the ground stays visible after take-off. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 
 Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. On the A340-600 and A340-300, **Ctrl + Shift + D** toggles the lower ECAM (SD). In **Settings → Overview → Flight-deck control**, select **Shortcuts and buttons…** to configure or disable them. The same editor can also assign a joystick, button box or gamepad button to each action. On aircraft with working TAXI buttons, shortcuts and controller buttons also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard shortcuts and controller buttons](docs/keyboard-shortcuts.md) for details.
 
@@ -99,9 +99,9 @@ Assignments apply immediately and belong to the current flight; texture IDs can 
 
 ## Known issues and limitations
 
-- **Night lighting:** Runway and taxiway lights can look very faint or be difficult to see. Improving their visibility is on the roadmap.
+- **Night lighting:** Runway and taxiway lights in the camera views have been checked at night only on the PMDG 777-300ER, where they now look like the main view's. On other aircraft they may still look faint.
 - **DLSS camera movement:** Slight aircraft movement can remain in the A350 lower view while taxiing with DLSS. TAA does not exhibit this movement. If the cameras do not recover after changing graphics settings and Taxi Cam asks for a restart, restart MSFS.
-- **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. Try a lower camera frame rate if needed.
+- **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. The camera views draw as far as the main view at every speed, so taxiing can cost more than with the 1,000 m distance of earlier versions. Try a lower camera frame rate if needed.
 
 Please report unexpected behaviour using **Report a bug**.
 

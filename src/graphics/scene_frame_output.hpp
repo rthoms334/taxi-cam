@@ -51,10 +51,6 @@ class SceneFrameOutput {
   bool tone_curve_active() const noexcept;
   // CameraCompositorD3D12::set_screen_scale; 0 turns it off.
   bool set_screen_scale(float scale, float floor) noexcept;
-  bool set_light_inputs(float main_exposure, float display_scale, float ambient) noexcept;
-  // Development shader reload (CameraCompositorD3D12::reload_shader).
-  bool reload_shader(const char* source, std::size_t size) noexcept;
-  const char* compositor_error() const noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
   bool hide_ground_speed() noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;

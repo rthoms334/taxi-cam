@@ -5,7 +5,6 @@
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
-#include "../camera/view_clip.hpp"
 #include "../graphics/camera_compositor_d3d12.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
@@ -42,110 +41,6 @@ std::atomic<bool> notifications_enabled{};
 // status line and the log.
 SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
-// Development loop: a camera output shader at
-// %LOCALAPPDATA%\Taxi Cam\dev\compositor.hlsl replaces the built-in one,
-// checked once a second, so lighting changes show while the simulator runs.
-// The built-in source is written beside it as compositor.default.hlsl to copy.
-// No file, no change. Deleting the file keeps the last loaded shader.
-struct DevShader {
-  std::uint64_t next_ms = 0;
-  FILETIME written{};
-  std::uint64_t bytes = 0;
-  bool template_written = false;
-  void poll(std::uint64_t key, std::uint64_t now) {
-    if (now < next_ms)
-      return;
-    next_ms = now + 1000;
-    wchar_t base[32768]{};
-    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
-    if (!n || n >= 32700)
-      return;
-    const std::wstring directory = std::wstring(base) + L"\\Taxi Cam\\dev";
-    if (!template_written && GetFileAttributesW(directory.c_str()) != INVALID_FILE_ATTRIBUTES) {
-      template_written = true;
-      const auto path = directory + L"\\compositor.default.hlsl";
-      HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-      if (file != INVALID_HANDLE_VALUE) {
-        const char* source = CameraCompositorD3D12::built_in_shader();
-        DWORD written_bytes = 0;
-        WriteFile(file, source, static_cast<DWORD>(std::strlen(source)), &written_bytes, nullptr);
-        CloseHandle(file);
-      }
-    }
-    const auto path = directory + L"\\compositor.hlsl";
-    WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
-      return;
-    const std::uint64_t size = (std::uint64_t{data.nFileSizeHigh} << 32) | data.nFileSizeLow;
-    if (size == bytes && CompareFileTime(&data.ftLastWriteTime, &written) == 0)
-      return;
-    if (!size || size > (1u << 20))
-      return;
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (file == INVALID_HANDLE_VALUE)
-      return;
-    std::string source(static_cast<std::size_t>(size), '\0');
-    DWORD read = 0;
-    const bool complete = ReadFile(file, source.data(), static_cast<DWORD>(size), &read, nullptr) && read == size;
-    CloseHandle(file);
-    if (!complete)
-      return;
-    bytes = size;
-    written = data.ftLastWriteTime;
-    scene_runtime::reload_shader(key, source);
-  }
-};
-// The first character of %LOCALAPPDATA%\Taxi Cam\dev\<name>, absent when the
-// file is missing or empty, or 0 when LOCALAPPDATA cannot be read. Byte-order
-// marks, NULs and whitespace before it are skipped, so a UTF-16 file written by
-// Windows PowerShell also works.
-char read_dev_switch(const wchar_t* name, char absent) {
-  wchar_t base[32768]{};
-  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
-  if (!n || n >= 32700)
-    return 0;
-  const std::wstring path = std::wstring(base) + L"\\Taxi Cam\\dev\\" + name;
-  char mode = absent;
-  HANDLE file =
-      CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
-  if (file != INVALID_HANDLE_VALUE) {
-    unsigned char text[16]{};
-    DWORD read = 0;
-    if (ReadFile(file, text, sizeof(text), &read, nullptr)) {
-      for (DWORD i = 0; i < read; ++i) {
-        const auto c = text[i];
-        if (c == 0 || c == 0xef || c == 0xbb || c == 0xbf || c == 0xff || c == 0xfe || c == ' ' || c == '\t' || c == '\r' || c == '\n')
-          continue;
-        mode = static_cast<char>(c);
-        break;
-      }
-    }
-    CloseHandle(file);
-  }
-  return mode;
-}
-// Each camera capture holds the complete render: a capture due after a batch
-// that drew the camera image once (the deferred lighting) waits for the next
-// batch that draws it (sky, clouds and lights). Live on the PMDG 777
-// (2026-10-03) every capture had followed the deferred-only batch, and with
-// the hold the night lights looked like the main view's. For comparison,
-// %LOCALAPPDATA%\Taxi Cam\dev\capture_phase.txt starting with '0' captures
-// after the first drawing batch as before. Checked once a second, first at
-// bridge start, before any camera runs.
-struct DevCapturePhase {
-  std::uint64_t next_ms = 0;
-  int applied = -1;
-  void poll(std::uint64_t now) {
-    if (now < next_ms)
-      return;
-    next_ms = now + 1000;
-    const char mode = read_dev_switch(L"capture_phase.txt", '1');
-    if (applied == (mode != '0'))
-      return;
-    applied = mode != '0';
-    scene_runtime::manager().set_capture_phase(applied != 0);
-  }
-};
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
 // Match main view lighting: hands the simulator's main-view exposure and
@@ -159,7 +54,6 @@ struct ToneFeed {
   float exposure = 0;
   std::vector<std::uint32_t> table;
   bool table_sent = false;
-  float fresh_exposure(std::uint64_t now) const noexcept { return exposure_ms && now - exposure_ms <= 2000 ? exposure : 0.0f; }
   void update(std::uint64_t key, bool enabled, std::uint64_t now) {
     win::set_tone_capture_enabled(enabled);
     const auto status = win::tone_status();
@@ -523,8 +417,6 @@ DWORD run_impl() {
   };
   std::uint64_t last_stop_sequence{};
   std::array<std::array<double, 6>, 3> applied_mounts{};
-  // Camera views draw as far as the main view above 60 kt (view_clip).
-  bool far_follows_main = false;
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -960,16 +852,6 @@ DWORD run_impl() {
       scene_runtime::manager().set_source_rate(rate);
       scene_runtime::set_waiting_stale_ms(win::waiting_stale_ms(rate, nose_priority));
     }
-    // Taxiing, the views keep their own 1000 m far; from the take-off roll on
-    // they draw as far as the main view so the ground stays visible in flight.
-    // Camera weather needs the main view's far at every speed: the cloud
-    // raymarch ends each sky ray at the far plane, below the cloud base at
-    // 1000 m. It also sends each camera's cloud merge into the camera image.
-    // Atomics only; the observer applies the far before each pose refresh.
-    const bool camera_weather = settings.camera_weather != 0;
-    far_follows_main = native_camera::follow_main_far(far_follows_main, speed.valid, speed.knots);
-    native_camera::request_scene_main_far(camera_weather || far_follows_main);
-    win::set_cloud_merge_enabled(camera_weather);
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
       for (unsigned i = 0; i < mounts.size(); ++i) {
@@ -1094,14 +976,9 @@ DWORD run_impl() {
     const double display_light = light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
     const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
     scene_runtime::set_screen_scale(
-        key, settings.camera_tone && drawing->display_light_enabled ? display_scale : 0.0f,
+        key, settings.camera_tone ? display_scale : 0.0f,
         light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);
     last_ambient = light.valid ? light.ambient : -1.0;
-    scene_runtime::set_light_inputs(key, tone.fresh_exposure(now), display_scale, static_cast<float>(last_ambient));
-    static DevShader dev_shader;
-    dev_shader.poll(key, now);
-    static DevCapturePhase dev_capture_phase;
-    dev_capture_phase.poll(now);
     // Match main view lighting starts each camera's fog history at clear air.
     win::set_fog_history_reset(settings.camera_tone != 0);
     if (drawing->ground_speed)
@@ -1497,22 +1374,21 @@ DWORD run_impl() {
       log_status(status, retention_detail);
       // Per camera and for the main view: near plane / culling far / default far, metres.
       char clip_detail[448];
-      std::snprintf(
-          clip_detail, sizeof(clip_detail),
-          "Camera draw distance: pose_proven=%d follow_main=%d writes=%llu "
-          "error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
-          scene.pose_session_proven ? 1 : 0, scene.follow_main_far ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
-          scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0], scene.main_clip[1],
-          scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2], scene.draw_clip[1][0],
-          scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1], scene.draw_clip[2][2]);
+      std::snprintf(clip_detail, sizeof(clip_detail),
+                    "Camera draw distance: pose_proven=%d writes=%llu "
+                    "error=%s main=%.3g/%.6g/%.6g feed0=%.3g/%.6g/%.6g feed1=%.3g/%.6g/%.6g feed2=%.3g/%.6g/%.6g",
+                    scene.pose_session_proven ? 1 : 0, static_cast<unsigned long long>(scene.draw_clip_writes),
+                    scene.draw_clip_error && *scene.draw_clip_error ? scene.draw_clip_error : "none", scene.main_clip[0],
+                    scene.main_clip[1], scene.main_clip[2], scene.draw_clip[0][0], scene.draw_clip[0][1], scene.draw_clip[0][2],
+                    scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
+                    scene.draw_clip[2][2]);
       log_status(status, clip_detail);
       // Camera weather: cloud merges sent into a camera image, and those that
       // could not be (no descriptor heap); cumulative for this bridge.
       const auto clouds = win::cloud_merge_status();
       char weather_detail[160];
-      std::snprintf(weather_detail, sizeof(weather_detail), "Camera weather: enabled=%d cloud_merges=%llu refused=%llu",
-                    clouds.enabled ? 1 : 0, static_cast<unsigned long long>(clouds.redirects),
-                    static_cast<unsigned long long>(clouds.refusals));
+      std::snprintf(weather_detail, sizeof(weather_detail), "Camera weather: cloud_merges=%llu refused=%llu",
+                    static_cast<unsigned long long>(clouds.redirects), static_cast<unsigned long long>(clouds.refusals));
       log_status(status, weather_detail);
       // Match main view lighting: the simulator exposure in use (0: Taxi Cam's
       // exposure), copies of its exposure and table, and resource changes.
@@ -1526,18 +1402,19 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
                     tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);
-      char fog_detail[1200] = "Camera fog: ";
-      win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
+      // Camera fog: history resets written and camera fog volumes tracked.
+      const auto fog = win::fog_status();
+      char fog_detail[96];
+      std::snprintf(fog_detail, sizeof(fog_detail), "Camera fog: resets=%llu volumes=%u", static_cast<unsigned long long>(fog.resets),
+                    fog.volumes);
       log_status(status, fog_detail);
-      // Capture phase (complete unless dev\capture_phase.txt says 0), per feed nose/left/right since the
-      // bridge started: ordered batches that drew the camera image, those that
-      // drew it once (the deferred lighting) and the most draws in one batch;
-      // captures after a one-draw batch, a several-draw batch, the batch directly
-      // after a held one, or a one-draw batch after a lost hold; one-draw batches
-      // held.
+      // Capture phase, per feed nose/left/right since the bridge started:
+      // ordered batches that drew the camera image, those that drew it once
+      // (the deferred lighting) and the most draws in one batch; captures after
+      // a several-draw batch, the batch directly after a held one, or a one-draw
+      // batch after a lost hold; one-draw batches held.
       char phase_detail[512];
-      auto phase_used = static_cast<std::size_t>(
-          std::snprintf(phase_detail, sizeof(phase_detail), "Capture phase: complete=%d", output.capture.capture_phase ? 1 : 0));
+      auto phase_used = static_cast<std::size_t>(std::snprintf(phase_detail, sizeof(phase_detail), "Capture phase:"));
       const auto append_phase = [&](const char* name, const auto& value) {
         if (phase_used >= sizeof(phase_detail))
           return;
@@ -1558,13 +1435,6 @@ DWORD run_impl() {
                      [kind](const PhaseFeed& feed) { return feed.captures[kind]; });
       append_phase("held", [](const PhaseFeed& feed) { return feed.held; });
       log_status(status, phase_detail);
-      if (output.shader_reloads || output.shader_reload_failures) {
-        char shader_detail[400];
-        std::snprintf(shader_detail, sizeof(shader_detail), "Dev shader: reloads=%llu failures=%llu error=%.300s",
-                      static_cast<unsigned long long>(output.shader_reloads),
-                      static_cast<unsigned long long>(output.shader_reload_failures), output.shader_error.data());
-        log_status(status, shader_detail);
-      }
       // Camera mount on the aircraft Node: per feed 0 world placement, 1 attached,
       // 2 lost; attach/restore/refusal counts; contract fallback reason if any.
       char mount_detail[448];

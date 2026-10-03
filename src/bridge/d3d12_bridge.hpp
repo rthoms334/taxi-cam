@@ -177,16 +177,17 @@ void set_graphics_observation_demand(bool enabled) noexcept;
 void set_graphics_diagnostics_enabled(bool enabled) noexcept;
 // Camera weather: a camera view's cloud composite goes into that view's image
 // (cloud_merge.hpp). Counts are cumulative for the bridge lifetime.
-void set_cloud_merge_enabled(bool enabled) noexcept;
 struct CloudMergeStatus {
-  bool enabled = false;
   std::uint64_t redirects = 0, refusals = 0;
 };
 CloudMergeStatus cloud_merge_status() noexcept;
-// Camera fog: whether the history reset is on and how many volumes it wrote,
-// then each froxel fog volume as WxH@address g<creation group>.<index>:UAV
-// exits (group 0: created before the bridge attached).
-void fog_volumes(char* text, std::size_t size) noexcept;
+// Camera fog: history resets written (cumulative for the bridge lifetime) and
+// camera fog volumes tracked (at most 48).
+struct FogStatus {
+  std::uint64_t resets = 0;
+  unsigned volumes = 0;
+};
+FogStatus fog_status() noexcept;
 // Camera fog: write each camera view's fog history once with clear air, so it
 // starts where the main view sits instead of at opaque (Match main view lighting).
 void set_fog_history_reset(bool enabled) noexcept;
@@ -195,7 +196,7 @@ void set_fog_history_reset(bool enabled) noexcept;
 // Counts are cumulative for the bridge lifetime.
 void set_tone_capture_enabled(bool enabled) noexcept;
 struct ToneStatus {
-  bool enabled = false, readback_failed = false, exposure_valid = false;
+  bool readback_failed = false, exposure_valid = false;
   float exposure = 0;
   std::uint64_t exposure_copies = 0, table_copies = 0, source_changes = 0;
 };

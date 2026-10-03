@@ -84,7 +84,6 @@ inline std::uint32_t load_notification_preference(const std::wstring& selection)
   return !key || GetPrivateProfileIntW(L"messages", key, 1, selection.c_str()) ? 1u : 0u;
 }
 inline constexpr unsigned kCamButtonRevision = 1;
-inline constexpr unsigned kCameraWeatherRevision = 1;
 inline bool load_settings(Settings& s, const std::wstring& installation, std::uint32_t profile_id = 0) {
   if (!profile_id)
     profile_id = GetPrivateProfileIntW(L"aircraft", L"profile", 1, (settings_directory() + L"\\settings.ini").c_str());
@@ -169,12 +168,6 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
     value.parked_rate = kDefaultParkedCameraRate;
   value.single_camera = integer(L"display", L"single_camera", 0);
   value.dynamic_tail = integer(L"display", L"dynamic_tail", 0) ? 1u : 0u;
-  // Proof-of-concept builds saved camera_weather (off by default) without the
-  // revision. Load such a profile with the shipped default once; a value saved
-  // with the revision is the user's choice.
-  value.camera_weather = integer(L"display", L"camera_weather_revision", 0) < kCameraWeatherRevision
-                             ? 1u
-                             : (integer(L"display", L"camera_weather", 1) ? 1u : 0u);
   value.camera_tone = integer(L"display", L"camera_tone", 1) ? 1u : 0u;
   value.calibration_budget = integer(L"display", L"calibration_budget", 4096);
   value.automatic_exposure = integer(L"display", L"automatic_exposure", 1);
@@ -231,7 +224,7 @@ inline bool save_settings(const Settings& s) {
       text, 4096,
       L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
       L"[display]\r\ncamera_rate=%u\r\nparked_rate=%u\r\nparked_rate_revision=%u\r\nsingle_camera=%u\r\ndynamic_tail=%u\r\n"
-      L"camera_weather=%u\r\ncamera_weather_revision=%u\r\ncamera_tone=%u\r\nautomatic_exposure=%u\r\n"
+      L"camera_tone=%u\r\nautomatic_exposure=%u\r\n"
       L"exposure=%.9g\r\nnight_boost=%.9g\r\nnight_boost_revision=%u\r\ncalibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\n"
       L"speed_blue=%.9g\r\n"
       L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
@@ -241,11 +234,10 @@ inline bool save_settings(const Settings& s) {
       L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
       s.enabled, s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_rate, s.parked_rate, kParkedRateRevision, s.single_camera,
-      s.dynamic_tail, s.camera_weather, kCameraWeatherRevision, s.camera_tone, s.automatic_exposure, s.exposure, s.night_boost,
-      kNightBoostPreferenceRevision, s.calibration_budget, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0],
-      s.guide_color[1], s.guide_color[2], s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0],
-      s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0],
-      w[1], w[2], w[3], w[4], w[5]);
+      s.dynamic_tail, s.camera_tone, s.automatic_exposure, s.exposure, s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget,
+      s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2], s.nose_dot[0],
+      s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1],
+      n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
   if (count <= 0)
     return false;
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

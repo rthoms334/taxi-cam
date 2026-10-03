@@ -293,10 +293,12 @@ struct Registry {
   // PassBegin reports that reached the manager's global path: the pass bound
   // no RTV, or bound RTVs the bridge could not resolve to tracked resources.
   std::atomic<std::uint64_t> pass_no_targets{}, pass_unresolved_targets{};
-  // Camera weather (cloud_merge.hpp): whether camera cloud merges are sent into
-  // the camera output, how many were, and how many could not be.
-  std::atomic<bool> cloud_merge_enabled{};
+  // Camera weather (cloud_merge.hpp): camera cloud merges sent into the camera
+  // output, and those that could not be. cloud_scene_seen is set when a list
+  // first holds a camera output as its cloud_scene; until then barriers skip
+  // the list lookup that forgets it.
   std::atomic<std::uint64_t> cloud_merge_redirects{}, cloud_merge_refusals{};
+  std::atomic<bool> cloud_scene_seen{};
   // Recordings invalidated on the next hit after a contended find_list miss,
   // and lists admitted mid-recording (unobserved, awaiting their Reset).
   std::atomic<std::uint64_t> contended_invalidations{}, unobserved_admissions{};
@@ -1377,9 +1379,7 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
 // Camera fog: the simulator's froxel fog volumes (3D R10G10B10A2, 64 slices,
 // one eighth of the view's width and height). The density pass blends each
 // frame with a history volume. A view has three: the integrated volume that
-// the lights and the scene read, and a history pair. Volumes created after the
-// bridge attached are grouped at creation, and each volume's UNORDERED_ACCESS
-// exits are counted (metadata only), for the Camera fog line.
+// the lights and the scene read, and a history pair.
 //
 // History reset (2026-10-02, live readout): a new view's history starts at
 // transmittance 0 and the blend (3-12% per frame) climbs out of it slowly, so
@@ -1393,15 +1393,10 @@ void table_exit(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION
 namespace fog {
 struct Volume {
   std::atomic<ID3D12Resource*> resource{nullptr};
-  std::atomic<std::uint32_t> width{0}, height{0};
-  std::atomic<std::uint32_t> group{0}, index{0};  // group 0: not seen created
-  std::atomic<std::uint64_t> exits{0};
   std::atomic<bool> reset{false};  // history reset already applied to this volume
 };
 struct State {
-  std::array<Volume, 48> volumes;
-  std::atomic<Volume*> last_created{nullptr};
-  std::atomic<std::uint32_t> groups{0};
+  std::array<Volume, 48> volumes;  // camera volumes seen at a guarded exit
   std::atomic<bool> history_reset{false};
   // Camera output sizes in fog cells ((width/8) << 16 | height/8, rounded up).
   std::array<std::atomic<std::uint32_t>, 4> cameras{};
@@ -1422,56 +1417,34 @@ bool volume_shape(const D3D12_RESOURCE_DESC& d) noexcept {
   return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && d.DepthOrArraySize == 64 && d.MipLevels == 1 &&
          d.Format == DXGI_FORMAT_R10G10B10A2_UNORM && !(d.Width == 64 && d.Height == 64);
 }
-Volume* slot(ID3D12Resource* resource, const D3D12_RESOURCE_DESC& d) noexcept {
+Volume* slot(ID3D12Resource* resource) noexcept {
   for (auto& v : state().volumes) {
     ID3D12Resource* seen = v.resource.load(std::memory_order_acquire);
-    if (!seen && v.resource.compare_exchange_strong(seen, resource, std::memory_order_acq_rel)) {
-      v.width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
-      v.height.store(d.Height, std::memory_order_relaxed);
+    if (!seen && v.resource.compare_exchange_strong(seen, resource, std::memory_order_acq_rel))
       return &v;
-    }
     if (seen == resource)
       return &v;
   }
   // Full: recycle slots in turn (views are recreated by resizes and CAM
-  // toggles). A recycled live volume only loses its counters and may be reset
-  // once more.
+  // toggles). A recycled live volume may be reset once more.
   auto& v = state().volumes[state().evict.fetch_add(1, std::memory_order_relaxed) % state().volumes.size()];
-  v.group.store(0, std::memory_order_relaxed);
-  v.index.store(0, std::memory_order_relaxed);
-  v.exits.store(0, std::memory_order_relaxed);
   v.reset.store(false, std::memory_order_relaxed);
-  v.width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
-  v.height.store(d.Height, std::memory_order_relaxed);
   v.resource.store(resource, std::memory_order_release);
   return &v;
 }
+// From every observed resource creation: a resource created at the address of
+// a tracked volume is a new one (a recreated view), so its history is reset
+// again at its first guarded exit.
 void created(IUnknown* object) noexcept {
   ID3D12Resource* resource = nullptr;
   if (FAILED(object->QueryInterface(IID_PPV_ARGS(&resource))))
     return;
-  const auto d = tone::description(resource);
   resource->Release();
-  if (!volume_shape(d))
-    return;
-  auto& s = state();
-  auto* v = slot(resource, d);
-  if (!v)
-    return;
-  v->width.store(static_cast<std::uint32_t>(d.Width), std::memory_order_relaxed);
-  v->height.store(d.Height, std::memory_order_relaxed);
-  v->exits.store(0, std::memory_order_relaxed);
-  v->reset.store(false, std::memory_order_relaxed);
-  auto* last = s.last_created.exchange(v, std::memory_order_acq_rel);
-  if (last && last != v && last->width.load(std::memory_order_relaxed) == d.Width &&
-      last->height.load(std::memory_order_relaxed) == d.Height && last->group.load(std::memory_order_relaxed) &&
-      last->index.load(std::memory_order_relaxed) < 2) {
-    v->group.store(last->group.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    v->index.store(last->index.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-  } else {
-    v->group.store(s.groups.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-    v->index.store(0, std::memory_order_relaxed);
-  }
+  for (auto& v : state().volumes)
+    if (v.resource.load(std::memory_order_acquire) == resource) {
+      v.reset.store(false, std::memory_order_relaxed);
+      return;
+    }
 }
 std::uint32_t cells(std::uint64_t width, std::uint32_t height) noexcept {
   return static_cast<std::uint32_t>(((width + 7) / 8) << 16) | ((height + 7) / 8);
@@ -1558,23 +1531,14 @@ bool write_clear_air(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, 
   list->ResourceBarrier(1, &barrier);
   return true;
 }
-// Metadata only, from observe_legacy: counts each volume's UNORDERED_ACCESS
-// exits. No GPU work.
-void count_exit(ID3D12Resource* resource) noexcept {
-  const auto d = tone::description(resource);
-  if (!volume_shape(d))
-    return;
-  if (auto* v = slot(resource, d))
-    v->exits.fetch_add(1, std::memory_order_relaxed);
-}
 // From before_legacy_uav, inside the owned-work guard: the observer delivers
 // this exit only in a valid recording of an enabled observer, outside any
 // pass, after prior GPU work (the fog compute's own dispatches, see
 // observe_gpu_work), in a certain batch of at most 256 barriers with no
 // earlier transition of this volume, so the volume is in UNORDERED_ACCESS
-// when the injected copy runs. Any camera volume, so creation grouping is not
-// needed: the integrated volume is rewritten every frame and only this
-// frame's copy is affected.
+// when the injected copy runs. Any camera volume, history or integrated: the
+// integrated volume is rewritten every frame and only this frame's copy is
+// affected.
 void reset_history(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   auto& s = state();
   if (!s.history_reset.load(std::memory_order_relaxed) || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
@@ -1582,7 +1546,7 @@ void reset_history(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSIT
   const auto d = tone::description(b.pResource);
   if (!volume_shape(d) || !camera_volume(d))
     return;
-  auto* v = slot(b.pResource, d);
+  auto* v = slot(b.pResource);
   bool expected = false;
   if (!v || !v->reset.compare_exchange_strong(expected, true, std::memory_order_relaxed))
     return;
@@ -1637,9 +1601,10 @@ void stage_copy_model(List* list, ID3D12Resource* target, PfdCopyProof::Mode mod
     list->copy_proof.observe_transition({reinterpret_cast<std::uint64_t>(target), item->id}, model, reason);
 }
 // Any barrier may move the camera output out of the render-target state, so a
-// following cloud merge is left as the simulator bound it.
+// following cloud merge is left as the simulator bound it. Before any list has
+// held a camera output, recordings need no lookup here.
 void forget_cloud_scene(ID3D12GraphicsCommandList* list, std::uint64_t id) noexcept {
-  if (!registry().cloud_merge_enabled.load(std::memory_order_relaxed))
+  if (!registry().cloud_scene_seen.load(std::memory_order_relaxed))
     return;
   std::shared_ptr<List> fallback;
   if (auto* item = metadata_list(list, id, fallback))
@@ -1651,9 +1616,6 @@ void observe_legacy(void*,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
   forget_cloud_scene(list, id);
-  if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && b.Transition.pResource &&
-      b.Transition.StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && b.Transition.StateAfter != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-    fog::count_exit(b.Transition.pResource);
   if (registry().live_backfill.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
       (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
     consider_live_resource(list, b.Transition.pResource,
@@ -3289,8 +3251,12 @@ struct Targets {
     flush_pfd(l.native, l.id);
     record(l, count, handles, contiguous, depth, true);
     l.cloud_previous = std::exchange(l.cloud_scene, View{});
-    if (l.count && cloud_target(l.targets[0]).camera_output)
+    if (l.count && cloud_target(l.targets[0]).camera_output) {
       l.cloud_scene = l.targets[0];
+      auto& seen = registry().cloud_scene_seen;
+      if (!seen.load(std::memory_order_relaxed))
+        seen.store(true, std::memory_order_relaxed);
+    }
   }
   static void apply(List& l,
                     UINT count,
@@ -3320,7 +3286,7 @@ struct Targets {
                                    const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
     auto& r = registry();
     const View previous = std::exchange(l.cloud_previous, View{});
-    if (!r.cloud_merge_enabled.load(std::memory_order_relaxed) || !previous.resource || count != 3 || !handles || l.count != 3)
+    if (!previous.resource || count != 3 || !handles || l.count != 3)
       return;
     const cloud_merge::Target bound[3]{cloud_target(l.targets[0]), cloud_target(l.targets[1]), cloud_target(l.targets[2])};
     if (!cloud_merge::camera_merge_bind(cloud_target(previous), count, depth != nullptr, bound))
@@ -3849,16 +3815,12 @@ void set_graphics_observation_demand(bool enabled) noexcept {
 void set_graphics_diagnostics_enabled(bool enabled) noexcept {
   registry().diagnostics_enabled.store(enabled, std::memory_order_relaxed);
 }
-void set_cloud_merge_enabled(bool enabled) noexcept {
-  registry().cloud_merge_enabled.store(enabled, std::memory_order_relaxed);
-}
 void set_tone_capture_enabled(bool enabled) noexcept {
   tone::source().enabled.store(enabled, std::memory_order_relaxed);
 }
 ToneStatus tone_status() noexcept {
   auto& s = tone::source();
   ToneStatus status;
-  status.enabled = s.enabled.load(std::memory_order_relaxed);
   status.readback_failed = s.failed.load(std::memory_order_relaxed);
   status.exposure_copies = s.exposure_copies.load(std::memory_order_relaxed);
   status.table_copies = s.table_copies.load(std::memory_order_relaxed);
@@ -3896,34 +3858,20 @@ bool read_tone_table(std::uint32_t* table) noexcept {
   buffer->Unmap(0, &none);
   return stable;
 }
-void fog_volumes(char* text, std::size_t size) noexcept {
+FogStatus fog_status() noexcept {
   auto& f = fog::state();
-  unsigned count = 0;
-  while (count < f.volumes.size() && f.volumes[count].resource.load(std::memory_order_relaxed))
-    ++count;
-  int used = std::snprintf(text, size, "history_reset=%d resets=%llu volumes=%u", f.history_reset.load(std::memory_order_relaxed) ? 1 : 0,
-                           static_cast<unsigned long long>(f.resets.load(std::memory_order_relaxed)), count);
-  for (auto& v : f.volumes) {
-    if (used < 0 || static_cast<std::size_t>(used) >= size || !v.resource.load(std::memory_order_relaxed))
-      break;
-    const int n = std::snprintf(text + used, size - used, " %ux%u@%llx g%u.%u:%llu", v.width.load(std::memory_order_relaxed),
-                                v.height.load(std::memory_order_relaxed),
-                                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(v.resource.load(std::memory_order_relaxed)) &
-                                                                0xffffff),
-                                v.group.load(std::memory_order_relaxed), v.index.load(std::memory_order_relaxed),
-                                static_cast<unsigned long long>(v.exits.load(std::memory_order_relaxed)));
-    if (n < 0)
-      break;
-    used += n;
-  }
+  FogStatus status;
+  status.resets = f.resets.load(std::memory_order_relaxed);
+  for (auto& v : f.volumes)
+    status.volumes += v.resource.load(std::memory_order_relaxed) != nullptr;
+  return status;
 }
 void set_fog_history_reset(bool enabled) noexcept {
   fog::state().history_reset.store(enabled, std::memory_order_relaxed);
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();
-  return {r.cloud_merge_enabled.load(std::memory_order_relaxed), r.cloud_merge_redirects.load(std::memory_order_relaxed),
-          r.cloud_merge_refusals.load(std::memory_order_relaxed)};
+  return {r.cloud_merge_redirects.load(std::memory_order_relaxed), r.cloud_merge_refusals.load(std::memory_order_relaxed)};
 }
 std::uint64_t frame_pulse() noexcept {
   return registry().frame_pulse.load(std::memory_order_relaxed) + queue_hook::total_statistics().calls;

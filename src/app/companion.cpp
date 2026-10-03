@@ -974,7 +974,6 @@ void build_controls() {
       button(L"Forward 1 m", 333 + i * 10, x + (feed_count == 3 ? 120 : 160), 488, feed_count == 3 ? 110 : 146);
     }
     button(L"Reset camera mounts", 359, 260, 594, 240);
-    toggle(L"Camera weather", 236, s.camera_weather, 260, 644, 240);
   } else if (page == 2) {
     toggle(L"Match main view lighting", 237, s.camera_tone, 715, 130, 275);
     edit(s.exposure, 201, 840, 251, 120);
@@ -1192,7 +1191,7 @@ void draw_page(HDC dc) {
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
     text(dc, L"Range 5–60 per camera; install default 10. Parked aircraft run at the 5 fps floor.", 264, 564, 560, 24, small, Muted);
-    text(dc, L"Cameras stay on at any speed. Above 60 knots they draw as far as the main view.", 250, 630, 730, 24, small, Muted);
+    text(dc, L"Cameras stay on at any speed and draw as far as the main view.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
     const auto* profile = profiles::find(draft().profile);
@@ -1214,10 +1213,6 @@ void draw_page(HDC dc) {
       text(dc, L"Position relative to the aircraft datum", x + 12, 397, width - 24, 22, small, Muted);
     }
     text(dc, L"Positive pitch looks up. Positive yaw looks right.", 530, 594, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
-    text(dc,
-         L"Camera weather shows the clouds and overcast light in the camera views; they then draw as far as the main view, also while "
-         L"taxiing.",
-         530, 646, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 2) {
     panel(dc, 244, 122, 766, 92);
     text(dc, L"Main view lighting", 264, 130, 440, 29, heading);
@@ -1693,8 +1688,6 @@ bool is_on(int id, const win::Settings& s) {
       return s.single_camera;
     case 235:
       return s.dynamic_tail;
-    case 236:
-      return s.camera_weather;
     case 237:
       return s.camera_tone;
     case 229:
@@ -2065,7 +2058,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_connection();
         return 0;
       }
-      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235 || id == 236 || id == 237) {
+      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235 || id == 237) {
         if (!apply(false))
           return 0;
         auto s = draft();
@@ -2100,8 +2093,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           s.single_camera = !s.single_camera;
         if (id == 235)
           s.dynamic_tail = !s.dynamic_tail;
-        if (id == 236)
-          s.camera_weather = !s.camera_weather;
         if (id == 237)
           s.camera_tone = !s.camera_tone;
         if (id == 229)

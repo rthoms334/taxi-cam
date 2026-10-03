@@ -138,7 +138,6 @@ class SceneCaptureManager {
     std::array<CopyDiagnostic, 3> copies{};
     std::uint64_t source_candidates = 0, source_draws = 0, tail_submissions = 0, tail_captures = 0;
     const char* tail_status = "not_started";
-    bool capture_phase = false;  // set_capture_phase
     std::array<CapturePhaseDiagnostic, 3> phases{};
     std::uint64_t unknown_submitted_lists = 0, invalid_source_recordings = 0, scoped_source_invalidations = 0;
     // Limited global reports (PassBegin, PassState, unsupported work) on a list
@@ -211,10 +210,6 @@ class SceneCaptureManager {
   // Returns how many sources were restored.
   unsigned rearm_source_states() noexcept;
   void set_source_rate(std::uint32_t frames_per_second) noexcept;
-  // Development switch (dev\capture_phase.txt): a queue-tail capture due after
-  // a batch that drew the camera image exactly once waits for the next batch
-  // that draws it (capture_phase.hpp). Off captures after the first batch.
-  void set_capture_phase(bool hold) noexcept;
   // Suppress NEW GPU capture work only. Source state/alias/draw observation,
   // immutable replay effects and existing packet/consumer ordering must continue
   // while idle, including for persistent textures created directly in RT state.
@@ -587,7 +582,6 @@ class SceneCaptureManager {
   bool gpu_timing_enabled_ = false;
   std::uint32_t source_rate_ = kDefaultCameraRate;
   std::array<std::uint64_t, 3> last_tail_us_{};
-  bool capture_phase_ = false;
   struct PhaseFeed {
     source_state::Key source;
     capture_phase::Feed state;

@@ -121,10 +121,9 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
-  // Decoded camera-display brightness. Always given to the output shader as
-  // DisplayScale; it drives the camera image only when enabled.
+  // Decoded camera-display brightness, used with Match main view lighting;
+  // emissive 0: not decoded for this aircraft.
   DisplayLight display_light{};
-  bool display_light_enabled = false;
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -363,7 +362,6 @@ inline constexpr auto make_pmdg_777 =
       // full-code light (30 points, 1.2 codes RMS); the day capture's offset is
       // about 0.013. With these the ND's ground and sky matched the window.
       p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f, 0.0013f, 0.0134f};
-      p.display_light_enabled = true;
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 =

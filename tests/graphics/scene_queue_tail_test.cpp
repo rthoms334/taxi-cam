@@ -1137,8 +1137,8 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   require(manager->poll_completed_frames(unused.data(), unused.size()) == 0, "Rate-check frame remained unretired");
   // Capture phase: the simulator renders a camera view in two submissions,
   // one draw (deferred lighting) and then several (sky, clouds, lights).
-  // Off, the tail copies the first; held, it copies the second. The observed
-  // lists stay alive until the boundary observation is removed.
+  // The tail holds the first and copies the second. The observed lists stay
+  // alive until the boundary observation is removed.
   Commands deferred, forward, rt_exit;
   {
     deferred.initialize(device.p);
@@ -1186,15 +1186,14 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     };
     const auto rt_model = manager->device(DeviceKey)->source_states.state(source_key(0)).model;
     require(rt_model == Model::legacy_rt || rt_model == Model::enhanced_rt, "Capture-phase sources are not render targets");
-    const auto scenario = [&](bool hold, std::initializer_list<std::pair<UINT, ID3D12CommandList* const*>> batches, unsigned word,
-                              Kind kind, auto between, const char* label) {
-      manager->set_capture_phase(hold);
+    const auto scenario = [&](std::initializer_list<std::pair<UINT, ID3D12CommandList* const*>> batches, unsigned word, Kind kind,
+                              auto between, const char* label) {
       Sleep(70);  // Past the 20 Hz interval.
       const auto before = manager->statistics();
       std::size_t index = 0;
       for (const auto& [count, lists] : batches) {
         producer.queue->ExecuteCommandLists(count, lists);
-        if (!index && hold && kind != Kind::after_multi)
+        if (!index && kind != Kind::after_multi)
           require(std::strcmp(manager->statistics().tail_status, "awaiting_complete_render") == 0, label);
         between(index++);
       }
@@ -1287,19 +1286,16 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       }
       require(manager->rearm_source_states() >= 2, "Rearm did not restore both sources");
     };
-    scenario(false, {{1, &deferred_list}, {1, &forward_list}}, 0, Kind::after_one, none, "Off: the tail copied the deferred-only batch");
-    scenario(true, {{1, &deferred_list}, {1, &forward_list}}, 1, Kind::after_hold, none, "Held: the tail did not copy the forward batch");
-    scenario(true, {{2, both}}, 1, Kind::after_multi, none, "A complete one-submission render was held");
-    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::after_hold, none, "A single-writer view stalled");
-    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, retire, "A forgotten hold held again");
-    scenario(true, {{1, &deferred_list}, {1, &forward_list}, {1, &deferred_list}}, 0, Kind::forced, rate_drop,
+    scenario({{1, &deferred_list}, {1, &forward_list}}, 1, Kind::after_hold, none, "Held: the tail did not copy the forward batch");
+    scenario({{2, both}}, 1, Kind::after_multi, none, "A complete one-submission render was held");
+    scenario({{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::after_hold, none, "A single-writer view stalled");
+    scenario({{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, retire, "A forgotten hold held again");
+    scenario({{1, &deferred_list}, {1, &forward_list}, {1, &deferred_list}}, 0, Kind::forced, rate_drop,
              "An unrecorded capture kept its hold for the next render's deferred batch");
-    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, leave_rt,
-             "A hold survived its source leaving the RT state");
-    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, rearm, "A hold survived a source-state rearm");
+    scenario({{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, leave_rt, "A hold survived its source leaving the RT state");
+    scenario({{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, rearm, "A hold survived a source-state rearm");
     for (unsigned feed = 0; feed < 2; ++feed)
       require(manager->statistics().phases[feed].held == 6 && manager->statistics().phases[feed].max_draws >= 3, "Held/max counts");
-    manager->set_capture_phase(false);
   }
   const auto phase_checked_captures = manager->statistics().tail_captures;
   // Unknown actual recordings must destroy global model proof, even if empty.

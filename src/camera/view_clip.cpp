@@ -27,11 +27,11 @@ bool read_camera_clip(std::uint64_t camera_address, CameraClip& clip) noexcept {
   return true;
 }
 
-bool camera_far_target(const CameraClip& own, const CameraClip& main, bool follow_main, CameraClip& target) noexcept {
+bool camera_far_target(const CameraClip& own, const CameraClip& main, CameraClip& target) noexcept {
   if (!plausible_camera_clip(own))
     return false;
   target = own;
-  if (follow_main && plausible_camera_clip(main)) {
+  if (plausible_camera_clip(main)) {
     target.far_plane = main.far_plane;
     target.default_far = main.default_far;
     // The camera keeps its own near plane; the main far must still lie beyond it.
