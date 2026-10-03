@@ -144,24 +144,6 @@ struct Runtime {
   ClearedAaLedger cleared_aa;
   std::uint64_t aa_restores = 0;
   std::uint64_t aa_restore_failures = 0;
-  // Camera AA development switch (request_scene_view_aa); false clears bit31
-  // as before. The counters and last refusal are observer-thread only.
-  std::atomic<bool> view_aa{false};
-  // Development: every feed's gate stays open on every update (request_scene_continuous).
-  std::atomic<bool> continuous{false};
-  std::uint64_t aa_sets = 0, aa_clears = 0, aa_refusals = 0;
-  const char* aa_error = "";
-  // Pooled views whose P+48 bit36 this bridge cleared (development values 4
-  // and 5). Noted before the clear is written, so a full ledger refuses it.
-  // Set again at the view's next closed-gate preparation once the switch
-  // leaves those values or frame generation is on, before the slot is reused
-  // by a creation, and at retirement once the gate is seen closed, before
-  // native erase or while a flight or aircraft change holds it back.
-  ClearedAaLedger cleared_bit36;
-  // Development bit36 switch (request_scene_clear_bit36); honoured only with
-  // view_aa. The counters are observer-thread only.
-  std::atomic<bool> clear_bit36{false};
-  std::uint64_t bit36_clears = 0, bit36_sets = 0, bit36_restores = 0, bit36_restore_failures = 0;
   // Consecutive activation pulses refused because the diffuse texture had no
   // render-target record; bounded by ViewResizeWarmup::MaximumOutputWaits.
   unsigned rt_record_refusals = 0;
@@ -1013,78 +995,31 @@ bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair,
   }
   return true;
 }
-bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapshot& view, bool allow_bit36_clear = true) {
+bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapshot& view) {
   if (!session_work_allowed(runtime))
     return false;
-  // Development switch, read once per preparation: true leaves the engine's
-  // AA bit set (the main view's temporal path), false clears it as before.
-  const bool enabled = runtime.view_aa.load(std::memory_order_acquire);
   LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-  // Values 4 and 5 also clear bit36, honoured only with the AA bit, so a
-  // half-applied switch change never clears bit36 without bit31. The clear is
-  // also withheld unless the global frame-generation byte reads 0: a view
-  // without bit36 takes that mode and per-viewport DLSS-G work. Otherwise a
-  // bit36 this bridge cleared is set again here; the engine's own state is kept.
-  bool clear_bit36 = enabled && allow_bit36_clear && runtime.clear_bit36.load(std::memory_order_acquire);
-  if (clear_bit36 && read_global_frame_generation(image, runtime.contract.layout) != 0) {
-    clear_bit36 = false;
-    runtime.aa_error = "bit36_frame_generation_on";
-  }
-  const auto request =
-      view_aa_request(enabled, clear_bit36, runtime.cleared_bit36.contains(runtime.renderer, view.view_address), allow_bit36_clear);
-  // Record the view before its bit36 can be cleared, so no clear is ever
-  // untracked. Over-noting is harmless: a hand-back of a set bit writes nothing.
-  if (request.bit36 == ViewBit36::clear && (view.flags[0] & kViewDirectOutputFlag) &&
-      !runtime.cleared_bit36.note(runtime.renderer, view.view_address)) {
-    runtime.stage_error = "bit36_ledger_full";
-    runtime.aa_error = "bit36_ledger_full";
-    ++runtime.aa_refusals;
-    return false;
-  }
-  const auto result = set_owned_view_aa(view, image, runtime.contract.layout, request);
+  const auto result = disable_owned_view_aa(view, image, runtime.contract.layout);
   if (!result.complete) {
     // A clear whose write landed but whose reread failed may have left the bit
     // clear: keep the view owed a restore. Over-noting is harmless.
-    if (!enabled && (result.changed & kViewAaFlag))
+    if (result.write_attempted)
       runtime.cleared_aa.note(runtime.renderer, view.view_address);
     runtime.stage_error = result.error;
-    runtime.aa_error = result.error;
-    ++runtime.aa_refusals;
     return false;
   }
-  // A set bit is the state a restore hands back: nothing is owed for this
-  // view, so a later erase or pool reuse must not count it as cleared.
-  if (enabled)
-    runtime.cleared_aa.forget(view.view_address);
-  if (request.bit36 == ViewBit36::restore)
-    runtime.cleared_bit36.forget(view.view_address);
   if (result.write_attempted) {
-    if (result.changed & kViewAaFlag) {
-      if (enabled) {
-        ++runtime.aa_sets;
-      } else {
-        // The pooled view now carries a bridge-modified flag word. Remember the
-        // exact P so the bit is restored before the slot's next entry or erase.
-        runtime.cleared_aa.note(runtime.renderer, view.view_address);
-        ++runtime.aa_clears;
-      }
-    }
-    if (result.changed & kViewDirectOutputFlag)
-      ++(request.bit36 == ViewBit36::clear ? runtime.bit36_clears : runtime.bit36_sets);
+    // The pooled view now carries a bridge-modified flag word. Remember the
+    // exact P so the bit is restored before the slot's next entry or erase.
+    runtime.cleared_aa.note(runtime.renderer, view.view_address);
     const auto confirmed = inspect_entry(runtime, id);
     auto expected_flags = view.flags;
-    expected_flags[0] ^= result.changed;
+    expected_flags[0] &= ~kViewAaFlag;
     if (!confirmed.complete || !confirmed.ready || confirmed.mode != 2 || confirmed.view_address != view.view_address ||
         confirmed.node_address != view.node_address || confirmed.camera_address != view.camera_address ||
         confirmed.resource_address != view.resource_address || confirmed.dimensions != view.dimensions ||
         confirmed.output_dimensions != view.output_dimensions || confirmed.flags != expected_flags) {
-      if (!(result.changed & kViewAaFlag))
-        runtime.stage_error = "Owned camera identity changed while writing its bit36; render gate stays closed.";
-      else
-        runtime.stage_error = enabled ? "Owned camera identity changed while enabling its AA; render gate stays closed."
-                                      : "Owned camera identity changed while disabling its AA; render gate stays closed.";
-      runtime.aa_error = "aa_identity_changed";
-      ++runtime.aa_refusals;
+      runtime.stage_error = "Owned camera identity changed while disabling its AA; render gate stays closed.";
       return false;
     }
     view = confirmed;
@@ -1576,68 +1511,43 @@ ec::ViewPoolSnapshot creation_pool(Runtime& runtime) {
   return pool;
 }
 
-// The outcome of handing back the owed bits of one view: a completed restore
-// forgets every owed ledger entry and counts each bit it wrote; a refused one
-// stays pending and counts a failure per owed bit.
-void record_flag_restore(Runtime& runtime, std::uint64_t view, std::uint64_t owed, const ViewAaResult& result) {
-  if (result.complete) {
-    if (owed & kViewAaFlag)
-      runtime.cleared_aa.forget(view);
-    if (owed & kViewDirectOutputFlag)
-      runtime.cleared_bit36.forget(view);
-    if (result.changed & kViewAaFlag)
-      ++runtime.aa_restores;
-    if (result.changed & kViewDirectOutputFlag)
-      ++runtime.bit36_restores;
-  } else {
-    if (owed & kViewAaFlag)
-      ++runtime.aa_restore_failures;
-    if (owed & kViewDirectOutputFlag)
-      ++runtime.bit36_restore_failures;
-  }
-}
 // Before a creation can select first-free pool slots, hand back every pooled
-// view this bridge left with bit31 or bit36 cleared. Only a view still present
-// in the fresh pool, currently association-free, not queued or marked for
-// release, and with its gate bit set is written; each write is reread. A view
-// that the pool no longer shows is forgotten; a refused write stays pending for
-// retry. A ledger noted under another renderer owes nothing here.
+// view this bridge left with bit31 cleared. Only a view still present in the
+// fresh pool, currently association-free, not queued or marked for release,
+// and with its gate bit set is written; each write is reread. A view that the
+// pool no longer shows is forgotten; a refused write stays pending for retry.
 void restore_cleared_aa(Runtime& runtime, const ec::ViewPoolSnapshot& pool) {
-  if (!runtime.cleared_aa.pending() && !runtime.cleared_bit36.pending())
+  if (!runtime.cleared_aa.pending())
     return;
-  if (!pool.valid || !pool.release_checked)
+  if (!pool.valid || !pool.release_checked || runtime.cleared_aa.renderer() != runtime.renderer)
     return;
-  const auto restore = [&](std::uint64_t view) {
-    const auto owed = owed_view_flags(runtime.cleared_aa, runtime.cleared_bit36, runtime.renderer, view);
-    if (!owed)
-      return;
+  for (const auto view : runtime.cleared_aa.views()) {
+    if (!view)
+      continue;
     const ec::ViewSlot* slot = nullptr;
     for (const auto& candidate : pool.slots)
       if (candidate.view_address == view)
         slot = &candidate;
     if (!slot) {
-      if (owed & kViewAaFlag)
-        runtime.cleared_aa.forget(view);
-      if (owed & kViewDirectOutputFlag)
-        runtime.cleared_bit36.forget(view);
-      return;
+      runtime.cleared_aa.forget(view);
+      continue;
     }
     if (!slot->free || slot->release_pending || slot->release_queued)
-      return;
-    record_flag_restore(runtime, view, owed, restore_view_flags(view, owed));
-  };
-  for (const auto view : runtime.cleared_aa.views())
-    if (view)
-      restore(view);
-  // A view in both ledgers was handled above, in one write for both bits.
-  for (const auto view : runtime.cleared_bit36.views())
-    if (view && !runtime.cleared_aa.contains(runtime.renderer, view))
-      restore(view);
+      continue;
+    const auto result = restore_view_aa_flag(view);
+    if (result.complete) {
+      runtime.cleared_aa.forget(view);
+      if (result.write_attempted)
+        ++runtime.aa_restores;
+    } else {
+      ++runtime.aa_restore_failures;
+    }
+  }
 }
 
 bool creation_capacity(Runtime& runtime, unsigned required) {
   auto pool = creation_pool(runtime);
-  if (pool.valid && !runtime.retirement_waiting && (runtime.cleared_aa.pending() || runtime.cleared_bit36.pending())) {
+  if (pool.valid && !runtime.retirement_waiting && runtime.cleared_aa.pending()) {
     restore_cleared_aa(runtime, pool);
     // The flag write changed pooled-view bytes the creation predicate did not
     // observe; reread the complete pool before admitting this creation.
@@ -1748,9 +1658,7 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
       runtime.stage_error = "The new owned view could not be validated with its render gate closed.";
       return id;
     }
-    // A bit36 clear waits for the first pulse: the closed-gate warmup, resize
-    // and output routine run with the flag word the engine's setup produced.
-    if (!session_work_allowed(runtime) || !prepare_owned_view_aa(runtime, id, view, false)) {
+    if (!session_work_allowed(runtime) || !prepare_owned_view_aa(runtime, id, view)) {
       runtime.creation_valid = false;
       return id;
     }
@@ -1852,30 +1760,28 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
         runtime.gates[i] = false;
     return false;
   }
-  if (action != ViewRetirement::Action::erase)
-    return false;
   const auto readiness = get_aircraft_session_readiness();
-  if (readiness.loading || (runtime.reset_requested.load(std::memory_order_acquire) && !readiness.ready)) {
-    // A flight or aircraft change can tear the entry down during this wait
-    // without the callback ever reaching native erase. Hand a bit36 this bridge
-    // cleared (development values 4 and 5) back now: the gate was seen closed
-    // on an earlier update and still is, and the write is reread-checked. No
-    // native call; bit31 keeps its hand-back below.
-    if (runtime.cleared_bit36.contains(runtime.renderer, view.view_address))
-      record_flag_restore(runtime, view.view_address, kViewDirectOutputFlag, restore_view_flags(view.view_address, kViewDirectOutputFlag));
+  if (action != ViewRetirement::Action::erase || readiness.loading ||
+      (runtime.reset_requested.load(std::memory_order_acquire) && !readiness.ready))
     return false;
-  }
   // A camera Node mounted on the aircraft goes back under its world root first.
   if (!restore_mount(runtime, id))
     return false;
   if (!runtime.retired_views.retain(runtime.renderer, view.view_address))
     return false;
-  // Hand the pooled view back with the flag word this bridge found: bit31 and
-  // bit36 where it cleared them, in one write. The gate is closed here by
-  // construction; a refused write leaves the ledger entries for the pool-reuse
-  // path and does not block native retirement.
-  if (const auto owed = owed_view_flags(runtime.cleared_aa, runtime.cleared_bit36, runtime.renderer, view.view_address))
-    record_flag_restore(runtime, view.view_address, owed, restore_view_flags(view.view_address, owed));
+  // Hand the pooled view back with the flag word this bridge found. The gate
+  // is closed here by construction; a refused write leaves the ledger entry
+  // for the pool-reuse path and does not block native retirement.
+  if (runtime.cleared_aa.contains(runtime.renderer, view.view_address)) {
+    const auto restored = restore_view_aa_flag(view.view_address);
+    if (restored.complete) {
+      runtime.cleared_aa.forget(view.view_address);
+      if (restored.write_attempted)
+        ++runtime.aa_restores;
+    } else {
+      ++runtime.aa_restore_failures;
+    }
+  }
   function<void (*)(void*, std::uint64_t)>(runtime, runtime.contract.functions.erase_entry)(reinterpret_cast<void*>(token.identity), id);
   reader.reset_budget();
   entries = inspected(runtime, [&] { return ec::inspect_owned_entries(reader, token.identity, {id, 0, 0}); });
@@ -2126,8 +2032,7 @@ void observer(void* manager) noexcept {
       }
     }
     auto next_schedule = runtime.schedule;
-    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0,
-                            runtime.continuous.load(std::memory_order_acquire));
+    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
     std::array<bool, kMaxCameraFeeds> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
@@ -2557,8 +2462,7 @@ void observer(void* manager) noexcept {
           // The early tick only decides whether validation is necessary. Anchor
           // the committed pulse near its call after potentially slow reads.
           next_schedule = runtime.schedule;
-          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0,
-                                  runtime.continuous.load(std::memory_order_acquire));
+          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
           if (new_pair) {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
@@ -2769,15 +2673,6 @@ void observer(void* manager) noexcept {
     report.aa_restores = runtime.aa_restores;
     report.aa_restore_failures = runtime.aa_restore_failures;
     report.aa_cleared_pending = runtime.cleared_aa.pending();
-    report.aa_sets = runtime.aa_sets;
-    report.aa_clears = runtime.aa_clears;
-    report.aa_refusals = runtime.aa_refusals;
-    report.aa_error = runtime.aa_error;
-    report.bit36_clears = runtime.bit36_clears;
-    report.bit36_sets = runtime.bit36_sets;
-    report.bit36_restores = runtime.bit36_restores;
-    report.bit36_restore_failures = runtime.bit36_restore_failures;
-    report.bit36_cleared_pending = runtime.cleared_bit36.pending();
     report.rt_record_refusals = runtime.rt_record_refusals;
     report.rt_record_holds = runtime.rt_record_holds;
     report.view_wait_count = runtime.view_wait.episodes();
@@ -3097,36 +2992,6 @@ void request_scene_main_far(bool follow) noexcept {
   state().follow_main_far.store(follow, std::memory_order_release);
 }
 
-void request_scene_view_aa(bool enabled) noexcept {
-  state().view_aa.store(enabled, std::memory_order_release);
-}
-
-void request_scene_continuous(bool continuous) noexcept {
-  state().continuous.store(continuous, std::memory_order_release);
-}
-
-void request_scene_clear_bit36(bool clear) noexcept {
-  state().clear_bit36.store(clear, std::memory_order_release);
-}
-
-std::int32_t scene_global_aa_mode() noexcept {
-  auto& runtime = state();
-  // The image, base and contract are written once, before hooked is released.
-  if (!runtime.hooked.load(std::memory_order_acquire))
-    return -1;
-  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-  return read_global_aa_mode(image, runtime.contract.layout);
-}
-
-std::int32_t scene_global_frame_generation() noexcept {
-  auto& runtime = state();
-  // The image, base and contract are written once, before hooked is released.
-  if (!runtime.hooked.load(std::memory_order_acquire))
-    return -1;
-  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
-  return read_global_frame_generation(image, runtime.contract.layout);
-}
-
 void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {
   const auto settings = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
                         (nose_priority ? 1u << 16 : 0u);
@@ -3177,9 +3042,6 @@ ProbeSnapshot scene_snapshot() {
   result.requested_rate = settings & 0xffu;
   result.requested_feeds = (settings >> 8) & 0xffu;
   result.requested_nose_priority = ((settings >> 16) & 1u) != 0;
-  result.aa_requested = runtime.view_aa.load(std::memory_order_acquire);
-  result.continuous_requested = runtime.continuous.load(std::memory_order_acquire);
-  result.bit36_clear_requested = runtime.clear_bit36.load(std::memory_order_acquire);
   result.mounts = runtime.requested_mounts;
   return result;
 }

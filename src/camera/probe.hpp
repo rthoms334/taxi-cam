@@ -126,21 +126,6 @@ struct ProbeSnapshot {
   std::uint64_t aa_restores = 0;
   std::uint64_t aa_restore_failures = 0;
   bool aa_cleared_pending = false;
-  // Camera AA development switch (request_scene_view_aa): the requested state,
-  // bit31 writes that set or cleared it on an owned view, refused preparations
-  // and the last refusal ("" when none).
-  bool aa_requested = false;
-  // Development: every feed rendered on every update (request_scene_continuous).
-  bool continuous_requested = false;
-  std::uint64_t aa_sets = 0, aa_clears = 0, aa_refusals = 0;
-  const char* aa_error = "";
-  // Development bit36 switch (request_scene_clear_bit36, values 4 and 5): the
-  // requested state, bit36 writes that cleared it or set it back in the
-  // closed-gate preparation, hand-backs at erase or pool reuse (writes
-  // performed), refused hand-backs, and whether a cleared view is still owed.
-  bool bit36_clear_requested = false;
-  std::uint64_t bit36_clears = 0, bit36_sets = 0, bit36_restores = 0, bit36_restore_failures = 0;
-  bool bit36_cleared_pending = false;
   // Consecutive pulses and cumulative holds where the diffuse texture had no
   // render-target record (inspection=rt_record_absent).
   unsigned rt_record_refusals = 0;
@@ -199,46 +184,6 @@ void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = 
 // Taxi Cam's views the main view's far distances (above 60 kt, so they keep
 // drawing the ground after take-off); false restores each camera's own far.
 void request_scene_main_far(bool follow) noexcept;
-// Development switch, atomic only. The observer applies it in its existing
-// closed-gate AA preparation before each pulse: true leaves the engine's
-// per-view AA bit (P+48 bit31) set on Taxi Cam's views, false clears it (the
-// default). Untested live.
-void request_scene_view_aa(bool enabled) noexcept;
-// Development switch, atomic only. True keeps every feed's gate open on every
-// observer update (RenderSchedule continuous) instead of rate-paced pulses, so
-// the engine draws each view on consecutive frames as it does the main view.
-// Suspension still closes them. Costs a full view render per feed per frame.
-void request_scene_continuous(bool continuous) noexcept;
-// Development switch, atomic only. True clears the engine's P+48 bit36 on
-// Taxi Cam's views in the same closed-gate preparation, honoured only while
-// request_scene_view_aa is true and the global frame-generation byte reads 0,
-// so the engine's per-view render driver runs its AA dispatcher and post pass
-// for them. False sets bit36 again on each view this bridge cleared at that
-// view's next closed-gate preparation, its retirement (also while a flight or
-// aircraft change holds native erase back) or pool reuse; other views keep the
-// engine's state. Untested live.
-void request_scene_clear_bit36(bool clear) noexcept;
-// dev\camera_aa.txt's first character: '1' AA on, paced; '2' AA on,
-// continuous; '3' AA cleared, continuous; '4' AA on and bit36 cleared,
-// continuous; '5' AA on and bit36 cleared, paced. Anything else is the
-// default: AA cleared, bit36 as the engine set it, paced.
-struct DevCameraAaRequest {
-  bool aa = false;
-  bool clear_bit36 = false;
-  bool continuous = false;
-};
-constexpr DevCameraAaRequest dev_camera_aa_request(char value) noexcept {
-  return {value == '1' || value == '2' || value == '4' || value == '5', value == '4' || value == '5',
-          value == '2' || value == '3' || value == '4'};
-}
-// Diagnostics only, on the caller's thread: the simulator's global AA mode
-// read from the image (read_global_aa_mode), or -1 before the observer is
-// installed, on another image layout or when the read is refused.
-std::int32_t scene_global_aa_mode() noexcept;
-// Diagnostics only, on the caller's thread: the global frame-generation byte
-// (read_global_frame_generation; 0 off, 1 DLSSG, 2 FSRFG), or -1 as above.
-// The observer reads it again for itself before any bit36 clear.
-std::int32_t scene_global_frame_generation() noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;
