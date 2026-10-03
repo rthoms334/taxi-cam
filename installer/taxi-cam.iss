@@ -69,6 +69,10 @@ Type: files; Name: "{userprograms}\380 Taxi Cam.lnk"
 [Icons]
 Name: "{userprograms}\Taxi Cam"; Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"
 #endif
+[Run]
+; Offered on the finish page, ticked by default; silent installs never start it.
+Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"; Description: "Launch Taxi Cam"; Flags: nowait postinstall skipifsilent
+
 ; Settings are retained unless the user explicitly chooses removal in the uninstaller.
 ; Installation records, logs and historical backups are retained.
 
