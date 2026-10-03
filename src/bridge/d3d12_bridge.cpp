@@ -4151,6 +4151,17 @@ static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
   }
   return result;
 }
+std::vector<DisplayResourceRecord> display_resource_records() {
+  std::vector<DisplayResourceRecord> result;
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  for (const auto& [native, item] : r.resources)
+    if (item->alive && item->display_shape)
+      result.push_back({item->id, reinterpret_cast<std::uint64_t>(native), item->draws.load(std::memory_order_relaxed),
+                        item->submission_activity.load(std::memory_order_relaxed), static_cast<unsigned>(item->desc.Width),
+                        item->desc.Height, item->desc.MipLevels, static_cast<unsigned>(item->desc.Format)});
+  return result;
+}
 const RenderTargetShapes& render_target_shape_inventory() noexcept {
   return render_target_shapes();
 }

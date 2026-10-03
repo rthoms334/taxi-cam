@@ -90,6 +90,34 @@ void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noe
     return;
   notification_log.publish(event, now);
 }
+// Local research file beside the snapshot image: every display-shaped texture
+// with its native resource address, for an external read-only search of
+// simulator memory for the object that names it. Not part of bridge.log.
+void write_display_candidates(std::uint64_t snapshot_id, const std::array<std::uint64_t, MaxDisplaySides>& routed) noexcept {
+  try {
+    const auto image = win::display_snapshot_path();
+    const auto slash = image.find_last_of(L'\\');
+    if (slash == std::wstring::npos)
+      return;
+    const auto path = image.substr(0, slash) + L"\\display-candidates.txt";
+    const auto records = win::display_resource_records();
+    const auto identity = native_camera::get_aircraft_identity();
+    std::FILE* file = _wfopen(path.c_str(), L"wb");
+    if (!file)
+      return;
+    std::fprintf(file, "pid=%lu tick=%llu snapshot=%llu routed=%llu,%llu,%llu\r\ntype=%.255s\r\npath=%.259s\r\n", GetCurrentProcessId(),
+                 static_cast<unsigned long long>(GetTickCount64()), static_cast<unsigned long long>(snapshot_id),
+                 static_cast<unsigned long long>(routed[0]), static_cast<unsigned long long>(routed[1]),
+                 static_cast<unsigned long long>(routed[2]), identity.type.data(), identity.path.data());
+    for (const auto& record : records)
+      std::fprintf(file, "id=%llu native=0x%llx size=%ux%u mips=%u format=%u draws=%llu activity=%llu\r\n",
+                   static_cast<unsigned long long>(record.id), static_cast<unsigned long long>(record.native), record.width, record.height,
+                   record.mips, record.format, static_cast<unsigned long long>(record.draws),
+                   static_cast<unsigned long long>(record.activity));
+    std::fclose(file);
+  } catch (...) {
+  }
+}
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
     wchar_t directory[32768]{};
@@ -759,6 +787,8 @@ DWORD run_impl() {
         snapshot.result = poll.result == win::DisplaySnapshotResult::none ? win::DisplaySnapshotResult::lost : poll.result;
         if (snapshot.result == win::DisplaySnapshotResult::ready && !win::save_snapshot_bmp(win::display_snapshot_path(), poll.image))
           snapshot.result = win::DisplaySnapshotResult::failed;
+        if (snapshot.result == win::DisplaySnapshotResult::ready)
+          write_display_candidates(snapshot.id, win::target_ids());
         log_snapshot();
       }
     }

@@ -257,4 +257,12 @@ struct DisplaySnapshotPoll {
 // Control thread only. pending until the copy completes or fails; the final
 // result is returned once, then none until the next request.
 DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept;
+// Display-shaped textures of every catalog profile with their native resource
+// addresses, for the local display-identity research file written beside a
+// snapshot. Addresses are process-local and never go into bridge.log.
+struct DisplayResourceRecord {
+  std::uint64_t id = 0, native = 0, draws = 0, activity = 0;
+  unsigned width = 0, height = 0, mips = 0, format = 0;
+};
+std::vector<DisplayResourceRecord> display_resource_records();
 }  // namespace taxi_camera::standalone
