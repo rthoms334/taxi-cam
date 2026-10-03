@@ -100,6 +100,8 @@ struct AircraftProfile {
   // Target pixels: the outer display region is black around this camera inset.
   DisplayInsets camera_padding{16, 12, 16, 0};
   PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
+  // Daytime EV of Taxi Cam's fallback exposure (DisplayExposureController),
+  // used only while the camera images cannot take the main view's lighting.
   float exposure = -8.f;
   // Measured PFD redraws per second per side (bridge stamps/s ÷ 2). Composing
   // faster than this cannot reach the screen. 0 = not measured: only the
@@ -121,7 +123,7 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
-  // Decoded camera-display brightness, used with Match main view lighting;
+  // Decoded camera-display brightness, used to match the main view's lighting;
   // emissive 0: not decoded for this aircraft.
   DisplayLight display_light{};
 };

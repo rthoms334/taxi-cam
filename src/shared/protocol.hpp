@@ -7,7 +7,6 @@
 #include <cwchar>
 #include "../profiles/catalog.hpp"
 #include "camera_rate.hpp"
-#include "exposure_settings.hpp"
 #include "sim_messages.hpp"
 #include "version.hpp"
 
@@ -20,11 +19,12 @@ namespace taxi_camera::standalone {
 // Protocol 18: Settings camera_weather (clouds and overcast light in the camera views).
 // Protocol 19: Settings camera_tone (camera views use the main view's exposure and tone curve).
 // Protocol 20: Settings drops camera_weather (camera weather is always on).
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 20;
+// Protocol 21: Settings drops camera_tone, automatic_exposure, exposure and
+// night_boost (the camera views always take the main view's lighting).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 21;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
-  std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
-  float exposure = profiles::A380.exposure, night_boost = kDefaultNightBoostEv;
+  std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
   std::uint64_t route_request{}, left_id{}, right_id{};
   std::uint64_t profile_request{};         // Session-only: selecting the same profile is an explicit retry.
   std::uint64_t aircraft_session_epoch{};  // Scope manual previews and texture IDs to the observed flight.
@@ -56,12 +56,6 @@ struct Settings {
   // feeds equal. Off by default: live the tail looked like a slide show.
   // Saved per aircraft profile.
   std::uint32_t dynamic_tail = 0;
-  // Protocol 19: 1 gives the camera views the simulator's own main-view
-  // exposure (eye adaptation) and tone curve, so they look like the main view
-  // by day and at night; Exposure and night boost then do not apply to the
-  // camera image. 0 keeps Taxi Cam's exposure control and night boost. Saved
-  // per aircraft profile.
-  std::uint32_t camera_tone = 1;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -115,7 +109,7 @@ inline bool valid_settings(const Settings& s) noexcept {
         return false;
   const auto* profile = profiles::find(s.profile);
   if (s.auto_profile > 1 || s.notifications > 1 || !profile || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
-      s.scene_test > 1 || s.dynamic_tail > 1 || s.camera_tone > 1 || s.calibration_budget < 64 || s.calibration_budget > 16384)
+      s.scene_test > 1 || s.dynamic_tail > 1 || s.calibration_budget < 64 || s.calibration_budget > 16384)
     return false;
   const auto sides = profiles::side_mask(*profile);
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
@@ -134,9 +128,7 @@ inline bool valid_settings(const Settings& s) noexcept {
   }
   if (s.parked_rate && (s.parked_rate < kMinimumParkedCameraRate || s.parked_rate > kMaximumCameraRate))
     return false;
-  return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate && s.automatic_exposure <= 1 &&
-         std::isfinite(s.exposure) && s.exposure >= -16 && s.exposure <= 4 && std::isfinite(s.night_boost) && s.night_boost >= 0 &&
-         s.night_boost <= 8;
+  return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate;
 }
 class Mailbox {
  public:

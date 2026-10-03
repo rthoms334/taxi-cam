@@ -55,11 +55,6 @@ int wmain(int argc, wchar_t** argv) {
       bad.camera_rate = value;
       require(!valid_settings(bad), "Invalid rate admitted");
     }
-    for (const auto value : {-17.f, 5.f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
-      auto bad = settings;
-      bad.exposure = value;
-      require(!valid_settings(bad), "Invalid exposure admitted");
-    }
     auto bad = settings;
     bad.profile = 999;
     require(!valid_settings(bad), "Unknown aircraft admitted");
@@ -102,7 +97,7 @@ int wmain(int argc, wchar_t** argv) {
     owner.unlock();
     require(reader.lock(100), "Read mailbox lock");
     require(reader.data()->settings.camera_rate == 60, "Settings exchange");
-    require(ProtocolVersion == 20 && reader.data()->settings.notifications == 1 &&
+    require(ProtocolVersion == 21 && reader.data()->settings.notifications == 1 &&
                 reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
                 reader.data()->settings.tail_upper == std::array<float, 2>{0.25f, 0.625f} &&
                 reader.data()->settings.tail_corner == std::array<float, 2>{0.1875f, 0.75f} &&
@@ -156,7 +151,6 @@ int wmain(int argc, wchar_t** argv) {
     Settings saved = settings;
     saved.camera_rate = 60;
     saved.mounts[0][2] = 27.25;
-    saved.exposure = -7.5f;
     saved.nose_dot = {0.125f, 0.375f};
     saved.tail_upper = {0.25f, 0.625f};
     saved.tail_corner = {0.1875f, 0.75f};
@@ -173,8 +167,8 @@ int wmain(int argc, wchar_t** argv) {
     require(save_settings(saved), "Atomic profile save");
     Settings loaded;
     require(load_settings(loaded, install), "Profile reload");
-    require(loaded.camera_rate == 60 && loaded.mounts[0][2] == 27.25 && loaded.exposure == -7.5f && loaded.calibration_budget == 1024,
-            "Camera, exposure, rate and calibration persistence");
+    require(loaded.camera_rate == 60 && loaded.mounts[0][2] == 27.25 && loaded.calibration_budget == 1024,
+            "Camera, rate and calibration persistence");
     require(loaded.nose_dot == saved.nose_dot && loaded.tail_upper == saved.tail_upper && loaded.tail_corner == saved.tail_corner &&
                 loaded.tail_inner == saved.tail_inner,
             "All guide pairs persist with camera settings");
@@ -190,7 +184,7 @@ int wmain(int argc, wchar_t** argv) {
       saved.camera_rate = rate;
       require(save_settings(saved), "Save lower camera budget");
       require(load_settings(loaded, install) && loaded.camera_rate == rate && loaded.mounts == saved.mounts &&
-                  loaded.nose_dot == saved.nose_dot && loaded.exposure == saved.exposure,
+                  loaded.nose_dot == saved.nose_dot && loaded.speed_color == saved.speed_color,
               "Low-rate persistence must retain calibration and display settings");
     }
     saved.camera_rate = 15;

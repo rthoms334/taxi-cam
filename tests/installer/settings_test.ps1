@@ -62,18 +62,6 @@ function Assert-ForcedCameraRate([string]$ExpectedRate = '10') {
     }
     Assert-SettingsTest ($found -gt 0) 'Camera-rate force found no existing settings files to check.'
 }
-function Assert-ForcedExposure([string]$ExpectedExposure = '-8') {
-    $found = 0
-    $settingsPath = Get-TaxiExposureSettingsPath
-    foreach ($target in @(Get-TaxiCameraRateTargets)) {
-        if (-not (Test-Path -LiteralPath $target.path -PathType Leaf)) { continue }
-        $exposure = Get-TaxiIniKey $target.path 'display' 'exposure'
-        if ($null -eq $exposure -and $target.path -eq $settingsPath -and (Get-TaxiIniKey $target.path 'display' 'exposure_revision') -eq '1') { continue }
-        $found++
-        Assert-SettingsTest ($exposure -eq $ExpectedExposure) "Install did not write exposure=${ExpectedExposure}: $($target.path)"
-    }
-    Assert-SettingsTest ($found -gt 0) 'Exposure force found no existing settings files to check.'
-}
 function Assert-CameraRateRevision([string]$Path, $Expected) {
     $actual = Get-TaxiIniKey $Path 'display' 'camera_rate_revision'
     if ($null -eq $Expected) {
@@ -82,13 +70,10 @@ function Assert-CameraRateRevision([string]$Path, $Expected) {
         Assert-SettingsTest ($actual -eq $Expected) "camera_rate_revision is '$actual', expected '$Expected': $Path"
     }
 }
-function Assert-ExposureRevision([string]$Path, $Expected) {
+# The exposure migrate is retired: installs never write exposure_revision.
+function Assert-NoExposureRevision([string]$Path) {
     $actual = Get-TaxiIniKey $Path 'display' 'exposure_revision'
-    if ($null -eq $Expected) {
-        Assert-SettingsTest ($null -eq $actual) "Unexpected exposure_revision '$actual' on $Path"
-    } else {
-        Assert-SettingsTest ($actual -eq $Expected) "exposure_revision is '$actual', expected '$Expected': $Path"
-    }
+    Assert-SettingsTest ($null -eq $actual) "Unexpected exposure_revision '$actual' on $Path"
 }
 function Assert-MountCalibrationUnchanged([string]$Path, [string]$Forward = '27.25', [string]$Budget = '4096') {
     Assert-SettingsTest ((Get-TaxiIniKey $Path 'nose' 'forward') -eq $Forward) "Keep-install changed nose forward on $Path"
@@ -97,7 +82,7 @@ function Assert-MountCalibrationUnchanged([string]$Path, [string]$Forward = '27.
 function Assert-StampOnlySettings {
     Assert-SettingsTest (Test-Path -LiteralPath $settingsIni -PathType Leaf) 'Keep-install did not stamp a missing settings.ini.'
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Assert-SettingsTest ($null -eq (Get-TaxiIniKey $settingsIni 'display' 'camera_rate')) 'Stamp-only settings.ini included camera_rate.'
 }
 function Write-RateFixture([string]$SettingsRate = '', [string]$ProfileRate = '', [string]$ProfileExposure = '-7.5') {
@@ -183,26 +168,24 @@ try {
     }
     Invoke-Install
     Assert-ForcedCameraRate
-    Assert-ForcedExposure
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'aircraft' 'profile') -eq '4' -and (Get-TaxiIniKey $settingsIni 'aircraft' 'automatic') -eq '1') 'Keep-install rate force changed aircraft selection.'
     Assert-MountCalibrationUnchanged $profileIni
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-8') 'Keep-install did not force profile exposure to -8.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Keep-install changed the retired profile exposure key.'
     Assert-Saved $preserved
     Assert-Saved $unrelated
 
     Set-TaxiIniKey $settingsIni 'display' 'camera_rate' '15'
     Set-TaxiIniKey $profileIni 'display' 'camera_rate' '15'
-    Set-TaxiIniKey $profileIni 'display' 'exposure' '-7.5'
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Invoke-Install
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'display' 'camera_rate') -eq '15') 'Second keep-install rewrote a user camera_rate after the migration stamp.'
     Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15') 'Second keep-install rewrote a profile camera_rate after the migration stamp.'
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Second keep-install rewrote a user exposure after the migration stamp.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Second keep-install changed the retired profile exposure key.'
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Assert-MountCalibrationUnchanged $profileIni
     Assert-Saved $preserved
     Assert-Saved $unrelated
@@ -210,23 +193,22 @@ try {
     Write-RateFixture '5' '5'
     Set-TaxiIniKey $settingsIni 'display' 'camera_rate_revision' '1'
     Assert-CameraRateRevision $settingsIni '1'
-    Assert-ExposureRevision $settingsIni $null
+    Assert-NoExposureRevision $settingsIni
     Invoke-Install
     Assert-ForcedCameraRate
-    Assert-ForcedExposure
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Assert-MountCalibrationUnchanged $profileIni
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-8') 'Revision-1 migrate did not force exposure to -8.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Revision-1 migrate changed the retired profile exposure key.'
     Set-TaxiIniKey $settingsIni 'display' 'camera_rate' '5'
     Set-TaxiIniKey $profileIni 'display' 'camera_rate' '5'
     Set-TaxiIniKey $profileIni 'display' 'exposure' '-6'
     Invoke-Install
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'display' 'camera_rate') -eq '5') 'Install after revision 2 rewrote a user camera_rate of 5.'
     Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '5') 'Install after revision 2 rewrote a user profile camera_rate of 5.'
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-6') 'Install after exposure revision 1 rewrote a user exposure.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-6') 'Install changed the retired profile exposure key.'
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Assert-MountCalibrationUnchanged $profileIni
     $rateAfterInstall = Get-ExistingRateMap
 
@@ -256,46 +238,43 @@ try {
     Assert-SettingsTest $refused 'Locked destination executable did not fail keep-install.'
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'display' 'camera_rate') -eq '15') 'Failed keep-install left a forced camera_rate after rollback.'
     Assert-CameraRateRevision $settingsIni $null
-    Assert-ExposureRevision $settingsIni $null
+    Assert-NoExposureRevision $settingsIni
     Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15') 'Failed keep-install left a forced profile camera_rate after rollback.'
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Failed keep-install left a forced exposure after rollback.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Failed keep-install changed the retired profile exposure key.'
     Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25' -and (Get-TaxiIniKey $profileIni 'display' 'calibration_budget') -eq '4096') 'Failed keep-install rate rollback dropped calibration.'
     Assert-Saved $preserved
     Assert-Saved $unrelated
     Invoke-Install
     Assert-ForcedCameraRate
-    Assert-ForcedExposure
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'aircraft' 'profile') -eq '4') 'Retry keep-install after rate rollback changed aircraft selection.'
     Assert-MountCalibrationUnchanged $profileIni
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-8') 'Retry keep-install after rollback did not force exposure to -8.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Retry keep-install after rollback changed the retired profile exposure key.'
 
     Write-RateFixture
     Assert-SettingsTest ($null -eq (Get-TaxiIniKey $settingsIni 'display' 'camera_rate')) 'Missing-key fixture still had camera_rate.'
     Assert-CameraRateRevision $settingsIni $null
-    Assert-ExposureRevision $settingsIni $null
+    Assert-NoExposureRevision $settingsIni
     Invoke-Install
     Assert-ForcedCameraRate
-    Assert-ForcedExposure
     Assert-CameraRateRevision $settingsIni '2'
-    Assert-ExposureRevision $settingsIni '1'
+    Assert-NoExposureRevision $settingsIni
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'aircraft' 'profile') -eq '4') 'Missing-key migrate changed aircraft selection.'
     Assert-MountCalibrationUnchanged $profileIni
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-8') 'Missing-key migrate did not force exposure to -8.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Missing-key migrate changed the retired profile exposure key.'
 
     Remove-Item -LiteralPath $settingsIni
     Invoke-Install
     Assert-StampOnlySettings
     Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '10') 'Missing settings.ini migrate left a profile rate other than 10.'
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-8') 'Missing settings.ini migrate left a profile exposure other than -8.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Missing settings.ini migrate changed the retired profile exposure key.'
     Assert-MountCalibrationUnchanged $profileIni
     Set-TaxiIniKey $profileIni 'display' 'camera_rate' '15'
-    Set-TaxiIniKey $profileIni 'display' 'exposure' '-7.5'
     Invoke-Install
     Assert-StampOnlySettings
     Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15') 'Install after a stamp-only settings.ini rewrote a user profile rate.'
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Install after a stamp-only settings.ini rewrote a user profile exposure.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Install after a stamp-only settings.ini changed the retired profile exposure key.'
     Assert-MountCalibrationUnchanged $profileIni
     $rateAfterInstall = Get-ExistingRateMap
 
@@ -426,7 +405,7 @@ exit $LASTEXITCODE
     $refused = $false
     try { [void]@(Get-TaxiSettingsTargets -Installation $app) } catch { $refused = $_.Exception.Message -like '*file is a directory*' }
     Assert-SettingsTest $refused 'A directory was accepted as a known settings file.'
-    Write-Output "PASS settings lifecycle: $checks checks; keep defaults, one-shot camera_rate=10 and exposure=-8 migrate, revision-1 force-5 restamp, user override kept, missing-key migrate, rollback of rate and stamp, reset defaults with locked startup fallback, multiple startup file rollback, inner/outer rollback, concurrent writer, legacy imports, explicit uninstall removal, unrelated files and path guards. Fixture: $fixture"
+    Write-Output "PASS settings lifecycle: $checks checks; keep defaults, one-shot camera_rate=10 migrate, retired exposure keys left alone, revision-1 force-5 restamp, user override kept, missing-key migrate, rollback of rate and stamp, reset defaults with locked startup fallback, multiple startup file rollback, inner/outer rollback, concurrent writer, legacy imports, explicit uninstall removal, unrelated files and path guards. Fixture: $fixture"
 } finally {
     $env:LOCALAPPDATA = $priorLocal
     $env:TEMP = $priorTemp

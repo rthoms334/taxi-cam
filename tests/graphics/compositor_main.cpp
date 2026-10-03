@@ -714,7 +714,7 @@ Result run(bool force_warp) {
   auto night = pairs.back();
   night[0].night = night[1].night = true;
   pixel_case(device.get(), compositor, generator, night, false, result,
-             {Compositor::DefaultExposureEv, Compositor::DefaultExposureEv + taxi_camera::DisplayExposureController::DefaultNightBoostEv});
+             {Compositor::DefaultExposureEv, Compositor::DefaultExposureEv + taxi_camera::DisplayExposureController::NightBoostEv});
   result.statistics = compositor.statistics();
   require(result.statistics.shader_compiles == 5 && result.statistics.descriptor_writes == 28 && result.statistics.input_changes == 13 &&
               result.statistics.recordings == 22 && result.night_rgb_checks == 2 && result.float_pixels > 1000000 &&

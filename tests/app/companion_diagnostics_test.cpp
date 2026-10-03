@@ -246,28 +246,14 @@ int main() {
     page = 1;
     build_controls();
     require(!GetDlgItem(window, 236), "Camera weather has no control");
-    // Match main view lighting sits with the exposure controls on the Display page.
-    require(!GetDlgItem(window, 237), "Match main view lighting is not a Camera views control");
+    // The camera views always take the main view's lighting: the Display page
+    // has no lighting or exposure controls, only the camera rate and the
+    // ground-speed colour.
     page = 2;
     build_controls();
-    require(
-        GetDlgItem(window, 237) && GetDlgItem(window, 201) && GetDlgItem(window, 222) && current.camera_tone == 1 && is_on(237, current),
-        "Match main view lighting starts on beside the exposure controls");
-    {
-      RECT tone{}, exposure{}, client{};
-      GetWindowRect(GetDlgItem(window, 237), &tone);
-      GetWindowRect(GetDlgItem(window, 201), &exposure);
-      MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&tone), 2);
-      MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&exposure), 2);
-      GetClientRect(window, &client);
-      require(tone.bottom <= exposure.top && tone.right <= client.right, "Match main view lighting fits above Daytime exposure");
-    }
-    command(237);
-    require(current.camera_tone == 0 && !is_on(237, current), "Match main view lighting can be turned off");
-    GetDlgItemTextW(window, 237, label, 96);
-    require(std::wstring(label) == L"Match main view lighting: Off", "Match main view lighting label reflects its state");
-    command(237);
-    require(current.camera_tone == 1, "Match main view lighting can be turned back on");
+    require(!GetDlgItem(window, 237) && !GetDlgItem(window, 201) && !GetDlgItem(window, 222) && !GetDlgItem(window, 202) &&
+                GetDlgItem(window, 200) && GetDlgItem(window, 231),
+            "Display has no lighting or exposure controls");
     page = 4;
     build_controls();
     SetDlgItemTextW(window, 203, L"1024");

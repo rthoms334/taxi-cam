@@ -43,26 +43,27 @@ SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
-// Match main view lighting: hands the simulator's main-view exposure and
-// tone-curve table, as the graphics hooks copied them, to the composition.
-// A table is read at most once a second, only when a newer copy exists. An
-// exposure older than two seconds (no copies, the setting off, or the main
-// view not rendering) returns the camera images to Taxi Cam's exposure.
+// Camera tone: hands the simulator's main-view exposure and tone-curve table,
+// as the graphics hooks copied them, to the composition. A table is read at
+// most once a second, only when a newer copy exists. An exposure older than
+// two seconds (no copies, or the main view not rendering) returns the camera
+// images to Taxi Cam's fallback exposure.
+static_assert(DisplayExposureController::UnlitExposureEv == CameraCompositorD3D12::DefaultExposureEv);
 struct ToneFeed {
   std::uint64_t exposure_copies = 0, table_copies = 0;
   std::uint64_t exposure_ms = 0, table_ms = 0;
   float exposure = 0;
   std::vector<std::uint32_t> table;
   bool table_sent = false;
-  void update(std::uint64_t key, bool enabled, std::uint64_t now) {
-    win::set_tone_capture_enabled(enabled);
+  void update(std::uint64_t key, std::uint64_t now) {
+    win::set_tone_capture_enabled(true);
     const auto status = win::tone_status();
     if (status.exposure_copies != exposure_copies && status.exposure_valid) {
       exposure_copies = status.exposure_copies;
       exposure = status.exposure;
       exposure_ms = now;
     }
-    const bool fresh = enabled && exposure_ms && now - exposure_ms <= 2000;
+    const bool fresh = exposure_ms && now - exposure_ms <= 2000;
     const std::uint32_t* offered = nullptr;
     if (fresh && status.table_copies != table_copies && now - table_ms >= 1000) {
       table.resize(CameraCompositorD3D12::ToneTableTexels);
@@ -964,11 +965,12 @@ DWORD run_impl() {
     scene_runtime::set_composition(key, composition);
     scene_runtime::set_reference_guides(key, drawing->reference_guides);
     const auto light = native_camera::get_lighting();
-    const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
-                                         light.ambient, light.sample_ms);
+    // The fallback exposure, used while the tone curve and the display scale
+    // are not: automatic from the ambient light with a fixed night boost.
+    const auto display = exposure.update(now, drawing->exposure, light.valid, light.ambient, light.sample_ms);
     scene_runtime::set_display_exposure(key, display.applied_ev);
     static ToneFeed tone;
-    tone.update(key, settings.camera_tone != 0, now);
+    tone.update(key, now);
     // On an aircraft whose display is decoded, the camera image is written as
     // scene light divided by the display's own full-code light, so the display
     // gives the scene light back and the main view exposes, tonemaps and blooms
@@ -976,11 +978,8 @@ DWORD run_impl() {
     const double display_light = light.valid ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
     const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
     scene_runtime::set_screen_scale(
-        key, settings.camera_tone ? display_scale : 0.0f,
-        light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);
+        key, display_scale, light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);
     last_ambient = light.valid ? light.ambient : -1.0;
-    // Match main view lighting starts each camera's fog history at clear air.
-    win::set_fog_history_reset(settings.camera_tone != 0);
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
     else
@@ -1390,15 +1389,15 @@ DWORD run_impl() {
       std::snprintf(weather_detail, sizeof(weather_detail), "Camera weather: cloud_merges=%llu refused=%llu",
                     static_cast<unsigned long long>(clouds.redirects), static_cast<unsigned long long>(clouds.refusals));
       log_status(status, weather_detail);
-      // Match main view lighting: the simulator exposure in use (0: Taxi Cam's
+      // Camera tone: the simulator exposure in use (0: Taxi Cam's fallback
       // exposure), copies of its exposure and table, and resource changes.
       const auto tone_copies = win::tone_status();
       char tone_detail[320];
       std::snprintf(tone_detail, sizeof(tone_detail),
-                    "Camera tone: enabled=%d active=%d exposure=%.6g screen_scale=%.6g ambient=%.6g exposure_copies=%llu "
+                    "Camera tone: active=%d exposure=%.6g screen_scale=%.6g ambient=%.6g exposure_copies=%llu "
                     "table_copies=%llu source_changes=%llu readback_failed=%d",
-                    settings.camera_tone ? 1 : 0, output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure),
-                    static_cast<double>(output.screen_scale), last_ambient, static_cast<unsigned long long>(tone_copies.exposure_copies),
+                    output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure), static_cast<double>(output.screen_scale),
+                    last_ambient, static_cast<unsigned long long>(tone_copies.exposure_copies),
                     static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
                     tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);

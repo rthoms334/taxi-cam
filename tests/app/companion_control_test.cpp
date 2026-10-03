@@ -53,7 +53,6 @@ int main() {
     Settings settings;
     require(valid_settings(settings), "Default settings are valid");
     settings.camera_rate = 60;
-    settings.exposure = -7.3f;
     settings.follow_taxi = 0;
     settings.manual_mask = 3;
     settings.mounts[0][2] = 27.25;
@@ -76,11 +75,6 @@ int main() {
     require(!valid_settings(settings), "Dynamic tail rate accepts only 0 or 1");
     settings.dynamic_tail = 1;
     require(valid_settings(settings), "Dynamic tail rate can be turned on");
-    require(settings.camera_tone == 1, "Match main view lighting defaults on");
-    settings.camera_tone = 2;
-    require(!valid_settings(settings), "Match main view lighting accepts only 0 or 1");
-    settings.camera_tone = 0;
-    require(valid_settings(settings), "Match main view lighting can be turned off");
     {
       // Bit 2 is the lower ECAM: valid only for a profile with that side.
       auto sd = settings;
@@ -128,13 +122,12 @@ int main() {
     require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
     change = setup.observe(true, false, control.owner_pid() + 1, 2);
     require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
-    require(ProtocolVersion == 20 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 21 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol11 guide coordinates roundtrip");
     require(control.settings().parked_rate == settings.parked_rate, "Protocol11 parked floor roundtrip");
     require(control.settings().dynamic_tail == 1, "Protocol16 dynamic tail roundtrip");
-    require(control.settings().camera_tone == 0, "Protocol19 camera tone roundtrip");
     require(control.settings().notifications == 0, "Protocol12 notification preference roundtrip");
     {
       // Protocol 12 status: the bridge's notification log travels in Status
@@ -200,8 +193,8 @@ int main() {
         require(control.connected(now), "Both PFDs stay requested during live heartbeat");
         require(control.owner_pid() == GetCurrentProcessId(), "Contention does not invent an owner change");
         const auto& held = control.settings();
-        require(held.manual_mask == 3 && held.camera_rate == 60 && held.exposure == settings.exposure && held.mounts == settings.mounts &&
-                    held.route_request == 12 && held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
+        require(held.manual_mask == 3 && held.camera_rate == 60 && held.mounts == settings.mounts && held.route_request == 12 &&
+                    held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
                     held.tail_upper == settings.tail_upper && held.tail_corner == settings.tail_corner &&
                     held.tail_inner == settings.tail_inner && held.guide_color == settings.guide_color &&
                     held.speed_color == settings.speed_color,

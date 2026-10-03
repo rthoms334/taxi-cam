@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0) { throw 'IPC poller compilation failed.' }
 if ($Test) {
     & (Join-Path $repository 'tests/performance/test.ps1')
 }
-$sources = @('tools/performance/sampler.cpp', 'src/shared/protocol.hpp', 'src/shared/sim_messages.hpp', 'src/shared/camera_rate.hpp', 'src/shared/exposure_settings.hpp', 'src/profiles/catalog.hpp', 'src/shared/version.hpp', 'changelog.json')
+$sources = @('tools/performance/sampler.cpp', 'src/shared/protocol.hpp', 'src/shared/sim_messages.hpp', 'src/shared/camera_rate.hpp', 'src/profiles/catalog.hpp', 'src/shared/version.hpp', 'changelog.json')
 $manifest = @($sources | ForEach-Object {
     [ordered]@{path=$_; sha256=(Get-FileHash -LiteralPath (Join-Path $repository $_) -Algorithm SHA256).Hash}
 })

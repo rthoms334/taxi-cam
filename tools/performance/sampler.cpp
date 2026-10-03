@@ -253,7 +253,6 @@ std::string settings_json(const ipc::Settings& s) {
   std::ostringstream out;
   out << std::setprecision(17);
   out << "{\"enabled\":" << s.enabled << ",\"camera_rate\":" << s.camera_rate << ",\"parked_rate\":" << s.parked_rate
-      << ",\"automatic_exposure\":" << s.automatic_exposure << ",\"exposure\":" << s.exposure << ",\"night_boost\":" << s.night_boost
       << ",\"profile\":" << s.profile << ",\"auto_profile\":" << s.auto_profile << ",\"follow_taxi\":" << s.follow_taxi
       << ",\"auto_detect\":" << s.auto_detect << ",\"single_camera\":" << s.single_camera << ",\"manual_mask\":" << s.manual_mask
       << ",\"calibration_mask\":" << s.calibration_mask << ",\"calibration_budget\":" << s.calibration_budget

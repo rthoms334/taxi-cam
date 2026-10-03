@@ -1397,7 +1397,6 @@ struct Volume {
 };
 struct State {
   std::array<Volume, 48> volumes;  // camera volumes seen at a guarded exit
-  std::atomic<bool> history_reset{false};
   // Camera output sizes in fog cells ((width/8) << 16 | height/8, rounded up).
   std::array<std::atomic<std::uint32_t>, 4> cameras{};
   std::atomic<unsigned> next_camera{0}, evict{0};
@@ -1541,7 +1540,7 @@ bool write_clear_air(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, 
 // affected.
 void reset_history(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
   auto& s = state();
-  if (!s.history_reset.load(std::memory_order_relaxed) || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return;
   const auto d = tone::description(b.pResource);
   if (!volume_shape(d) || !camera_volume(d))
@@ -3865,9 +3864,6 @@ FogStatus fog_status() noexcept {
   for (auto& v : f.volumes)
     status.volumes += v.resource.load(std::memory_order_relaxed) != nullptr;
   return status;
-}
-void set_fog_history_reset(bool enabled) noexcept {
-  fog::state().history_reset.store(enabled, std::memory_order_relaxed);
 }
 CloudMergeStatus cloud_merge_status() noexcept {
   const auto& r = registry();

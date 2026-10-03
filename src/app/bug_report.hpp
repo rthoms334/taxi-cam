@@ -58,12 +58,11 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
   out << "Profile=";
   profile(s.profile);
   out << "; service=" << s.enabled << "; fps=" << s.camera_rate << "; parked_fps=" << s.parked_rate << "; dynamic_tail=" << s.dynamic_tail
-      << "; camera_tone=" << s.camera_tone << '\n';
+      << '\n';
   out << "TAXI_follow=" << s.follow_taxi << "; preview_mask=" << s.manual_mask << "; calibration_mask=" << s.calibration_mask
       << "; scene_test=" << s.scene_test << "; first_camera_only=" << s.single_camera << '\n';
   out << "Auto_detect=" << s.auto_detect << "; requested_PFDs=" << s.left_id << '/' << s.right_id << '/' << s.lower_id
       << "; calibration_budget=" << s.calibration_budget << '\n';
-  out << "Exposure_EV=" << s.exposure << "; auto_exposure=" << s.automatic_exposure << "; night_boost=" << s.night_boost << '\n';
   for (size_t i = 0; i < s.mounts.size(); ++i) {
     out << (i ? "Tail" : "Nose") << " mount (right/up/forward m; pitch/yaw deg; lens rad):";
     for (const double value : s.mounts[i])

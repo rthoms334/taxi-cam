@@ -188,11 +188,8 @@ struct FogStatus {
   unsigned volumes = 0;
 };
 FogStatus fog_status() noexcept;
-// Camera fog: write each camera view's fog history once with clear air, so it
-// starts where the main view sits instead of at opaque (Match main view lighting).
-void set_fog_history_reset(bool enabled) noexcept;
 // Camera tone: copies of the main view's eye-adaptation exposure and 64^3
-// tone-curve table, made at the simulator's own state exits while enabled.
+// tone-curve table, made at the simulator's own state exits once enabled.
 // Counts are cumulative for the bridge lifetime.
 void set_tone_capture_enabled(bool enabled) noexcept;
 struct ToneStatus {

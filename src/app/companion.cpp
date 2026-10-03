@@ -148,7 +148,7 @@ void draw_bug_icon(HDC dc, const RECT& bounds, COLORREF color) {
 }
 void edit(double value, int id, int x, int y, int w = 110) {
   wchar_t buffer[64];
-  std::swprintf(buffer, 64, id >= 360 && id <= 367 ? L"%.1f" : id == 201 || id == 202 ? L"%.4g" : L"%.10g", value);
+  std::swprintf(buffer, 64, id >= 360 && id <= 367 ? L"%.1f" : L"%.10g", value);
   auto h = child(L"EDIT", buffer, id, x, y, w, 30, ES_AUTOHSCROLL | ES_LEFT | WS_BORDER);
   SendMessageW(h, EM_SETLIMITTEXT, 32, 0);
 }
@@ -351,8 +351,6 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
     ok = false;
   if (ok)
     settings.calibration_budget = static_cast<UINT>(budget);
-  settings.exposure = static_cast<float>(number(201, settings.exposure, ok));
-  settings.night_boost = static_cast<float>(number(202, settings.night_boost, ok));
   for (unsigned i = 0; i < 3; ++i)
     for (unsigned j = 0; j < 6; ++j)
       settings.mounts[i][j] = number(300 + static_cast<int>(i * 10 + j), settings.mounts[i][j], ok);
@@ -715,7 +713,7 @@ bool apply(bool save = true) {
   if (!read_fields(settings, &field_error)) {
     notice = field_error ? field_error
              : page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
-                         : L"Check the values: rate 5–60 (min 5), EV −16 to +4, lens 0.05–1.55.";
+                         : L"Check the values: rate 5–60 (min 5), lens 0.05–1.55.";
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
@@ -975,11 +973,7 @@ void build_controls() {
     }
     button(L"Reset camera mounts", 359, 260, 594, 240);
   } else if (page == 2) {
-    toggle(L"Match main view lighting", 237, s.camera_tone, 715, 130, 275);
-    edit(s.exposure, 201, 840, 251, 120);
-    toggle(L"Auto exposure", 222, s.automatic_exposure, 785, 344, 190);
-    edit(s.night_boost, 202, 840, 443, 120);
-    edit(s.camera_rate, 200, 840, 539, 120);
+    edit(s.camera_rate, 200, 840, 151, 120);
     button(L"Ground-speed colour", 231, 740, 630, 235);
     const auto* display_profile = profiles::find(s.profile);
     EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
@@ -1214,31 +1208,16 @@ void draw_page(HDC dc) {
     }
     text(dc, L"Positive pitch looks up. Positive yaw looks right.", 530, 594, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 2) {
-    panel(dc, 244, 122, 766, 92);
-    text(dc, L"Main view lighting", 264, 130, 440, 29, heading);
-    text(dc,
-         L"Use the simulator's own exposure and tone curve for the camera images, so they look like the main view by day and at night. "
-         L"Turn off to use the exposure controls below.",
-         264, 168, 715, 41, small, Muted, DT_LEFT | DT_WORDBREAK);
-    const int ys[]{222, 318, 414, 510};
-    const wchar_t* names[]{L"Daytime exposure", L"Automatic night exposure", L"Maximum night boost", L"Camera frame rate"};
-    const wchar_t* descriptions[]{L"Exposure compensation in EV. Your calibrated baseline is −8.8.",
-                                  L"Gradually brighten the camera display as ambient light drops.",
-                                  L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
-                                  L"Per camera, 5–60; default 10. Parked aircraft refresh twice a second; higher rates are capped."};
-    for (int i = 0; i < 4; ++i) {
-      panel(dc, 244, ys[i], 766, 88);
-      text(dc, names[i], 264, ys[i] + 8, 515, 29, heading);
-      text(dc, descriptions[i], 264, ys[i] + 40, 525, 41, small, Muted, DT_LEFT | DT_WORDBREAK);
-    }
-    wchar_t value[96];
-    std::swprintf(value, 96, L"Currently applied exposure: %.2f EV", sample.exposure);
-    text(dc, sample.heartbeat ? value : L"Applied exposure appears when the camera bridge connects.", 251, 630, 480, 24, small, Muted);
+    // The camera images always take the main view's lighting: no exposure controls.
+    panel(dc, 244, 122, 766, 88);
+    text(dc, L"Camera frame rate", 264, 130, 515, 29, heading);
+    text(dc, L"Per camera, 5–60; default 10. Parked aircraft refresh twice a second; higher rates are capped.", 264, 162, 525, 41, small,
+         Muted, DT_LEFT | DT_WORDBREAK);
     if (sample.heartbeat) {
       wchar_t rate_line[192];
       std::swprintf(rate_line, 192, L"Camera rate in use: %u fps%ls. Useful maximum on this aircraft: %u fps.", sample.effective_rate,
                     camera_rate_limit_text(sample.rate_limits), sample.useful_rate);
-      text(dc, rate_line, 251, 654, 740, 24, small, Muted);
+      text(dc, rate_line, 251, 630, 480, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
     }
   } else if (page == 3) {
     panel(dc, 244, 119, 766, 226);
@@ -1668,8 +1647,6 @@ bool is_on(int id, const win::Settings& s) {
       return auto_connect.load(std::memory_order_acquire);
     case 221:
       return s.follow_taxi;
-    case 222:
-      return s.automatic_exposure;
     case 223:
       return s.auto_detect;
     case 224:
@@ -1688,8 +1665,6 @@ bool is_on(int id, const win::Settings& s) {
       return s.single_camera;
     case 235:
       return s.dynamic_tail;
-    case 237:
-      return s.camera_tone;
     case 229:
       return s.scene_test;
     default:
@@ -2058,7 +2033,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_connection();
         return 0;
       }
-      if ((id >= 221 && id <= 229) || id == 232 || id == 233 || id == 235 || id == 237) {
+      if (id == 221 || (id >= 223 && id <= 229) || id == 232 || id == 233 || id == 235) {
         if (!apply(false))
           return 0;
         auto s = draft();
@@ -2072,8 +2047,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
             s.calibration_mask = 0;
           }
         }
-        if (id == 222)
-          s.automatic_exposure = !s.automatic_exposure;
         if (id == 223)
           s.auto_detect = !s.auto_detect;
         if (id == 224 || id == 225 || id == 232) {
@@ -2093,8 +2066,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           s.single_camera = !s.single_camera;
         if (id == 235)
           s.dynamic_tail = !s.dynamic_tail;
-        if (id == 237)
-          s.camera_tone = !s.camera_tone;
         if (id == 229)
           s.scene_test = !s.scene_test;
         publish(s);
@@ -2269,8 +2240,8 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   if (!win::load_settings(current, installation))
     notice = L"Saved settings were invalid; profile defaults loaded.";
   whats_new = win::whats_new_pending(win::settings_directory(), InstalledVersion);
-  // enabled is runtime connection state. A saved Service: Off value from an
-  // older version must never prevent Connect or Auto-connect from enabling it.
+  // enabled is runtime connection state, not saved: it starts off until
+  // Connect or Auto-connect enables it.
   current.enabled = 0;
   auto_connect.store(win::load_auto_connect(win::settings_directory()), std::memory_order_release);
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))

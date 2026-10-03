@@ -77,8 +77,6 @@ if ($ResetSettings) {
 $settingsSnapshot = @()
 $rateSnapshot = @()
 $rateMigrated = $false
-$exposureSnapshot = @()
-$exposureMigrated = $false
 $prior = @{}
 $installed = @()
 $writtenHashes = @{}
@@ -176,11 +174,6 @@ try {
         foreach ($entry in $rateSnapshot) {
             if ($entry.owned) { $writtenHashes[$entry.path] = $entry.installedHash }
         }
-        $exposureSnapshot = @(New-TaxiExposureSnapshot -BackupDirectory $staging)
-        $exposureMigrated = [bool](Set-TaxiForcedExposure $exposureSnapshot)
-        foreach ($entry in $exposureSnapshot) {
-            if ($entry.owned) { $writtenHashes[$entry.path] = $entry.installedHash }
-        }
     }
     if (Test-Path -LiteralPath $oldExe -PathType Leaf) {
         $oldBackup = Join-Path $staging '380-taxi-cam.exe.backup'
@@ -274,12 +267,7 @@ try {
         Move-Item -LiteralPath $disabled -Destination $legacy
     }
     if ($ResetSettings) { Restore-TaxiSettingsSnapshot $settingsSnapshot }
-    else {
-        # Exposure runs after camera_rate on the same files. Restore exposure
-        # first so hashes match the rate snapshot's owned state, then rate.
-        Restore-TaxiSettingsSnapshot $exposureSnapshot
-        Restore-TaxiSettingsSnapshot $rateSnapshot
-    }
+    else { Restore-TaxiSettingsSnapshot $rateSnapshot }
     if ($xmlWritten) {
         if (-not (Test-Path -LiteralPath $ExeXml) -or (Get-FileHash -LiteralPath $ExeXml).Hash -ne $xmlWrittenHash) { throw 'exe.xml changed after installation; the newer contents were preserved.' }
         if ($xmlBackup) { Copy-Item -LiteralPath $xmlBackup -Destination $ExeXml -Force }
