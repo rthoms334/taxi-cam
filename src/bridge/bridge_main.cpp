@@ -95,44 +95,76 @@ struct DevShader {
     scene_runtime::reload_shader(key, source);
   }
 };
+// The first character of %LOCALAPPDATA%\Taxi Cam\dev\<name>, '0' when the file
+// is missing or empty, or 0 when LOCALAPPDATA cannot be read. Byte-order marks,
+// NULs and whitespace before it are skipped, so a UTF-16 file written by
+// Windows PowerShell also works.
+char read_dev_switch(const wchar_t* name) {
+  wchar_t base[32768]{};
+  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
+  if (!n || n >= 32700)
+    return 0;
+  const std::wstring path = std::wstring(base) + L"\\Taxi Cam\\dev\\" + name;
+  char mode = '0';
+  HANDLE file =
+      CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (file != INVALID_HANDLE_VALUE) {
+    unsigned char text[16]{};
+    DWORD read = 0;
+    if (ReadFile(file, text, sizeof(text), &read, nullptr)) {
+      for (DWORD i = 0; i < read; ++i) {
+        const auto c = text[i];
+        if (c == 0 || c == 0xef || c == 0xbb || c == 0xbf || c == 0xff || c == 0xfe || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+          continue;
+        mode = static_cast<char>(c);
+        break;
+      }
+    }
+    CloseHandle(file);
+  }
+  return mode;
+}
 // Development A/B switch: %LOCALAPPDATA%\Taxi Cam\dev\camera_aa.txt starting
 // with '1' leaves the simulator's AA on for Taxi Cam's camera views; '2' also
 // keeps every camera rendering on every frame (continuous gates), as the main
 // view's temporal AA needs; '3' renders every frame with the AA still cleared.
+// '4' is '2' with the engine's P+48 bit36 also cleared, so the engine should
+// run its own AA and post passes for the camera views (static decode, untested
+// live); '5' is '4' with paced gates.
 // '0', any other content or no file keeps today's paced, cleared views.
 // Checked once a second; the observer applies it in its AA preparation.
-// Byte-order marks, NULs and whitespace before the digit are skipped, so a
-// UTF-16 file written by Windows PowerShell also works.
 struct DevCameraAa {
   std::uint64_t next_ms = 0;
   void poll(std::uint64_t now) {
     if (now < next_ms)
       return;
     next_ms = now + 1000;
-    wchar_t base[32768]{};
-    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
-    if (!n || n >= 32700)
+    const char mode = read_dev_switch(L"camera_aa.txt");
+    if (!mode)
       return;
-    const std::wstring path = std::wstring(base) + L"\\Taxi Cam\\dev\\camera_aa.txt";
-    char mode = '0';
-    HANDLE file =
-        CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-      unsigned char text[16]{};
-      DWORD read = 0;
-      if (ReadFile(file, text, sizeof(text), &read, nullptr)) {
-        for (DWORD i = 0; i < read; ++i) {
-          const auto c = text[i];
-          if (c == 0 || c == 0xef || c == 0xbb || c == 0xbf || c == 0xff || c == 0xfe || c == ' ' || c == '\t' || c == '\r' || c == '\n')
-            continue;
-          mode = static_cast<char>(c);
-          break;
-        }
-      }
-      CloseHandle(file);
-    }
-    native_camera::request_scene_view_aa(mode == '1' || mode == '2');
-    native_camera::request_scene_continuous(mode == '2' || mode == '3');
+    const auto request = native_camera::dev_camera_aa_request(mode);
+    native_camera::request_scene_view_aa(request.aa);
+    native_camera::request_scene_clear_bit36(request.clear_bit36);
+    native_camera::request_scene_continuous(request.continuous);
+  }
+};
+// Development switch: %LOCALAPPDATA%\Taxi Cam\dev\capture_phase.txt starting
+// with '1' makes each camera capture hold the complete render. A capture due
+// after a batch that drew the camera image once (the deferred lighting) waits
+// for the next batch that draws it (sky, clouds and lights). Anything else or
+// no file captures after the first drawing batch. Checked once a second.
+struct DevCapturePhase {
+  std::uint64_t next_ms = 0;
+  int applied = -1;
+  void poll(std::uint64_t now) {
+    if (now < next_ms)
+      return;
+    next_ms = now + 1000;
+    const char mode = read_dev_switch(L"capture_phase.txt");
+    if (!mode || applied == (mode == '1'))
+      return;
+    applied = mode == '1';
+    scene_runtime::manager().set_capture_phase(applied != 0);
   }
 };
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
@@ -1091,6 +1123,8 @@ DWORD run_impl() {
     dev_shader.poll(key, now);
     static DevCameraAa dev_camera_aa;
     dev_camera_aa.poll(now);
+    static DevCapturePhase dev_capture_phase;
+    dev_capture_phase.poll(now);
     // Match main view lighting starts each camera's fog history at clear air.
     win::set_fog_history_reset(settings.camera_tone != 0);
     if (drawing->ground_speed)
@@ -1519,16 +1553,58 @@ DWORD run_impl() {
       win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
       log_status(status, fog_detail);
       // Camera AA development switch (dev\camera_aa.txt): the requested state,
-      // continuous gates, the simulator's global AA mode (-1: not read on this
-      // image), bit31 writes that set or cleared it on the views, refusals and
+      // continuous gates, the simulator's global AA mode and frame-generation
+      // byte (-1: not read on this image), bit31 writes that set or cleared it
+      // on the views, the bit36 clear request (values 4 and 5) and its writes,
+      // hand-backs and pending views, each feed's bit31 and bit36 as last
+      // inspected (-: no view, or not inspected in that update), refusals and
       // the last one.
-      char aa_detail[240];
+      const auto feed_bit = [&](unsigned feed, unsigned bit) {
+        // Camera setup always leaves bits 5 and 21 set: a zero word was not inspected.
+        return !scene.pair.owned_ids[feed] || !scene.flags[feed][0] ? '-' : (scene.flags[feed][0] >> bit) & 1u ? '1' : '0';
+      };
+      char aa_detail[512];
       std::snprintf(aa_detail, sizeof(aa_detail),
-                    "Camera AA: requested=%d continuous=%d mode=%d sets=%llu clears=%llu refused=%llu error=%s", scene.aa_requested ? 1 : 0,
-                    scene.continuous_requested ? 1 : 0, static_cast<int>(native_camera::scene_global_aa_mode()),
-                    static_cast<unsigned long long>(scene.aa_sets), static_cast<unsigned long long>(scene.aa_clears),
+                    "Camera AA: requested=%d no_bit36=%d continuous=%d mode=%d fg=%d sets=%llu clears=%llu b36_clears=%llu b36_sets=%llu "
+                    "b36_restores=%llu b36_restore_failures=%llu b36_pending=%d b31=%c%c%c b36=%c%c%c refused=%llu error=%s",
+                    scene.aa_requested ? 1 : 0, scene.bit36_clear_requested ? 1 : 0, scene.continuous_requested ? 1 : 0,
+                    static_cast<int>(native_camera::scene_global_aa_mode()),
+                    static_cast<int>(native_camera::scene_global_frame_generation()), static_cast<unsigned long long>(scene.aa_sets),
+                    static_cast<unsigned long long>(scene.aa_clears), static_cast<unsigned long long>(scene.bit36_clears),
+                    static_cast<unsigned long long>(scene.bit36_sets), static_cast<unsigned long long>(scene.bit36_restores),
+                    static_cast<unsigned long long>(scene.bit36_restore_failures), scene.bit36_cleared_pending ? 1 : 0, feed_bit(0, 31),
+                    feed_bit(1, 31), feed_bit(2, 31), feed_bit(0, 36), feed_bit(1, 36), feed_bit(2, 36),
                     static_cast<unsigned long long>(scene.aa_refusals), scene.aa_error && *scene.aa_error ? scene.aa_error : "none");
       log_status(status, aa_detail);
+      // Capture phase (dev\capture_phase.txt), per feed nose/left/right since the
+      // bridge started: ordered batches that drew the camera image, those that
+      // drew it once (the deferred lighting) and the most draws in one batch;
+      // captures after a one-draw batch, a several-draw batch, the batch directly
+      // after a held one, or a one-draw batch after a lost hold; one-draw batches
+      // held.
+      char phase_detail[512];
+      auto phase_used = static_cast<std::size_t>(
+          std::snprintf(phase_detail, sizeof(phase_detail), "Capture phase: complete=%d", output.capture.capture_phase ? 1 : 0));
+      const auto append_phase = [&](const char* name, const auto& value) {
+        if (phase_used >= sizeof(phase_detail))
+          return;
+        const auto& feeds = output.capture.phases;
+        const auto written =
+            std::snprintf(phase_detail + phase_used, sizeof(phase_detail) - phase_used, " %s=%llu/%llu/%llu", name,
+                          static_cast<unsigned long long>(value(feeds[0])), static_cast<unsigned long long>(value(feeds[1])),
+                          static_cast<unsigned long long>(value(feeds[2])));
+        if (written > 0 && static_cast<std::size_t>(written) < sizeof(phase_detail) - phase_used)
+          phase_used += static_cast<std::size_t>(written);
+      };
+      using PhaseFeed = SceneCaptureManager::CapturePhaseDiagnostic;
+      append_phase("batches", [](const PhaseFeed& feed) { return feed.batches; });
+      append_phase("one_draw", [](const PhaseFeed& feed) { return feed.one_draw; });
+      append_phase("max_draws", [](const PhaseFeed& feed) { return feed.max_draws; });
+      for (std::size_t kind = 0; kind < capture_phase::KindCount; ++kind)
+        append_phase(capture_phase::kind_name(static_cast<capture_phase::Kind>(kind)),
+                     [kind](const PhaseFeed& feed) { return feed.captures[kind]; });
+      append_phase("held", [](const PhaseFeed& feed) { return feed.held; });
+      log_status(status, phase_detail);
       if (output.shader_reloads || output.shader_reload_failures) {
         char shader_detail[400];
         std::snprintf(shader_detail, sizeof(shader_detail), "Dev shader: reloads=%llu failures=%llu error=%.300s",

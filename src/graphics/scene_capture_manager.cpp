@@ -87,6 +87,7 @@ void SceneCaptureManager::defer(const DeferredWork& work) noexcept {
     deferred_evidence_count_.fetch_add(1, std::memory_order_relaxed);
 }
 void SceneCaptureManager::note_wipe(WipeSite site, std::uint32_t origins) noexcept {
+  forget_capture_phase();  // Every global wipe names itself here.
   ++stats_.wipes;
   ++stats_.wipe_counts[static_cast<std::size_t>(site)];
   stats_.last_wipe_site = site;
@@ -107,6 +108,7 @@ void SceneCaptureManager::retire_sources(Device& owner, std::uint32_t origins) n
   // now, on this lock holder, rather than after CaptureProgress::StallMs. The
   // drawn flag is cleared, so the next ordered draw is the first capture.
   owner.source_states.retire_live_models();
+  forget_capture_phase();
   const auto restored = owner.source_states.rearm_retained_rt();
   ++stats_.source_retirements;
   stats_.retirement_restored += restored;
@@ -380,6 +382,7 @@ std::uint64_t SceneCaptureManager::reset_session(std::uint64_t key) noexcept {
       owner->source_states.register_source({reinterpret_cast<std::uint64_t>(source.native), source.generation});
   }
   last_tail_us_ = {};
+  phase_feeds_ = {};
   stats_.tail_status = "session_stopped";
   // Never retire lists, clear packet masks/consumer flags, release recording
   // leases or reset a GPU allocator here. Old native lists remain replayable.
@@ -720,8 +723,10 @@ unsigned SceneCaptureManager::rearm_source_states_locked() noexcept {
   for (auto& owner : devices_)
     if (owner.active && !owner.failed)
       restored += owner.source_states.rearm_retained_rt();
-  if (restored)
+  if (restored) {
+    forget_capture_phase();  // A restored model carries no ordering evidence.
     stats_.tail_status = "awaiting_ordered_source_state";
+  }
   return restored;
 }
 
@@ -729,6 +734,7 @@ void SceneCaptureManager::begin_source_tracking() noexcept {
   const std::lock_guard lock(mutex_);
   source_tracking_ = true;
   last_tail_us_ = {};
+  phase_feeds_ = {};
   rearm_source_states_locked();
   stats_.tail_status = "awaiting_ordered_source_state";
 }
@@ -740,6 +746,7 @@ unsigned SceneCaptureManager::rearm_source_states() noexcept {
 void SceneCaptureManager::stop_source_tracking() noexcept {
   const std::lock_guard lock(mutex_);
   source_tracking_ = false;
+  phase_feeds_ = {};
   for (auto& item : lists_)
     release_source_leases(item.source_leases, item.source_lease_count);
   stats_.tail_status = "stopped";
@@ -748,6 +755,17 @@ void SceneCaptureManager::set_source_rate(std::uint32_t rate) noexcept {
   const std::lock_guard lock(mutex_);
   source_rate_ = rate < kMinimumParkedCameraRate ? kMinimumParkedCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
 }
+void SceneCaptureManager::set_capture_phase(bool hold) noexcept {
+  const std::lock_guard lock(mutex_);
+  if (capture_phase_ == hold)
+    return;
+  capture_phase_ = stats_.capture_phase = hold;
+  phase_feeds_ = {};
+}
+void SceneCaptureManager::forget_capture_phase() noexcept {
+  for (auto& phase : phase_feeds_)
+    capture_phase::forget(phase.state);
+}
 void SceneCaptureManager::set_gpu_timing_enabled(bool enabled) noexcept {
   const std::lock_guard lock(mutex_);
   gpu_timing_enabled_ = enabled;
@@ -755,6 +773,7 @@ void SceneCaptureManager::set_gpu_timing_enabled(bool enabled) noexcept {
 void SceneCaptureManager::set_capture_enabled(bool enabled) noexcept {
   const std::lock_guard lock(mutex_);
   capture_enabled_ = enabled;
+  phase_feeds_ = {};
   if (enabled)
     rearm_source_states_locked();
 }
@@ -1504,7 +1523,7 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
     return;
   }
   collect();
-  unsigned feeds = 0;
+  unsigned feeds = 0, drawn_feeds = 0;
   stats_.tail_status = "no_candidate_draw";
   const auto now = steady_now_us();
   for (std::size_t source_index = 0; source_index < sources_.size(); ++source_index) {
@@ -1512,8 +1531,13 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
     if (!source.native || source.device_key != owner.key ||
         source_generations_[source_index].load(std::memory_order_acquire) != source.generation)
       continue;
-    const auto state = owner.source_states.state({reinterpret_cast<std::uint64_t>(source.native), source.generation});
+    const source_state::Key key{reinterpret_cast<std::uint64_t>(source.native), source.generation};
+    const auto state = owner.source_states.state(key);
     const auto observed_feed = handoff_.observed_feed(reinterpret_cast<std::uint64_t>(source.native));
+    if (state.model != source_state::Model::legacy_rt && state.model != source_state::Model::enhanced_rt)
+      for (auto& phase : phase_feeds_)
+        if (phase.source == key)
+          capture_phase::forget(phase.state);  // It left the RT state: the next drawing batch is not this render's rest.
     if (state.model == source_state::Model::unknown) {
       if (observed_feed >= 0)
         stats_.tail_status = "unknown_source_state";
@@ -1529,21 +1553,42 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
     }
     if (feeds & (1u << match.feed))
       continue;
+    auto& phase = phase_feeds_[match.feed];
+    if (phase.source != key)
+      phase = {key, {}};
+    auto& diagnostic = stats_.phases[match.feed];
+    if (!(drawn_feeds & (1u << match.feed))) {
+      drawn_feeds |= 1u << match.feed;
+      ++diagnostic.batches;
+      diagnostic.one_draw += state.draws == 1;
+      diagnostic.max_draws = std::max(diagnostic.max_draws, state.draws);
+    }
     ID3D12Resource* leased_source = nullptr;
     for (std::size_t index = 0; index < pending.source_lease_count; ++index) {
       const auto& lease = pending.source_leases[index];
-      if (lease.key == source_state::Key{reinterpret_cast<std::uint64_t>(source.native), source.generation}) {
+      if (lease.key == key) {
         leased_source = lease.native;
         break;
       }
     }
+    // A hold covers only the drawing batch directly after it: when that batch
+    // records no capture, for any reason, the hold is forgotten.
     if (!leased_source) {
+      capture_phase::forget(phase.state);
       stats_.tail_status = "source_lease_unavailable";
       continue;
     }
     const auto previous = last_tail_us_[match.feed];
     if (previous && (now < previous || now - previous < (1000000u + source_rate_ - 1) / source_rate_)) {
+      capture_phase::forget(phase.state);
       stats_.tail_status = "sample_interval";
+      continue;
+    }
+    // Before any private recording: a held batch leaves no packet, lease or list work.
+    const auto phase_decision = capture_phase::decide(phase.state, capture_phase_, state.draws);
+    if (!phase_decision.capture) {
+      ++diagnostic.held;
+      stats_.tail_status = "awaiting_complete_render";
       continue;
     }
     stats_.tail_status = "tail_packet_unavailable";
@@ -1593,10 +1638,14 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
       ++stats_.tail_submissions;
       ++stats_.tail_captures;
       last_tail_us_[match.feed] = now;
+      capture_phase::captured(phase.state);
+      ++diagnostic.captures[static_cast<std::size_t>(phase_decision.kind)];
       stats_.tail_status = "captured";
       feeds |= 1u << match.feed;
       break;
     }
+    if (!(feeds & (1u << match.feed)))
+      capture_phase::forget(phase.state);  // Due but not recorded.
   }
   if (feeds)
     stats_.tail_status = "captured";
@@ -1974,8 +2023,12 @@ void SceneCaptureManager::collect() noexcept {
     auto& source = sources_[index];
     if (!source.native || source_generations_[index].load(std::memory_order_acquire))
       continue;
+    const source_state::Key key{reinterpret_cast<std::uint64_t>(source.native), source.generation};
     if (auto* owner = device(source.device_key))
-      owner->source_states.unregister_source({reinterpret_cast<std::uint64_t>(source.native), source.generation});
+      owner->source_states.unregister_source(key);
+    for (auto& phase : phase_feeds_)
+      if (phase.source == key)
+        phase = {};
     source = {};
     --stats_.source_candidates;
     retired = true;

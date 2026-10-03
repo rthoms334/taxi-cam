@@ -22,8 +22,12 @@ struct Effect {
   enum class Kind { legacy_rt, enhanced_rt, other, pass_other, draw };
   Key key;
   Kind kind = Kind::other;
+  // Native draws this draw evidence stands for (append counts collapsed
+  // repeats); 0 for state effects. It occupies the struct's tail padding.
+  std::uint32_t draws = 0;
   bool operator==(const Effect&) const = default;
 };
+static_assert(sizeof(Effect) == 24, "The draw count must not grow the fixed recording storage");
 
 // CPU recording evidence only. Apply immutable recordings in actual native
 // Execute order, including every replay. Invalid recordings retain their prior
@@ -39,7 +43,8 @@ struct Recording {
   bool overflowed = false;
 
   // Repeated draw evidence collapses across independent keys until this key's
-  // next state effect. Transitions only collapse when consecutively identical.
+  // next state effect and is counted on the evidence it collapses into.
+  // Transitions only collapse when consecutively identical.
   bool append(Effect effect) noexcept;
   void invalidate() noexcept { invalid = true; }
   // Old storage is ignored, not traversed/cleared; subsequent appends overwrite.
@@ -53,6 +58,9 @@ struct Recording {
 struct State {
   Model model = Model::unknown;
   bool drawn = false;
+  // Native draws in a render-target model since the batch began or the model
+  // was last set, saturating; nonzero exactly when drawn.
+  std::uint32_t draws = 0;
 };
 
 class Tracker {
@@ -65,7 +73,7 @@ class Tracker {
   bool register_source(Key key, Model initial = Model::unknown) noexcept;
   void unregister_source(Key key) noexcept;
   void clear() noexcept;
-  // Submission-batch boundary: clear draw evidence, preserve known final states.
+  // Submission-batch boundary: clear draw evidence and counts, preserve known final states.
   void begin_batch() noexcept;
   // Stale/unregistered keys cannot affect a current generation. Invalid logs
   // invalidate every tracked state and return false; later valid absolute RT

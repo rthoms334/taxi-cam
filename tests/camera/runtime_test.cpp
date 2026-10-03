@@ -230,12 +230,46 @@ void wrong_host_public_flow() {
   require_refused();
 }
 
+// Development camera AA switch: each value reaches the observer mailboxes as
+// mapped; only '4' and '5' request the bit36 clear, always with the AA bit. A
+// wrong host queues and writes nothing, and reads no global AA or
+// frame-generation value.
+void dev_camera_aa_mailbox() {
+  require_wrong_host();
+  require(nc::scene_global_aa_mode() == -1 && nc::scene_global_frame_generation() == -1,
+          "A wrong host read the global AA mode or frame-generation byte");
+  const bool pending = nc::scene_snapshot().pair.request_pending;
+  for (const char value : {'0', '1', '2', '3', '4', '5', '6', 'x', '\0'}) {
+    const auto request = nc::dev_camera_aa_request(value);
+    require(request.clear_bit36 == (value == '4' || value == '5') && (!request.clear_bit36 || request.aa),
+            "A development value other than 4 or 5 cleared bit36, or cleared it without the AA bit");
+    require(request.aa == (value == '1' || value == '2' || value == '4' || value == '5') &&
+                request.continuous == (value == '2' || value == '3' || value == '4'),
+            "A development camera AA value was mismapped");
+    nc::request_scene_view_aa(request.aa);
+    nc::request_scene_clear_bit36(request.clear_bit36);
+    nc::request_scene_continuous(request.continuous);
+    const auto snapshot = nc::scene_snapshot();
+    require_inert(snapshot);
+    require(snapshot.aa_requested == request.aa && snapshot.bit36_clear_requested == request.clear_bit36 &&
+                snapshot.continuous_requested == request.continuous,
+            "A development camera AA request did not reach the snapshot");
+    require(snapshot.pair.request_pending == pending && !snapshot.bit36_cleared_pending && !snapshot.bit36_clears && !snapshot.bit36_sets &&
+                !snapshot.bit36_restores && !snapshot.bit36_restore_failures,
+            "A development camera AA request queued or wrote engine work on a wrong host");
+  }
+  nc::request_scene_view_aa(false);
+  nc::request_scene_clear_bit36(false);
+  nc::request_scene_continuous(false);
+}
+
 }  // namespace
 
 int main() {
   try {
     profile_transition_mailbox();
     wrong_host_public_flow();
+    dev_camera_aa_mailbox();
     std::printf("PASS: %u production runtime wrong-host checks; no hook, owned entries, pose calls or engine updates.\n", checks);
     return 0;
   } catch (const std::exception& error) {

@@ -146,7 +146,7 @@ The selected slot becomes occupied according to that predicate only later, when 
 
 The flag copied from `D+44` has these exact visible effects in setup:
 
-- At 17642882, setup calls `66802672(P, &temporary)` after constructing a two-qword argument from image slots 176053056 and 176053064, OR-ing the first qword with `0x1000200020`.
+- At 17642882, setup calls `66802672(P, &temporary)` after constructing a two-qword argument from image slots 176053056 and 176053064, OR-ing the first qword with `0x1000200020` (bits 5, 21 and 36; the [architecture notes](architecture.md) describe bit 36's effect on the per-view render driver).
 - At 17642887, it ANDs qword `P+48` with `0xffffffffbffef2ff`, clearing bits selected by `0x40010d00`.
 - If **byte `E+72 != 0`**, instructions 17642901..17642919 copy sixteen bytes from static RVA **130434112** and call `66802672(P, &copy)` again.
 

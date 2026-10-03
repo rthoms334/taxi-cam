@@ -1135,6 +1135,173 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   for (std::size_t i = 0; i < unused_count; ++i)
     require(manager->discard_frame(unused[i].token), "Discard unused rate-check frame");
   require(manager->poll_completed_frames(unused.data(), unused.size()) == 0, "Rate-check frame remained unretired");
+  // Capture phase: the simulator renders a camera view in two submissions,
+  // one draw (deferred lighting) and then several (sky, clouds, lights).
+  // Off, the tail copies the first; held, it copies the second. The observed
+  // lists stay alive until the boundary observation is removed.
+  Commands deferred, forward, rt_exit;
+  {
+    deferred.initialize(device.p);
+    forward.initialize(device.p);
+    rt_exit.initialize(device.p);
+    constexpr std::uint64_t DeferredGeneration = Generation + 30, ForwardGeneration = Generation + 31, ExitGeneration = Generation + 32;
+    require(manager->register_command_list(deferred.list.p, DeviceKey, DeferredGeneration) &&
+                manager->register_command_list(forward.list.p, DeviceKey, ForwardGeneration) &&
+                manager->register_command_list(rt_exit.list.p, DeviceKey, ExitGeneration),
+            "Register capture-phase lists");
+    require(Boundary::register_list(deferred.list.p, DeferredGeneration, callbacks).ready &&
+                Boundary::register_list(forward.list.p, ForwardGeneration, callbacks).ready &&
+                Boundary::register_list(rt_exit.list.p, ExitGeneration, callbacks).ready,
+            "Observe capture-phase lists");
+    Ref<ID3D12GraphicsCommandList7> deferred7, forward7;
+    check(deferred.list->QueryInterface(IID_PPV_ARGS(deferred7.put())), "Get deferred interface7");
+    check(forward.list->QueryInterface(IID_PPV_ARGS(forward7.put())), "Get forward interface7");
+    for (unsigned feed = 0; feed < 2; ++feed) {
+      ID3D12Resource* target = sources[feed].p;
+      const float first_color[]{1, 0, 1, 1};
+      manager->stage_source_draw(deferred.list.p, DeferredGeneration, 1, &target, &ids[feed]);
+      draw.record(deferred7.p, handles[feed], colors[0][feed], false, width, heights[feed]);
+      manager->stage_source_draw(forward.list.p, ForwardGeneration, 1, &target, &ids[feed]);
+      draw.record(forward7.p, handles[feed], first_color, false, width, heights[feed]);
+      manager->stage_source_draw(forward.list.p, ForwardGeneration, 1, &target, &ids[feed]);
+      draw.record(forward7.p, handles[feed], colors[1][feed], false, width, heights[feed]);
+    }
+    // A scoped target report moves both sources out of their RT model.
+    for (unsigned feed = 0; feed < 2; ++feed) {
+      ID3D12Resource* target = sources[feed].p;
+      manager->invalidate_source_targets(rt_exit.list.p, ExitGeneration, 1, &target, &ids[feed]);
+    }
+    check(deferred.list->Close(), "Close deferred-lighting recording");
+    check(forward.list->Close(), "Close forward recording");
+    check(rt_exit.list->Close(), "Close render-target exit recording");
+    ID3D12CommandList* deferred_list = deferred.list.p;
+    ID3D12CommandList* forward_list = forward.list.p;
+    ID3D12CommandList* exit_list = rt_exit.list.p;
+    ID3D12CommandList* both[]{deferred_list, forward_list};
+    using taxi_camera::capture_phase::Kind;
+    using taxi_camera::source_state::Effect;
+    using taxi_camera::source_state::Model;
+    const auto source_key = [&](unsigned feed) {
+      return taxi_camera::source_state::Key{reinterpret_cast<std::uint64_t>(sources[feed].p), ids[feed]};
+    };
+    const auto rt_model = manager->device(DeviceKey)->source_states.state(source_key(0)).model;
+    require(rt_model == Model::legacy_rt || rt_model == Model::enhanced_rt, "Capture-phase sources are not render targets");
+    const auto scenario = [&](bool hold, std::initializer_list<std::pair<UINT, ID3D12CommandList* const*>> batches, unsigned word,
+                              Kind kind, auto between, const char* label) {
+      manager->set_capture_phase(hold);
+      Sleep(70);  // Past the 20 Hz interval.
+      const auto before = manager->statistics();
+      std::size_t index = 0;
+      for (const auto& [count, lists] : batches) {
+        producer.queue->ExecuteCommandLists(count, lists);
+        if (!index && hold && kind != Kind::after_multi)
+          require(std::strcmp(manager->statistics().tail_status, "awaiting_complete_render") == 0, label);
+        between(index++);
+      }
+      drain(producer.queue.p);
+      const auto after = manager->statistics();
+      for (unsigned feed = 0; feed < 2; ++feed) {
+        const auto& was = before.phases[feed];
+        const auto& now = after.phases[feed];
+        require(now.captures[static_cast<std::size_t>(kind)] == was.captures[static_cast<std::size_t>(kind)] + 1, label);
+        require(after.tail_captures == before.tail_captures + 2, label);
+        require(now.batches == was.batches + batches.size(), label);
+      }
+      std::array<Manager::Frame, 2> frames{};
+      std::size_t frame_count = 0;
+      wait([&] {
+        frame_count += manager->poll_completed_frames(frames.data() + frame_count, frames.size() - frame_count);
+        return frame_count == 2;
+      });
+      check(consumer.allocator->Reset(), "Reset phase consumer allocator");
+      check(consumer.list->Reset(consumer.allocator.p, nullptr), "Reset phase consumer list");
+      for (const auto& result : frames) {
+        const auto feed = result.match.feed;
+        require(feed < 2, "Bad phase feed identity");
+        barrier(consumer.list.p, result.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+        from.pResource = result.resource;
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        to.pResource = readbacks[feed].p;
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint = footprints[feed];
+        consumer.list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        barrier(consumer.list.p, result.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+      }
+      check(consumer.list->Close(), "Close phase consumer");
+      const auto consume = manager->begin_private_submission(DeviceKey, consumer.queue.p);
+      require(consume.receipt != 0, "Begin phase consumer");
+      ID3D12CommandList* read = consumer.list.p;
+      consumer.queue->ExecuteCommandLists(1, &read);
+      require(manager->end_private_submission(consume.receipt), "Submit phase consumer");
+      for (const auto& result : frames)
+        require(manager->finish_consumption(result.token, consume.fence, consume.value), "Finish phase consumer lease");
+      drain(consumer.queue.p);
+      for (unsigned feed = 0; feed < 2; ++feed) {
+        void* mapped = nullptr;
+        const D3D12_RANGE range{0, static_cast<SIZE_T>(readback_bytes[feed])};
+        check(readbacks[feed]->Map(0, &range, &mapped), "Map phase pixels");
+        std::uint32_t pixel = 0;
+        std::memcpy(&pixel,
+                    static_cast<const std::uint8_t*>(mapped) + footprints[feed].Offset +
+                        UINT64(heights[feed] / 2) * footprints[feed].Footprint.RowPitch + width / 2 * 4,
+                    4);
+        require(pixel == words[word][feed], label);
+        const D3D12_RANGE empty{0, 0};
+        readbacks[feed]->Unmap(0, &empty);
+      }
+    };
+    const auto none = [](std::size_t) {};
+    const auto retire = [&](std::size_t batch) {
+      if (batch)
+        return;
+      const std::lock_guard lock(manager->mutex_);
+      manager->retire_sources(*manager->device(DeviceKey), 0);
+    };
+    // The batch after the hold is due but not recorded (a rate drop leaves it
+    // inside the interval); the next deferred batch must not count as after_hold.
+    const auto rate_drop = [&](std::size_t batch) { manager->set_source_rate(batch ? 20 : 1); };
+    // A batch whose tail sees the sources out of their RT model, then RT again
+    // without a tail, as a later batch's transition would leave them.
+    const auto leave_rt = [&](std::size_t batch) {
+      if (batch)
+        return;
+      producer.queue->ExecuteCommandLists(1, &exit_list);
+      const std::lock_guard lock(manager->mutex_);
+      auto& states = manager->device(DeviceKey)->source_states;
+      require(states.state(source_key(0)).model == Model::other && states.state(source_key(1)).model == Model::other,
+              "The scoped target report did not leave the RT model");
+      taxi_camera::source_state::Recording entry;
+      for (unsigned feed = 0; feed < 2; ++feed)
+        require(entry.append({source_key(feed), rt_model == Model::legacy_rt ? Effect::Kind::legacy_rt : Effect::Kind::enhanced_rt}),
+                "Record RT re-entry");
+      require(states.apply(entry), "Apply RT re-entry");
+    };
+    // A model lost without a tail and restored by the stall-recovery rearm.
+    const auto rearm = [&](std::size_t batch) {
+      if (batch)
+        return;
+      {
+        const std::lock_guard lock(manager->mutex_);
+        manager->device(DeviceKey)->source_states.retire_live_models();
+      }
+      require(manager->rearm_source_states() >= 2, "Rearm did not restore both sources");
+    };
+    scenario(false, {{1, &deferred_list}, {1, &forward_list}}, 0, Kind::after_one, none, "Off: the tail copied the deferred-only batch");
+    scenario(true, {{1, &deferred_list}, {1, &forward_list}}, 1, Kind::after_hold, none, "Held: the tail did not copy the forward batch");
+    scenario(true, {{2, both}}, 1, Kind::after_multi, none, "A complete one-submission render was held");
+    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::after_hold, none, "A single-writer view stalled");
+    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, retire, "A forgotten hold held again");
+    scenario(true, {{1, &deferred_list}, {1, &forward_list}, {1, &deferred_list}}, 0, Kind::forced, rate_drop,
+             "An unrecorded capture kept its hold for the next render's deferred batch");
+    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, leave_rt,
+             "A hold survived its source leaving the RT state");
+    scenario(true, {{1, &deferred_list}, {1, &deferred_list}}, 0, Kind::forced, rearm, "A hold survived a source-state rearm");
+    for (unsigned feed = 0; feed < 2; ++feed)
+      require(manager->statistics().phases[feed].held == 6 && manager->statistics().phases[feed].max_draws >= 3, "Held/max counts");
+    manager->set_capture_phase(false);
+  }
+  const auto phase_checked_captures = manager->statistics().tail_captures;
   // Unknown actual recordings must destroy global model proof, even if empty.
   const auto wipes_before_unknown = manager->statistics().wipes;
   check(unknown.list->Close(), "Close unknown list");
@@ -1143,14 +1310,14 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   Sleep(70);
   producer.queue->ExecuteCommandLists(1, &original);
   drain(producer.queue.p);
-  require(manager->statistics().tail_captures == rate_checked_captures, "Unregistered submission left stale state proof usable");
+  require(manager->statistics().tail_captures == phase_checked_captures, "Unregistered submission left stale state proof usable");
   require(manager->statistics().wipes > wipes_before_unknown &&
               manager->statistics().wipe_counts[static_cast<std::size_t>(Manager::WipeSite::unknown_lists_no_owner)] > 0,
           "An unregistered list's wipe was not attributed to unknown_lists_no_owner");
   require(Boundary::remove().protection_restored, "Remove boundary observation");
   producer.queue->ExecuteCommandLists(1, &original);
   drain(producer.queue.p);
-  require(manager->statistics().tail_captures == rate_checked_captures &&
+  require(manager->statistics().tail_captures == phase_checked_captures &&
               std::strcmp(manager->statistics().tail_status, "observer_disabled") == 0 &&
               manager->statistics().last_wipe_site == Manager::WipeSite::observer_disabled,
           "Disabled observer left prior immutable recording eligible");

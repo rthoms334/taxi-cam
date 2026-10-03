@@ -25,18 +25,25 @@ bool Recording::append(Effect effect) noexcept {
     invalidate();
     return false;
   }
-  if (count && effects[count - 1] == effect)
-    return true;
   if (effect.kind == Effect::Kind::draw) {
     // Effects for other generation-qualified resources are independent. A draw
-    // can repeat its last draw evidence until this same key changes state.
+    // can repeat its last draw evidence until this same key changes state; the
+    // repeat is counted there.
     for (std::size_t i = count; i != 0; --i) {
-      if (effects[i - 1].key != effect.key)
+      auto& earlier = effects[i - 1];
+      if (earlier.key != effect.key)
         continue;
-      if (effects[i - 1].kind == Effect::Kind::draw)
+      if (earlier.kind == Effect::Kind::draw) {
+        earlier.draws += earlier.draws != UINT32_MAX;
         return true;
+      }
       break;
     }
+    effect.draws = 1;
+  } else {
+    effect.draws = 0;
+    if (count && effects[count - 1] == effect)
+      return true;
   }
   if (count == effects.size()) {
     overflowed = true;
@@ -83,8 +90,10 @@ void Tracker::clear() noexcept {
 }
 
 void Tracker::begin_batch() noexcept {
-  for (auto& slot : sources_)
+  for (auto& slot : sources_) {
     slot.state.drawn = false;
+    slot.state.draws = 0;
+  }
 }
 
 bool Tracker::apply(const Recording& recording) noexcept {
@@ -118,9 +127,13 @@ bool Tracker::apply(const Recording& recording) noexcept {
           // Pass-state reports retire the live model; the bitmap's RT history remains.
           slot.state = {Model::other, false};
           break;
-        case Effect::Kind::draw:
+        case Effect::Kind::draw: {
           slot.state.drawn = render_target_model(slot.state.model);
+          // Evidence written without append (draws 0) stands for one draw.
+          const std::uint32_t draws = effect.draws ? effect.draws : 1;
+          slot.state.draws = !slot.state.drawn ? 0 : draws > UINT32_MAX - slot.state.draws ? UINT32_MAX : slot.state.draws + draws;
           break;
+        }
       }
       break;
     }

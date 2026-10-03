@@ -351,6 +351,7 @@ if ($Validate) {
         @{Name='pfd-detector'; Sources=@('tests/graphics/pfd_target_detector_test.cpp')},
         @{Name='render-target-shapes'; Sources=@('tests/graphics/render_target_shapes_test.cpp')},
         @{Name='cloud-merge'; Sources=@('tests/graphics/cloud_merge_test.cpp')},
+        @{Name='capture-phase'; Sources=@('tests/graphics/capture_phase_test.cpp')},
         @{Name='display-exposure'; Sources=@('tests/graphics/display_exposure_test.cpp')},
         @{Name='ground-speed-display'; Sources=@('tests/graphics/ground_speed_display_test.cpp')},
         @{Name='calibration'; Sources=@('tests/graphics/calibration_test.cpp')},
