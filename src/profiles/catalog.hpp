@@ -71,23 +71,26 @@ inline double display_full_light(const DisplayLight& d, double ambient) noexcept
     return 0;
   return d.emissive * (d.gain_low + (d.gain_high - d.gain_low) * display_ambient_position(d, ambient));
 }
-// The main view's display-referred light before its tone curve (scene light x
-// its exposure) that a full camera code may stand for when the display cannot
-// give the scene light back. The night PMDG 777 (full code 22.3, exposure
-// 0.0333: 0.74) stays above it, so its pass-through is unchanged.
-constexpr double DisplayWhite = 0.5;
-// The scene light a full camera code stands for: the display's full-code light
-// while that is enough, otherwise (daylight: 1637 x 0.000111 = 0.18) the
-// scene light the main view shows at DisplayWhite, so the camera image is
-// compressed into the display's range instead of clipping. exposure: the
-// simulator's main-view exposure (y = scene x exposure), 0 when unknown.
-inline double display_code_light(double full_light, double exposure) noexcept {
+// How bright a full code looks in the main view, before its tone curve (full
+// light x exposure; y = scene light x exposure), below which the camera image
+// stops passing the scene light through. The night PMDG 777 (full code 22.3,
+// exposure 0.0333: 0.74) and dusk (1125 x 0.00146: 1.6) stay above it;
+// daylight (1637 x 0.000111: 0.18) is far below, so everything the main view
+// shows brighter than 0.18 would clip. The gap between the two is hysteresis.
+constexpr double DisplayPassOff = 0.45, DisplayPassOn = 0.55;
+// Whether the camera image can be the scene light for the display to give
+// back. Otherwise the main view's tone curve makes the image, as on other
+// aircraft: the display then shows it at most this dim, where the main view's
+// exposure of the display is close to linear. exposure: the simulator's
+// main-view exposure, 0 when unknown; then only the night display (the gain at
+// its low clamp) passes through. was: the previous result.
+inline bool display_pass_through(const DisplayLight& d, double ambient, double exposure, bool was) noexcept {
+  const double full_light = display_full_light(d, ambient);
   if (!(full_light > 0))
-    return 0;
+    return false;
   if (!(exposure > 0) || !(exposure < 1e6))
-    return full_light;
-  const double white = DisplayWhite / exposure;
-  return white > full_light ? white : full_light;
+    return display_ambient_position(d, ambient) == 0;
+  return full_light * exposure >= (was ? DisplayPassOff : DisplayPassOn);
 }
 inline double display_floor(const DisplayLight& d, double ambient) noexcept {
   if (ambient != ambient || !(d.lux_high > d.lux_low))

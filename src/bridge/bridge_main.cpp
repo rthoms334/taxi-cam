@@ -1046,13 +1046,13 @@ DWORD run_impl() {
     // On an aircraft whose display is decoded, the camera image is written as
     // scene light divided by the display's own full-code light, so the display
     // gives the scene light back and the main view exposes, tonemaps and blooms
-    // it once. Camera texels hold scene light / 16. By day the display is too
-    // dim for that (display_code_light), so the image is compressed into its
-    // range with the latest main-view exposure, held up to ten seconds.
-    const double display_light =
-        light.valid ? profiles::display_code_light(profiles::display_full_light(drawing->display_light, light.ambient),
-                                                   tone.screen_exposure(now))
-                    : 0.0;
+    // it once. Camera texels hold scene light / 16. By day the display is far
+    // too dim for that (display_pass_through, with the latest main-view
+    // exposure held up to ten seconds), so the scale is 0 and the main view's
+    // tone curve, or Taxi Cam's fallback exposure, makes the image instead.
+    static bool pass_through = false;
+    pass_through = light.valid && profiles::display_pass_through(drawing->display_light, light.ambient, tone.screen_exposure(now), pass_through);
+    const double display_light = pass_through ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
     const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
     scene_runtime::set_screen_scale(
         key, display_scale, light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);
