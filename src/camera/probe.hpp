@@ -130,6 +130,8 @@ struct ProbeSnapshot {
   // bit31 writes that set or cleared it on an owned view, refused preparations
   // and the last refusal ("" when none).
   bool aa_requested = false;
+  // Development: every feed rendered on every update (request_scene_continuous).
+  bool continuous_requested = false;
   std::uint64_t aa_sets = 0, aa_clears = 0, aa_refusals = 0;
   const char* aa_error = "";
   // Consecutive pulses and cumulative holds where the diffuse texture had no
@@ -195,6 +197,11 @@ void request_scene_main_far(bool follow) noexcept;
 // per-view AA bit (P+48 bit31) set on Taxi Cam's views, false clears it (the
 // default). Untested live.
 void request_scene_view_aa(bool enabled) noexcept;
+// Development switch, atomic only. True keeps every feed's gate open on every
+// observer update (RenderSchedule continuous) instead of rate-paced pulses, so
+// the engine draws each view on consecutive frames as it does the main view.
+// Suspension still closes them. Costs a full view render per feed per frame.
+void request_scene_continuous(bool continuous) noexcept;
 // Diagnostics only, on the caller's thread: the simulator's global AA mode
 // read from the image (read_global_aa_mode), or -1 before the observer is
 // installed, on another image layout or when the read is refused.

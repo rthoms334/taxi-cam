@@ -147,6 +147,8 @@ struct Runtime {
   // Camera AA development switch (request_scene_view_aa); false clears bit31
   // as before. The counters and last refusal are observer-thread only.
   std::atomic<bool> view_aa{false};
+  // Development: every feed's gate stays open on every update (request_scene_continuous).
+  std::atomic<bool> continuous{false};
   std::uint64_t aa_sets = 0, aa_clears = 0, aa_refusals = 0;
   const char* aa_error = "";
   // Consecutive activation pulses refused because the diffuse texture had no
@@ -2057,7 +2059,8 @@ void observer(void* manager) noexcept {
       }
     }
     auto next_schedule = runtime.schedule;
-    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
+    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0,
+                            runtime.continuous.load(std::memory_order_acquire));
     std::array<bool, kMaxCameraFeeds> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
@@ -2487,7 +2490,8 @@ void observer(void* manager) noexcept {
           // The early tick only decides whether validation is necessary. Anchor
           // the committed pulse near its call after potentially slow reads.
           next_schedule = runtime.schedule;
-          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
+          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0,
+                                  runtime.continuous.load(std::memory_order_acquire));
           if (new_pair) {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
@@ -3025,6 +3029,10 @@ void request_scene_view_aa(bool enabled) noexcept {
   state().view_aa.store(enabled, std::memory_order_release);
 }
 
+void request_scene_continuous(bool continuous) noexcept {
+  state().continuous.store(continuous, std::memory_order_release);
+}
+
 std::int32_t scene_global_aa_mode() noexcept {
   auto& runtime = state();
   // The image, base and contract are written once, before hooked is released.
@@ -3085,6 +3093,7 @@ ProbeSnapshot scene_snapshot() {
   result.requested_feeds = (settings >> 8) & 0xffu;
   result.requested_nose_priority = ((settings >> 16) & 1u) != 0;
   result.aa_requested = runtime.view_aa.load(std::memory_order_acquire);
+  result.continuous_requested = runtime.continuous.load(std::memory_order_acquire);
   result.mounts = runtime.requested_mounts;
   return result;
 }

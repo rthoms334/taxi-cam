@@ -32,7 +32,10 @@ ViewAaResult set_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
   if (!view.complete || !view.ready || view.mode != 2 || view.status != engine_camera::OwnedViewStatus::ready || view.read_failures ||
       (view.error && *view.error) || !view.view_address || (view.view_address & 7) || view.view_address > UINTPTR_MAX - 64)
     return fail("aa_invalid_owned_view");
-  if (!(view.flags[0] & 1u))
+  // An open gate only refuses a write. A view kept rendering every update
+  // (continuous development schedule) already carrying the requested bit is
+  // confirmed by the same rereads below, without writing.
+  if (!(view.flags[0] & 1u) && enabled != ((view.flags[0] & kViewAaFlag) != 0))
     return fail("aa_gate_open");
   const auto field = view.view_address + 48;
   if (!writable_flags(field))

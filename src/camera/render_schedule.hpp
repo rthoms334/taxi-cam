@@ -16,7 +16,9 @@ class RenderSchedule {
   // Parked floors go below the moving minimum; see kMinimumParkedCameraRate.
   // nose_priority turns every other turn of feeds 1 and 2 into an idle slot
   // (NosePriorityPolicy); feed 0 keeps its cadence.
-  void configure(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept {
+  // continuous (development) opens every feed on every update while not
+  // suspended: the engine's temporal AA needs the view on consecutive frames.
+  void configure(unsigned rate, unsigned feeds = 2, bool nose_priority = false, bool continuous = false) noexcept {
     rate_ = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate);
     feeds_ = std::clamp(feeds, 1u, kMaxCameraFeeds);
     if (next_feed_ >= feeds_)
@@ -24,6 +26,7 @@ class RenderSchedule {
     if (!nose_priority)
       skip_turn_ = {};
     nose_priority_ = nose_priority;
+    continuous_ = continuous;
   }
 
   // Only reset after the previous owned entries have been removed. Configuration
@@ -59,6 +62,14 @@ class RenderSchedule {
     }
     have_time_ = true;
     previous_time_ = now_ms;
+    if (continuous_ && !suspended) {
+      for (unsigned i = 0; i < feeds_; ++i) {
+        active_[i] = seen_[i] = true;
+        last_[i] = now_ms;
+      }
+      last_any_ = now_ms;
+      return active_;
+    }
     // Even after a long stall, close the last pulse for an entire observer
     // interval. Never leave a gate continuously on while trying to catch up.
     if (was_active || suspended)
@@ -94,12 +105,14 @@ class RenderSchedule {
   unsigned rate() const noexcept { return rate_; }
   unsigned feeds() const noexcept { return feeds_; }
   bool nose_priority() const noexcept { return nose_priority_; }
+  bool continuous() const noexcept { return continuous_; }
 
  private:
   unsigned rate_ = kDefaultCameraRate;
   unsigned feeds_ = 2;
   unsigned next_feed_ = 0;
   bool nose_priority_ = false;
+  bool continuous_ = false;
   bool skipped_ = false;
   std::array<bool, kMaxCameraFeeds> skip_turn_{};
   bool have_time_ = false;

@@ -468,6 +468,38 @@ void set_refusals() {
           "AA set accepted an override that changed during the update");
   require(changed.view_memory[48] & 1, "AA set failure opened the gate");
 }
+// A view kept open every update (continuous schedule) that already carries the
+// requested bit is confirmed without a write; a change still needs the gate closed.
+void open_gate_unchanged() {
+  const auto layout = nc::observed_store_layout();
+  for (const bool enabled : {true, false}) {
+    Fixture fixture;
+    fixture.view.flags[0] &= ~1ull;
+    if (enabled)
+      fixture.view.flags[0] |= nc::kViewAaFlag;
+    else
+      fixture.view.flags[0] &= ~nc::kViewAaFlag;
+    fixture.save();
+    const auto kept = nc::set_owned_view_aa(fixture.view, fixture.image, layout, enabled);
+    require(kept.complete && !kept.write_attempted && !*kept.error && fixture.image.reads == 4,
+            "An open gate already in the requested AA state was refused or rewritten");
+    fixture.unchanged();
+    const auto changed = nc::set_owned_view_aa(fixture.view, fixture.image, layout, !enabled);
+    require(!changed.complete && !changed.write_attempted && !std::strcmp(changed.error, "aa_gate_open") && fixture.image.reads == 4,
+            "An open gate accepted an AA change");
+    fixture.unchanged();
+  }
+  // Already set under a clearing global override still refuses an AA request.
+  Fixture overridden;
+  overridden.view.flags[0] &= ~1ull;
+  overridden.view.flags[0] |= nc::kViewAaFlag;
+  overridden.save();
+  overridden.image.overrides = {nc::kViewAaFlag, 0};
+  const auto refused = nc::set_owned_view_aa(overridden.view, overridden.image, layout, true);
+  require(!refused.complete && !refused.write_attempted && !std::strcmp(refused.error, "aa_cleared_by_global_override"),
+          "An open gate accepted AA under a clearing global override");
+  overridden.unchanged();
+}
 void global_aa_mode() {
   Image image;
   require(nc::read_global_aa_mode(image, nc::observed_store_layout()) == 7 && image.reads == 1, "AA mode was not read");
@@ -491,6 +523,7 @@ int main() {
     set_direction(0);
     set_direction(4096 - 56);
     set_refusals();
+    open_gate_unchanged();
     global_aa_mode();
     std::printf("View AA guard tests passed: %u checks\n", checks);
     return 0;

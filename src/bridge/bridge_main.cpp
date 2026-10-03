@@ -96,9 +96,11 @@ struct DevShader {
   }
 };
 // Development A/B switch: %LOCALAPPDATA%\Taxi Cam\dev\camera_aa.txt starting
-// with '1' leaves the simulator's AA on for Taxi Cam's camera views; '0', any
-// other content or no file keeps today's clear. Checked once a second; the
-// observer applies it in its closed-gate AA preparation before each pulse.
+// with '1' leaves the simulator's AA on for Taxi Cam's camera views; '2' also
+// keeps every camera rendering on every frame (continuous gates), as the main
+// view's temporal AA needs; '3' renders every frame with the AA still cleared.
+// '0', any other content or no file keeps today's paced, cleared views.
+// Checked once a second; the observer applies it in its AA preparation.
 // Byte-order marks, NULs and whitespace before the digit are skipped, so a
 // UTF-16 file written by Windows PowerShell also works.
 struct DevCameraAa {
@@ -112,7 +114,7 @@ struct DevCameraAa {
     if (!n || n >= 32700)
       return;
     const std::wstring path = std::wstring(base) + L"\\Taxi Cam\\dev\\camera_aa.txt";
-    bool enabled = false;
+    char mode = '0';
     HANDLE file =
         CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (file != INVALID_HANDLE_VALUE) {
@@ -123,13 +125,14 @@ struct DevCameraAa {
           const auto c = text[i];
           if (c == 0 || c == 0xef || c == 0xbb || c == 0xbf || c == 0xff || c == 0xfe || c == ' ' || c == '\t' || c == '\r' || c == '\n')
             continue;
-          enabled = c == '1';
+          mode = static_cast<char>(c);
           break;
         }
       }
       CloseHandle(file);
     }
-    native_camera::request_scene_view_aa(enabled);
+    native_camera::request_scene_view_aa(mode == '1' || mode == '2');
+    native_camera::request_scene_continuous(mode == '2' || mode == '3');
   }
 };
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
@@ -1516,11 +1519,13 @@ DWORD run_impl() {
       win::fog_volumes(fog_detail + std::strlen(fog_detail), sizeof(fog_detail) - std::strlen(fog_detail));
       log_status(status, fog_detail);
       // Camera AA development switch (dev\camera_aa.txt): the requested state,
-      // the simulator's global AA mode (-1: not read on this image), bit31
-      // writes that set or cleared it on the views, refusals and the last one.
-      char aa_detail[224];
-      std::snprintf(aa_detail, sizeof(aa_detail), "Camera AA: requested=%d mode=%d sets=%llu clears=%llu refused=%llu error=%s",
-                    scene.aa_requested ? 1 : 0, static_cast<int>(native_camera::scene_global_aa_mode()),
+      // continuous gates, the simulator's global AA mode (-1: not read on this
+      // image), bit31 writes that set or cleared it on the views, refusals and
+      // the last one.
+      char aa_detail[240];
+      std::snprintf(aa_detail, sizeof(aa_detail),
+                    "Camera AA: requested=%d continuous=%d mode=%d sets=%llu clears=%llu refused=%llu error=%s", scene.aa_requested ? 1 : 0,
+                    scene.continuous_requested ? 1 : 0, static_cast<int>(native_camera::scene_global_aa_mode()),
                     static_cast<unsigned long long>(scene.aa_sets), static_cast<unsigned long long>(scene.aa_clears),
                     static_cast<unsigned long long>(scene.aa_refusals), scene.aa_error && *scene.aa_error ? scene.aa_error : "none");
       log_status(status, aa_detail);

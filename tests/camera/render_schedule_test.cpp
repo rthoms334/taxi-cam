@@ -551,6 +551,24 @@ void adaptive_rate_switch_contract() {
   require(schedule.tick(1300)[0], "Unparked schedule did not resume at the saved rate");
   require(schedule.rate() == 10, "Saved rate not restored after unparking");
 }
+// Development continuous mode: every configured feed on every tick, closed
+// while suspended, and back to paced pulses (closing first) when turned off.
+void continuous_schedule() {
+  using Gates = std::array<bool, 3>;
+  taxi_camera::native_camera::RenderSchedule schedule;
+  schedule.configure(2, 3, false, true);
+  require(schedule.continuous(), "Continuous mode was not recorded");
+  for (std::uint64_t now = 1000; now < 1100; now += 16)
+    require(schedule.tick(now) == Gates{true, true, true}, "Continuous mode closed a feed between updates");
+  require(schedule.tick(1100, true) == Gates{}, "Suspension left continuous gates open");
+  require(schedule.tick(1116) == Gates{true, true, true}, "Continuous mode did not reopen after suspension");
+  schedule.configure(2, 2, false, true);
+  require(schedule.tick(1132) == Gates{true, true, false}, "Continuous mode opened an unconfigured feed");
+  schedule.configure(2, 2, false, false);
+  require(schedule.tick(1148) == Gates{}, "Leaving continuous mode did not close the open gates");
+  require(schedule.tick(1164) == Gates{} && schedule.tick(1600) == Gates{}, "Leaving continuous mode burst ahead of the per-feed interval");
+  require(schedule.tick(1648)[0] || schedule.tick(1664)[1], "Paced pulses did not resume after continuous mode");
+}
 }  // namespace
 
 int main() {
@@ -571,6 +589,7 @@ int main() {
     nose_priority_schedule();
     nose_priority_policy();
     adaptive_rate_switch_contract();
+    continuous_schedule();
     std::printf(
         "PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off intervals, no catch-up bursts, "
         "parked floor, nose priority and rate caps.\n",
