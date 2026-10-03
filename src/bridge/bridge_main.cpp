@@ -944,6 +944,7 @@ DWORD run_impl() {
       nose_priority = desired_priority;
       native_camera::request_scene_rate(rate, feeds, nose_priority);
       scene_runtime::manager().set_source_rate(rate);
+      scene_runtime::set_waiting_stale_ms(win::waiting_stale_ms(rate, nose_priority));
     }
     // Taxiing, the views keep their own 1000 m far; from the take-off roll on
     // they draw as far as the main view so the ground stays visible in flight.

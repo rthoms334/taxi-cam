@@ -55,7 +55,7 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 
    On the PMDG 777, use the glareshield display select panel: select **L INBD**, **R INBD** or **LWR CTR**, then press **CAM** (labelled INOP). That display shows the cameras until you press **CAM** again with the same display selected. PMDG's data broadcast setting is not needed. The keyboard shortcuts add displays manually. If the lower DU shows the cameras on the wrong screen, pick its texture under **LOWER DU TEXTURE** in **PFD routing**; its automatic choice is not yet verified.
 
-Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the cameras. The page also returns while the camera image is missing or more than a second old. The text uses the ground-speed colour on the Airbus aircraft and is white on the PMDG 777.
+Each display first shows a black **PLEASE WAIT** page for 750 ms, and then the cameras. The page also returns while the camera image is missing or stale: more than a second old, or more than six camera intervals at a low camera rate (3 s at the 2 Hz parked rate). The text uses the ground-speed colour on the Airbus aircraft and is white on the PMDG 777.
 
 The cameras stay on at any speed, including in flight, and Taxi Cam never turns the TAXI buttons off by itself. With **Camera views → Camera weather** on (the default), the camera views show the current clouds and overcast light and draw as far as the main view at every speed. With it off they draw up to 1,000 m away while taxiing and show a clear sky; above **60 knots** they still draw as far as the main view, so the ground stays visible after take-off. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 

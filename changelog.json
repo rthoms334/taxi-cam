@@ -9,7 +9,8 @@
         "New: Display > Match main view lighting (on by default) lights the camera images like the main view, day and night. Turn it off to use Taxi Cam's exposure and night boost controls.",
         "MSFS no longer closes while loading a flight when it runs under a graphics debugger such as PIX with Taxi Cam installed.",
         "At night the camera views no longer hide distant lights behind fog that is not there. A new camera view started with its haze fully opaque and cleared it only very slowly, so lights a few hundred metres away hardly showed; with Match main view lighting on, each camera's haze now starts clear like the main view's and then follows the real weather.",
-        "PMDG 777: the navigation display is found automatically again after a flight loads. A short-lived texture during loading could leave the display texture parked as the lower display, so cameras only appeared after pressing Detect."
+        "PMDG 777: the navigation display is found automatically again after a flight loads. A short-lived texture during loading could leave the display texture parked as the lower display, so cameras only appeared after pressing Detect.",
+        "The PLEASE WAIT page no longer flashes up at random while parked. At the low parked camera rate one skipped camera frame made the picture count as stale after a second; the page now waits for several missed camera frames in a row (3 s while parked)."
       ]
     },
     {

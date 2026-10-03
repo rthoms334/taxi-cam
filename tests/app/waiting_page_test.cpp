@@ -6,6 +6,16 @@ using taxi_camera::profiles::WaitingPageMinimumMs;
 using taxi_camera::standalone::WaitingPageTimer;
 
 int main() {
+  // The stale limit covers six feed intervals and never drops under a second.
+  using taxi_camera::profiles::WaitingPageStaleMs;
+  using taxi_camera::standalone::waiting_stale_ms;
+  static_assert(waiting_stale_ms(2, false) == 3000);
+  static_assert(waiting_stale_ms(2, true) == 6000);
+  static_assert(waiting_stale_ms(5, true) == 2400);
+  static_assert(waiting_stale_ms(10, false) == WaitingPageStaleMs);
+  static_assert(waiting_stale_ms(10, true) == 1200);
+  static_assert(waiting_stale_ms(60, false) == WaitingPageStaleMs);
+  static_assert(waiting_stale_ms(0, false) == 6000);
   WaitingPageTimer timer;
   assert(timer.observe(1000, 0) == 0);
   // Each side starts its own minimum time when it is first admitted.
