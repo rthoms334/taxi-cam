@@ -2,7 +2,7 @@
 param([switch]$RunEfsFixture)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-# Run with Windows PowerShell 5.1, as used by Setup. By default this only checks
+# Requires build/native/setup-host-test.exe from build.ps1 -Validate. By default this only checks
 # prerequisites. -RunEfsFixture still requires an existing current EFS key; it
 # never enrolls a certificate, changes machine policy, or touches simulator data.
 # Prefer a disposable Windows test account already configured for EFS.
@@ -122,18 +122,26 @@ namespace TaxiCamEfsFixture {
     }
     $report.copyToDisabledDirectory = $copy
     if ((Get-FileHash -LiteralPath $source).Hash -ne $original.sha256) { throw 'The copy experiment changed the source fixture.' }
-    . (Join-Path $repo 'installer/exe_xml.ps1')
-    $document = Read-TaxiLaunchXml $source
-    Set-TaxiStartupEntry $document (Join-Path $testRoot 'app/taxi-cam.exe') (Join-Path $testRoot 'sim/FlightSimulator2024.exe')
-    $writtenHash = ''
-    $backup = Save-TaxiLaunchXml $document $source $original.sha256 ([ref]$writtenHash)
+    # Configure startup through the companion's setup commands (test host build).
+    . (Join-Path $repo 'tests/support/installer_fixture.ps1')
+    $sim = Join-Path $testRoot 'sim'
+    New-TaxiFixtureImage (Join-Path $sim 'FlightSimulator2024.exe') $false
+    $state = Join-Path $testRoot 'state'
+    $env:TAXI_SETUP_TEST_PROCESSES = '-'
+    try {
+        $process = Start-Process -FilePath (Join-Path $repo 'build/native/setup-host-test.exe') -ArgumentList @('configure','--destination',('"' + (Join-Path $testRoot 'app') + '"'),
+            '--state',('"' + $state + '"'),'--simulator',('"' + $sim + '"'),'--startup','automatic','--exe-xml',('"' + $source + '"')) -WindowStyle Hidden -Wait -PassThru
+    } finally { Remove-Item Env:\TAXI_SETUP_TEST_PROCESSES -ErrorAction SilentlyContinue }
+    if ($process.ExitCode -ne 0) { throw 'The setup command test host failed to configure startup.' }
+    $record = Get-Content -Raw -LiteralPath (Join-Path $testRoot 'app/installation.json') | ConvertFrom-Json
+    if (-not $record.startupUpdated) { throw "The encrypted startup update fell back: $($record.startupError)" }
     $updated = Get-FixtureFile $source
-    $backupFile = Get-FixtureFile $backup
-    $report.startupUpdate = [ordered]@{ source = $updated; backup = $backupFile; writtenHash = $writtenHash }
+    $backupFile = Get-FixtureFile $record.exeXmlBackup
+    $report.startupUpdate = [ordered]@{ source = $updated; backup = $backupFile; writtenHash = $record.exeXmlInstalledHash }
     if (-not $updated.encrypted -or -not $backupFile.encrypted) { throw 'The startup update did not preserve encryption on both files.' }
     if ($backupFile.sha256 -ne $original.sha256) { throw 'The encrypted sibling backup bytes changed.' }
-    if ($updated.sha256 -ne $writtenHash) { throw 'The committed startup hash does not match.' }
-    $after = Read-TaxiLaunchXml $source
+    if ($updated.sha256 -ne $record.exeXmlInstalledHash) { throw 'The committed startup hash does not match.' }
+    [xml]$after = Get-Content -Raw -LiteralPath $source
     if ($after.SelectNodes('//Launch.Addon').Count -ne 2) { throw 'The startup update did not preserve the existing addon.' }
     if ($copy.error6000Reproduced) {
         Write-Result 'REPRODUCED' 'Windows returned actual error 6000 while copying the encrypted fixture; the sibling startup update preserved original backup bytes and encryption.'

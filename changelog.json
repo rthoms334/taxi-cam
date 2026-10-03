@@ -11,7 +11,9 @@
         "Lights: distant lights are no longer hidden behind haze that is not there.",
         "PMDG 777: the navigation display is found automatically again after a flight loads.",
         "The PLEASE WAIT page no longer flashes up at random while parked.",
-        "Removed: the Exposure, Automatic exposure and Night boost settings, now that the camera views use the main view's lighting."
+        "Removed: the Exposure, Automatic exposure and Night boost settings, now that the camera views use the main view's lighting.",
+        "Setup, the uninstaller and the update check no longer run Windows PowerShell. Some antivirus programs, including Microsoft Defender, reported the 0.9.50 installer as a threat because it started hidden PowerShell scripts. Taxi Cam now does this work itself, and Windows PowerShell is no longer required.",
+        "Setup still keeps your settings, calibration and other programs' startup entries in exe.xml, and still falls back to starting Taxi Cam from the Start menu when it cannot safely change exe.xml."
       ]
     },
     {

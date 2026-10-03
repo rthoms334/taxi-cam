@@ -40,6 +40,64 @@ inline std::wstring settings_path(const Settings& s) {
       name += wchar_t(c);
   return folder + L"\\" + name + L".ini";
 }
+// One-shot release default for saved profiles: camera_rate=10. Setup applied
+// it before the companion did; both use the same stamp on settings.ini, so a
+// user already migrated keeps every later choice.
+inline constexpr unsigned kCameraRateMigrationRevision = 2;
+// True when the path and every existing ancestor are ordinary files or
+// directories. A junction or symbolic link could lead outside the settings tree.
+inline bool settings_path_without_links(std::wstring path) {
+  for (;;) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+      return false;
+    const auto end = path.find_last_of(L"\\/");
+    if (end == std::wstring::npos || end < 3)
+      return true;
+    path.resize(end);
+  }
+}
+inline bool patch_profile_camera_rate(const std::wstring& path) {
+  // Patch a copy so calibration, unknown keys and the file's encoding remain intact.
+  const auto temporary = path + L".migrate.tmp";
+  if (!CopyFileW(path.c_str(), temporary.c_str(), FALSE))
+    return false;
+  bool ok = WritePrivateProfileStringW(L"display", L"camera_rate", L"10", temporary.c_str()) != FALSE;
+  // The profile API reports zero for a cache flush as well as for failures.
+  WritePrivateProfileStringW(nullptr, nullptr, nullptr, temporary.c_str());
+  if (ok)
+    ok = MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+  if (!ok) {
+    // CopyFile carries read-only attributes too. Remove them only from our
+    // failed temporary copy so a later retry cannot be blocked by that file.
+    SetFileAttributesW(temporary.c_str(), FILE_ATTRIBUTE_NORMAL);
+    DeleteFileW(temporary.c_str());
+  }
+  return ok;
+}
+inline void migrate_saved_camera_rate() {
+  if (!settings_override.empty())
+    return;
+  const auto directory = settings_directory();
+  if (directory.empty())
+    return;
+  const auto selection = directory + L"\\settings.ini";
+  if (GetPrivateProfileIntW(L"display", L"camera_rate_revision", 0, selection.c_str()) == kCameraRateMigrationRevision)
+    return;
+  const auto legacy = directory.substr(0, directory.find_last_of(L"\\")) + L"\\380 Taxi Cam";
+  bool ok = settings_path_without_links(selection);
+  for (const auto* profile : profiles::Catalog)
+    for (const auto& folder : {directory, legacy}) {
+      const auto path = folder + L"\\profiles\\" + std::wstring(profile->key.begin(), profile->key.end()) + L".ini";
+      if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        continue;
+      // Never follow a junction or symbolic link out of the settings tree.
+      ok = settings_path_without_links(path) && patch_profile_camera_rate(path) && ok;
+    }
+  // Stamp last: a failed or refused profile write is retried at the next start.
+  if (ok)
+    WritePrivateProfileStringW(L"display", L"camera_rate_revision", L"2", selection.c_str());
+}
 // Global [messages] notifications; protocol 10 saved the same choice as
 // [messages] in_simulator. A file with only the legacy key keeps the user's
 // choice; save_settings writes the new key and removes the legacy one.

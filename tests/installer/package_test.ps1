@@ -21,7 +21,7 @@ try {
     }
     if ($entries.Count -ne $requiredFiles.Count) { throw 'Runtime package contains unnecessary files.' }
     $base = Join-Path (Split-Path -Parent $zip) ([IO.Path]::GetFileNameWithoutExtension($zip))
-    $manifest = @(Get-Content -Raw -LiteralPath ($base + '.manifest.json') | ConvertFrom-Json)
+    $manifest = @(Get-Content -Raw -LiteralPath ($base + '.manifest.json') | ConvertFrom-Json | ForEach-Object { $_ })
     if ($manifest.Count -ne $entries.Count) { throw 'Manifest does not cover the complete package.' }
     foreach ($file in $manifest) {
         $stream = $entries[$file.file].Open()

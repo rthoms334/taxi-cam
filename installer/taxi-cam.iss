@@ -10,14 +10,8 @@
 #ifndef AppIcon
   #error AppIcon is required
 #endif
-#ifndef SettingsScript
-  #error SettingsScript is required
-#endif
 #ifndef OutputBase
   #define OutputBase "taxi-cam-test-setup"
-#endif
-#ifndef RuntimeScript
-  #define RuntimeScript "runtime.ps1"
 #endif
 
 [Setup]
@@ -54,36 +48,37 @@ UsePreviousAppDir=no
 #endif
 
 [Files]
-; Native binaries only ever enter the live directory through the guarded transaction.
-Source: "{#PayloadDir}\*"; DestDir: "{tmp}\payload"; Flags: dontcopy recursesubdirs createallsubdirs ignoreversion
-Source: "{#RuntimeScript}"; DestDir: "{tmp}"; DestName: "runtime.ps1"; Flags: dontcopy
-Source: "{#SettingsScript}"; DestDir: "{tmp}"; DestName: "settings.ps1"; Flags: dontcopy
+; The new companion runs Setup's checks before any installed file changes.
+Source: "{#PayloadDir}\taxi-cam.exe"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\taxi-cam.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\taxi-camera-bridge.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
+; Camera mounts are user calibration: kept on update and uninstall, replaced
+; only by an explicit settings reset. A first installation imports the
+; simulator folder's calibration; a known installation never resurrects it.
+Source: "{#PayloadDir}\taxi-camera-mounts.cfg"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall; Check: ResetMounts
+Source: "{code:SimulatorMounts}"; DestDir: "{app}"; DestName: "taxi-camera-mounts.cfg"; Flags: external onlyifdoesntexist skipifsourcedoesntexist uninsneveruninstall; Check: ImportSimulatorMounts
+Source: "{#PayloadDir}\taxi-camera-mounts.cfg"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall; Check: InstallBundledMounts
 
-#ifndef InstallerTest
 [InstallDelete]
+Type: files; Name: "{app}\380-taxi-cam.exe"
+#ifndef InstallerTest
 Type: files; Name: "{userprograms}\380 Taxi Cam.lnk"
 
 [Icons]
 Name: "{userprograms}\Taxi Cam"; Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"
 #endif
-
-[UninstallDelete]
-Type: files; Name: "{app}\taxi-cam.exe"
-Type: files; Name: "{app}\taxi-camera-bridge.dll"
-Type: files; Name: "{app}\LICENSE.txt"
-Type: files; Name: "{app}\THIRD_PARTY_NOTICES.txt"
 ; Settings are retained unless the user explicitly chooses removal in the uninstaller.
 ; Installation records, logs and historical backups are retained.
 
 [Code]
-#include InternalDir + "\uninstall-scripts.iss"
 var
   SimulatorPage: TInputDirWizardPage;
   StartupPage: TInputOptionWizardPage;
   XmlPage: TInputFileWizardPage;
   SettingsPage: TInputOptionWizardPage;
-  Prepared, Completed: Boolean;
-  RemoveSavedSettings: Boolean;
+  KnownInstallation, RemoveSavedSettings: Boolean;
   PreviousDir, StartupNotice: String;
   DiscoveredSimulator, InheritedXml: String;
   ExplicitXml, XmlEdited, LoadingChoices: Boolean;
@@ -97,10 +92,6 @@ function InitializeSetup: Boolean;
 var
   Choice: String;
 begin
-  Result := FileExists(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'));
-  if not Result then
-    SuppressibleMsgBox('Taxi Cam setup and updates require Windows PowerShell 5.1. Restore the Windows PowerShell component and run setup again.', mbError, MB_OK, IDOK);
-  if not Result then exit;
   Choice := ExpandConstant('{param:STARTUP|}');
   Result := (Choice = '') or (CompareText(Choice, 'automatic') = 0) or (CompareText(Choice, 'manual') = 0);
   if not Result then begin
@@ -111,8 +102,33 @@ end;
 
 function StartupMode: String;
 begin
-  if StartupPage.SelectedValueIndex = 1 then Result := 'Manual'
-  else Result := 'Automatic';
+  if StartupPage.SelectedValueIndex = 1 then Result := 'manual'
+  else Result := 'automatic';
+end;
+
+function ResetSettings: Boolean;
+begin
+  Result := not SettingsPage.Values[0];
+end;
+
+function SimulatorMounts(Param: String): String;
+begin
+  Result := AddBackslash(SimulatorPage.Values[0]) + 'taxi-camera-mounts.cfg';
+end;
+
+function ResetMounts: Boolean;
+begin
+  Result := ResetSettings;
+end;
+
+function ImportSimulatorMounts: Boolean;
+begin
+  Result := not ResetSettings and not KnownInstallation and FileExists(SimulatorMounts(''));
+end;
+
+function InstallBundledMounts: Boolean;
+begin
+  Result := not ResetSettings and not ImportSimulatorMounts;
 end;
 
 procedure XmlChoiceChanged(Sender: TObject);
@@ -138,25 +154,22 @@ begin
   end;
 end;
 
-function RunHelper(Mode, Script, Destination, State: String): Boolean;
+{ Runs one of the companion's installer commands without showing its window. }
+function RunSetupCommand(Executable, Command, Destination, State, Arguments: String): Boolean;
 var
-  Args: String;
   ExitCode: Integer;
 begin
-  Args := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + Q(Script) +
-    ' -Mode ' + Mode + ' -Destination ' + Q(Destination) + ' -StateDirectory ' + Q(State);
-  if Mode = 'Install' then begin
-    Args := Args + ' -PayloadDirectory ' + Q(ExpandConstant('{tmp}\payload')) +
-      ' -SimulatorDirectory ' + Q(SimulatorPage.Values[0]) + ' -StartupMode ' + StartupMode +
-      ' -UpdateFromPid ' + Q(ExpandConstant('{param:UPDATEFROMPID|0}'));
-    if (StartupMode = 'Automatic') and (XmlPage.Values[0] <> '') then
-      Args := Args + ' -ExeXml ' + Q(XmlPage.Values[0]);
-    if not SettingsPage.Values[0] then Args := Args + ' -ResetSettings';
-  end;
-  if ((Mode = 'Uninstall') or (Mode = 'CheckClosed')) and RemoveSavedSettings then
-    Args := Args + ' -RemoveSettings';
-  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Args, '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
+  Result := Exec(Executable, '--setup ' + Command + ' --destination ' + Q(Destination) + ' --state ' + Q(State) + Arguments,
+    '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
   if Result then Result := ExitCode = 0;
+end;
+
+function InstallArguments: String;
+begin
+  Result := ' --simulator ' + Q(SimulatorPage.Values[0]) + ' --startup ' + StartupMode;
+  if (StartupMode = 'automatic') and (XmlPage.Values[0] <> '') then
+    Result := Result + ' --exe-xml ' + Q(XmlPage.Values[0]);
+  if ResetSettings then Result := Result + ' --reset-settings';
 end;
 
 function ErrorText(State: String): String;
@@ -173,7 +186,7 @@ var
 begin
   Result := True;
   if PreviousDir = WizardDirValue then exit;
-  Result := RunHelper('Discover', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state'));
+  Result := RunSetupCommand(ExpandConstant('{tmp}\taxi-cam.exe'), 'discover', WizardDirValue, ExpandConstant('{tmp}\state'), '');
   if not Result then exit;
   PreviousDir := WizardDirValue;
   Ini := ExpandConstant('{tmp}\state\choices.ini');
@@ -220,8 +233,7 @@ begin
     False, False);
   SettingsPage.Add('&Keep existing settings (recommended)');
   SettingsPage.Values[0] := ExpandConstant('{param:RESETSETTINGS|0}') <> '1';
-  ExtractTemporaryFile('runtime.ps1');
-  ExtractTemporaryFile('settings.ps1');
+  ExtractTemporaryFile('taxi-cam.exe');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -239,7 +251,7 @@ begin
     else MsgBox('Select the Content directory containing FlightSimulator2024.exe.', mbError, MB_OK);
   end;
   if CurPageID = XmlPage.ID then begin
-    { Silent setup delegates an empty choice to the installer's existing
+    { Silent setup delegates an empty choice to the companion's existing
       discovery/manual-startup fallback; interactive setup requests a path. }
     if WizardSilent and (XmlPage.Values[0] = '') then exit;
     Result := (CompareText(ExtractFileName(XmlPage.Values[0]), 'exe.xml') = 0) and (ExtractFileDrive(XmlPage.Values[0]) <> '');
@@ -249,30 +261,47 @@ end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  Result := (PageID = XmlPage.ID) and (StartupMode = 'Manual');
+  Result := (PageID = XmlPage.ID) and (StartupMode = 'manual');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  Text: AnsiString;
+  Arguments: String;
 begin
   Result := '';
-  if Prepared then exit;
   if not DiscoverChoices then begin
     Result := 'Cannot read the previous installation settings. Check installation.json.';
     exit;
   end;
   ClearStaleInheritedXml;
-  ExtractTemporaryFiles('{tmp}\payload\*');
-  if not RunHelper('Install', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state')) then begin
+  KnownInstallation := FileExists(AddBackslash(WizardDirValue) + 'installation.json');
+  { MSFS and the companion must be closed before the bridge DLL is replaced. }
+  Arguments := InstallArguments + ' --update-from-pid ' + ExpandConstant('{param:UPDATEFROMPID|0}');
+  if ResetSettings then Arguments := Arguments + ' --settings-closed';
+  if not RunSetupCommand(ExpandConstant('{tmp}\taxi-cam.exe'), 'check', WizardDirValue, ExpandConstant('{tmp}\state'), Arguments) then begin
     Result := ErrorText(ExpandConstant('{tmp}\state'));
-    Log('Taxi Cam installation failed: ' + Result);
+    Log('Taxi Cam installation check failed: ' + Result);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  State: String;
+  Text: AnsiString;
+begin
+  if CurStep <> ssPostInstall then exit;
+  { Configure automatic startup and the installation record with the installed companion. }
+  State := ExpandConstant('{tmp}\state');
+  if not RunSetupCommand(ExpandConstant('{app}\taxi-cam.exe'), 'configure', ExpandConstant('{app}'), State, InstallArguments) then begin
+    StartupNotice := 'Taxi Cam was installed, but Setup could not finish configuring it: ' + ErrorText(State) +
+      ' Run Setup again, or open Taxi Cam from the Start menu when you use MSFS.';
+    Log('Taxi Cam configuration failed: ' + StartupNotice);
+    SuppressibleMsgBox(StartupNotice, mbError, MB_OK, IDOK);
     exit;
   end;
-  Prepared := True;
-  if LoadStringFromFile(ExpandConstant('{tmp}\state\warning.txt'), Text) then
+  if LoadStringFromFile(State + '\warning.txt', Text) then
     StartupNotice := UTF8Decode(Text)
-  else if StartupMode = 'Manual' then
+  else if StartupMode = 'manual' then
     StartupNotice := 'Launch Taxi Cam from the Start menu before using MSFS. Existing simulator startup entries were left unchanged. You can run setup again to configure automatic startup.';
   if StartupNotice <> '' then Log('Taxi Cam startup notice: ' + StartupNotice);
 end;
@@ -286,25 +315,21 @@ begin
   end;
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+function UninstallCompanion: String;
 begin
-  if CurStep = ssDone then Completed := True;
-end;
-
-procedure DeinitializeSetup;
-begin
-  if Prepared and not Completed then
-    if not RunHelper('Rollback', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state')) then
-      MsgBox('Setup could not restore the previous installation. See ' + ExpandConstant('{tmp}\state\error.txt'), mbError, MB_OK);
+  Result := ExpandConstant('{app}\taxi-cam.exe');
 end;
 
 function InitializeUninstall: Boolean;
 var
   Choice: Integer;
+  Arguments: String;
 begin
+  Result := True;
   RemoveSavedSettings := ExpandConstant('{param:REMOVESETTINGS|0}') = '1';
-  WriteUninstallScripts(ExpandConstant('{tmp}\taxi-uninstall'));
-  Result := RunHelper('CheckClosed', ExpandConstant('{tmp}\taxi-uninstall\runtime.ps1'), ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall'));
+  if not FileExists(UninstallCompanion) then exit;
+  if RemoveSavedSettings then Arguments := ' --settings-closed';
+  Result := RunSetupCommand(UninstallCompanion, 'check', ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall'), Arguments);
   if not Result then MsgBox(ErrorText(ExpandConstant('{tmp}\taxi-uninstall')), mbError, MB_OK);
   if Result and not UninstallSilent then begin
     Choice := TaskDialogMsgBox('Keep your Taxi Cam settings?',
@@ -317,10 +342,14 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Arguments: String;
 begin
-  if CurUninstallStep = usUninstall then
-    if not RunHelper('Uninstall', ExpandConstant('{tmp}\taxi-uninstall\runtime.ps1'), ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall')) then begin
-      MsgBox(ErrorText(ExpandConstant('{tmp}\taxi-uninstall')), mbError, MB_OK);
-      Abort;
-    end;
+  if (CurUninstallStep <> usUninstall) or not FileExists(UninstallCompanion) then exit;
+  if RemoveSavedSettings then Arguments := ' --remove-settings';
+  { Remove this installation's automatic startup entries and, when chosen, saved settings. }
+  if not RunSetupCommand(UninstallCompanion, 'uninstall', ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall'), Arguments) then begin
+    MsgBox(ErrorText(ExpandConstant('{tmp}\taxi-uninstall')), mbError, MB_OK);
+    Abort;
+  end;
 end;
