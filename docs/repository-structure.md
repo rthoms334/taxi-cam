@@ -11,6 +11,7 @@ All application code lives under `src/`. The executable and DLL are built from t
 | `src/hooks/` | Camera-update and Direct3D observers, including the Win64 assembly thunk |
 | `src/shared/` | App/bridge protocol, control policy and generated-version interface |
 | `src/profiles/` | Aircraft integration metadata |
+| `src/setup/` | Installer commands built into `taxi-cam.exe` (`--setup`): checks, `exe.xml` startup entries, installation record and saved-settings removal |
 
 Supporting files are kept separate:
 
@@ -18,7 +19,7 @@ Supporting files are kept separate:
 | --- | --- |
 | `tests/` | App, camera, graphics, hook, installer and diagnostic tests; shared fixtures are in `tests/support/` |
 | `tools/diagnostics/` | Optional interface-inventory, pose, material and telemetry tools for development |
-| `installer/` | Inno Setup definition, package/build/bootstrap scripts and embedded install/uninstall helpers |
+| `installer/` | Inno Setup definition and package/build/bootstrap scripts; Setup itself runs no scripts |
 | `ci/` | Release version lookup, pinned toolchain helpers and release publication |
 | `.github/workflows/` | GitHub Actions PR test-build and gated Windows release workflows |
 | `docs/` | Architecture, integration contracts and development documentation |

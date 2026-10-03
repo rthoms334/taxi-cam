@@ -26,6 +26,7 @@
 #include "../shared/profile_selection.hpp"
 #include "../graphics/target_assignment.hpp"
 #include "updater.hpp"
+#include "../setup/setup_commands.hpp"
 #include "changelog.hpp"
 #include "changelog_fetch.hpp"
 
@@ -2195,14 +2196,22 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
 }
 }  // namespace
 int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
+  int argc{};
+  auto** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (!argv)
+    return 1;
+  // Setup and the uninstaller run installer commands without starting the tray app.
+  if (argc >= 2 && !std::wcscmp(argv[1], L"--setup")) {
+    const int code = setup::run_setup_command(argc - 2, argv + 2);
+    LocalFree(argv);
+    return code;
+  }
   instance = app;
   // Required for NOTIFYICON_VERSION_4 tray toasts on Windows 10/11. Without an
   // explicit AppUserModelID the shell assigns a generated one and often drops
   // NIF_INFO balloons (or stores them under a muteable NotifyIconGeneratedAumid).
   SetCurrentProcessExplicitAppUserModelID(L"TaxiCam.Companion");
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-  int argc{};
-  auto** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   for (int i = 1; i < argc; ++i) {
     if (!std::wcscmp(argv[i], L"--background"))
       background_start = true;
@@ -2237,6 +2246,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   installation.resize(installation.find_last_of(L"\\/"));
   if (preview_ui)
     win::settings_override = installation + L"\\preview-settings";
+  win::migrate_saved_camera_rate();
   if (!win::load_settings(current, installation))
     notice = L"Saved settings were invalid; profile defaults loaded.";
   whats_new = win::whats_new_pending(win::settings_directory(), InstalledVersion);

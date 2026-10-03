@@ -108,9 +108,10 @@ if (Test-Path -LiteralPath $prWorkflowPath -PathType Leaf) {
     Assert-TextAbsent $pr 'environment:\s*release' 'PR CI must not use the release environment.'
 }
 
-$updater = Get-Content -Raw -LiteralPath (Join-Path $repo 'src/app/update-check.ps1')
-Assert-TextContains $updater 'api\.github\.com/repos/\$script:Repository/releases/latest' `
+$updater = Get-Content -Raw -LiteralPath (Join-Path $repo 'src/app/updater.cpp')
+Assert-TextContains $updater 'L"https://api\.github\.com/repos/" \+ wide\(Repository\) \+ L"/releases/latest"' `
     'Auto-update must read published GitHub releases only.'
+Assert-TextContains $updater 'constexpr char Repository\[\] = "rthoms334/taxi-cam";' 'Auto-update must read the project repository.'
 Assert-TextAbsent $updater 'windows-pr-test-build-' 'Auto-update must not read PR artifacts.'
 Assert-TextAbsent $updater 'windows-release-' 'Auto-update must not read untagged main-build artifacts.'
 

@@ -10,39 +10,20 @@ $steam = Join-Path $testRoot 'Steam/MSFS2024'
 $oldXml = Join-Path $testRoot 'Store-config/exe.xml'
 $newXml = Join-Path $testRoot 'Steam-config/exe.xml'
 New-Item -ItemType Directory -Force -Path $payload,$store,$steam,(Split-Path -Parent $oldXml),(Split-Path -Parent $newXml) | Out-Null
-[IO.File]::WriteAllText((Join-Path $payload 'fixture.txt'), 'This fixture never installs a native runtime.')
+# The payload's taxi-cam.exe is an argument recorder: it answers discovery
+# from the fixture record and always refuses the pre-installation check, so no
+# native installer, registration, shortcut, settings or simulator change occurs.
+foreach ($name in @('taxi-camera-bridge.dll','LICENSE.txt','THIRD_PARTY_NOTICES.txt','taxi-camera-mounts.cfg')) {
+    [IO.File]::WriteAllText((Join-Path $payload $name), 'This fixture never installs a native runtime.')
+}
 foreach ($sim in @($store,$steam)) { [IO.File]::WriteAllText((Join-Path $sim 'FlightSimulator2024.exe'), 'File-existence fixture only.') }
 foreach ($xml in @($oldXml,$newXml)) { [IO.File]::WriteAllText($xml, '<SimBase.Document Type="Launch"/>') }
 $xmlHashes = @{}
 foreach ($xml in @($oldXml,$newXml)) { $xmlHashes[$xml] = (Get-FileHash -LiteralPath $xml).Hash }
-
-# Execute the compiled wizard, but replace its external helper with an argument
-# recorder which always refuses PrepareToInstall. No native installer, registry
-# registration, shortcuts, settings changes or live simulator access can occur.
-$runtime = Join-Path $testRoot 'capture-runtime.ps1'
-@'
-param([string]$Mode,[string]$Destination,[string]$StateDirectory,[string]$SimulatorDirectory,
-      [string]$ExeXml,[string]$PayloadDirectory,[string]$StartupMode,[string]$UpdateFromPid,[switch]$ResetSettings)
-$ErrorActionPreference = 'Stop'
-New-Item -ItemType Directory -Force -Path $StateDirectory | Out-Null
-if ($Mode -eq 'Discover') {
-    $record = Get-Content -LiteralPath (Join-Path $Destination 'installation.json') -Raw | ConvertFrom-Json
-    @('[Paths]', ('Simulator=' + (Split-Path -Parent $record.simulator)), ('ExeXml=' + $record.exeXml), 'Startup=automatic') |
-        Set-Content -LiteralPath (Join-Path $StateDirectory 'choices.ini') -Encoding Unicode
-    exit 0
-}
-if ($Mode -eq 'Install') {
-    [ordered]@{simulator=$SimulatorDirectory; exeXml=$ExeXml; exeXmlWasPassed=$PSBoundParameters.ContainsKey('ExeXml'); startup=$StartupMode} |
-        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Destination 'captured-arguments.json') -Encoding utf8
-    [IO.File]::WriteAllText((Join-Path $StateDirectory 'error.txt'), 'Wizard argument fixture stopped before installation.')
-    exit 1
-}
-throw "Unexpected fixture mode: $Mode"
-'@ | Set-Content -LiteralPath $runtime -Encoding utf8
-$settings = Join-Path $repoRoot 'installer/settings.ps1'
-& (Join-Path $repoRoot 'installer/embed-uninstaller.ps1') -Output (Join-Path $testRoot 'uninstall-scripts.iss') `
-    -RuntimeScript $runtime -UninstallScript (Join-Path $repoRoot 'installer/uninstall.ps1') `
-    -ExeXmlScript (Join-Path $repoRoot 'installer/exe_xml.ps1') -SettingsScript $settings
+$deps = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'dependencies.json') | ConvertFrom-Json
+$cxx = Join-Path $repoRoot ('build/deps/' + $deps.'llvm-mingw'.directory + '/bin/clang++.exe')
+& $cxx -std=c++20 -O2 -static -municode -DNOMINMAX -DWIN32_LEAN_AND_MEAN (Join-Path $PSScriptRoot 'wizard_capture.cpp') -o (Join-Path $payload 'taxi-cam.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Wizard argument recorder compilation failed.' }
 $compiler = & (Join-Path $repoRoot 'installer/bootstrap.ps1')
 $script:checks = 0
 function Assert-Wizard([bool]$Condition,[string]$Message) {
@@ -51,14 +32,14 @@ function Assert-Wizard([bool]$Condition,[string]$Message) {
 }
 function Build-WizardFixture([string]$Source,[string]$Name) {
     $log = Join-Path $testRoot ($Name + '-compiler.log')
-    & $compiler "/DPayloadDir=$payload" "/DInternalDir=$testRoot" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" `
-        "/DRuntimeScript=$runtime" "/DSettingsScript=$settings" '/DAppVersion=0.0.0' '/DBuildNumber=0' '/DInstallerTest=1' `
+    & $compiler "/DPayloadDir=$payload" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" `
+        '/DAppVersion=0.0.0' '/DBuildNumber=0' '/DInstallerTest=1' `
         "/DOutputBase=$Name" "/O$testRoot" $Source *> $log
     if ($LASTEXITCODE -ne 0) { throw "Wizard fixture compilation failed. See $log" }
     return Join-Path $testRoot ($Name + '.exe')
 }
 function Invoke-WizardCase([string]$Fixture,[string]$Name,[string[]]$Options,[string]$ExpectedSimulator,
-                           [bool]$ExpectXml,[string]$ExpectedXml = '',[string]$ExpectedStartup = 'Automatic') {
+                           [bool]$ExpectXml,[string]$ExpectedXml = '',[string]$ExpectedStartup = 'automatic') {
     $app = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Path $app | Out-Null
     $record = Join-Path $app 'installation.json'
@@ -93,13 +74,13 @@ Invoke-WizardCase $fixture 'unchanged-simulator' @() $store $true $oldXml
 Invoke-WizardCase $fixture 'silent-store-to-steam' @('/SIMULATORDIR="' + $steam + '"') $steam $false
 Invoke-WizardCase $fixture 'explicit-new-xml' @('/SIMULATORDIR="' + $steam + '"','/EXEXML="' + $newXml + '"') $steam $true $newXml
 Invoke-WizardCase $fixture 'explicit-old-xml' @('/SIMULATORDIR="' + $steam + '"','/EXEXML="' + $oldXml + '"') $steam $true $oldXml
-Invoke-WizardCase $fixture 'manual-simulator-change' @('/SIMULATORDIR="' + $steam + '"','/STARTUP=manual') $steam $false '' 'Manual'
+Invoke-WizardCase $fixture 'manual-simulator-change' @('/SIMULATORDIR="' + $steam + '"','/STARTUP=manual') $steam $false '' 'manual'
 
 # A private source copy assigns control values immediately before the final
 # production guard. It exercises that second guard independently of page Next,
 # and triggers the real edit event instead of reimplementing the selection rule.
 $source = Get-Content -LiteralPath $productionSource -Raw
-$marker = "  ClearStaleInheritedXml;`n  ExtractTemporaryFiles"
+$marker = "  ClearStaleInheritedXml;`n  KnownInstallation"
 $normalized = $source.Replace("`r`n", "`n")
 Assert-Wizard ($normalized.Split([string[]]@($marker),[StringSplitOptions]::None).Length -eq 2) 'Final selection-guard test marker is ambiguous.'
 $driver = @'
@@ -112,7 +93,7 @@ $driver = @'
   if ExpandConstant('{param:TESTLATESIM|}') <> '' then
     SimulatorPage.Values[0] := ExpandConstant('{param:TESTLATESIM|}');
   ClearStaleInheritedXml;
-  ExtractTemporaryFiles
+  KnownInstallation
 '@
 $driverSource = Join-Path $testRoot 'wizard-control-driver.iss'
 $normalized.Replace($marker,$driver.Replace("`r`n","`n")) | Set-Content -LiteralPath $driverSource -Encoding utf8
