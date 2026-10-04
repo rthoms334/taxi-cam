@@ -344,6 +344,12 @@ struct Registry {
   // Display identity research: call stacks of display-shaped texture
   // creations, written under the registry lock, read by the control thread.
   std::array<DisplayCreationRecord, 32> display_creations{};
+  // Display identity research: distinct (source ID << 32 | destination ID)
+  // copies between two tracked display textures, set from recording hooks.
+  std::array<std::atomic<std::uint64_t>, 64> display_feeds{};
+  // Last snapshot failure step and HRESULT/Win32 code, for bridge.log.
+  std::atomic<const char*> snapshot_failure{""};
+  std::atomic<long> snapshot_failure_code{};
   std::uint64_t display_creation_count{};
   std::atomic<std::uint64_t> snapshot_completed{}, snapshot_plans{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
@@ -1827,6 +1833,29 @@ void observe_enhanced(void*,
                    complete ? "not_rt_entry" : "split_or_partial_transition", scope);
   runtime::manager().observe_source_enhanced(list, id, b);
 }
+// Recording hooks: remember a copy from one tracked display texture into
+// another (an aircraft's own render target feeding its panel texture). The
+// display filter keeps every other copy to two atomic loads.
+void note_display_feed(ID3D12Resource* source, ID3D12Resource* destination) noexcept {
+  auto& r = registry();
+  const auto filtered = [&](ID3D12Resource* p) {
+    const auto hash = Registry::SeenResources::hash(p);
+    return (r.display_filter[hash / 64].load(std::memory_order_acquire) & (1ull << (hash % 64))) != 0;
+  };
+  if (!source || !destination || source == destination || !filtered(source) || !filtered(destination))
+    return;
+  const auto from = resource(source), to = resource(destination);
+  if (!from || !to || !from->alive || !to->alive)
+    return;
+  const auto key = from->id << 32 | (to->id & 0xffffffffull);
+  for (auto& slot : r.display_feeds) {
+    auto value = slot.load(std::memory_order_relaxed);
+    if (value == key)
+      return;
+    if (!value && (slot.compare_exchange_strong(value, key, std::memory_order_relaxed) || value == key))
+      return;
+  }
+}
 void copy_resource(void*,
                    ID3D12GraphicsCommandList* list,
                    std::uint64_t id,
@@ -1837,6 +1866,7 @@ void copy_resource(void*,
     consider_live_copy(dest);
     consider_live_copy(src);
   }
+  note_display_feed(src, dest);
   if (auto item = find_list(list); item && item->id == id)
     item->submission_proof.state_disjoint_work(17);
   if (idle_callback())
@@ -1858,6 +1888,8 @@ void copy_texture(void*,
     consider_live_copy(dest ? dest->pResource : nullptr);
     consider_live_copy(src ? src->pResource : nullptr);
   }
+  if (dest && src && dest->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX && src->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX)
+    note_display_feed(src->pResource, dest->pResource);
   if (auto item = find_list(list); item && item->id == id)
     item->submission_proof.state_disjoint_work(16);
   if (idle_callback())
@@ -4200,6 +4232,17 @@ std::vector<DisplayCreationRecord> display_creation_records(std::uint64_t after)
   std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.serial < b.serial; });
   return result;
 }
+std::vector<std::pair<std::uint64_t, std::uint64_t>> display_feed_pairs() {
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> result;
+  for (const auto& slot : registry().display_feeds)
+    if (const auto value = slot.load(std::memory_order_relaxed))
+      result.emplace_back(value >> 32, value & 0xffffffffull);
+  return result;
+}
+void display_snapshot_failure(const char*& step, long& code) noexcept {
+  step = registry().snapshot_failure.load(std::memory_order_relaxed);
+  code = registry().snapshot_failure_code.load(std::memory_order_relaxed);
+}
 std::vector<DisplayResourceRecord> display_resource_records() {
   std::vector<DisplayResourceRecord> result;
   auto& r = registry();
@@ -4356,11 +4399,16 @@ DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t n
   buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = buffer_desc.SampleDesc.Count = 1;
   buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
   ID3D12Resource* buffer = nullptr;
+  r.snapshot_failure.store("", std::memory_order_relaxed);
   {
     const OwnedWork guard;
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                               IID_PPV_ARGS(&buffer))))
+    const auto created = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                         nullptr, IID_PPV_ARGS(&buffer));
+    if (FAILED(created)) {
+      r.snapshot_failure_code.store(created, std::memory_order_relaxed);
+      r.snapshot_failure.store("create_readback_buffer", std::memory_order_relaxed);
       return DisplaySnapshotResult::failed;
+    }
   }
   {
     const WorkerRegistryLock lock(r);
@@ -4420,7 +4468,10 @@ DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
   const D3D12_RANGE readable{static_cast<SIZE_T>(footprint.Offset),
                              static_cast<SIZE_T>(footprint.Offset + std::uint64_t{layout.RowPitch} * layout.Height)};
   poll.result = DisplaySnapshotResult::failed;
-  if (SUCCEEDED(buffer->Map(0, &readable, reinterpret_cast<void**>(&bytes))) && bytes) {
+  const auto mapped = buffer->Map(0, &readable, reinterpret_cast<void**>(&bytes));
+  r.snapshot_failure_code.store(mapped, std::memory_order_relaxed);
+  r.snapshot_failure.store(FAILED(mapped) || !bytes ? "map" : "downsample", std::memory_order_relaxed);
+  if (SUCCEEDED(mapped) && bytes) {
     try {
       poll.image =
           downsample_snapshot(bytes + footprint.Offset, layout.RowPitch, layout.Width, layout.Height, bgra, kDisplaySnapshotMaxEdge);

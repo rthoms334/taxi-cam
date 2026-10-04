@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <utility>
 #include <vector>
 #include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/pfd_target_detector.hpp"
@@ -278,4 +279,8 @@ struct DisplayCreationRecord {
   std::array<std::uint64_t, 24> stack{};
 };
 std::vector<DisplayCreationRecord> display_creation_records(std::uint64_t after);
+// Distinct copies (source ID, destination ID) between tracked display textures.
+std::vector<std::pair<std::uint64_t, std::uint64_t>> display_feed_pairs();
+// Step and code of the last failed snapshot step ("" when none).
+void display_snapshot_failure(const char*& step, long& code) noexcept;
 }  // namespace taxi_camera::standalone

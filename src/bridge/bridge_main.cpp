@@ -163,9 +163,11 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
 // the render-target creation order at cockpit load. Bounded reads on this
 // control thread only; nothing routes by the proposal.
 struct PanelIdentityLog {
-  std::uint64_t signature{}, seen_ms{}, next_ms{};
+  std::uint64_t signature{}, seen_ms{}, next_ms{}, epoch{}, epoch_ms{};
   bool burst_logged{}, refusal_logged{};
   display_identity::Panels panels{};
+  std::vector<std::uint64_t> feeds;  // Logged (source << 32 | destination) pairs.
+  std::vector<std::pair<std::uint64_t, std::string>> names;  // Proposed ID -> panel name.
 };
 // Joins items into "prefix [part/total]: ..." lines of bounded length.
 void log_chunks(const win::Status& status, const char* prefix, const std::vector<std::string>& items) noexcept {
@@ -184,10 +186,57 @@ void log_chunks(const win::Status& status, const char* prefix, const std::vector
   } catch (...) {
   }
 }
-void service_panel_identity(PanelIdentityLog& state, const win::Status& status, std::uint64_t now) noexcept {
+// Textured panels only: the simulator keeps the previous aircraft's table
+// until the new cockpit loads, and VPainting entries come and go.
+std::uint64_t textured_signature(const display_identity::Panels& panels) noexcept {
+  std::uint64_t hash = 0xcbf29ce484222325ull;
+  const auto mix = [&](const void* data, std::size_t size) {
+    for (std::size_t i = 0; i < size; ++i)
+      hash = (hash ^ static_cast<const unsigned char*>(data)[i]) * 0x100000001b3ull;
+  };
+  for (std::uint32_t i = 0; i < panels.count; ++i) {
+    const auto& p = panels.panels[i];
+    if (!display_identity::textured(p))
+      continue;
+    mix(&p.index, sizeof(p.index));
+    mix(&p.canvas_width, sizeof(p.canvas_width));
+    mix(p.texture.data(), std::strlen(p.texture.data()));
+  }
+  return hash;
+}
+void service_panel_identity(PanelIdentityLog& state,
+                            const win::Status& status,
+                            std::uint64_t now,
+                            std::uint64_t epoch,
+                            bool session_ready) noexcept {
   if (now < state.next_ms)
     return;
   state.next_ms = now + 2000;
+  try {
+    // Copies from one tracked display texture into another, each pair once,
+    // named when the destination is a proposed panel texture.
+    for (const auto& [from, to] : win::display_feed_pairs()) {
+      const auto key = from << 32 | to;
+      if (std::find(state.feeds.begin(), state.feeds.end(), key) != state.feeds.end())
+        continue;
+      state.feeds.push_back(key);
+      const char* name = "";
+      for (const auto& [id, panel] : state.names)
+        if (id == to)
+          name = panel.c_str();
+      char detail[160];
+      std::snprintf(detail, sizeof(detail), "Display feed: copy #%llu -> #%llu %s", static_cast<unsigned long long>(from),
+                    static_cast<unsigned long long>(to), name);
+      log_status(status, detail);
+    }
+  } catch (...) {
+  }
+  if (epoch != state.epoch) {
+    state.epoch = epoch;
+    state.epoch_ms = now;
+    state.signature = 0;
+    state.burst_logged = false;
+  }
   const auto panels = display_identity::read_panels();
   if (panels.error) {
     if (!state.refusal_logged) {
@@ -199,8 +248,9 @@ void service_panel_identity(PanelIdentityLog& state, const win::Status& status, 
     }
     return;
   }
-  if (panels.signature != state.signature) {
-    state.signature = panels.signature;
+  const auto signature = textured_signature(panels);
+  if (signature != state.signature) {
+    state.signature = signature;
     state.seen_ms = now;
     state.burst_logged = false;
     state.panels = panels;
@@ -220,20 +270,22 @@ void service_panel_identity(PanelIdentityLog& state, const win::Status& status, 
     } catch (...) {
     }
   }
-  // Panel textures are created on the render thread around cockpit load; wait
-  // for them, then report the creations from 30 s before the table appeared.
-  if (state.burst_logged || !state.signature || now - state.seen_ms < 60000)
+  // Only a table that appeared in this flight session and stayed unchanged
+  // for 30 s with the session ready. Panel textures are recreated when the
+  // cockpit reloads, so the latest multi-mip creations since the session
+  // began are the current ones.
+  if (state.burst_logged || !session_ready || state.seen_ms < state.epoch_ms || now - state.seen_ms < 30000)
     return;
   state.burst_logged = true;
   try {
     static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
     const auto n = win::render_target_creation_sequence().snapshot(0, entries);
-    const auto start = state.seen_ms > 30000 ? state.seen_ms - 30000 : 0;
+    const auto start = state.epoch_ms > 5000 ? state.epoch_ms - 5000 : 0;
     std::vector<display_identity::Creation> burst;
     std::vector<std::string> items;
     for (std::size_t i = 0; i < n; ++i) {
       const auto& e = entries[i];
-      if (e.tick < start || e.tick > state.seen_ms + 60000)
+      if (e.tick < start || e.mips < 2)
         continue;
       burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format});
       char item[96];
@@ -241,25 +293,34 @@ void service_panel_identity(PanelIdentityLog& state, const win::Status& status, 
                     e.format, static_cast<long long>(e.tick) - static_cast<long long>(state.seen_ms));
       items.push_back(item);
     }
-    char head[64];
-    std::snprintf(head, sizeof(head), " entries=%zu", burst.size());
+    std::size_t textured = 0;
+    for (std::uint32_t i = 0; i < state.panels.count; ++i)
+      textured += display_identity::textured(state.panels.panels[i]);
+    char head[96];
+    std::snprintf(head, sizeof(head), " multimip_since_session=%zu textured_panels=%zu", burst.size(), textured);
     items.insert(items.begin(), head);
     log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
+    if (burst.size() > textured)
+      burst.erase(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(textured));
     std::array<display_identity::Assignment, display_identity::kMaxPanels> proposal{};
     bool complete = false;
     const auto paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
     std::vector<std::string> pairs;
     char summary[96];
-    std::snprintf(summary, sizeof(summary), " rule=reverse_index_multimip complete=%d paired=%zu", complete ? 1 : 0, paired);
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip complete=%d paired=%zu", complete ? 1 : 0, paired);
     pairs.emplace_back(summary);
+    state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {
       const auto& a = proposal[i];
+      if (a.creation.id)
+        state.names.emplace_back(a.creation.id, a.panel->texture.data());
       char item[128];
       std::snprintf(item, sizeof(item), " %s=#%llu(%ux%u m%u)", a.panel->texture.data(), static_cast<unsigned long long>(a.creation.id),
                     a.creation.width, a.creation.height, a.creation.mips);
       pairs.push_back(item);
     }
     log_chunks(status, "Display identity (proposed, not used)", pairs);
+    state.feeds.clear();  // Log known feeds again, now with names.
   } catch (...) {
   }
 }
@@ -537,6 +598,7 @@ DWORD run_impl() {
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
   std::uint64_t next_inventory{}, logged_creation{};
   PanelIdentityLog panel_identity;
+  DWORD snapshot_save_error = 0;
   // Display snapshot (PFD routing): the last handled request and its outcome.
   struct SnapshotState {
     std::uint64_t serial{}, id{};
@@ -885,10 +947,20 @@ DWORD run_impl() {
     // One snapshot per companion serial. It needs graphics observation while
     // pending, like calibration, but never a camera or a matching aircraft.
     const auto log_snapshot = [&] {
-      char detail[192];
-      std::snprintf(detail, sizeof(detail), "Display snapshot: serial=%llu id=%llu result=%s texture=%ux%u format=%u",
+      const char* step = "";
+      long code = 0;
+      if (snapshot_save_error) {
+        step = "save";
+        code = static_cast<long>(snapshot_save_error);
+      } else if (snapshot.result == win::DisplaySnapshotResult::failed) {
+        win::display_snapshot_failure(step, code);
+      }
+      char detail[256];
+      std::snprintf(detail, sizeof(detail), "Display snapshot: serial=%llu id=%llu result=%s texture=%ux%u format=%u step=%s code=%#lx",
                     static_cast<unsigned long long>(snapshot.serial), static_cast<unsigned long long>(snapshot.id),
-                    win::display_snapshot_name(snapshot.result), snapshot.width, snapshot.height, snapshot.format);
+                    win::display_snapshot_name(snapshot.result), snapshot.width, snapshot.height, snapshot.format, step,
+                    static_cast<unsigned long>(code));
+      snapshot_save_error = 0;
       log_status(status, detail);
     };
     if (connected && settings.enabled && session_settings && session.ready && !degraded && settings.snapshot_request &&
@@ -905,8 +977,10 @@ DWORD run_impl() {
         snapshot.format = poll.format;
         // none: another request replaced this one inside the bridge.
         snapshot.result = poll.result == win::DisplaySnapshotResult::none ? win::DisplaySnapshotResult::lost : poll.result;
-        if (snapshot.result == win::DisplaySnapshotResult::ready && !win::save_snapshot_bmp(win::display_snapshot_path(), poll.image))
+        if (snapshot.result == win::DisplaySnapshotResult::ready && !win::save_snapshot_bmp(win::display_snapshot_path(), poll.image)) {
           snapshot.result = win::DisplaySnapshotResult::failed;
+          snapshot_save_error = GetLastError();
+        }
         if (snapshot.result == win::DisplaySnapshotResult::ready)
           write_display_candidates(snapshot.id, win::target_ids());
         log_snapshot();
@@ -1285,7 +1359,8 @@ DWORD run_impl() {
     if (now >= next_inventory) {
       inventory = win::pfd_inventory();
       next_inventory = now + 1000;
-      service_panel_identity(panel_identity, status, now);
+      service_panel_identity(panel_identity, status, now, native_camera::get_aircraft_session_epoch(),
+                             native_camera::get_aircraft_session_readiness().ready);
       for (const auto& creation : win::display_creation_records(logged_creation)) {
         logged_creation = creation.serial;
         char detail[2048];
