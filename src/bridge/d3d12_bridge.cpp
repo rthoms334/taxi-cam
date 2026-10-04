@@ -1018,6 +1018,10 @@ RenderTargetShapes& render_target_shapes() noexcept {
   static RenderTargetShapes shapes;
   return shapes;
 }
+RenderTargetSequence& render_target_sequence() noexcept {
+  static RenderTargetSequence sequence;
+  return sequence;
+}
 bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial, bool created) {
   auto& r = registry();
   if (!r.ready || !object || !same_device(device))
@@ -1041,6 +1045,10 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
       (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 && desc.Width <= RenderTargetShapes::MaximumEdge)
     render_target_shapes().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels, static_cast<std::uint32_t>(desc.Format),
                                   GetTickCount64());
+  const bool sequenced = created && desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1 &&
+                         desc.SampleDesc.Count == 1 && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 &&
+                         desc.Width <= RenderTargetShapes::MaximumEdge;
+  std::uint64_t sequenced_id = 0;
   if (relevant(desc)) {
     std::shared_ptr<Resource> item;
     {
@@ -1048,6 +1056,9 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
       // up by the later RTV creation or barrier that first uses the resource.
       const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
       if (!lock) {
+        if (sequenced)  // Keep the creation order complete; the ID is unknown here.
+          render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
+                                          static_cast<std::uint32_t>(desc.Format), 0, GetTickCount64());
         native->Release();
         return false;
       }
@@ -1067,6 +1078,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
                                                                                  desc.MipLevels, static_cast<UINT>(desc.Format));
         r.resources[native] = item;
         r.resource_index.assign(native, item);
+        sequenced_id = item->id;
         if (creation.frames) {
           creation.id = item->id;
           creation.width = static_cast<unsigned>(desc.Width);
@@ -1107,6 +1119,9 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
       error("resource_registry_full");
     }
   }
+  if (sequenced)
+    render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
+                                    static_cast<std::uint32_t>(desc.Format), sequenced_id, GetTickCount64());
   native->Release();
   return true;
 }
@@ -4195,6 +4210,9 @@ std::vector<DisplayResourceRecord> display_resource_records() {
                         item->submission_activity.load(std::memory_order_relaxed), static_cast<unsigned>(item->desc.Width),
                         item->desc.Height, item->desc.MipLevels, static_cast<unsigned>(item->desc.Format)});
   return result;
+}
+const RenderTargetSequence& render_target_creation_sequence() noexcept {
+  return render_target_sequence();
 }
 const RenderTargetShapes& render_target_shape_inventory() noexcept {
   return render_target_shapes();

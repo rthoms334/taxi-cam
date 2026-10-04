@@ -1,0 +1,83 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+#include "../../src/camera/display_panels.hpp"
+
+namespace {
+using namespace taxi_camera::display_identity;
+unsigned checks = 0;
+void require(bool condition, const char* message) {
+  ++checks;
+  if (!condition) {
+    std::fprintf(stderr, "FAIL: %s\n", message);
+    std::exit(1);
+  }
+}
+void add(Panels& panels, std::uint32_t index, const char* section, const char* texture, std::uint32_t kind, std::uint32_t canvas) {
+  auto& p = panels.panels[panels.count++];
+  p.index = index;
+  p.kind = kind;
+  p.canvas = canvas != 0;
+  p.canvas_width = p.canvas_height = canvas;
+  std::strncpy(p.section.data(), section, p.section.size() - 1);
+  std::strncpy(p.texture.data(), texture, p.texture.size() - 1);
+}
+}  // namespace
+
+int main() {
+  // PMDG 777-300ER panel table as read live on 2026-10-04 (registry order is
+  // not index order), and that session's multi-mip cockpit-load creations.
+  Panels panels;
+  add(panels, 1, "VCockpit02", "EICASCDU", 4, 1024);
+  add(panels, 3, "VCockpit04", "VCISFDNC", 4, 512);
+  add(panels, 2, "VCockpit03", "VCISFD", 4, 512);
+  add(panels, 0, "VCockpit01", "DUS", 4, 1024);
+  add(panels, 12, "VPainting01", "RegistrationNumber", 8, 0);
+  add(panels, 8, "VCockpit09", "VCTABLETCA", 4, 1024);
+  add(panels, 10, "VCockpit11", "EICASUP", 4, 1024);
+  add(panels, 11, "VCockpit12", "NO_TEXTURE", 4, 256);
+  add(panels, 9, "VCockpit10", "VCTABLETFO", 4, 1024);
+  add(panels, 4, "VCockpit05", "VCSTBY", 4, 1024);
+  add(panels, 7, "VCockpit08", "VCChrono", 4, 1024);
+  add(panels, 5, "VCockpit06", "VCSTBYNC", 4, 1024);
+  add(panels, 6, "VCockpit07", "VCRadio", 4, 1024);
+  require(textured(panels.panels[0]) && !textured(panels.panels[4]) && !textured(panels.panels[7]),
+          "Textured panels exclude VPainting and NO_TEXTURE");
+  const std::vector<Creation> burst{{229, 1, 2048, 2048, 5, 28}, {0, 2, 368, 434, 1, 26},   {230, 3, 2048, 2048, 5, 28},
+                                    {231, 4, 2048, 2048, 5, 28}, {0, 5, 1024, 512, 5, 28},  {0, 6, 1024, 1024, 5, 28},
+                                    {0, 7, 1024, 1024, 5, 28},   {0, 8, 1024, 1024, 5, 28}, {0, 9, 512, 512, 5, 28},
+                                    {0, 10, 512, 512, 5, 28},    {0, 11, 917, 943, 1, 27},  {232, 12, 2048, 2048, 5, 28},
+                                    {233, 13, 2048, 2048, 5, 28}};
+  std::array<Assignment, kMaxPanels> out{};
+  bool complete = false;
+  const auto n = propose(panels, burst.data(), burst.size(), out, complete);
+  require(n == 11 && complete, "All eleven textured panels paired");
+  const auto find = [&](const char* name) -> const Creation* {
+    for (std::size_t i = 0; i < n; ++i)
+      if (std::strcmp(out[i].panel->texture.data(), name) == 0)
+        return &out[i].creation;
+    return nullptr;
+  };
+  require(find("DUS") && find("DUS")->id == 233, "DUS is the last multi-mip creation");
+  require(find("EICASCDU") && find("EICASCDU")->id == 232, "EICASCDU is second last");
+  require(find("EICASUP") && find("EICASUP")->id == 229, "Highest textured index is created first");
+  require(find("VCChrono") && find("VCChrono")->width == 1024 && find("VCChrono")->height == 512, "Chrono gets the 1024x512 texture");
+  require(find("VCISFD") && find("VCISFD")->width == 512, "ISFD gets a 512 texture");
+  require(!find("NO_TEXTURE") && !find("RegistrationNumber"), "Untextured panels are not paired");
+
+  const auto short_n = propose(panels, burst.data(), 5, out, complete);
+  require(short_n == 4 && !complete, "A short burst is reported incomplete");
+  Panels empty;
+  require(propose(empty, burst.data(), burst.size(), out, complete) == 0 && !complete, "No panels, no proposal");
+
+  std::array<char, 8> name{};
+  const unsigned char raw[] = {'E', 'I', 'C', 'A', 'S', 'C', 'D', 'U', 'X'};
+  copy_name(raw, sizeof(raw), name);
+  require(std::strcmp(name.data(), "EICASCD") == 0, "Names are truncated and terminated");
+  const unsigned char stop[] = {'D', 'U', 'S', 0, 'Z'};
+  copy_name(stop, sizeof(stop), name);
+  require(std::strcmp(name.data(), "DUS") == 0, "Names stop at NUL");
+  std::printf("PASS: %u display identity checks.\n", checks);
+  return 0;
+}

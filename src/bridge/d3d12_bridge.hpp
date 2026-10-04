@@ -4,6 +4,7 @@
 #include <vector>
 #include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/pfd_target_detector.hpp"
+#include "../graphics/render_target_sequence.hpp"
 #include "../graphics/render_target_shapes.hpp"
 #include "../graphics/scene_runtime.hpp"
 #include "../shared/display_snapshot.hpp"
@@ -222,6 +223,9 @@ bool graphics_admission_halted() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
 // Render-target shapes seen at creation since the bridge attached.
 const RenderTargetShapes& render_target_shape_inventory() noexcept;
+// Render-target creations (256 px and larger) in creation order with the
+// bridge's resource ID where it tracks the texture, for display identity.
+const RenderTargetSequence& render_target_creation_sequence() noexcept;
 // Control-thread only. Turns off late-attach barrier/copy/OM extras after the
 // profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled
 // list keeps association a little longer so stamps/calibration can light.

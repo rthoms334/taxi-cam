@@ -47,7 +47,7 @@ $engine = @(
  'src/camera/probe.cpp','src/camera/local_memory.cpp','src/camera/code_contract.cpp','src/camera/activation_mask.cpp',
  'src/camera/camera_contract.cpp','src/camera/camera_contract_model.cpp','src/camera/relocatable_contract.cpp','src/camera/rtti_vtables.cpp',
  'src/camera/view_resize.cpp','src/camera/view_aa.cpp','src/camera/view_clip.cpp','src/camera/source_view.cpp','src/camera/body_pose_provider.cpp','src/camera/mount_config.cpp',
- 'src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp',
+ 'src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp','src/camera/display_panels.cpp',
  'src/camera/owned_entry_inventory.cpp','src/camera/owned_view.cpp','src/camera/view_pool.cpp',
  'src/hooks/observer_hook.cpp','src/hooks/observer_thunk.S','tools/diagnostics/image_inventory.cpp'
 )
@@ -326,6 +326,7 @@ if ($Validate) {
         @{Name='settings-store'; Sources=@('tests/app/settings_store_test.cpp')},
         @{Name='camera-rate-migration'; Sources=@('tests/app/camera_rate_migration_test.cpp')},
         @{Name='display-snapshot'; Sources=@('tests/app/display_snapshot_test.cpp')},
+        @{Name='display-identity'; Sources=@('tests/camera/display_identity_test.cpp')},
         @{Name='notification-settings'; Sources=@('tests/app/notification_settings_test.cpp')},
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='startup-state'; Sources=@('tests/app/startup_state_test.cpp')},

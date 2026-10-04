@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 #include "../camera/body_pose_provider.hpp"
+#include "../camera/display_panels.hpp"
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
 #include "../graphics/camera_compositor_d3d12.hpp"
@@ -156,6 +157,110 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
       win::append_rotating_log(path, std::string_view(line, static_cast<std::size_t>(length)), win::BridgeLogBytes);
   } catch (...) {
     // Diagnostics must not interrupt bridge operation.
+  }
+}
+// Display identity research (diagnostics only): the VCockpit panel table and
+// the render-target creation order at cockpit load. Bounded reads on this
+// control thread only; nothing routes by the proposal.
+struct PanelIdentityLog {
+  std::uint64_t signature{}, seen_ms{}, next_ms{};
+  bool burst_logged{}, refusal_logged{};
+  display_identity::Panels panels{};
+};
+// Joins items into "prefix [part/total]: ..." lines of bounded length.
+void log_chunks(const win::Status& status, const char* prefix, const std::vector<std::string>& items) noexcept {
+  try {
+    std::vector<std::string> lines(1);
+    for (const auto& item : items) {
+      if (lines.back().size() + item.size() > 1500)
+        lines.emplace_back();
+      lines.back() += item;
+    }
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+      char head[96];
+      std::snprintf(head, sizeof(head), "%s [%zu/%zu]:", prefix, i + 1, lines.size());
+      log_status(status, (head + lines[i]).c_str());
+    }
+  } catch (...) {
+  }
+}
+void service_panel_identity(PanelIdentityLog& state, const win::Status& status, std::uint64_t now) noexcept {
+  if (now < state.next_ms)
+    return;
+  state.next_ms = now + 2000;
+  const auto panels = display_identity::read_panels();
+  if (panels.error) {
+    if (!state.refusal_logged) {
+      state.refusal_logged = true;
+      char detail[160];
+      std::snprintf(detail, sizeof(detail), "Display panels: unavailable error=%s timestamp=%u image_size=%#x", panels.error,
+                    panels.timestamp, panels.image_size);
+      log_status(status, detail);
+    }
+    return;
+  }
+  if (panels.signature != state.signature) {
+    state.signature = panels.signature;
+    state.seen_ms = now;
+    state.burst_logged = false;
+    state.panels = panels;
+    try {
+      std::vector<std::string> items;
+      char count[48];
+      std::snprintf(count, sizeof(count), " count=%u", panels.count);
+      items.emplace_back(count);
+      for (std::uint32_t i = 0; i < panels.count; ++i) {
+        const auto& p = panels.panels[i];
+        char item[160];
+        std::snprintf(item, sizeof(item), " [%u] %s texture=%s kind=%u canvas=%ux%u%s;", p.index, p.section.data(), p.texture.data(),
+                      p.kind, p.canvas_width, p.canvas_height, display_identity::textured(p) ? " textured" : "");
+        items.emplace_back(item);
+      }
+      log_chunks(status, "Display panels", items);
+    } catch (...) {
+    }
+  }
+  // Panel textures are created on the render thread around cockpit load; wait
+  // for them, then report the creations from 30 s before the table appeared.
+  if (state.burst_logged || !state.signature || now - state.seen_ms < 60000)
+    return;
+  state.burst_logged = true;
+  try {
+    static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
+    const auto n = win::render_target_creation_sequence().snapshot(0, entries);
+    const auto start = state.seen_ms > 30000 ? state.seen_ms - 30000 : 0;
+    std::vector<display_identity::Creation> burst;
+    std::vector<std::string> items;
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto& e = entries[i];
+      if (e.tick < start || e.tick > state.seen_ms + 60000)
+        continue;
+      burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format});
+      char item[96];
+      std::snprintf(item, sizeof(item), " %llu:%ux%u:m%u:f%u:%+lld", static_cast<unsigned long long>(e.id), e.width, e.height, e.mips,
+                    e.format, static_cast<long long>(e.tick) - static_cast<long long>(state.seen_ms));
+      items.push_back(item);
+    }
+    char head[64];
+    std::snprintf(head, sizeof(head), " entries=%zu", burst.size());
+    items.insert(items.begin(), head);
+    log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
+    std::array<display_identity::Assignment, display_identity::kMaxPanels> proposal{};
+    bool complete = false;
+    const auto paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
+    std::vector<std::string> pairs;
+    char summary[96];
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_multimip complete=%d paired=%zu", complete ? 1 : 0, paired);
+    pairs.emplace_back(summary);
+    for (std::size_t i = 0; i < paired; ++i) {
+      const auto& a = proposal[i];
+      char item[128];
+      std::snprintf(item, sizeof(item), " %s=#%llu(%ux%u m%u)", a.panel->texture.data(), static_cast<unsigned long long>(a.creation.id),
+                    a.creation.width, a.creation.height, a.creation.mips);
+      pairs.push_back(item);
+    }
+    log_chunks(status, "Display identity (proposed, not used)", pairs);
+  } catch (...) {
   }
 }
 struct StartupTiming {
@@ -431,6 +536,7 @@ DWORD run_impl() {
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
   std::uint64_t next_inventory{}, logged_creation{};
+  PanelIdentityLog panel_identity;
   // Display snapshot (PFD routing): the last handled request and its outcome.
   struct SnapshotState {
     std::uint64_t serial{}, id{};
@@ -1179,6 +1285,7 @@ DWORD run_impl() {
     if (now >= next_inventory) {
       inventory = win::pfd_inventory();
       next_inventory = now + 1000;
+      service_panel_identity(panel_identity, status, now);
       for (const auto& creation : win::display_creation_records(logged_creation)) {
         logged_creation = creation.serial;
         char detail[2048];
