@@ -79,6 +79,49 @@ inline std::size_t propose(const Panels& panels,
   complete = textured_count > 0 && n == textured_count;
   return n;
 }
+// Resolves panel names to creations. Extra multi-mip textures created after
+// the named panels' (one iniBuilds A350 flight made two more 2048 x 2048
+// textures at the end of its burst) move every pairing back by the same
+// count. The window of the last textured-panel-count creations therefore
+// moves back one creation at a time, up to max_shift, until every non-empty
+// name lands on a creation fit() accepts (the profile's display shape).
+// Returns the shift used with ids and out filled, or -1 with ids zeroed.
+template <class Fit>
+int resolve_names(const Panels& panels,
+                  const Creation* creations,
+                  std::size_t count,
+                  const char* const* names,
+                  std::size_t name_count,
+                  Fit fit,
+                  std::uint64_t* ids,
+                  std::array<Assignment, kMaxPanels>& out,
+                  std::size_t& paired,
+                  unsigned max_shift = 4) noexcept {
+  std::size_t textured_count = 0, wanted = 0;
+  for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
+    textured_count += textured(panels.panels[i]);
+  for (std::size_t k = 0; k < name_count; ++k)
+    wanted += names[k] && names[k][0];
+  for (unsigned shift = 0; textured_count && wanted && shift <= max_shift && count >= textured_count + shift; ++shift) {
+    bool complete = false;
+    paired = propose(panels, creations + (count - textured_count - shift), textured_count, out, complete);
+    bool all = complete;
+    for (std::size_t k = 0; k < name_count; ++k) {
+      ids[k] = 0;
+      if (!names[k] || !names[k][0])
+        continue;
+      for (std::size_t i = 0; i < paired; ++i)
+        if (out[i].creation.id && fit(out[i].creation) && std::strcmp(out[i].panel->texture.data(), names[k]) == 0)
+          ids[k] = out[i].creation.id;
+      all = all && ids[k];
+    }
+    if (all)
+      return static_cast<int>(shift);
+  }
+  for (std::size_t k = 0; k < name_count; ++k)
+    ids[k] = 0;
+  return -1;
+}
 // Live read of the current process. Refuses any other build.
 Panels read_panels() noexcept;
 }  // namespace taxi_camera::display_identity

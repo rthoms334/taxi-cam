@@ -72,6 +72,51 @@ int main() {
   Panels empty;
   require(propose(empty, burst.data(), burst.size(), out, complete) == 0 && !complete, "No panels, no proposal");
 
+  // iniBuilds A350, 2026-10-04: two extra 2048 x 2048 textures arrived
+  // between $EFIS_LEFT's and $INI_FAP's. Names must land on the 1644 x 1024
+  // display shape, which a window moved back by two creations gives.
+  {
+    Panels a350;
+    add(a350, 0, "VCockpit01", "$INI_FAP", 4, 1024);
+    add(a350, 2, "VCockpit02", "$EFIS_LEFT", 4, 1024);
+    add(a350, 3, "VCockpit03", "$EFIS_RIGHT", 4, 1024);
+    add(a350, 4, "VCockpit04", "$SD", 4, 1024);
+    const auto fit = [](const Creation& c) { return c.width == 1644 && c.height == 1024; };
+    const char* names[]{"$EFIS_LEFT", "$EFIS_RIGHT", ""};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    const std::vector<Creation> usual{
+        {976, 1, 1644, 1024, 5, 28}, {977, 2, 1644, 1024, 5, 28}, {978, 3, 1644, 1024, 5, 28}, {981, 4, 2048, 2048, 5, 28}};
+    require(
+        resolve_names(a350, usual.data(), usual.size(), names, 3, fit, ids, out, pairs) == 0 && ids[0] == 978 && ids[1] == 977 && !ids[2],
+        "Usual A350 burst names without a shift");
+    const std::vector<Creation> extras{{975, 0, 2048, 2048, 5, 28}, {976, 1, 1644, 1024, 5, 28}, {977, 2, 1644, 1024, 5, 28},
+                                       {978, 3, 1644, 1024, 5, 28}, {979, 4, 2048, 2048, 5, 28}, {980, 5, 2048, 2048, 5, 28},
+                                       {981, 6, 2048, 2048, 5, 28}};
+    require(resolve_names(a350, extras.data(), extras.size(), names, 3, fit, ids, out, pairs) == 2 && ids[0] == 978 && ids[1] == 977,
+            "Two trailing extras shift the A350 names back by two");
+    const auto never = [](const Creation&) { return false; };
+    require(resolve_names(a350, extras.data(), extras.size(), names, 3, never, ids, out, pairs) == -1 && !ids[0] && !ids[1],
+            "No display-shaped pairing leaves the names unresolved");
+    const char* none[]{"", "", ""};
+    require(resolve_names(a350, extras.data(), extras.size(), none, 3, fit, ids, out, pairs) == -1,
+            "A profile without names resolves nothing");
+  }
+  // 777 names resolve unshifted from the recorded burst (DUS 233, EICASCDU 232).
+  {
+    const char* names[]{"DUS", "DUS", "EICASCDU"};
+    const auto fit = [](const Creation& c) { return c.width == 2048; };
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    std::vector<Creation> multimip;  // The bridge passes multi-mip format 28 creations only.
+    for (const auto& c : burst)
+      if (c.mips > 1 && c.format == 28)
+        multimip.push_back(c);
+    require(resolve_names(panels, multimip.data(), multimip.size(), names, 3, fit, ids, out, pairs) == 0 && ids[0] == 233 &&
+                ids[1] == 233 && ids[2] == 232,
+            "777 names resolve without a shift");
+  }
+
   std::array<char, 8> name{};
   const unsigned char raw[] = {'E', 'I', 'C', 'A', 'S', 'C', 'D', 'U', 'X'};
   copy_name(raw, sizeof(raw), name);

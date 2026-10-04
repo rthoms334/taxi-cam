@@ -303,6 +303,11 @@ void service_panel_identity(PanelIdentityLog& state,
       };
       static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
       const auto n = win::panel_texture_creation_sequence().snapshot(0, entries);
+      // Never a texture the panel table gave to another panel (an A350
+      // replacement once took $INI_FAP's texture for $EFIS_LEFT).
+      const auto paired_elsewhere = [&](std::uint64_t id) {
+        return std::any_of(state.names.begin(), state.names.end(), [&](const auto& name) { return name.first == id; });
+      };
       auto named = state.named;
       for (unsigned side = 0; side < MaxDisplaySides; ++side) {
         if (!named[side] || alive(named[side]))
@@ -312,7 +317,8 @@ void service_panel_identity(PanelIdentityLog& state,
         for (std::size_t i = 0; i < n; ++i) {
           const auto& e = entries[i];
           if (e.id > named[side] && e.width == shape.width && e.height == shape.height && e.mips == shape.mips &&
-              e.format == shape.format && alive(e.id) && std::find(named.begin(), named.end(), e.id) == named.end())
+              e.format == shape.format && alive(e.id) && std::find(named.begin(), named.end(), e.id) == named.end() &&
+              !paired_elsewhere(e.id))
             replacement = e.id;
         }
         if (replacement)
@@ -366,14 +372,30 @@ void service_panel_identity(PanelIdentityLog& state,
     items.insert(items.begin(), head);
     if (first)
       log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
-    if (burst.size() > textured)
-      burst.erase(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(textured));
+    // Route by name: every named side of the selected profile must resolve to
+    // a tracked texture of the profile's display shape, or nothing is
+    // published for this profile.
     std::array<display_identity::Assignment, display_identity::kMaxPanels> proposal{};
-    bool complete = false;
-    const auto paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
+    std::size_t paired = 0;
+    std::array<std::uint64_t, MaxDisplaySides> named{};
+    const auto fit = [&](const display_identity::Creation& c) {
+      return profile && profiles::matches_display(*profile, c.width, c.height, c.mips, c.format);
+    };
+    const int shift = profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
+                                                                std::min<std::size_t>(profile->sides, MaxDisplaySides), fit, named.data(),
+                                                                proposal, paired)
+                              : -1;
+    const bool resolved = shift >= 0;
+    bool complete = resolved;
+    if (!resolved) {
+      if (burst.size() > textured)
+        burst.erase(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(textured));
+      paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
+    }
     std::vector<std::string> pairs;
-    char summary[96];
-    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu", complete ? 1 : 0, paired);
+    char summary[112];
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d", complete ? 1 : 0,
+                  paired, shift);
     pairs.emplace_back(summary);
     state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {
@@ -393,21 +415,6 @@ void service_panel_identity(PanelIdentityLog& state,
       log_chunks(status, "Display identity (proposed)", pairs);
       state.feeds.clear();  // Log known feeds again, now with names.
     }
-    // Route by name: every named side of the selected profile must resolve to
-    // a texture the bridge tracks, or nothing is published for this profile.
-    std::array<std::uint64_t, MaxDisplaySides> named{};
-    bool resolved = complete && profile;
-    for (unsigned side = 0; resolved && side < profile->sides && side < MaxDisplaySides; ++side) {
-      const char* name = profile->panel_textures[side];
-      if (!name[0])
-        continue;
-      for (std::size_t i = 0; i < paired; ++i)
-        if (proposal[i].creation.id && std::strcmp(proposal[i].panel->texture.data(), name) == 0)
-          named[side] = proposal[i].creation.id;
-      resolved = named[side] != 0;
-    }
-    if (!resolved)
-      named = {};
     if (resolved) {
       state.locked = true;
       for (unsigned side = 0; side < MaxDisplaySides; ++side)
