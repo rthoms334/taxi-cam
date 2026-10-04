@@ -194,12 +194,48 @@ class TaxiButtonRoutes {
     return true;
   }
 
+  // Panel-name identity (the simulator's VCockpit texture= names): a side the
+  // user did not choose takes the texture named for it, replacing an automatic
+  // guess. Detection changes never withdraw a named side; destruction does.
+  // Single-display profiles may name one texture for several sides.
+  bool adopt_named(const Sides& named, unsigned sides) noexcept {
+    // A side the user chose: neither detected nor named. Single-display
+    // choices also set side 2 this way; the 777 lower DU has its own flag.
+    const auto chosen = [&](unsigned side) {
+      return (side == 2 && lower_explicit_) ||
+             (targets[side] && targets[side] != detected_targets_[side] && targets[side] != named_targets_[side]);
+    };
+    std::array<bool, MaxDisplaySides> user{};
+    for (unsigned side = 0; side < targets.size(); ++side)
+      user[side] = chosen(side);
+    bool changed = false;
+    for (unsigned side = 0; side < sides && side < targets.size(); ++side) {
+      const auto id = named[side];
+      if (!id || targets[side] == id || user[side])
+        continue;
+      // A texture the user put on another side (the right PFD's texture moved
+      // to the left) never serves this side as well. Automatic sides do not
+      // block: a swapped detected pair takes its names in this one pass.
+      bool held = false;
+      for (unsigned other = 0; other < targets.size(); ++other)
+        held = held || (other != side && user[other] && targets[other] == id && named[other] != id);
+      if (held)
+        continue;
+      targets[side] = named_targets_[side] = id;
+      detected_targets_[side] = 0;
+      assigned_ = changed = true;
+    }
+    return changed;
+  }
+  bool named(unsigned side) const noexcept { return side < targets.size() && targets[side] && targets[side] == named_targets_[side]; }
+
   void forget(std::uint64_t id) noexcept {
     assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0 || targets[2] != 0;
     for (unsigned side = 0; side < targets.size(); ++side)
       if (targets[side] == id) {
         targets[side] = 0;
         detected_targets_[side] = 0;
+        named_targets_[side] = 0;
         if (side == 2)
           lower_explicit_ = false;
       }
@@ -234,6 +270,7 @@ class TaxiButtonRoutes {
   bool assigned_ = false;
   bool lower_explicit_ = false;
   Sides detected_targets_{};
+  Sides named_targets_{};
 };
 
 }  // namespace taxi_camera

@@ -15,6 +15,7 @@
 #include "launcher_log.hpp"
 #include "connection_recoverability.hpp"
 #include "../shared/camera_rate_policy.hpp"
+#include "../shared/display_snapshot.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/sim_messages.hpp"
 #include "settings_store.hpp"
@@ -49,7 +50,6 @@ UINT dpi = 96, taskbar_created{};
 int page = 0;
 std::vector<HWND> controls;
 std::vector<HWND> navigation;
-std::vector<std::uint64_t> combo_ids;
 native_camera::AutoProfileSelection profile_selection;
 std::wstring installation, expected_simulator, notice = L"Changes are saved for this aircraft.";
 std::mutex app_mutex;
@@ -190,9 +190,13 @@ void publish(const win::Settings& value) {
   const std::lock_guard lock(app_mutex);
   const auto enabled = current.enabled;
   const auto profile_request = std::max(current.profile_request, value.profile_request);
+  // A snapshot request is session-only; an older draft must not withdraw it.
+  const auto snapshot = current.snapshot_request >= value.snapshot_request ? current : value;
   current = value;
   current.enabled = enabled;  // Profile/settings edits cannot override connection state.
   current.profile_request = profile_request;
+  current.snapshot_request = snapshot.snapshot_request;
+  current.snapshot_id = snapshot.snapshot_id;
 }
 void refresh_connection_button() {
   SetDlgItemTextW(window, 241, win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
@@ -207,11 +211,17 @@ bool pmdg_cam_control(const win::Settings& s) noexcept {
   return profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
 }
 // Side 2 is the lower ECAM (SD) on Airbus aircraft and the lower DU on the 777.
-std::wstring side2_label(const win::Settings& s, const wchar_t* action, bool on) {
-  const std::wstring name = pmdg_cam_control(s) ? L"lower" : L"SD";
-  const auto text = std::wstring(action) == L"preview" ? (pmdg_cam_control(s) ? L"Lower" : L"SD") + std::wstring(L" preview")
-                                                       : std::wstring(L"Calibrate ") + name;
-  return text + (on ? L": On" : L": Off");
+const wchar_t* side_toggle_name(const win::Settings& s, unsigned side) {
+  return side == 0 ? L"Left" : side == 1 ? L"Right" : pmdg_cam_control(s) ? L"Lower" : L"SD";
+}
+// PFD routing's Preview and Calibrate rows, from the current request.
+void refresh_side_toggles(const win::Settings& s) {
+  constexpr int previews[]{224, 225, 232}, calibrations[]{226, 227, 233};
+  for (unsigned side = 0; side < 3; ++side) {
+    const auto name = std::wstring(side_toggle_name(s, side));
+    SetDlgItemTextW(window, previews[side], (name + (s.manual_mask & (1u << side) ? L": On" : L": Off")).c_str());
+    SetDlgItemTextW(window, calibrations[side], (name + (s.calibration_mask & (1u << side) ? L": On" : L": Off")).c_str());
+  }
 }
 void request_connection(win::ConnectCommand command) {
   {
@@ -244,14 +254,8 @@ void request_connection(win::ConnectCommand command) {
                                                       : L"Connect requested. Cameras will enable when the bridge is ready.";
   refresh_connection_button();
   if (command == win::ConnectCommand::disconnect) {
-    SetDlgItemTextW(window, 224, L"Left preview: Off");
-    SetDlgItemTextW(window, 225, L"Right preview: Off");
-    SetDlgItemTextW(window, 226, L"Calibrate left: Off");
-    SetDlgItemTextW(window, 227, L"Calibrate right: Off");
     SetDlgItemTextW(window, 229, L"Scene test: Off");
-    const auto labels = draft();
-    SetDlgItemTextW(window, 232, side2_label(labels, L"preview", false).c_str());
-    SetDlgItemTextW(window, 233, side2_label(labels, L"calibrate", false).c_str());
+    refresh_side_toggles(draft());
   }
   InvalidateRect(window, nullptr, FALSE);
 }
@@ -366,31 +370,6 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
         else
           (*guides[i])[axis] = static_cast<float>(value / 100.);
       }
-  }
-  if (page == 3) {
-    std::array<std::uint64_t, 2> selected_ids{settings.left_id, settings.right_id};
-    for (unsigned i = 0; i < 2; ++i) {
-      const LRESULT selected = SendDlgItemMessageW(window, 400 + i, CB_GETCURSEL, 0, 0);
-      if (selected == 0)
-        selected_ids[i] = 0;
-      else if (selected > 0 && static_cast<size_t>(selected - 1) < combo_ids.size())
-        selected_ids[i] = combo_ids[selected - 1];
-    }
-    // Single-display aircraft route one texture to every side from the first
-    // list. On the PMDG 777 the second list is the separate lower DU texture.
-    const bool separate_lower = separate_lower_profile(settings);
-    const auto lower = separate_lower ? selected_ids[1] : 0;
-    if (single_display_profile(settings))
-      selected_ids[1] = 0;
-    const auto result = win::update_target_assignment(settings.left_id, settings.right_id, settings.route_request, selected_ids[0],
-                                                      selected_ids[1], settings.lower_id, lower);
-    if (result == win::TargetAssignmentResult::duplicate || result == win::TargetAssignmentResult::sequence_exhausted) {
-      if (error)
-        *error = result != win::TargetAssignmentResult::duplicate ? L"Display assignment request limit reached. Restart Taxi Cam."
-                 : separate_lower ? L"Choose a lower DU texture different from the navigation display texture, or Automatic assignment."
-                                  : L"Choose different textures for left and right, or Automatic assignment.";
-      return false;
-    }
   }
   return ok && win::valid_settings(settings);
 }
@@ -678,6 +657,706 @@ void request_whats_new() {
   }
   InvalidateRect(window, nullptr, FALSE);
 }
+// PFD routing: a one-shot picture of a tracked display texture, with the
+// selected profile's display rectangles drawn over it. The bridge writes the
+// image; this dialog only reads it.
+struct SnapshotView {
+  std::uint64_t id{}, serial{};
+  ULONGLONG requested_ms{};
+  HBITMAP image{};
+  int width{}, height{};
+  std::wstring caption, legend;
+} snapshot_view;
+std::uint64_t request_display_snapshot(std::uint64_t id) {
+  const std::lock_guard lock(app_mutex);
+  // Past the bridge's last handled serial too, which survives a profile reload.
+  current.snapshot_request = std::max(current.snapshot_request, status.snapshot_serial) + 1;
+  current.snapshot_id = id;
+  return current.snapshot_request;
+}
+void release_snapshot_image() {
+  if (snapshot_view.image)
+    DeleteObject(snapshot_view.image);
+  snapshot_view.image = nullptr;
+  snapshot_view.width = snapshot_view.height = 0;
+}
+// Texture each display side is routed to, from the bridge's status.
+std::array<std::uint64_t, MaxDisplaySides> routed_texture_ids(const win::Status& sample, const profiles::AircraftProfile& profile) {
+  const bool single = profile.pfd_detection == profiles::PfdDetectionPolicy::single_display;
+  return {sample.left_id, single ? sample.left_id : sample.right_id,
+          profiles::separate_lower_texture(profile) ? sample.lower_id : sample.left_id};
+}
+const wchar_t* snapshot_side_name(const win::Settings& s, unsigned side) {
+  return side == 0 ? L"Left" : side == 1 ? L"Right" : pmdg_cam_control(s) ? L"Lower DU" : L"SD";
+}
+// Profile rectangles apply only when the texture has the profile's display size.
+const profiles::AircraftProfile* snapshot_profile(const win::Settings& s, const win::Status& sample) {
+  const auto* profile = profiles::find(s.profile);
+  return profile && sample.snapshot_width == profile->width && sample.snapshot_height == profile->height ? profile : nullptr;
+}
+void update_snapshot_dialog(HWND hwnd) {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto s = draft();
+  const bool answered = sample.snapshot_serial == snapshot_view.serial;
+  const auto result = answered ? static_cast<win::DisplaySnapshotResult>(sample.snapshot_result) : win::DisplaySnapshotResult::pending;
+  if (answered && result == win::DisplaySnapshotResult::ready && !snapshot_view.image) {
+    snapshot_view.image = static_cast<HBITMAP>(
+        LoadImageW(nullptr, win::display_snapshot_path().c_str(), IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION));
+    BITMAP bitmap{};
+    if (snapshot_view.image && GetObjectW(snapshot_view.image, sizeof(bitmap), &bitmap)) {
+      snapshot_view.width = bitmap.bmWidth;
+      snapshot_view.height = std::abs(bitmap.bmHeight);
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+  }
+  wchar_t caption[320];
+  if (!answered)
+    std::swprintf(caption, 320, L"Texture #%llu. %ls", static_cast<unsigned long long>(snapshot_view.id),
+                  GetTickCount64() - snapshot_view.requested_ms > 3000
+                      ? L"Waiting for the simulator. Connect Taxi Cam with a flight loaded."
+                      : L"Requesting a snapshot...");
+  else
+    std::swprintf(caption, 320, L"Texture #%llu | %u x %u | format %u. %ls", static_cast<unsigned long long>(sample.snapshot_id),
+                  sample.snapshot_width, sample.snapshot_height, sample.snapshot_format,
+                  result == win::DisplaySnapshotResult::ready && !snapshot_view.image ? L"The saved image could not be opened."
+                                                                                      : win::display_snapshot_text(result));
+  std::wstring legend;
+  if (answered && result == win::DisplaySnapshotResult::ready) {
+    const auto* profile = snapshot_profile(s, sample);
+    std::wstring bound;
+    if (profile) {
+      const auto routed = routed_texture_ids(sample, *profile);
+      for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
+        if (routed[side] == sample.snapshot_id)
+          bound += (bound.empty() ? L"" : L", ") + std::wstring(snapshot_side_name(s, side));
+    }
+    const auto* named = profiles::find(s.profile);
+    const std::wstring name = named ? named->name : L"the selected profile";
+    legend = !profile ? L"This texture is not the size of a " + name + L" display texture, so no display rectangles are drawn."
+             : bound.empty()
+                 ? L"Not routed to a display on " + name + L". Dotted outlines show where its displays would be drawn."
+                 : L"Routed to " + bound + L" on " + name + L". Solid outlines are routed display rectangles; dotted ones are not.";
+  }
+  if (legend != snapshot_view.legend) {
+    snapshot_view.legend = legend;
+    SetDlgItemTextW(hwnd, 702, legend.c_str());
+  }
+  if (caption != snapshot_view.caption) {
+    snapshot_view.caption = caption;
+    SetDlgItemTextW(hwnd, 701, caption);
+    InvalidateRect(hwnd, nullptr, FALSE);
+  }
+}
+void paint_snapshot(HDC dc) {
+  const auto area = rectangle(20, 92, 860, 560);
+  HBRUSH fill = CreateSolidBrush(Sidebar);
+  FillRect(dc, &area, fill);
+  DeleteObject(fill);
+  if (!snapshot_view.image || snapshot_view.width <= 0 || snapshot_view.height <= 0)
+    return;
+  const int area_width = area.right - area.left, area_height = area.bottom - area.top;
+  const double fit = std::min(double(area_width) / snapshot_view.width, double(area_height) / snapshot_view.height);
+  const int width = std::max(1, int(snapshot_view.width * fit)), height = std::max(1, int(snapshot_view.height * fit));
+  const int left = area.left + (area_width - width) / 2, top = area.top + (area_height - height) / 2;
+  HDC memory = CreateCompatibleDC(dc);
+  const auto old_bitmap = SelectObject(memory, snapshot_view.image);
+  SetStretchBltMode(dc, HALFTONE);
+  SetBrushOrgEx(dc, 0, 0, nullptr);
+  StretchBlt(dc, left, top, width, height, memory, 0, 0, snapshot_view.width, snapshot_view.height, SRCCOPY);
+  SelectObject(memory, old_bitmap);
+  DeleteDC(memory);
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto s = draft();
+  const auto* profile = sample.snapshot_serial == snapshot_view.serial ? snapshot_profile(s, sample) : nullptr;
+  if (!profile)
+    return;
+  const auto routed = routed_texture_ids(sample, *profile);
+  const auto saved = SaveDC(dc);
+  SelectObject(dc, GetStockObject(NULL_BRUSH));
+  SelectObject(dc, small);
+  SetBkMode(dc, OPAQUE);
+  SetBkColor(dc, Sidebar);
+  for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side) {
+    const auto r = profiles::display_rect(*profile, side);
+    const bool bound = routed[side] == sample.snapshot_id;
+    const COLORREF color = bound ? Accent : Muted;
+    HPEN pen = CreatePen(bound ? PS_SOLID : PS_DOT, bound ? scale(2) : 1, color);
+    const auto old_pen = SelectObject(dc, pen);
+    RECT box{left + MulDiv(int(r.left), width, int(profile->width)), top + MulDiv(int(r.top), height, int(profile->height)),
+             left + MulDiv(int(r.right), width, int(profile->width)), top + MulDiv(int(r.bottom), height, int(profile->height))};
+    Rectangle(dc, box.left, box.top, box.right, box.bottom);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+    SetTextColor(dc, color);
+    InflateRect(&box, -scale(4), -scale(3));
+    DrawTextW(dc, snapshot_side_name(s, side), -1, &box, DT_LEFT | DT_TOP | DT_SINGLELINE);
+  }
+  RestoreDC(dc, saved);
+}
+INT_PTR CALLBACK snapshot_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
+  if (message == WM_INITDIALOG) {
+    place_dialog(hwnd, L"Taxi Cam — Display texture snapshot", 900, 760);
+    dialog_control(hwnd, L"STATIC", L"Display texture snapshot", -1, 20, 17, 860, 28, 0, heading);
+    dialog_control(hwnd, L"STATIC", L"", 701, 20, 54, 860, 30);
+    dialog_control(hwnd, L"STATIC", L"", 702, 20, 662, 860, 44, 0, small);
+    dialog_control(hwnd, L"BUTTON", L"Take again", 703, 652, 714, 120, 34, WS_TABSTOP);
+    const auto close = dialog_control(hwnd, L"BUTTON", L"Close", IDCANCEL, 782, 714, 98, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    SetTimer(hwnd, 1, 200, nullptr);
+    update_snapshot_dialog(hwnd);
+    SetFocus(close);
+    return FALSE;
+  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC)
+    return dialog_colors(w);
+  if (message == WM_TIMER) {
+    update_snapshot_dialog(hwnd);
+    return TRUE;
+  }
+  if (message == WM_PAINT) {
+    PAINTSTRUCT paint;
+    HDC dc = BeginPaint(hwnd, &paint);
+    paint_snapshot(dc);
+    EndPaint(hwnd, &paint);
+    return TRUE;
+  }
+  if (message == WM_COMMAND && LOWORD(w) == 703) {
+    release_snapshot_image();
+    snapshot_view.serial = request_display_snapshot(snapshot_view.id);
+    snapshot_view.requested_ms = GetTickCount64();
+    update_snapshot_dialog(hwnd);
+    InvalidateRect(hwnd, nullptr, TRUE);
+    return TRUE;
+  }
+  if ((message == WM_COMMAND && (LOWORD(w) == IDOK || LOWORD(w) == IDCANCEL)) || message == WM_CLOSE) {
+    EndDialog(hwnd, IDCANCEL);
+    return TRUE;
+  }
+  if (message == WM_DESTROY) {
+    KillTimer(hwnd, 1);
+    release_snapshot_image();
+  }
+  return FALSE;
+}
+bool snapshot_dialog_open{};
+void show_display_snapshot(std::uint64_t id) {
+  release_snapshot_image();
+  snapshot_view = {};
+  snapshot_view.id = id;
+  snapshot_view.serial = request_display_snapshot(id);
+  snapshot_view.requested_ms = GetTickCount64();
+  // The dialog owns the snapshot request until it closes; card pictures wait.
+  snapshot_dialog_open = true;
+  const DialogTemplate layout;
+  if (DialogBoxIndirectParamW(instance, &layout.dialog, window, snapshot_dialog, 0) == -1) {
+    notice = L"Could not open the display snapshot.";
+    InvalidateRect(window, nullptr, FALSE);
+  }
+  snapshot_dialog_open = false;
+}
+// PFD routing and Overview cards: small pictures of the display textures,
+// taken one at a time through the snapshot request while one of those pages
+// is on screen. Never periodic: a picture is retaken when a page opens and it
+// is older than ThumbnailFreshMs, or when the user asks for a refresh.
+struct Thumbnail {
+  std::uint64_t id{};
+  HBITMAP image{};
+  int width{}, height{};
+  std::uint32_t texture_width{}, texture_height{};
+  ULONGLONG taken_ms{}, tried_ms{};
+};
+struct Thumbnails {
+  std::vector<Thumbnail> items;
+  std::uint64_t epoch{}, serial{}, id{};
+  ULONGLONG requested_ms{}, fresh_after{};
+  bool showing{};
+} thumbnails;
+constexpr unsigned ThumbnailEdge = 512;
+constexpr ULONGLONG ThumbnailWaitMs = 8000, ThumbnailRetryMs = 15000, ThumbnailFreshMs = 120000;
+Thumbnail* find_thumbnail(std::uint64_t id) {
+  for (auto& t : thumbnails.items)
+    if (t.id == id)
+      return &t;
+  return nullptr;
+}
+void clear_thumbnails() {
+  for (auto& t : thumbnails.items)
+    if (t.image)
+      DeleteObject(t.image);
+  thumbnails.items.clear();
+  thumbnails.serial = 0;
+}
+// The bridge's snapshot image, kept no larger than ThumbnailEdge.
+HBITMAP load_thumbnail(int& width, int& height) {
+  auto* source = static_cast<HBITMAP>(
+      LoadImageW(nullptr, win::display_snapshot_path().c_str(), IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION));
+  BITMAP bitmap{};
+  if (!source || !GetObjectW(source, sizeof(bitmap), &bitmap) || bitmap.bmWidth <= 0 || !bitmap.bmHeight) {
+    if (source)
+      DeleteObject(source);
+    return nullptr;
+  }
+  const auto source_width = static_cast<unsigned>(bitmap.bmWidth), source_height = static_cast<unsigned>(std::abs(bitmap.bmHeight));
+  unsigned fit_width = 0, fit_height = 0;
+  win::fit_snapshot(source_width, source_height, ThumbnailEdge, fit_width, fit_height);
+  width = static_cast<int>(fit_width);
+  height = static_cast<int>(fit_height);
+  if (fit_width == source_width && fit_height == source_height)
+    return source;
+  HDC screen = GetDC(nullptr);
+  HBITMAP result = CreateCompatibleBitmap(screen, width, height);
+  HDC from = CreateCompatibleDC(screen), to = CreateCompatibleDC(screen);
+  if (result && from && to) {
+    const auto old_from = SelectObject(from, source), old_to = SelectObject(to, result);
+    SetStretchBltMode(to, HALFTONE);
+    SetBrushOrgEx(to, 0, 0, nullptr);
+    StretchBlt(to, 0, 0, width, height, from, 0, 0, static_cast<int>(source_width), static_cast<int>(source_height), SRCCOPY);
+    SelectObject(from, old_from);
+    SelectObject(to, old_to);
+  }
+  if (from)
+    DeleteDC(from);
+  if (to)
+    DeleteDC(to);
+  ReleaseDC(nullptr, screen);
+  DeleteObject(source);
+  return result;
+}
+// Routing lists: list 0 is the left PFD, or the shared display texture on a
+// single-display aircraft; list 1 is the right PFD, or the PMDG 777 lower DU.
+unsigned routing_lists(const win::Settings& s) {
+  return single_display_profile(s) && !separate_lower_profile(s) ? 1 : 2;
+}
+std::array<std::uint64_t, 2> routed_lists(const win::Settings& s, const win::Status& sample) {
+  return {sample.left_id, separate_lower_profile(s) ? sample.lower_id : routing_lists(s) == 1 ? 0 : sample.right_id};
+}
+std::array<std::uint64_t, 2> chosen_lists(const win::Settings& s) {
+  return {s.left_id, separate_lower_profile(s) ? s.lower_id : routing_lists(s) == 1 ? 0 : s.right_id};
+}
+unsigned side_list(const win::Settings& s, unsigned side) {
+  return separate_lower_profile(s) ? side == 2 : routing_lists(s) == 2 && side == 1;
+}
+const wchar_t* list_title(const win::Settings& s, unsigned list) {
+  return separate_lower_profile(s) ? (list ? L"Lower DU" : L"Navigation displays")
+         : routing_lists(s) == 1   ? L"Display texture"
+         : list                    ? L"Right PFD"
+                                   : L"Left PFD";
+}
+const wchar_t* list_action(const win::Settings& s, unsigned list) {
+  return separate_lower_profile(s) ? (list ? L"Lower" : L"NDs") : routing_lists(s) == 1 ? L"Use" : list ? L"Right" : L"Left";
+}
+const wchar_t* display_side_title(const win::Settings& s, unsigned side) {
+  if (pmdg_cam_control(s))
+    return side == 0 ? L"L INBD" : side == 1 ? L"R INBD" : L"LWR CTR";
+  return side == 0 ? L"Left PFD" : side == 1 ? L"Right PFD" : L"SD";
+}
+enum class RouteSource { none, detected, named, chosen };
+RouteSource route_source(const win::Settings& s, const win::Status& sample, unsigned side, std::uint64_t id) {
+  if (!id)
+    return RouteSource::none;
+  if (sample.named_mask & (1u << side))
+    return RouteSource::named;
+  return chosen_lists(s)[side_list(s, side)] == id ? RouteSource::chosen : RouteSource::detected;
+}
+const win::Candidate* find_candidate(const win::Status& sample, std::uint64_t id) {
+  for (UINT i = 0; id && i < std::min(sample.candidate_count, 16u); ++i)
+    if (sample.candidates[i].id == id)
+      return &sample.candidates[i];
+  return nullptr;
+}
+std::wstring candidate_name(const win::Candidate* candidate) {
+  return candidate && candidate->name[0] ? widen(std::string(candidate->name, strnlen(candidate->name, sizeof(candidate->name))).c_str())
+                                         : std::wstring();
+}
+std::wstring candidate_details(std::uint64_t id, const win::Candidate* candidate) {
+  wchar_t details[96];
+  if (candidate)
+    std::swprintf(details, 96, L"#%llu · %u × %u · %u mips", static_cast<unsigned long long>(id), candidate->width, candidate->height,
+                  candidate->mips);
+  else
+    std::swprintf(details, 96, L"#%llu", static_cast<unsigned long long>(id));
+  return details;
+}
+// Gallery order: routed textures, then named ones, then the rest; by ID
+// within each group so cards do not move as draw counts change.
+std::vector<win::Candidate> gallery_items(const win::Settings& s, const win::Status& sample) {
+  std::vector<win::Candidate> items(sample.candidates, sample.candidates + std::min(sample.candidate_count, 16u));
+  const auto routed = routed_lists(s, sample);
+  const auto rank = [&](const win::Candidate& c) { return c.id == routed[0] || c.id == routed[1] ? 0 : c.name[0] ? 1 : 2; };
+  std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) { return rank(a) != rank(b) ? rank(a) < rank(b) : a.id < b.id; });
+  return items;
+}
+constexpr unsigned GalleryColumns = 4;
+unsigned gallery_page{};
+std::array<std::uint64_t, GalleryColumns> gallery_ids{};
+// Shows the card buttons of the visible gallery page and repaints their
+// routed state. The buttons exist from build_controls on PFD routing only.
+void update_gallery_buttons() {
+  if (page != 3 || !GetDlgItem(window, 420))
+    return;
+  const auto s = draft();
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto items = gallery_items(s, sample);
+  const unsigned pages = std::max(1u, static_cast<unsigned>((items.size() + GalleryColumns - 1) / GalleryColumns));
+  gallery_page = std::min(gallery_page, pages - 1);
+  const unsigned lists = routing_lists(s);
+  for (unsigned slot = 0; slot < GalleryColumns; ++slot) {
+    const auto index = gallery_page * GalleryColumns + slot;
+    gallery_ids[slot] = index < items.size() ? items[index].id : 0;
+    for (unsigned list = 0; list < 2; ++list) {
+      HWND card_button = GetDlgItem(window, static_cast<int>(420 + slot * 2 + list));
+      const bool visible = gallery_ids[slot] && list < lists;
+      if (card_button && (IsWindowVisible(card_button) != FALSE) != visible)
+        ShowWindow(card_button, visible ? SW_SHOWNA : SW_HIDE);
+      if (card_button && visible)
+        InvalidateRect(card_button, nullptr, FALSE);
+    }
+  }
+  EnableWindow(GetDlgItem(window, 407), gallery_page > 0);
+  EnableWindow(GetDlgItem(window, 408), gallery_page + 1 < pages);
+}
+// Whether a gallery card button's texture is routed to its list now.
+bool gallery_button_routed(int id) {
+  const auto slot = static_cast<unsigned>(id - 420) / 2, list = static_cast<unsigned>(id - 420) % 2;
+  if (slot >= GalleryColumns || !gallery_ids[slot])
+    return false;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  return routed_lists(draft(), sample)[list] == gallery_ids[slot];
+}
+// Sends one explicit choice per list (0 = automatic) to the bridge.
+bool choose_routes(std::array<std::uint64_t, 2> choice) {
+  auto s = draft();
+  const bool separate = separate_lower_profile(s);
+  const auto lower = separate ? choice[1] : 0;
+  if (single_display_profile(s))
+    choice[1] = 0;
+  const auto result = win::update_target_assignment(s.left_id, s.right_id, s.route_request, choice[0], choice[1], s.lower_id, lower);
+  if (result == win::TargetAssignmentResult::duplicate || result == win::TargetAssignmentResult::sequence_exhausted) {
+    notice = result != win::TargetAssignmentResult::duplicate ? L"Display assignment request limit reached. Restart Taxi Cam."
+             : separate ? L"Choose a lower DU texture different from the navigation display texture, or Automatic."
+                        : L"Choose different textures for left and right, or Automatic.";
+    InvalidateRect(window, nullptr, FALSE);
+    return false;
+  }
+  publish(s);
+  dirty_notice();
+  return true;
+}
+// A card button. Taking the texture the other list shows swaps the two, so
+// one texture never serves both lists.
+void choose_texture(unsigned list, std::uint64_t id) {
+  const auto s = draft();
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  auto choice = chosen_lists(s);
+  const auto routed = routed_lists(s, sample);
+  if (routing_lists(s) == 2 && (choice[1 - list] == id || routed[1 - list] == id))
+    choice[1 - list] = routed[list] != id ? routed[list] : 0;
+  choice[list] = id;
+  if (choose_routes(choice))
+    notice = std::wstring(list_title(s, list)) + L" uses #" + std::to_wstring(id) + L" for this flight. Automatic restores detection.";
+}
+// Takes the next missing or stale picture. Requests go one at a time; the
+// snapshot dialog has the request to itself while it is open.
+void service_thumbnails() {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto now = GetTickCount64();
+  if (sample.aircraft_session_epoch != thumbnails.epoch) {
+    clear_thumbnails();
+    thumbnails.epoch = sample.aircraft_session_epoch;
+  }
+  if (thumbnails.serial && !snapshot_dialog_open) {
+    const auto result = static_cast<win::DisplaySnapshotResult>(sample.snapshot_result);
+    const bool answered = sample.snapshot_serial == thumbnails.serial && result != win::DisplaySnapshotResult::pending;
+    if (!answered && now - thumbnails.requested_ms < ThumbnailWaitMs)
+      return;
+    if (auto* t = find_thumbnail(thumbnails.id); t && answered && result == win::DisplaySnapshotResult::ready) {
+      int width = 0, height = 0;
+      if (const auto image = load_thumbnail(width, height)) {
+        if (t->image)
+          DeleteObject(t->image);
+        t->image = image;
+        t->width = width;
+        t->height = height;
+        t->texture_width = sample.snapshot_width;
+        t->texture_height = sample.snapshot_height;
+        t->taken_ms = now;
+      }
+    }
+    thumbnails.serial = 0;
+    InvalidateRect(window, nullptr, FALSE);
+  } else if (snapshot_dialog_open) {
+    thumbnails.serial = 0;
+  }
+  const bool showing = IsWindowVisible(window) && !IsIconic(window) && (page == 0 || page == 3);
+  if (showing && !thumbnails.showing)
+    thumbnails.fresh_after = std::max(thumbnails.fresh_after, now > ThumbnailFreshMs ? now - ThumbnailFreshMs : 0);
+  thumbnails.showing = showing;
+  const auto s = draft();
+  const auto routed = routed_lists(s, sample);
+  std::vector<std::uint64_t> wanted;
+  const auto want = [&](std::uint64_t id) {
+    if (id && std::find(wanted.begin(), wanted.end(), id) == wanted.end())
+      wanted.push_back(id);
+  };
+  want(routed[0]);
+  want(routed[1]);
+  if (page == 3) {
+    for (const auto id : gallery_ids)
+      want(id);
+    for (const auto& c : gallery_items(s, sample))
+      want(c.id);
+  }
+  // Destroyed textures leave the candidate list; drop their pictures.
+  std::erase_if(thumbnails.items, [&](Thumbnail& t) {
+    const bool gone = t.id != routed[0] && t.id != routed[1] && !find_candidate(sample, t.id);
+    if (gone && t.image)
+      DeleteObject(t.image);
+    return gone;
+  });
+  if (!showing || snapshot_dialog_open || !sample.heartbeat || now < sample.heartbeat || now - sample.heartbeat > 3000 ||
+      !sample.graphics_ready)
+    return;
+  for (const auto id : wanted) {
+    auto* t = find_thumbnail(id);
+    if (t && now - t->tried_ms < ThumbnailRetryMs)
+      continue;
+    if (t && t->image && t->taken_ms >= thumbnails.fresh_after)
+      continue;
+    if (!t) {
+      thumbnails.items.push_back({id});
+      t = &thumbnails.items.back();
+    }
+    t->tried_ms = now;
+    thumbnails.id = id;
+    thumbnails.serial = request_display_snapshot(id);
+    thumbnails.requested_ms = now;
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
+}
+// Clickable pictures drawn by draw_page, in device pixels.
+struct HitArea {
+  RECT bounds{};
+  std::uint64_t id{};  // Picture to enlarge; 0 opens PFD routing.
+};
+std::vector<HitArea> hit_areas;
+const HitArea* hit_area_at(POINT point) {
+  for (const auto& area : hit_areas)
+    if (PtInRect(&area.bounds, point))
+      return &area;
+  return nullptr;
+}
+void chip(HDC dc, int x, int y, const wchar_t* label, COLORREF color) {
+  SelectObject(dc, small);
+  SIZE size{};
+  GetTextExtentPoint32W(dc, label, static_cast<int>(std::wcslen(label)), &size);
+  RECT r{scale(x), scale(y), scale(x) + size.cx + scale(16), scale(y + 22)};
+  HBRUSH brush = CreateSolidBrush(Background);
+  HPEN pen = CreatePen(PS_SOLID, 1, color);
+  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
+  RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(10), scale(10));
+  SelectObject(dc, oldb);
+  SelectObject(dc, oldp);
+  DeleteObject(brush);
+  DeleteObject(pen);
+  SetTextColor(dc, color);
+  SetBkMode(dc, TRANSPARENT);
+  DrawTextW(dc, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+void route_chip(HDC dc, int x, int y, RouteSource source) {
+  switch (source) {
+    case RouteSource::named:
+      return chip(dc, x, y, L"Named", Accent);
+    case RouteSource::chosen:
+      return chip(dc, x, y, L"Your choice", RGB(126, 176, 255));
+    case RouteSource::detected:
+      return chip(dc, x, y, L"Detected", Muted);
+    case RouteSource::none:
+      return chip(dc, x, y, L"Not found", RGB(236, 182, 92));
+  }
+}
+// Draws a texture's picture, or the part `crop` (texture pixels) of it,
+// fitted and centred in box. Returns the drawn rectangle; empty without one.
+RECT draw_thumbnail(HDC dc, const RECT& box, std::uint64_t id, const wchar_t* missing, const profiles::DisplayRect* crop = nullptr) {
+  HBRUSH fill = CreateSolidBrush(Sidebar);
+  FillRect(dc, &box, fill);
+  DeleteObject(fill);
+  const auto* t = find_thumbnail(id);
+  if (!id || !t || !t->image || t->width <= 0 || t->height <= 0) {
+    const wchar_t* label = !id                                                   ? missing
+                           : thumbnails.serial && thumbnails.id == id            ? L"Taking a picture…"
+                           : t && t->tried_ms && !t->image && !thumbnails.serial ? L"No picture"
+                                                                                 : L"Waiting…";
+    auto r = box;
+    SelectObject(dc, small);
+    SetTextColor(dc, Muted);
+    SetBkMode(dc, TRANSPARENT);
+    DrawTextW(dc, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    return {};
+  }
+  int x = 0, y = 0, w = t->width, h = t->height;
+  if (crop && t->texture_width && t->texture_height && crop->right > crop->left && crop->bottom > crop->top &&
+      crop->right <= t->texture_width && crop->bottom <= t->texture_height) {
+    x = MulDiv(static_cast<int>(crop->left), t->width, static_cast<int>(t->texture_width));
+    y = MulDiv(static_cast<int>(crop->top), t->height, static_cast<int>(t->texture_height));
+    w = std::max(1, MulDiv(static_cast<int>(crop->right), t->width, static_cast<int>(t->texture_width)) - x);
+    h = std::max(1, MulDiv(static_cast<int>(crop->bottom), t->height, static_cast<int>(t->texture_height)) - y);
+  }
+  const int box_width = box.right - box.left, box_height = box.bottom - box.top;
+  const double fit = std::min(double(box_width) / w, double(box_height) / h);
+  const int width = std::max(1, int(w * fit)), height = std::max(1, int(h * fit));
+  const RECT drawn{box.left + (box_width - width) / 2, box.top + (box_height - height) / 2, 0, 0};
+  HDC memory = CreateCompatibleDC(dc);
+  const auto old_bitmap = SelectObject(memory, t->image);
+  SetStretchBltMode(dc, HALFTONE);
+  SetBrushOrgEx(dc, 0, 0, nullptr);
+  StretchBlt(dc, drawn.left, drawn.top, width, height, memory, x, y, w, h, SRCCOPY);
+  SelectObject(memory, old_bitmap);
+  DeleteDC(memory);
+  return {drawn.left, drawn.top, drawn.left + width, drawn.top + height};
+}
+// Overview: what each display side's camera draws into, cropped from the
+// texture routed to that side.
+void draw_display_strip(HDC dc, const win::Status& sample) {
+  const auto s = draft();
+  const auto* profile = profiles::find(s.profile);
+  if (!profile)
+    return;
+  const auto routed = routed_texture_ids(sample, *profile);
+  const int sides = static_cast<int>(std::min<unsigned>(profile->sides, MaxDisplaySides));
+  const int gap = 10, width = (734 - gap * (sides - 1)) / sides;
+  for (int side = 0; side < sides; ++side) {
+    const int x = 260 + side * (width + gap), y = 553;
+    const auto id = routed[side];
+    panel(dc, x, y, width, 114, Background);
+    const auto* t = find_thumbnail(id);
+    const bool fits = t && t->texture_width == profile->width && t->texture_height == profile->height;
+    const auto crop = profiles::display_rect(*profile, static_cast<unsigned>(side));
+    draw_thumbnail(dc, rectangle(x + 8, y + 8, 98, 98), id, L"No display", fits ? &crop : nullptr);
+    hit_areas.push_back({rectangle(x, y, width, 114), 0});
+    const int tx = x + 116, tw = width - 124;
+    text(dc, display_side_title(s, static_cast<unsigned>(side)), tx, y + 8, tw, 26, heading);
+    const auto* candidate = find_candidate(sample, id);
+    const auto name = candidate_name(candidate);
+    text(dc, id ? (name.empty() ? (L"#" + std::to_wstring(id)).c_str() : name.c_str()) : L"Waiting for detection", tx, y + 38, tw, 22,
+         small, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    route_chip(dc, tx, y + 76, route_source(s, sample, static_cast<unsigned>(side), id));
+  }
+}
+// PFD routing: the texture behind each routing list, with the display
+// rectangles it serves outlined.
+void draw_routing_slots(HDC dc, const win::Status& sample) {
+  const auto s = draft();
+  const auto* profile = profiles::find(s.profile);
+  const auto routed = routed_lists(s, sample);
+  const unsigned lists = routing_lists(s);
+  for (unsigned list = 0; list < lists; ++list) {
+    const int x = 260 + static_cast<int>(list) * 375, y = 169, width = lists == 1 ? 734 : 359;
+    const auto id = routed[list];
+    panel(dc, x, y, width, 130, Background);
+    const auto box = rectangle(x + 7, y + 7, 116, 116);
+    const auto drawn = draw_thumbnail(dc, box, id, L"Not found");
+    const auto* t = find_thumbnail(id);
+    if (id && drawn.right > drawn.left && profile && t && t->texture_width == profile->width && t->texture_height == profile->height) {
+      const auto sides = routed_texture_ids(sample, *profile);
+      HPEN pen = CreatePen(PS_SOLID, scale(2), Accent);
+      const auto old_pen = SelectObject(dc, pen);
+      const auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+      const int dw = drawn.right - drawn.left, dh = drawn.bottom - drawn.top;
+      for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side) {
+        if (sides[side] != id)
+          continue;
+        const auto r = profiles::display_rect(*profile, side);
+        Rectangle(dc, drawn.left + MulDiv(int(r.left), dw, int(profile->width)), drawn.top + MulDiv(int(r.top), dh, int(profile->height)),
+                  drawn.left + MulDiv(int(r.right), dw, int(profile->width)), drawn.top + MulDiv(int(r.bottom), dh, int(profile->height)));
+      }
+      SelectObject(dc, old_brush);
+      SelectObject(dc, old_pen);
+      DeleteObject(pen);
+    }
+    if (id)
+      hit_areas.push_back({box, id});
+    const int tx = x + 136, tw = width - 144;
+    text(dc, list_title(s, list), tx, y + 8, tw, 28, heading);
+    const auto* candidate = find_candidate(sample, id);
+    const auto name = candidate_name(candidate);
+    text(dc,
+         !id            ? L"Choose a texture below, or wait for detection."
+         : name.empty() ? L"Unnamed texture"
+                        : name.c_str(),
+         tx, y + 40, tw, 24, normal, id && !name.empty() ? Text : Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (id)
+      text(dc, candidate_details(id, candidate).c_str(), tx, y + 66, tw, 22, small, Muted);
+    const unsigned side = list && separate_lower_profile(s) ? 2 : list;
+    route_chip(dc, tx, y + 96, route_source(s, sample, side, id));
+  }
+}
+// PFD routing gallery: one card per tracked display texture on this page.
+void draw_gallery(HDC dc, const win::Status& sample) {
+  const auto s = draft();
+  const auto items = gallery_items(s, sample);
+  const auto routed = routed_lists(s, sample);
+  const bool any_named = std::any_of(items.begin(), items.end(), [](const auto& c) { return c.name[0] != 0; });
+  if (items.empty()) {
+    text(dc,
+         sample.graphics_ready ? L"Waiting for cockpit displays to be drawn. Restart Flight only if this stays empty."
+                               : L"Connect Taxi Cam with a flight loaded to see the display textures.",
+         260, 440, 734, 60, normal, Muted, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+    return;
+  }
+  const unsigned pages = static_cast<unsigned>((items.size() + GalleryColumns - 1) / GalleryColumns);
+  wchar_t page_label[32];
+  std::swprintf(page_label, 32, L"%u / %u", std::min(gallery_page, pages - 1) + 1, pages);
+  text(dc, page_label, 806, 327, 60, 32, small, Muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  for (unsigned slot = 0; slot < GalleryColumns; ++slot) {
+    const auto id = gallery_ids[slot];
+    const auto* candidate = find_candidate(sample, id);
+    if (!id || !candidate)
+      continue;
+    const int x = 260 + static_cast<int>(slot) * 186, y = 367;
+    const bool in_use = id == routed[0] || id == routed[1];
+    panel(dc, x, y, 178, 236, Background);
+    const auto box = rectangle(x + 6, y + 6, 166, 140);
+    draw_thumbnail(dc, box, id, L"");
+    hit_areas.push_back({box, id});
+    if (in_use)
+      chip(dc, x + 12, y + 12, routing_lists(s) == 1 ? L"In use" : list_action(s, id == routed[0] ? 0 : 1), Accent);
+    const auto name = candidate_name(candidate);
+    text(dc, name.empty() ? L"Unnamed" : name.c_str(), x + 10, y + 150, 158, 22, normal, name.empty() && any_named ? Muted : Text,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    wchar_t details[64];
+    std::swprintf(details, 64, L"#%llu · %u × %u · m%u", static_cast<unsigned long long>(id), candidate->width, candidate->height,
+                  candidate->mips);
+    text(dc, details, x + 10, y + 172, 158, 20, small, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
+}
+// Preview and Calibrate rows: the group label sits before each set of sides.
+int side_toggle_x(unsigned group, unsigned sides) {
+  return group ? 312 + static_cast<int>(sides) * 100 + 86 : 312;
+}
 void show_whats_new() {
   win::ChangelogFetchResult result;
   if (!changelog_fetcher.take(result))
@@ -731,60 +1410,6 @@ bool apply(bool save = true) {
   InvalidateRect(window, nullptr, FALSE);
   return true;
 }
-void target_combos(const win::Settings& s) {
-  win::Status sample;
-  {
-    const std::lock_guard lock(app_mutex);
-    sample = status;
-  }
-  // A dropped list belongs to the user until it closes. Do not replace its
-  // item order while it is being selected or turn a redraw into a selection.
-  for (unsigned side = 0; side < 2; ++side)
-    if (SendDlgItemMessageW(window, 400 + side, CB_GETDROPPEDSTATE, 0, 0))
-      return;
-  std::vector<std::uint64_t> next;
-  for (UINT i = 0; i < std::min(sample.candidate_count, 16u); ++i)
-    next.push_back(sample.candidates[i].id);
-  std::sort(next.begin(), next.end());
-  const bool existing = GetDlgItem(window, 400) != nullptr;
-  if (existing && next == combo_ids)
-    return;
-  std::array<std::uint64_t, 2> selected{s.left_id, separate_lower_profile(s) ? s.lower_id : s.right_id};
-  if (existing) {
-    for (unsigned side = 0; side < 2; ++side) {
-      const auto index = SendDlgItemMessageW(window, 400 + side, CB_GETCURSEL, 0, 0);
-      selected[side] = index > 0 && size_t(index - 1) < combo_ids.size() ? combo_ids[index - 1] : 0;
-    }
-  }
-  combo_ids = std::move(next);
-  const bool was_refreshing = refreshing;
-  refreshing = true;
-  for (unsigned side = 0; side < 2; ++side) {
-    HWND combo = GetDlgItem(window, 400 + side);
-    if (!combo)
-      combo = child(L"COMBOBOX", L"", 400 + side, 260 + static_cast<int>(side) * 375, 237, 315, 240, CBS_DROPDOWNLIST | WS_VSCROLL);
-    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Automatic assignment"));
-    SendMessageW(combo, CB_SETDROPPEDWIDTH, scale(420), 0);
-    int selection = 0;
-    for (size_t i = 0; i < combo_ids.size(); ++i) {
-      const win::Candidate* candidate = nullptr;
-      for (UINT j = 0; j < std::min(sample.candidate_count, 16u); ++j)
-        if (sample.candidates[j].id == combo_ids[i])
-          candidate = &sample.candidates[j];
-      wchar_t name[96];
-      std::swprintf(name, 96, L"#%llu | %ux%u | %u mips | format %u", static_cast<unsigned long long>(combo_ids[i]),
-                    candidate ? candidate->width : 0, candidate ? candidate->height : 0, candidate ? candidate->mips : 0,
-                    candidate ? candidate->format : 0);
-      SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-      if (combo_ids[i] == selected[side])
-        selection = static_cast<int>(i + 1);
-    }
-    SendMessageW(combo, CB_SETCURSEL, side && single_display_profile(s) && !separate_lower_profile(s) ? 0 : selection, 0);
-  }
-  EnableWindow(GetDlgItem(window, 401), !single_display_profile(s) || separate_lower_profile(s));
-  refreshing = was_refreshing;
-}
 // Runs on the UI thread, including when hidden to the tray.
 void sync_aircraft_session() {
   auto s = draft();
@@ -801,16 +1426,9 @@ void sync_aircraft_session() {
   publish(s);
   profile_selection = {};
   // Do not rebuild numeric edits when a flight changes in the background.
-  for (unsigned side = 0; side < 2; ++side)
-    SendDlgItemMessageW(window, 400 + side, CB_SETCURSEL, 0, 0);
-  for (const auto& label : std::array<std::pair<int, const wchar_t*>, 5>{{{224, L"Left preview: Off"},
-                                                                          {225, L"Right preview: Off"},
-                                                                          {226, L"Calibrate left: Off"},
-                                                                          {227, L"Calibrate right: Off"},
-                                                                          {229, L"Scene test: Off"}}})
-    SetDlgItemTextW(window, label.first, label.second);
-  SetDlgItemTextW(window, 232, side2_label(s, L"preview", false).c_str());
-  SetDlgItemTextW(window, 233, side2_label(s, L"calibrate", false).c_str());
+  SetDlgItemTextW(window, 229, L"Scene test: Off");
+  refresh_side_toggles(s);
+  update_gallery_buttons();
 }
 void toggle_camera_from_hotkey(unsigned action) {
   // Keep unfinished numeric edits in their controls. A global shortcut must not
@@ -845,13 +1463,7 @@ void toggle_camera_from_hotkey(unsigned action) {
     notice += L" Displays selected with CAM stay on until CAM is pressed again.";
   if (!s.enabled)
     notice = L"Camera request updated. Choose Connect to enable camera output.";
-  for (unsigned side = 0; side < 2; ++side) {
-    const auto label = std::wstring(side ? L"Right preview: " : L"Left preview: ") + (s.manual_mask & (1u << side) ? L"On" : L"Off");
-    SetDlgItemTextW(window, 224 + side, label.c_str());
-    SetDlgItemTextW(window, 226 + side, side ? L"Calibrate right: Off" : L"Calibrate left: Off");
-  }
-  SetDlgItemTextW(window, 232, side2_label(s, L"preview", (s.manual_mask & 4) != 0).c_str());
-  SetDlgItemTextW(window, 233, side2_label(s, L"calibrate", false).c_str());
+  refresh_side_toggles(s);
   SetDlgItemTextW(window, 221,
                   pmdg_cam_control(s) ? (s.follow_taxi ? L"CAM button: On" : L"CAM button: Off")
                   : s.follow_taxi     ? L"TAXI buttons: On"
@@ -958,7 +1570,7 @@ void build_controls() {
     toggle(pmdg_cam_control(s) ? L"CAM button" : L"TAXI buttons", 221, s.follow_taxi && !manual, 800, 412, 180);
     EnableWindow(GetDlgItem(window, 221), !manual);
     button(L"Shortcuts and buttons…", 645, 580, 412, 205);
-    edit(s.camera_rate, 200, 855, 528, 100);
+    button(L"Refresh", 409, 880, 512, 110, 32);
   } else if (page == 1) {
     const auto* profile = profiles::find(s.profile);
     const int feed_count = profile && profile->composition.split_bottom != 0 ? 3 : 2;
@@ -979,19 +1591,29 @@ void build_controls() {
     const auto* display_profile = profiles::find(s.profile);
     EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
   } else if (page == 3) {
-    toggle(L"Auto detect", 223, s.auto_detect, 795, 126, 180);
-    target_combos(s);
-    button(L"Refresh textures", 402, 260, 294, 190);
-    button(L"Swap left / right", 403, 475, 294, 190);
+    button(L"Automatic", 406, 525, 126, 120);
+    button(L"Swap left / right", 403, 655, 126, 165);
     EnableWindow(GetDlgItem(window, 403), !single_display_profile(s));
-    toggle(L"Left preview", 224, (s.manual_mask & 1) != 0, 260, 429, 200);
-    toggle(L"Right preview", 225, (s.manual_mask & 2) != 0, 505, 429, 200);
-    toggle(L"Calibrate left", 226, (s.calibration_mask & 1) != 0, 260, 540, 200);
-    toggle(L"Calibrate right", 227, (s.calibration_mask & 2) != 0, 505, 540, 200);
-    if (const auto* sides = profiles::find(s.profile); sides && sides->sides > 2) {
-      toggle(pmdg_cam_control(s) ? L"Lower preview" : L"SD preview", 232, (s.manual_mask & 4) != 0, 750, 429, 200);
-      toggle(pmdg_cam_control(s) ? L"Calibrate lower" : L"Calibrate SD", 233, (s.calibration_mask & 4) != 0, 750, 540, 200);
+    toggle(L"Auto detect", 223, s.auto_detect, 830, 126, 165);
+    button(L"Refresh pictures", 402, 640, 327, 160, 32);
+    button(L"‹", 407, 870, 327, 56, 32);
+    button(L"›", 408, 934, 327, 56, 32);
+    const unsigned lists = routing_lists(s);
+    for (unsigned slot = 0; slot < GalleryColumns; ++slot)
+      for (unsigned list = 0; list < lists; ++list)
+        ShowWindow(button(list_action(s, list), static_cast<int>(420 + slot * 2 + list),
+                          266 + static_cast<int>(slot) * 186 + static_cast<int>(list) * 86, 563, lists == 1 ? 166 : 80, 32),
+                   SW_HIDE);
+    const auto* side_profile = profiles::find(s.profile);
+    const unsigned sides = side_profile && side_profile->sides > 2 ? 3 : 2;
+    constexpr int previews[]{224, 225, 232}, calibrations[]{226, 227, 233};
+    for (unsigned side = 0; side < sides; ++side) {
+      toggle(side_toggle_name(s, side), previews[side], (s.manual_mask & (1u << side)) != 0,
+             side_toggle_x(0, sides) + static_cast<int>(side) * 100, 622, 96);
+      toggle(side_toggle_name(s, side), calibrations[side], (s.calibration_mask & (1u << side)) != 0,
+             side_toggle_x(1, sides) + static_cast<int>(side) * 100, 622, 96);
     }
+    update_gallery_buttons();
   } else if (page == 4) {
     toggle(L"Scene test", 229, s.scene_test, 260, 449, 200);
     toggle(L"First camera only", 228, s.single_camera, 505, 449, 200);
@@ -1128,6 +1750,7 @@ void show() {
   SetForegroundWindow(window);
 }
 void draw_page(HDC dc) {
+  hit_areas.clear();
   RECT client{};
   GetClientRect(window, &client);
   FillRect(dc, &client, background_brush);
@@ -1183,10 +1806,10 @@ void draw_page(HDC dc) {
          : cam  ? L"Select L INBD, R INBD or LWR CTR, then press CAM. Press CAM again with that display selected to turn it off."
                 : L"Left and right EFIS TAXI buttons activate their own PFD.",
          264, 446, 530, 40, small, Muted, DT_LEFT | DT_WORDBREAK);
-    panel(dc, 244, 511, 766, 102);
-    text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
-    text(dc, L"Range 5–60 per camera; install default 10. Parked aircraft run at the 5 fps floor.", 264, 564, 560, 24, small, Muted);
-    text(dc, L"Cameras stay on at any speed and draw as far as the main view.", 250, 630, 730, 24, small, Muted);
+    panel(dc, 244, 505, 766, 171);
+    text(dc, L"Cockpit displays", 264, 513, 300, 30, heading);
+    text(dc, L"Where each camera is drawn. Select one to change it.", 470, 513, 400, 30, small, Muted);
+    draw_display_strip(dc, sample);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
     const auto* profile = profiles::find(draft().profile);
@@ -1221,34 +1844,24 @@ void draw_page(HDC dc) {
       text(dc, rate_line, 251, 630, 480, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
     }
   } else if (page == 3) {
-    panel(dc, 244, 119, 766, 226);
-    text(dc, L"PFD assignment", 262, 127, 420, 30, heading);
-    text(dc, L"Target identities apply to this simulator session.", 262, 166, 715, 25, small, Muted);
-    if (separate_lower_profile(draft())) {
-      text(dc, L"NAVIGATION DISPLAYS TEXTURE", 260, 207, 315, 25, small, Muted);
-      text(dc, L"LOWER DU TEXTURE", 635, 207, 315, 25, small, Muted);
-    } else if (single_display_profile(draft())) {
-      text(dc, L"DISPLAY TEXTURE (EVERY SIDE)", 260, 207, 315, 25, small, Muted);
-      text(dc, L"NOT USED ON THIS AIRCRAFT", 635, 207, 315, 25, small, Muted);
-    } else {
-      text(dc, L"LEFT PFD", 260, 207, 315, 25, small, Muted);
-      text(dc, L"RIGHT PFD", 635, 207, 315, 25, small, Muted);
-    }
-    panel(dc, 244, 368, 766, 112);
-    text(dc, L"Manual camera preview", 260, 381, 705, 29, heading);
+    panel(dc, 244, 119, 766, 190);
+    text(dc, L"Assigned displays", 262, 127, 255, 34, heading);
+    draw_routing_slots(dc, sample);
+    panel(dc, 244, 319, 766, 294);
+    text(dc, L"Display textures", 262, 327, 180, 32, heading);
+    text(dc, L"Select a picture to enlarge it.", 446, 327, 190, 32, small, Muted);
+    draw_gallery(dc, sample);
+    const auto s = draft();
+    const auto* profile = profiles::find(s.profile);
+    const unsigned sides = profile && profile->sides > 2 ? 3 : 2;
+    text(dc, L"Preview", 250, 622, 60, 36, small, Muted);
+    text(dc, L"Calibrate", side_toggle_x(1, sides) - 76, 622, 72, 36, small, Muted);
     text(dc,
-         pmdg_cam_control(draft()) ? L"Previews add displays on top of the CAM button. Calibration turns CAM control off."
-                                   : L"Manual preview and calibration turn off automatic TAXI-button control.",
-         260, 410, 705, 22, small, Muted);
-    panel(dc, 244, 500, 766, 112);
-    text(dc, L"Target calibration", 260, 507, 705, 29, heading);
-    text(dc, L"Animated bars identify each screen before enabling a live feed.", 260, 581, 705, 23, small, Muted);
-    const auto* profile = profiles::find(draft().profile);
-    text(dc,
-         profile && profile->taxi_control == profiles::TaxiControl::manual_only
-             ? L"Use shortcuts in Overview > Flight-deck control, or manual previews."
-             : L"Enable flight-deck control on Overview to return to normal use.",
-         250, 630, 745, 24, small, Muted);
+         pmdg_cam_control(s) ? L"Previews add displays on top of the CAM button. Calibration bars identify each screen and turn CAM off."
+         : profile && profile->taxi_control == profiles::TaxiControl::manual_only
+             ? L"Previews are this aircraft's camera control. Calibration bars identify each screen."
+             : L"Previews and calibration turn off TAXI-button control. Calibration bars identify each screen.",
+         250, 660, 760, 22, small, Muted);
   } else if (page == 4) {
     panel(dc, 244, 138, 766, 277);
     wchar_t data[1024];
@@ -1707,6 +2320,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (show_event && WaitForSingleObject(show_event, 0) == WAIT_OBJECT_0)
         show();
       poll_updates();
+      service_thumbnails();
       return 0;
     case WM_HOTKEY: {
       const int action = hotkey_registration.action(w, l);
@@ -1747,7 +2361,28 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     }
     case WM_ERASEBKGND:
       return 1;
+    case WM_LBUTTONUP: {
+      const POINT point{static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))};
+      if (const auto* area = hit_area_at(point)) {
+        if (area->id) {
+          show_display_snapshot(area->id);
+        } else {
+          SendMessageW(hwnd, WM_COMMAND, 103, 0);
+        }
+        return 0;
+      }
+      break;
+    }
     case WM_SETCURSOR:
+      if (reinterpret_cast<HWND>(w) == hwnd && LOWORD(l) == HTCLIENT) {
+        POINT point{};
+        GetCursorPos(&point);
+        ScreenToClient(hwnd, &point);
+        if (hit_area_at(point)) {
+          SetCursor(LoadCursorW(nullptr, IDC_HAND));
+          return TRUE;
+        }
+      }
       if (const auto link = reinterpret_cast<HWND>(w);
           link && GetParent(link) == hwnd && (GetDlgCtrlID(link) == 514 || GetDlgCtrlID(link) == 515) && LOWORD(l) == HTCLIENT) {
         SetCursor(LoadCursorW(nullptr, IDC_HAND));
@@ -1784,7 +2419,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         break;
       const int id = static_cast<int>(item->CtlID);
       const bool disabled = (item->itemState & ODS_DISABLED) != 0;
-      const bool selected = !disabled && ((id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft()));
+      const bool selected = !disabled && ((id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft()) ||
+                                          (id >= 420 && id < 428 && gallery_button_routed(id)));
       HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || (id >= 512 && id <= 515) ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
@@ -1843,8 +2479,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       sync_aircraft_session();
       auto_profile();
       show_notifications();
-      if (page == 3)
-        target_combos(draft());
+      update_gallery_buttons();
+      service_thumbnails();
       if (IsWindowVisible(hwnd))
         InvalidateRect(hwnd, nullptr, FALSE);
       return 0;
@@ -1906,9 +2542,34 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         edit_camera_hotkeys();
         return 0;
       }
-      if (HIWORD(w) == CBN_SELCHANGE && (id == 400 || id == 401)) {
-        if (apply(false))
-          dirty_notice();
+      if (id >= 420 && id < 428) {
+        const auto slot = static_cast<unsigned>(id - 420) / 2;
+        if (slot < GalleryColumns && gallery_ids[slot])
+          choose_texture(static_cast<unsigned>(id - 420) % 2, gallery_ids[slot]);
+        update_gallery_buttons();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (id == 406) {
+        if (choose_routes({0, 0}))
+          notice = L"Automatic assignment restored. Named and detected displays apply again.";
+        update_gallery_buttons();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (id == 407 || id == 408) {
+        if (id == 407 && gallery_page > 0)
+          --gallery_page;
+        if (id == 408)
+          ++gallery_page;
+        update_gallery_buttons();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (id == 409) {
+        thumbnails.fresh_after = GetTickCount64();
+        service_thumbnails();
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
       if (HIWORD(w) == EN_CHANGE || (HIWORD(w) == CBN_SELCHANGE && id != 210)) {
@@ -2127,6 +2788,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (id == 402) {
+        thumbnails.fresh_after = GetTickCount64();
         if (apply(false)) {
           win::Status sample;
           {
@@ -2144,16 +2806,14 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (id == 403) {
         if (!apply(false))
           return 0;
-        auto s = draft();
-        const auto result =
-            win::update_target_assignment(s.left_id, s.right_id, s.route_request, s.right_id, s.left_id, s.lower_id, s.lower_id);
-        if (result == win::TargetAssignmentResult::sequence_exhausted) {
-          notice = L"Display assignment request limit reached. Restart Taxi Cam.";
-          InvalidateRect(hwnd, nullptr, FALSE);
-          return 0;
+        win::Status sample;
+        {
+          const std::lock_guard lock(app_mutex);
+          sample = status;
         }
-        publish(s);
-        dirty_notice();
+        const auto routed = routed_lists(draft(), sample);
+        if (routed[0] && routed[1] && choose_routes({routed[1], routed[0]}))
+          notice = L"Left and right swapped for this flight. Automatic restores detection.";
         build_controls();
         return 0;
       }

@@ -243,24 +243,30 @@ void guide_settings_tests() {
   assert(settings_path(saved[0]) != settings_path(saved[1]) && settings_path(saved[1]) != settings_path(saved[2]));
 }
 }  // namespace
-// Live PMDG 777 values (bridge.log, 2026-10-03): night passes the scene light
-// through unchanged; by day the display (0.18 of main-view light) cannot, so a
-// full code stands for the scene light the main view shows at DisplayWhite.
-void display_code_light_tests() {
+// Live PMDG 777 values (bridge.log, 2026-10-03): night and dusk pass the scene
+// light through; by day (and above a sunlit cloud deck) a full code reaches only
+// 0.18 of the main view's light, so the main view's tone curve takes over.
+void display_pass_through_tests() {
   const auto& light = profiles::Pmdg777300ER.display_light;
-  const double night = profiles::display_full_light(light, 0), day = profiles::display_full_light(light, 32000);
-  assert(std::abs(night - 22.3235) < 1e-3 && std::abs(day - 1637.06) < 0.01);
-  assert(profiles::display_code_light(night, 0.0333) == night);
-  assert(profiles::display_code_light(night, 0) == night && profiles::display_code_light(day, 0) == day);
-  assert(profiles::display_code_light(day, -1) == day && profiles::display_code_light(day, NAN) == day);
-  assert(std::abs(profiles::display_code_light(day, 0.000111153) - profiles::DisplayWhite / 0.000111153) < 1e-6);
-  assert(profiles::display_code_light(0, 0.000111153) == 0);
-  // Dusk (exposure 0.00146, full code 1125): still bright enough.
-  assert(profiles::display_code_light(1125, 0.00146) == 1125);
+  assert(std::abs(profiles::display_full_light(light, 0) - 22.3235) < 1e-3);
+  assert(std::abs(profiles::display_full_light(light, 32000) - 1637.06) < 0.01);
+  assert(profiles::display_pass_through(light, 0, 0.0333, false));
+  assert(!profiles::display_pass_through(light, 32000, 0.000111154, false));
+  assert(!profiles::display_pass_through(light, 32000, 0.000111154, true));
+  // Dusk: full code 1125 at about 1370 lux.
+  assert(profiles::display_pass_through(light, 1373, 0.00146, false));
+  // Hysteresis: 0.5 keeps the previous choice.
+  const double half = 0.5 / profiles::display_full_light(light, 0);
+  assert(profiles::display_pass_through(light, 0, half, true) && !profiles::display_pass_through(light, 0, half, false));
+  // Unknown exposure: only the night display passes through.
+  assert(profiles::display_pass_through(light, 0, 0, false) && profiles::display_pass_through(light, 150, NAN, false));
+  assert(!profiles::display_pass_through(light, 32000, 0, true) && !profiles::display_pass_through(light, 1000, -1, true));
+  // Not decoded: never.
+  assert(!profiles::display_pass_through(profiles::DisplayLight{}, 0, 0.0333, true));
 }
 int main() {
   aircraft_swap_tests();
-  display_code_light_tests();
+  display_pass_through_tests();
   using namespace standalone;
   wchar_t temporary[32768];
   assert(GetTempPathW(32768, temporary));
@@ -396,7 +402,9 @@ int main() {
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 87));
-  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 5, 28));
+  // The named $PFD_CPT/$PFD_FO panel textures are five-mip; no other count.
+  assert(profiles::matches_display(profiles::IniA380, 768, 1024, 5, 28));
+  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 2, 28));
   assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 12, 87));
   assert(profiles::matches_display(profiles::A380, 768, 1024, 5, 28));
   assert(!profiles::matches_display(profiles::A380, 768, 1024, 1, 28));

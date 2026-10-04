@@ -1,10 +1,14 @@
 #pragma once
+#include <array>
 #include <cstddef>
+#include <utility>
 #include <vector>
 #include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/pfd_target_detector.hpp"
+#include "../graphics/render_target_sequence.hpp"
 #include "../graphics/render_target_shapes.hpp"
 #include "../graphics/scene_runtime.hpp"
+#include "../shared/display_snapshot.hpp"
 namespace taxi_camera::standalone {
 inline constexpr const char* pfd_gpu_operation_name(unsigned slot) noexcept {
   switch (slot) {
@@ -220,6 +224,11 @@ bool graphics_admission_halted() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
 // Render-target shapes seen at creation since the bridge attached.
 const RenderTargetShapes& render_target_shape_inventory() noexcept;
+// Render-target creations (256 px and larger) in creation order with the
+// bridge's resource ID where it tracks the texture, for display identity.
+const RenderTargetSequence& render_target_creation_sequence() noexcept;
+// The same, restricted to multi-mip R8G8B8A8_UNORM creations (panel textures).
+const RenderTargetSequence& panel_texture_creation_sequence() noexcept;
 // Control-thread only. Turns off late-attach barrier/copy/OM extras after the
 // profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled
 // list keeps association a little longer so stamps/calibration can light.
@@ -236,9 +245,50 @@ void set_target_mask(unsigned mask) noexcept;
 void set_waiting_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
 std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept;
+// Sides whose route came from the panel-name table (bit per side).
+unsigned named_target_mask() noexcept;
 // Control-thread flight reset: drop routes/activity and make all older recording
 // proofs ineligible. Keep native metadata and already-recorded GPU ownership.
 void reset_display_session() noexcept;
 void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;
+// Texture IDs named for each display side by the panel table (0 = none).
+// discover_pfds routes them first; explicit choices and dead textures are
+// never overridden or kept.
+void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) noexcept;
+// Display texture snapshot for PFD routing. Control thread only. Replaces any
+// earlier request, then copies the tracked display texture's base mip into a
+// private READBACK buffer at the next proven submission boundary, the same
+// kind of site a display write uses. The texture need not be routed.
+// Returns pending, or why the request was refused.
+DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t now) noexcept;
+struct DisplaySnapshotPoll {
+  DisplaySnapshotResult result = DisplaySnapshotResult::none;
+  std::uint64_t id = 0;
+  unsigned width = 0, height = 0, format = 0;
+  SnapshotImage image;  // Only for ready: shrunk to kDisplaySnapshotMaxEdge.
+};
+// Control thread only. pending until the copy completes or fails; the final
+// result is returned once, then none until the next request.
+DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept;
+// Display-shaped textures of every catalog profile with their native resource
+// addresses, for the local display-identity research file written beside a
+// snapshot. Addresses are process-local and never go into bridge.log.
+struct DisplayResourceRecord {
+  std::uint64_t id = 0, native = 0, draws = 0, activity = 0;
+  unsigned width = 0, height = 0, mips = 0, format = 0;
+};
+std::vector<DisplayResourceRecord> display_resource_records();
+// Call stack (return addresses, caller first) of each display-shaped texture
+// creation, kept in a 32-entry ring. bridge.log prints them module-relative.
+struct DisplayCreationRecord {
+  std::uint64_t serial = 0, id = 0, tick = 0;
+  unsigned width = 0, height = 0, mips = 0, format = 0, frames = 0;
+  std::array<std::uint64_t, 24> stack{};
+};
+std::vector<DisplayCreationRecord> display_creation_records(std::uint64_t after);
+// Distinct copies (source ID, destination ID) between tracked display textures.
+std::vector<std::pair<std::uint64_t, std::uint64_t>> display_feed_pairs();
+// Step and code of the last failed snapshot step ("" when none).
+void display_snapshot_failure(const char*& step, long& code) noexcept;
 }  // namespace taxi_camera::standalone

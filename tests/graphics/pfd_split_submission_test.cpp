@@ -198,6 +198,56 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   }
   require(inventory[0].submission_activity > 0, "Submitted exits count separately from unavailable native draws");
   std::uint64_t checked = 0;
+  // Display snapshot with no camera or calibration patch ready. An unrouted
+  // display is read at a proven site in the original batch; the image is the
+  // native gradient, with the alpha byte dropped.
+  {
+    using Result = win::DisplaySnapshotResult;
+    require(win::request_display_snapshot(UINT64_MAX, GetTickCount64()) == Result::unavailable, "Unknown snapshot texture refused");
+    require(win::poll_display_snapshot(GetTickCount64()).result == Result::none, "Refused snapshot leaves nothing pending");
+    const auto unrouted = std::find_if(inventory.begin(), inventory.end(), [&](const auto& c) { return c.id != ids[0] && c.id != ids[1]; });
+    runtime::service();  // The bridge's control tick prepares the copy packets outside submission.
+    if (fbw_count == 3) {
+      // The third FBW display is only sampled, never drawn, in these frames:
+      // with no proven RT exit there is no copy site, so nothing is planned.
+      require(unrouted != inventory.end() && win::request_display_snapshot(unrouted->id, GetTickCount64()) == Result::pending,
+              "Idle snapshot request accepted");
+      const auto idle_plans = win::graphics_status().queue_patch_plans;
+      record_frame(false, false);
+      execute();
+      runtime::service();
+      require(win::graphics_status().queue_patch_plans == idle_plans &&
+                  win::poll_display_snapshot(GetTickCount64()).result == Result::pending,
+              "A display without a proven exit was snapshotted");
+    }
+    const auto snapshot_id = unrouted != inventory.end() && fbw_count != 3 ? unrouted->id : inventory[0].id;
+    require(win::request_display_snapshot(snapshot_id, GetTickCount64()) == Result::pending, "Snapshot request accepted");
+    require(win::poll_display_snapshot(GetTickCount64()).result == Result::pending, "Snapshot waits for a copy site");
+    const auto plans = win::graphics_status().queue_patch_plans;
+    record_frame(false, false);
+    execute();
+    require(win::graphics_status().queue_patch_plans > plans, "Snapshot-only batch was planned");
+    runtime::service();
+    auto poll = win::poll_display_snapshot(GetTickCount64());
+    if (poll.result != Result::ready)
+      std::fprintf(stderr, "Snapshot poll: result=%s id=%llu/%llu %ux%u format=%u copies=%llu\n", win::display_snapshot_name(poll.result),
+                   static_cast<unsigned long long>(poll.id), static_cast<unsigned long long>(snapshot_id), poll.width, poll.height,
+                   poll.format, static_cast<unsigned long long>(runtime::snapshot(key).capture.display_copies));
+    require(poll.result == Result::ready && poll.id == snapshot_id && poll.width == 768 && poll.height == 1024 &&
+                poll.format == static_cast<unsigned>(description.Format),
+            "Snapshot completed after its covering fence");
+    require(poll.image.width == 768 && poll.image.height == 1024, "Snapshot within the edge limit keeps its size");
+    bool correct = true;
+    for (const auto [x, y] : {std::pair{0u, 0u}, std::pair{767u, 1023u}, std::pair{384u, 512u}, std::pair{100u, 900u}}) {
+      const auto* bgr = poll.image.bgr.data() + (std::size_t{y} * 768 + x) * 3;
+      correct &= matches_pixel(std::array<unsigned char, 4>{bgr[2], bgr[1], bgr[0], 64}.data(),
+                               {static_cast<unsigned char>(std::lround(255.f * x / 767)),
+                                static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
+      ++checked;
+    }
+    require(correct, "Snapshot holds the display's native pixels");
+    require(win::poll_display_snapshot(GetTickCount64()).result == Result::none, "Snapshot result is returned once");
+  }
   // Full lower-trim and unselected-display oracle; selected upper display has
   // palette checks for calibration and fixed interior samples for camera.
   const auto pixels = [&](bool calibration, bool overwrite) {

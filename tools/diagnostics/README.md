@@ -208,3 +208,17 @@ The direct-callee/branch prefix suite passes **7,194 synthetic checks**, includi
 - [OpenProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess) and [process access rights](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights): query/read access.
 - [QueryFullProcessImageNameW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew), [EnumProcessModulesEx](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-enumprocessmodulesex), [GetModuleFileNameExW](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getmodulefilenameexw), and [GetModuleInformation](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getmoduleinformation): explicit process/main-image identity and mapping bounds. A module-order assumption is never trusted without the filename check.
 - [OpenProcessToken](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken), [GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation), and [EqualSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-equalsid): same-user verification; the SID is not included in output.
+
+## Display identity scan
+
+`display_identity_build.ps1` builds `build/tools/diagnostics/display-identity-scan.exe` and tests it against a stand-in process: it must refuse another executable and tie a planted name to its fake texture chain. It never reads the simulator during the build.
+
+The scan looks for the simulator object that ties a cockpit display texture name from `panel.cfg` (`texture=`, for example `DUS` or `$GAUGES_UNIFIED`) to the native D3D12 texture the bridge tracks. Take a **PFD routing** snapshot first: the bridge then writes `%LOCALAPPDATA%\Taxi Cam\snapshots\display-candidates.txt` with every display-shaped texture's ID and native address. Then run, with the simulator's PID:
+
+```powershell
+.\build\tools\diagnostics\display-identity-scan.exe <pid> "$env:LOCALAPPDATA\Taxi Cam\snapshots\display-candidates.txt" DUS EICASCDU > identity-report.txt
+```
+
+On the tested Store 1.8.16.0 image (PE timestamp 1787653788, SizeOfImage 0xE108600) it first walks the VCockpit panel registry found by static decode of the `panel.cfg` reader: a static array of up to 64 panel pointers at `exe+0xA50B160` with its count at `+0x200`; each 0x690-byte panel holds its `texture=` name inline at `+0x88` and its section name at `+0x528`. For each panel it follows heap pointers up to three levels deep and prints any path that reaches a tracked native texture (`FOUND panel+0x…->+0x… = native #id`). Other builds skip this walk. `--panels-only` stops after it; otherwise the full scan below follows.
+
+It opens only that PID, with `PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`, after checking the exact `FlightSimulator2024.exe` basename and the same user. It reads every committed, readable, non-guard region in 16 MiB chunks and reports qwords holding each native address, occurrences of each name (ASCII and UTF-16), one level of references back to both, and name references that lie within 0x800 bytes of a texture reference, with annotated memory around them. Reading the whole address space pages memory in and can take tens of seconds. Matches show where to look; they do not prove an object layout. The report contains process-local addresses, so keep it local.

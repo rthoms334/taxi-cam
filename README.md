@@ -91,11 +91,11 @@ All aircraft start with the same green ground-speed colour. Exposure and night b
 
 If automatic detection stays at a waiting message or selects the wrong screens, open **PFD routing**:
 
-1. Select **Refresh textures**, then choose a candidate for the left or right display.
-2. Use **Calibrate left** or **Calibrate right** to identify that screen with an animated pattern. Repeat with another candidate if the pattern appears on the wrong screen. Use **Swap left / right** if the two sides are reversed.
-3. Turn both calibration controls off, then activate the cameras with the TAXI buttons or shortcuts. On aircraft with working TAXI buttons, turning the last calibration control off automatically restores button control. The iniBuilds A380 stays in manual control.
+1. **Assigned displays** shows a picture of the texture behind each display and whether it was named, detected or chosen. **Overview → Cockpit displays** shows the same in small.
+2. Under **Display textures**, find the screen in the pictures (select one to enlarge it) and choose **Left** or **Right** on its card. Use **Swap left / right** if the two sides are reversed, or **Automatic** to go back to detection.
+3. If the pictures are not conclusive, use **Calibrate Left** or **Right** to identify that screen with an animated pattern, then turn calibration off. On aircraft with working TAXI buttons, turning the last calibration control off automatically restores button control. The iniBuilds A380 stays in manual control.
 
-Assignments apply immediately and belong to the current flight; texture IDs can change after a reload. **Left preview** and **Right preview** are also available, but these controls turn off **Overview → TAXI buttons**. Re-enable that setting to return to cockpit-button control. Keyboard shortcuts preserve the setting.
+Assignments apply immediately and belong to the current flight; texture IDs can change after a reload. **Preview Left** and **Right** are also available, but these controls turn off **Overview → TAXI buttons**. Re-enable that setting to return to cockpit-button control. Keyboard shortcuts preserve the setting.
 
 ## Known issues and limitations
 

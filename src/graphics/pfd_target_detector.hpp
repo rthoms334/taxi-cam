@@ -82,7 +82,7 @@ class PfdTargetDetector {
     bool has_draws = false, has_submission_activity = false;
     for (std::size_t i = 0; i < count; ++i) {
       const auto& value = observations[i];
-      if (profiles::matches_display(*profile_, value.width, value.height, value.levels, value.format)) {
+      if (profiles::matches_detection(*profile_, value.width, value.height, value.levels, value.format)) {
         has_draws |= value.draws != 0;
         has_submission_activity |= value.submission_activity != 0;
       }
@@ -94,7 +94,7 @@ class PfdTargetDetector {
     std::size_t current_count = 0;
     for (std::size_t i = 0; i < count; ++i) {
       const auto& value = observations[i];
-      if (!profiles::matches_display(*profile_, value.width, value.height, value.levels, value.format))
+      if (!profiles::matches_detection(*profile_, value.width, value.height, value.levels, value.format))
         continue;
       if (value.id == 0) {
         reset();

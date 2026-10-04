@@ -566,6 +566,108 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
   context->pool.service(device.p, fence->GetCompletedValue());
   require(gpu_retired == 2, "Completed submitted packet did not release both owned resource leases");
   require(context->pool.ready_count() == Pool::Capacity - 1, "A later completed fence falsely recycled quarantined work");
+  // Readback (display snapshot): the same packet copies a display region into
+  // a READBACK buffer and raises the completion serial only once its covering
+  // fence passes. The texture returns to its original state.
+  {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT shown_footprint{};
+    UINT64 shown_bytes{};
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &shown_footprint, nullptr, nullptr, &shown_bytes);
+    Ref<ID3D12Resource> shown, shown_upload, snapshot, snapshot_upload;
+    create_buffer(device.p, shown_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, shown_upload);
+    success(shown_upload->Map(0, &none, reinterpret_cast<void**>(&bytes)), "Map snapshot source pattern");
+    for (UINT y = 0; y < Height; ++y)
+      for (UINT x = 0; x < Width; ++x) {
+        auto* pixel = bytes + shown_footprint.Offset + y * shown_footprint.Footprint.RowPitch + x * 4;
+        pixel[0] = static_cast<std::uint8_t>(x * 7);
+        pixel[1] = static_cast<std::uint8_t>(y * 11);
+        pixel[2] = 99;
+        pixel[3] = 255;
+      }
+    shown_upload->Unmap(0, nullptr);
+    success(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                            IID_PPV_ARGS(shown.put())),
+            "Create snapshot display");
+    success(allocators[0]->Reset(), "Reset snapshot setup allocator");
+    success(lists[0]->Reset(allocators[0].p, nullptr), "Reset snapshot setup list");
+    D3D12_TEXTURE_COPY_LOCATION fill_source{}, fill_target{};
+    fill_source.pResource = shown_upload.p;
+    fill_source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    fill_source.PlacedFootprint = shown_footprint;
+    fill_target.pResource = shown.p;
+    fill_target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    lists[0]->CopyTextureRegion(&fill_target, 0, 0, 0, &fill_source, nullptr);
+    transition(lists[0].p, shown.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    success(lists[0]->Close(), "Close snapshot setup list");
+    ID3D12CommandList* setup[]{lists[0].p};
+    queue->ExecuteCommandLists(1, setup);
+    success(queue->Signal(fence.p, 4), "Signal snapshot setup");
+    complete(fence.p, 4);
+    context->pool.service(device.p, fence->GetCompletedValue());
+
+    create_buffer(device.p, patch_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, snapshot);
+    create_buffer(device.p, patch_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, snapshot_upload);
+    std::atomic<std::uint64_t> done{0};
+    Pool::Copy read{shown.p, snapshot.p, patch_footprint, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 8, 4, PatchWidth, PatchHeight, true,
+                    &done,   5};
+    const auto ready = context->pool.ready_count();
+    auto bad_read = read;
+    bad_read.source = snapshot_upload.p;
+    require(!context->pool.record(bad_read), "Readback into a non-READBACK buffer was recorded");
+    bad_read = read;
+    bad_read.completed_value = 0;
+    require(!context->pool.record(bad_read), "Readback without a completion serial was recorded");
+    bad_read = valid;
+    bad_read.completed = &done;
+    bad_read.completed_value = 7;
+    require(!context->pool.record(bad_read), "A display write accepted a readback completion counter");
+    require(context->pool.ready_count() == ready, "Malformed readback consumed a packet");
+
+    const auto read_packet = context->pool.record(read);
+    require(static_cast<bool>(read_packet), "Record display readback");
+    success(queue->Wait(blocker.p, 3), "Block snapshot readback");
+    ID3D12CommandList* read_lists[]{read_packet.list};
+    queue->ExecuteCommandLists(1, read_lists);
+    success(queue->Signal(fence.p, 5), "Signal snapshot readback");
+    context->pool.submit(read_packet.slot, 5);
+    context->pool.service(device.p, fence->GetCompletedValue());
+    require(done.load() == 0, "Readback completion raised before its covering fence");
+    success(blocker->Signal(3), "Release snapshot readback");
+    complete(fence.p, 5);
+    context->pool.service(device.p, fence->GetCompletedValue());
+    require(done.load() == 5, "Completed readback did not raise its serial");
+
+    // An older request finishing later cannot lower the serial; a cancelled
+    // readback never raises it.
+    auto older = read;
+    older.completed_value = 2;
+    const auto older_packet = context->pool.record(older);
+    require(static_cast<bool>(older_packet), "Record older readback");
+    ID3D12CommandList* older_lists[]{older_packet.list};
+    queue->ExecuteCommandLists(1, older_lists);
+    success(queue->Signal(fence.p, 6), "Signal older readback");
+    context->pool.submit(older_packet.slot, 6);
+    complete(fence.p, 6);
+    context->pool.service(device.p, fence->GetCompletedValue());
+    require(done.load() == 5, "An older readback lowered the completion serial");
+    auto cancelled = read;
+    cancelled.completed_value = 9;
+    const auto cancelled_packet = context->pool.record(cancelled);
+    require(static_cast<bool>(cancelled_packet), "Record cancelled readback");
+    context->pool.cancel(cancelled_packet.slot);
+    context->pool.service(device.p, fence->GetCompletedValue());
+    require(done.load() == 5 && context->pool.ready_count() == ready, "Cancelled readback raised its serial or kept its packet");
+
+    const D3D12_RANGE snapshot_range{0, static_cast<SIZE_T>(patch_bytes)};
+    success(snapshot->Map(0, &snapshot_range, reinterpret_cast<void**>(&bytes)), "Map snapshot readback");
+    for (UINT y = 0; y < PatchHeight; ++y)
+      for (UINT x = 0; x < PatchWidth; ++x) {
+        const auto* pixel = bytes + patch_footprint.Offset + y * patch_footprint.Footprint.RowPitch + x * 4;
+        require(pixel[0] == (x + 8) * 7 && pixel[1] == (y + 4) * 11 && pixel[2] == 99 && pixel[3] == 255,
+                "Snapshot readback copied the wrong display region");
+      }
+    snapshot->Unmap(0, &none);
+  }
   success(device->GetDeviceRemovedReason(), "D3D12 device removed");
   if (diagnostics.p) {
     for (UINT64 i = 0; i < diagnostics->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
@@ -580,7 +682,8 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
       require(message->Severity > D3D12_MESSAGE_SEVERITY_ERROR, "D3D12 reported invalid inserted copy work");
     }
   }
-  std::printf("PASS: %u PFD submission checks; 1024 actual sampled pixels, four lower mips unchanged (%s, %s, %s, debug layer %s).\n",
+  std::printf("PASS: %u PFD submission checks; 1024 actual sampled pixels, four lower mips unchanged, 128 snapshot readback pixels "
+              "(%s, %s, %s, debug layer %s).\n",
               checks, warp ? "WARP" : "hardware", common ? "COMMON" : "explicit SRV",
               before ? "before mixed list" : "after barrier-only list", debug_enabled ? "enabled" : "unavailable");
 }

@@ -71,23 +71,26 @@ inline double display_full_light(const DisplayLight& d, double ambient) noexcept
     return 0;
   return d.emissive * (d.gain_low + (d.gain_high - d.gain_low) * display_ambient_position(d, ambient));
 }
-// The main view's display-referred light before its tone curve (scene light x
-// its exposure) that a full camera code may stand for when the display cannot
-// give the scene light back. The night PMDG 777 (full code 22.3, exposure
-// 0.0333: 0.74) stays above it, so its pass-through is unchanged.
-constexpr double DisplayWhite = 0.5;
-// The scene light a full camera code stands for: the display's full-code light
-// while that is enough, otherwise (daylight: 1637 x 0.000111 = 0.18) the
-// scene light the main view shows at DisplayWhite, so the camera image is
-// compressed into the display's range instead of clipping. exposure: the
-// simulator's main-view exposure (y = scene x exposure), 0 when unknown.
-inline double display_code_light(double full_light, double exposure) noexcept {
+// How bright a full code looks in the main view, before its tone curve (full
+// light x exposure; y = scene light x exposure), below which the camera image
+// stops passing the scene light through. The night PMDG 777 (full code 22.3,
+// exposure 0.0333: 0.74) and dusk (1125 x 0.00146: 1.6) stay above it;
+// daylight (1637 x 0.000111: 0.18) is far below, so everything the main view
+// shows brighter than 0.18 would clip. The gap between the two is hysteresis.
+constexpr double DisplayPassOff = 0.45, DisplayPassOn = 0.55;
+// Whether the camera image can be the scene light for the display to give
+// back. Otherwise the main view's tone curve makes the image, as on other
+// aircraft: the display then shows it at most this dim, where the main view's
+// exposure of the display is close to linear. exposure: the simulator's
+// main-view exposure, 0 when unknown; then only the night display (the gain at
+// its low clamp) passes through. was: the previous result.
+inline bool display_pass_through(const DisplayLight& d, double ambient, double exposure, bool was) noexcept {
+  const double full_light = display_full_light(d, ambient);
   if (!(full_light > 0))
-    return 0;
+    return false;
   if (!(exposure > 0) || !(exposure < 1e6))
-    return full_light;
-  const double white = DisplayWhite / exposure;
-  return white > full_light ? white : full_light;
+    return display_ambient_position(d, ambient) == 0;
+  return full_light * exposure >= (was ? DisplayPassOff : DisplayPassOn);
 }
 inline double display_floor(const DisplayLight& d, double ambient) noexcept {
   if (ambient != ambient || !(d.lux_high > d.lux_low))
@@ -144,6 +147,21 @@ struct AircraftProfile {
   // Decoded camera-display brightness, used to match the main view's lighting;
   // emissive 0: not decoded for this aircraft.
   DisplayLight display_light{};
+  // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
+  // routing by name. Empty keeps automatic detection for that side.
+  std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
+  // A second accepted mip count (0 = none), for named panel textures whose
+  // mip count differs from the detected display targets'. Kept narrow: every
+  // profile's shape admits display candidates on every aircraft.
+  unsigned panel_mips = 0;
+  // Texture shapes of other panels, read from logged cockpit loads. Name
+  // pairing must land every listed panel on its shape, so extra textures from
+  // an aircraft switch cannot slide the names onto look-alike displays.
+  struct PanelShape {
+    const char* name;
+    unsigned width, height;
+  };
+  std::array<PanelShape, 6> panel_shapes{};
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -164,18 +182,27 @@ inline constexpr bool commandable_buttons(const AircraftProfile& p) noexcept {
 // age that brings the page back while the side stays on.
 inline constexpr std::uint64_t WaitingPageMinimumMs = 750;
 inline constexpr std::uint64_t WaitingPageStaleMs = 1000;
-inline constexpr AircraftProfile A380{1,
-                                      "fbw-a380x",
-                                      L"FlyByWire A380X",
-                                      {"L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON", "L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON"},
-                                      {"A32NX.FCU_EFIS_L_TAXI_PUSH", "A32NX.FCU_EFIS_R_TAXI_PUSH"},
-                                      {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"},
-                                      {{{0, -1.75, 26.950668984, -17.5, 0, 1.24},
-                                        {0, 18, -25, -32, 0, 1.02},
-                                        {0, 18, -25, -32, 0, 1.02}}},
-                                      768,
-                                      1024,
-                                      5};
+// panel.cfg texture names were read live on 2026-10-04 and match the
+// cockpit material labels.
+inline constexpr AircraftProfile A380 = [] {
+  AircraftProfile p{1,
+                    "fbw-a380x",
+                    L"FlyByWire A380X",
+                    {"L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON", "L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON"},
+                    {"A32NX.FCU_EFIS_L_TAXI_PUSH", "A32NX.FCU_EFIS_R_TAXI_PUSH"},
+                    {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"},
+                    {{{0, -1.75, 26.950668984, -17.5, 0, 1.24}, {0, 18, -25, -32, 0, 1.02}, {0, 18, -25, -32, 0, 1.02}}},
+                    768,
+                    1024,
+                    5};
+  p.panel_textures = {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", ""};
+  p.panel_shapes = {{{"SCREEN_DU_MFD", 1646, 1024},
+                     {"SCREEN_DU_EWD", 768, 1024},
+                     {"SCREEN_DU_SD", 768, 1024},
+                     {"SCREEN_DU_NDL", 768, 1024},
+                     {"SCREEN_DU_NDR", 768, 1024}}};
+  return p;
+}();
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
 // The accepted -900 calibration transfers to the -1000 with its physical
 // longitudinal offsets, retaining the same height, pitch and lens. Composition
@@ -206,6 +233,8 @@ inline constexpr AircraftProfile A359 = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
+  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
+  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 inline constexpr AircraftProfile A35K = [] {
@@ -228,6 +257,8 @@ inline constexpr AircraftProfile A35K = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
+  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
+  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 // iniBuilds A380 display layout started from FBW. Mounts and guide defaults
@@ -249,9 +280,15 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.composition.tail_upper = {0.34f, 0.52f};
   p.composition.tail_corner = {0.305f, 0.65f};
   p.composition.tail_inner = {0.355f, 0.65f};
-  // Live-selected PFDs use one mip. Exclude the observed five-mip static
-  // resources; other active displays still require target identity checks.
+  // The aircraft draws its PFDs in one-mip typeless targets and then into the
+  // five-mip panel textures named in panel.cfg; routing by name stamps the
+  // named $PFD_CPT/$PFD_FO panel textures (2026-10-04 panel table: eight
+  // 768 x 1024 five-mip displays). The allocation-group fallback still pairs
+  // only the one-mip typeless group.
   p.mips = 1;
+  p.panel_mips = 5;
+  p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
+  p.panel_shapes = {{{"$INI_FAP", 2048, 1536}, {"$ND_CPT", 768, 1024}, {"$ND_FO", 768, 1024}, {"$EWD", 768, 1024}, {"$SD", 768, 1024}}};
   p.formats = {28, 29, 87, 91, 27, 90};
   p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
   // 31.3 both-PFD stamps/s at camera_rate 15 on installed 0.9.11 (no FG):
@@ -382,6 +419,7 @@ inline constexpr auto make_pmdg_777 =
       // full-code light (30 points, 1.2 codes RMS); the day capture's offset is
       // about 0.013. With these the ND's ground and sky matched the window.
       p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f, 0.0013f, 0.0134f};
+      p.panel_textures = {Pmdg777Texture, Pmdg777Texture, Pmdg777LowerTexture};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 =
@@ -452,6 +490,7 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
   p.pfd_detection = PfdDetectionPolicy::single_display;
   p.display_texture = A346Texture;
+  p.panel_textures = {A346Texture, A346Texture, A346Texture};
   return p;
 }();
 // iniBuilds A340-300 (streamed fs24-inibuilds-aircraft-a340; encrypted, so no
@@ -516,7 +555,7 @@ inline bool camera_candidate(unsigned width, unsigned height) noexcept {
   return false;
 }
 inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
-  if (width != p.width || height != p.height || !mips || mips > 12 || (p.mips && p.mips != mips) || !format)
+  if (width != p.width || height != p.height || !mips || mips > 12 || (p.mips && p.mips != mips && p.panel_mips != mips) || !format)
     return false;
   bool listed = false;
   for (auto supported : p.formats) {
@@ -528,6 +567,15 @@ inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, 
   }
   // No scanned format list: admit the known size and leave a shared size ambiguous.
   return !listed;
+}
+// Automatic detection: the profile's own mip count only. panel_mips admits
+// named panel textures for routing by name, not for detection.
+inline constexpr bool matches_detection(const AircraftProfile& p,
+                                        unsigned width,
+                                        unsigned height,
+                                        unsigned mips,
+                                        unsigned format) noexcept {
+  return matches_display(p, width, height, mips, format) && (!p.mips || mips == p.mips);
 }
 inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) noexcept {
   const auto equal = [](std::string_view a, std::string_view b) {
