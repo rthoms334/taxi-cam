@@ -257,9 +257,13 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.composition.tail_upper = {0.34f, 0.52f};
   p.composition.tail_corner = {0.305f, 0.65f};
   p.composition.tail_inner = {0.355f, 0.65f};
-  // Live-selected PFDs use one mip. Exclude the observed five-mip static
-  // resources; other active displays still require target identity checks.
-  p.mips = 1;
+  // The aircraft draws its PFDs in one-mip typeless targets and then into the
+  // five-mip panel textures named in panel.cfg; routing by name stamps the
+  // named $PFD_CPT/$PFD_FO panel textures (2026-10-04 panel table: eight
+  // 768 x 1024 five-mip displays). The allocation-group fallback still pairs
+  // only the one-mip typeless group, so mips stay unrestricted here.
+  p.mips = 0;
+  p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
   p.formats = {28, 29, 87, 91, 27, 90};
   p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
   // 31.3 both-PFD stamps/s at camera_rate 15 on installed 0.9.11 (no FG):
