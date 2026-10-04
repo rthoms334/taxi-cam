@@ -319,9 +319,11 @@ void service_panel_identity(PanelIdentityLog& state,
             if (id == state.named[side])
               id = replacement;
       }
+      // Republished every check: a profile (re)application clears the
+      // bridge's named targets.
+      win::set_named_targets(named);
       if (named != state.named) {
         state.named = named;
-        win::set_named_targets(named);
         char detail[160];
         std::snprintf(detail, sizeof(detail), "Display named routing: recreated ids=%llu,%llu,%llu", static_cast<unsigned long long>(named[0]),
                       static_cast<unsigned long long>(named[1]), static_cast<unsigned long long>(named[2]));
@@ -407,10 +409,10 @@ void service_panel_identity(PanelIdentityLog& state,
             state.locked_shapes[side] = {0, named[side], proposal[i].creation.tick, proposal[i].creation.width, proposal[i].creation.height,
                                          proposal[i].creation.mips, proposal[i].creation.format};
     }
+    win::set_named_targets(named);
     if (named != state.named || profile_id != state.named_profile) {
       state.named = named;
       state.named_profile = profile_id;
-      win::set_named_targets(named);
       char detail[192];
       std::snprintf(detail, sizeof(detail), "Display named routing: profile=%u resolved=%d ids=%llu,%llu,%llu", profile_id,
                     resolved ? 1 : 0, static_cast<unsigned long long>(named[0]), static_cast<unsigned long long>(named[1]),
