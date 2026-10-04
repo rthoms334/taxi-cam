@@ -172,6 +172,10 @@ struct PanelIdentityLog {
   std::string proposal_text;
   std::array<std::uint64_t, MaxDisplaySides> named{};
   std::uint32_t named_profile{};
+  // First complete mapping of this flight, frozen: the creation log scrolls,
+  // so re-deriving it later could shift names onto other textures.
+  bool locked{};
+  std::array<RenderTargetSequence::Entry, MaxDisplaySides> locked_shapes{};
 };
 // Joins items into "prefix [part/total]: ..." lines of bounded length.
 void log_chunks(const win::Status& status, const char* prefix, const std::vector<std::string>& items) noexcept {
@@ -240,6 +244,7 @@ void service_panel_identity(PanelIdentityLog& state,
     state.epoch = epoch;
     state.epoch_ms = now;
     state.signature = 0;
+    state.locked = false;
     state.burst_logged = false;
   }
   const auto panels = display_identity::read_panels();
@@ -258,6 +263,7 @@ void service_panel_identity(PanelIdentityLog& state,
     state.signature = signature;
     state.seen_ms = now;
     state.burst_logged = false;
+    state.locked = false;
     state.panels = panels;
     try {
       std::vector<std::string> items;
@@ -285,6 +291,46 @@ void service_panel_identity(PanelIdentityLog& state,
   state.next_analysis_ms = now + 10000;
   const bool first = !state.burst_logged;
   state.burst_logged = true;
+  const auto profile_id = profile ? profile->id : 0u;
+  if (state.locked && profile_id == state.named_profile) {
+    // Keep the frozen mapping. A destroyed named texture (the 777 recreates
+    // displays) takes the newest live texture of the same shape created later.
+    try {
+      const auto records = win::display_resource_records();
+      const auto alive = [&](std::uint64_t id) {
+        return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
+      };
+      static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
+      const auto n = win::render_target_creation_sequence().snapshot(0, entries);
+      auto named = state.named;
+      for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+        if (!named[side] || alive(named[side]))
+          continue;
+        const auto& shape = state.locked_shapes[side];
+        std::uint64_t replacement = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+          const auto& e = entries[i];
+          if (e.id > named[side] && e.width == shape.width && e.height == shape.height && e.mips == shape.mips &&
+              e.format == shape.format && alive(e.id) && std::find(named.begin(), named.end(), e.id) == named.end())
+            replacement = e.id;
+        }
+        if (replacement)
+          for (auto& id : named)  // Single-display profiles name one texture for several sides.
+            if (id == state.named[side])
+              id = replacement;
+      }
+      if (named != state.named) {
+        state.named = named;
+        win::set_named_targets(named);
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "Display named routing: recreated ids=%llu,%llu,%llu", static_cast<unsigned long long>(named[0]),
+                      static_cast<unsigned long long>(named[1]), static_cast<unsigned long long>(named[2]));
+        log_status(status, detail);
+      }
+    } catch (...) {
+    }
+    return;
+  }
   try {
     static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
     const auto n = win::render_target_creation_sequence().snapshot(0, entries);
@@ -353,7 +399,14 @@ void service_panel_identity(PanelIdentityLog& state,
     }
     if (!resolved)
       named = {};
-    const auto profile_id = profile ? profile->id : 0u;
+    if (resolved) {
+      state.locked = true;
+      for (unsigned side = 0; side < MaxDisplaySides; ++side)
+        for (std::size_t i = 0; i < paired; ++i)
+          if (named[side] && proposal[i].creation.id == named[side])
+            state.locked_shapes[side] = {0, named[side], proposal[i].creation.tick, proposal[i].creation.width, proposal[i].creation.height,
+                                         proposal[i].creation.mips, proposal[i].creation.format};
+    }
     if (named != state.named || profile_id != state.named_profile) {
       state.named = named;
       state.named_profile = profile_id;
