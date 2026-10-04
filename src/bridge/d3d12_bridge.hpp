@@ -227,6 +227,8 @@ const RenderTargetShapes& render_target_shape_inventory() noexcept;
 // Render-target creations (256 px and larger) in creation order with the
 // bridge's resource ID where it tracks the texture, for display identity.
 const RenderTargetSequence& render_target_creation_sequence() noexcept;
+// The same, restricted to multi-mip R8G8B8A8_UNORM creations (panel textures).
+const RenderTargetSequence& panel_texture_creation_sequence() noexcept;
 // Control-thread only. Turns off late-attach barrier/copy/OM extras after the
 // profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled
 // list keeps association a little longer so stamps/calibration can light.

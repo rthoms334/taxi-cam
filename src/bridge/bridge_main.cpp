@@ -301,7 +301,7 @@ void service_panel_identity(PanelIdentityLog& state,
         return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
       };
       static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
-      const auto n = win::render_target_creation_sequence().snapshot(0, entries);
+      const auto n = win::panel_texture_creation_sequence().snapshot(0, entries);
       auto named = state.named;
       for (unsigned side = 0; side < MaxDisplaySides; ++side) {
         if (!named[side] || alive(named[side]))
@@ -333,7 +333,7 @@ void service_panel_identity(PanelIdentityLog& state,
   }
   try {
     static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
-    const auto n = win::render_target_creation_sequence().snapshot(0, entries);
+    const auto n = win::panel_texture_creation_sequence().snapshot(0, entries);
 
     std::vector<display_identity::Creation> burst;
     std::vector<std::string> items;

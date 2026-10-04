@@ -1029,6 +1029,20 @@ RenderTargetSequence& render_target_sequence() noexcept {
   static RenderTargetSequence sequence;
   return sequence;
 }
+// Panel-texture candidates only (multi-mip R8G8B8A8_UNORM): rare, so a cockpit
+// load's burst cannot scroll out behind the loader's many small targets.
+RenderTargetSequence& panel_texture_sequence() noexcept {
+  static RenderTargetSequence sequence;
+  return sequence;
+}
+void record_creation(const D3D12_RESOURCE_DESC& desc, std::uint64_t id) noexcept {
+  const auto now = GetTickCount64();
+  render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels, static_cast<std::uint32_t>(desc.Format),
+                                  id, now);
+  if (desc.MipLevels > 1 && desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+    panel_texture_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
+                                    static_cast<std::uint32_t>(desc.Format), id, now);
+}
 bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial, bool created) {
   auto& r = registry();
   if (!r.ready || !object || !same_device(device))
@@ -1064,8 +1078,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
       const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
       if (!lock) {
         if (sequenced)  // Keep the creation order complete; the ID is unknown here.
-          render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
-                                          static_cast<std::uint32_t>(desc.Format), 0, GetTickCount64());
+          record_creation(desc, 0);
         native->Release();
         return false;
       }
@@ -1127,8 +1140,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
     }
   }
   if (sequenced)
-    render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
-                                    static_cast<std::uint32_t>(desc.Format), sequenced_id, GetTickCount64());
+    record_creation(desc, sequenced_id);
   native->Release();
   return true;
 }
@@ -4257,6 +4269,9 @@ std::vector<DisplayResourceRecord> display_resource_records() {
 }
 const RenderTargetSequence& render_target_creation_sequence() noexcept {
   return render_target_sequence();
+}
+const RenderTargetSequence& panel_texture_creation_sequence() noexcept {
+  return panel_texture_sequence();
 }
 const RenderTargetShapes& render_target_shape_inventory() noexcept {
   return render_target_shapes();
