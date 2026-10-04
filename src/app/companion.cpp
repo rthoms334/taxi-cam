@@ -149,7 +149,7 @@ void draw_bug_icon(HDC dc, const RECT& bounds, COLORREF color) {
 }
 void edit(double value, int id, int x, int y, int w = 110) {
   wchar_t buffer[64];
-  std::swprintf(buffer, 64, id >= 360 && id <= 367 ? L"%.1f" : L"%.10g", value);
+  std::swprintf(buffer, 64, id >= 360 && id <= 367 ? L"%.1f" : id == 201 || id == 202 ? L"%+.2f" : L"%.10g", value);
   auto h = child(L"EDIT", buffer, id, x, y, w, 30, ES_AUTOHSCROLL | ES_LEFT | WS_BORDER);
   SendMessageW(h, EM_SETLIMITTEXT, 32, 0);
 }
@@ -356,6 +356,14 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
     ok = false;
   if (ok)
     settings.calibration_budget = static_cast<UINT>(budget);
+  float* brightness[]{&settings.day_brightness, &settings.night_brightness};
+  for (int i = 0; i < 2; ++i) {
+    const auto value = static_cast<float>(number(201 + i, *brightness[i], ok));
+    if (!valid_camera_brightness(value))
+      ok = false;
+    else
+      *brightness[i] = value;
+  }
   for (unsigned i = 0; i < 3; ++i)
     for (unsigned j = 0; j < 6; ++j)
       settings.mounts[i][j] = number(300 + static_cast<int>(i * 10 + j), settings.mounts[i][j], ok);
@@ -1393,7 +1401,7 @@ bool apply(bool save = true) {
   if (!read_fields(settings, &field_error)) {
     notice = field_error ? field_error
              : page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
-                         : L"Check the values: rate 5–60 (min 5), lens 0.05–1.55.";
+                         : L"Check the values: rate 5–60 (min 5), brightness −4 to +2 EV in 0.25 steps, lens 0.05–1.55.";
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
@@ -1587,6 +1595,8 @@ void build_controls() {
     button(L"Reset camera mounts", 359, 260, 594, 240);
   } else if (page == 2) {
     edit(s.camera_rate, 200, 840, 151, 120);
+    edit(s.day_brightness, 201, 840, 247, 120);
+    edit(s.night_brightness, 202, 840, 343, 120);
     button(L"Ground-speed colour", 231, 740, 630, 235);
     const auto* display_profile = profiles::find(s.profile);
     EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
@@ -1832,11 +1842,18 @@ void draw_page(HDC dc) {
     }
     text(dc, L"Positive pitch looks up. Positive yaw looks right.", 530, 594, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 2) {
-    // The camera images always take the main view's lighting: no exposure controls.
-    panel(dc, 244, 122, 766, 88);
-    text(dc, L"Camera frame rate", 264, 130, 515, 29, heading);
-    text(dc, L"Per camera, 5–60; default 10. Parked aircraft refresh twice a second; higher rates are capped.", 264, 162, 525, 41, small,
-         Muted, DT_LEFT | DT_WORDBREAK);
+    // The camera images take the main view's lighting; brightness is the
+    // user's offset on top of it.
+    const int ys[]{122, 218, 314};
+    const wchar_t* names[]{L"Camera frame rate", L"Daytime brightness", L"Night brightness"};
+    const wchar_t* descriptions[]{L"Per camera, 5–60; default 10. Parked aircraft refresh twice a second; higher rates are capped.",
+                                  L"EV added to the main view's exposure in daylight, −4 to +2 in 0.25 steps. 0 matches the main view.",
+                                  L"EV added at night, −4 to +2 in 0.25 steps. Dusk blends the two with the ambient light."};
+    for (int i = 0; i < 3; ++i) {
+      panel(dc, 244, ys[i], 766, 88);
+      text(dc, names[i], 264, ys[i] + 8, 515, 29, heading);
+      text(dc, descriptions[i], 264, ys[i] + 40, 525, 41, small, Muted, DT_LEFT | DT_WORDBREAK);
+    }
     if (sample.heartbeat) {
       wchar_t rate_line[192];
       std::swprintf(rate_line, 192, L"Camera rate in use: %u fps%ls. Useful maximum on this aircraft: %u fps.", sample.effective_rate,

@@ -52,51 +52,6 @@ inline constexpr Composition A350EtacsA35K = [] {
   c.tail_inner = {0.37f, 0.855f};
   return c;
 }();
-// How bright the aircraft's camera display shines, in the simulator's scene
-// units for a full code (sRGB-decoded 1): emissive x the gain its behaviour
-// maps from A:AMBIENT LIGHT SENSOR, linear between the two lux values and
-// clamped outside them. emissive 0: not decoded for this aircraft.
-// floor_low/high: light that falls on the display (cockpit lighting, sun), as
-// a fraction of its full-code light, interpolated on the same ambient mapping.
-struct DisplayLight {
-  float emissive = 0;
-  float lux_low = 0, lux_high = 0, gain_low = 0, gain_high = 0;
-  float floor_low = 0, floor_high = 0;
-};
-inline double display_ambient_position(const DisplayLight& d, double ambient) noexcept {
-  return ambient <= d.lux_low ? 0 : ambient >= d.lux_high ? 1 : (ambient - d.lux_low) / (d.lux_high - d.lux_low);
-}
-inline double display_full_light(const DisplayLight& d, double ambient) noexcept {
-  if (!(d.emissive > 0) || !(d.lux_high > d.lux_low) || ambient != ambient)
-    return 0;
-  return d.emissive * (d.gain_low + (d.gain_high - d.gain_low) * display_ambient_position(d, ambient));
-}
-// How bright a full code looks in the main view, before its tone curve (full
-// light x exposure; y = scene light x exposure), below which the camera image
-// stops passing the scene light through. The night PMDG 777 (full code 22.3,
-// exposure 0.0333: 0.74) and dusk (1125 x 0.00146: 1.6) stay above it;
-// daylight (1637 x 0.000111: 0.18) is far below, so everything the main view
-// shows brighter than 0.18 would clip. The gap between the two is hysteresis.
-constexpr double DisplayPassOff = 0.45, DisplayPassOn = 0.55;
-// Whether the camera image can be the scene light for the display to give
-// back. Otherwise the main view's tone curve makes the image, as on other
-// aircraft: the display then shows it at most this dim, where the main view's
-// exposure of the display is close to linear. exposure: the simulator's
-// main-view exposure, 0 when unknown; then only the night display (the gain at
-// its low clamp) passes through. was: the previous result.
-inline bool display_pass_through(const DisplayLight& d, double ambient, double exposure, bool was) noexcept {
-  const double full_light = display_full_light(d, ambient);
-  if (!(full_light > 0))
-    return false;
-  if (!(exposure > 0) || !(exposure < 1e6))
-    return display_ambient_position(d, ambient) == 0;
-  return full_light * exposure >= (was ? DisplayPassOff : DisplayPassOn);
-}
-inline double display_floor(const DisplayLight& d, double ambient) noexcept {
-  if (ambient != ambient || !(d.lux_high > d.lux_low))
-    return 0;
-  return d.floor_low + (d.floor_high - d.floor_low) * display_ambient_position(d, ambient);
-}
 struct AircraftProfile {
   std::uint32_t id;
   std::string_view key;
@@ -144,9 +99,6 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
-  // Decoded camera-display brightness, used to match the main view's lighting;
-  // emissive 0: not decoded for this aircraft.
-  DisplayLight display_light{};
   // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
   // routing by name. Empty keeps automatic detection for that side.
   std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
@@ -367,10 +319,8 @@ inline constexpr Composition Pmdg777Composition = [] {
 // wing mounts stay the published shared defaults until calibrated separately.
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
     {{0, -2, 16, -18, 0, 1}, {-6, 1.5, -28, -5, -12, 0.6}, {6, 1.5, -28, -5, 12, 0.6}}};
-inline constexpr std::array<std::array<double, 6>, 3> Pmdg777300Mounts{
-    {{0, -2, 22, -18, 0, 1}, Pmdg777Mounts[1], Pmdg777Mounts[2]}};
-inline constexpr std::array<std::array<double, 6>, 3> Pmdg777FMounts{
-    {Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777300Mounts{{{0, -2, 22, -18, 0, 1}, Pmdg777Mounts[1], Pmdg777Mounts[2]}};
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777FMounts{{Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
 // Nose matches the 220 px picture; each bottom feed fills its tall half-pane.
 inline constexpr CameraPanes Pmdg777Panes{
     {{736, static_cast<std::int32_t>((Pmdg777NosePictureHeight * 736 + 384) / 768)},
@@ -409,25 +359,12 @@ inline constexpr auto make_pmdg_777 =
       // picture. Bottom inset stays 0; leftover working-image rows under the squares
       // are black. L/R stay 0.
       p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
-      // PMDG773ER_VC.gltf material DUS emissiveFactor 148.8235 (150 x 253/255);
-      // 77W_Cockpit_Behavior.xml: (A:AMBIENT LIGHT SENSOR) 200 2000 0.15 11.0
-      // (F:MapRange). The shared ph_base_gbuffer emissive path (PIX 2026-10-02)
-      // gives 148.8235 x 11 = 1637.06 by day, matched bit for bit, with no screen
-      // filter or glass; the lower EICASCDU uses 150 (0.8% brighter).
-      // Live calibration (2026-10-02, night, ambient 0.64): a code ramp on the ND
-      // read back from the main view fits this light with a floor of 0.0013 of
-      // full-code light (30 points, 1.2 codes RMS); the day capture's offset is
-      // about 0.013. With these the ND's ground and sky matched the window.
-      p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f, 0.0013f, 0.0134f};
       p.panel_textures = {Pmdg777Texture, Pmdg777Texture, Pmdg777LowerTexture};
       return p;
     };
-inline constexpr AircraftProfile Pmdg777 =
-    make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
-inline constexpr AircraftProfile Pmdg777300ER =
-    make_pmdg_777(6, "pmdg-777-300er", L"PMDG 777-300ER", "PMDG 777-300ER", Pmdg777300Mounts);
-inline constexpr AircraftProfile Pmdg777F =
-    make_pmdg_777(7, "pmdg-777f", L"PMDG 777F", "PMDG 777F", Pmdg777FMounts);
+inline constexpr AircraftProfile Pmdg777 = make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
+inline constexpr AircraftProfile Pmdg777300ER = make_pmdg_777(6, "pmdg-777-300er", L"PMDG 777-300ER", "PMDG 777-300ER", Pmdg777300Mounts);
+inline constexpr AircraftProfile Pmdg777F = make_pmdg_777(7, "pmdg-777f", L"PMDG 777F", "PMDG 777F", Pmdg777FMounts);
 static_assert(Pmdg777300ER.mounts[0][2] == 22);
 static_assert(Pmdg777300ER.mounts[0] != Pmdg777Mounts[0]);
 static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
@@ -532,8 +469,8 @@ inline constexpr AircraftProfile IniA343 = [] {
   p.pfd_detection = PfdDetectionPolicy::single_display;
   return p;
 }();
-inline constexpr std::array<const AircraftProfile*, 9> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
-                                                              &Pmdg777F, &AerosoftA346, &IniA343};
+inline constexpr std::array<const AircraftProfile*, 9> Catalog{&A380,         &A359,     &A35K,         &IniA380, &Pmdg777,
+                                                               &Pmdg777300ER, &Pmdg777F, &AerosoftA346, &IniA343};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < p.sides && side < MaxDisplaySides ? side : 0];
 }

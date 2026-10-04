@@ -611,36 +611,6 @@ void tone_case(ID3D12Device* device, Result& result) {
     ++result.tone_checks;
   }
   readback->Unmap(0, nullptr);
-
-  // Display scene light: the texel times the scale, less the floor,
-  // sRGB-encoded, clipped at full code, with at most one code of dither. It
-  // takes precedence over the tone curve.
-  constexpr float Scale = 3.0f, Floor = 0.01f;
-  require(compositor.set_screen_scale(Scale) && !compositor.set_screen_scale(-1) && compositor.screen_scale() == 0 &&
-              !compositor.set_screen_scale(Scale, 1) && compositor.set_screen_scale(Scale, Floor),
-          "The display scale was not applied or an invalid one was accepted");
-  PrivateSubmission second(device);
-  list = second.list();
-  list->ClearRenderTargetView(handles[0], Nose.data(), 0, nullptr);
-  list->ClearRenderTargetView(handles[1], Tail.data(), 0, nullptr);
-  check(compositor.record(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET), compositor.last_error());
-  list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-  second.finish(compositor);
-  check(readback->Map(0, &range, &mapped), "Map display-scale readback");
-  pixels = static_cast<const unsigned char*>(mapped) + footprint.Offset;
-  nose = pixels + UINT64(127) * footprint.Footprint.RowPitch + 4 * 384;
-  tail = pixels + UINT64(600) * footprint.Footprint.RowPitch + 4 * 200;
-  const auto display_code = [](double value) {
-    const double y = std::clamp(value, 0.0, 1.0);
-    return static_cast<int>(std::floor((y <= 0.0031308 ? 12.92 * y : 1.055 * std::pow(y, 1 / 2.4) - 0.055) * 255 + 0.5));
-  };
-  for (UINT channel = 0; channel < 3; ++channel) {
-    require(std::abs(nose[channel] - display_code(Nose[channel] * Scale - Floor)) <= 1 &&
-                std::abs(tail[channel] - display_code(Tail[channel] * Scale - Floor)) <= 1,
-            "The display scene light differs from its CPU model");
-    ++result.tone_checks;
-  }
-  readback->Unmap(0, nullptr);
   compositor.release();
 }
 

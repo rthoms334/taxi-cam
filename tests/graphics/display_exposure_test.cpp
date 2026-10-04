@@ -15,7 +15,7 @@ int main() {
   assert(controller.snapshot().applied_ev == unlit);
   // The first update starts at its target; later ones slew at 1 EV/s.
   auto value = controller.update(1000, day, true, 4000, 1000);
-  assert(value.applied_ev == day && value.target_ev == day && value.lighting_valid);
+  assert(value.applied_ev == day && value.target_ev == day && value.lighting_valid && value.darkness == 0);
   value = controller.update(1500, day, true, 0.536, 1500);
   assert(value.target_ev == day + boost && value.applied_ev == day + .5f);
   for (unsigned i = 2; i <= 8; ++i)
@@ -25,10 +25,11 @@ int main() {
   value = controller.update(1000, day, true, 0, 1000);
   assert(value.applied_ev == day + boost);  // Zero is a valid darkest reading.
   value = controller.update(2500, day, true, 0, 1000);
-  assert(value.lighting_valid && value.target_ev == day + boost);
+  assert(value.lighting_valid && value.target_ev == day + boost && value.darkness == 1);
   // Lighting older than 1.5 s, or none, targets the compositor's default.
   value = controller.update(2501, day, true, 0, 1000);
-  assert(!value.lighting_valid && value.target_ev == unlit && value.applied_ev < day + boost && value.applied_ev > day + boost - .01f);
+  assert(!value.lighting_valid && value.target_ev == unlit && value.applied_ev < day + boost && value.applied_ev > day + boost - .01f &&
+         value.darkness == 1);  // The last valid darkness is kept for the camera brightness.
   value = controller.update(1000000, day, false, 0, 0);
   assert(value.applied_ev > day + boost - 1.01f);  // A long gap advances at most 1 EV.
   const auto before_reverse = value.applied_ev;
