@@ -49,8 +49,6 @@ class SceneFrameOutput {
   // offer it again before the next prepare). Exposure 0 returns to Taxi Cam's.
   bool set_tone_curve(float exposure, const std::uint32_t* table) noexcept;
   bool tone_curve_active() const noexcept;
-  // CameraCompositorD3D12::set_screen_scale; 0 turns it off.
-  bool set_screen_scale(float scale, float floor) noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
   bool hide_ground_speed() noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
@@ -67,8 +65,12 @@ class SceneFrameOutput {
   // before every recorded copy. No allocation or CPU image access here.
   Patch patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   float display_exposure() const noexcept;
-  bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* left, DXGI_FORMAT left_format,
-               ID3D12Resource* right, DXGI_FORMAT right_format) noexcept;
+  bool prepare(ID3D12Resource* nose,
+               DXGI_FORMAT nose_format,
+               ID3D12Resource* left,
+               DXGI_FORMAT left_format,
+               ID3D12Resource* right,
+               DXGI_FORMAT right_format) noexcept;
   bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
     return prepare(nose, nose_format, tail, tail_format, tail, tail_format);
   }

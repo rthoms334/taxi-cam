@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include "../shared/camera_brightness.hpp"
 
 namespace taxi_camera {
 
@@ -10,13 +11,14 @@ struct DisplayExposureState {
   float applied_ev = -8.8f;
   float target_ev = -8.8f;
   bool lighting_valid = false;
+  // ambient_darkness of the latest valid lighting sample (0 until one arrives).
+  double darkness = 0;
 };
 
 // Taxi Cam's own exposure, used only while the camera images cannot take the
-// main view's (no fresh simulator exposure and no decoded display). Display
-// adaptation only: it cannot restore light contributions missing from the
-// scene texture. Ambient 1..4000 follows the official Asobo display-lighting
-// template range; its mapping to the fixed night boost is a bounded visual
+// main view's (no fresh simulator exposure). Display adaptation only: it
+// cannot restore light contributions missing from the scene texture. The
+// mapping of ambient_darkness to the fixed night boost is a bounded visual
 // heuristic. Without lighting data the target is UnlitExposureEv.
 class DisplayExposureController {
  public:
@@ -45,8 +47,8 @@ class DisplayExposureController {
                             now_ms - lighting_sample_ms <= MaximumLightingAgeMs && std::isfinite(ambient) && ambient >= 0 && ambient <= 1e7;
     state_.target_ev = UnlitExposureEv;
     if (state_.lighting_valid) {
-      const auto darkness = std::clamp(std::log2(4000.0 / std::max(ambient, 1.0)) / std::log2(4000.0), 0.0, 1.0);
-      state_.target_ev = std::clamp(day_ev + NightBoostEv * static_cast<float>(darkness), -16.f, 4.f);
+      state_.darkness = ambient_darkness(ambient);
+      state_.target_ev = std::clamp(day_ev + NightBoostEv * static_cast<float>(state_.darkness), -16.f, 4.f);
     }
     if (!initialized_) {
       state_.applied_ev = state_.target_ev;

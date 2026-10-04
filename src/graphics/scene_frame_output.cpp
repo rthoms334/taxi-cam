@@ -75,9 +75,6 @@ bool SceneFrameOutput::set_tone_curve(float exposure, const std::uint32_t* table
   }
   return compositor_->set_tone_curve(exposure, table);
 }
-bool SceneFrameOutput::set_screen_scale(float scale, float floor) noexcept {
-  return compositor_ && !prepared_ && !failed_ && compositor_->set_screen_scale(scale, floor);
-}
 bool SceneFrameOutput::tone_curve_active() const noexcept {
   return compositor_ && compositor_->tone_curve_active();
 }
@@ -249,8 +246,12 @@ std::uint64_t SceneFrameOutput::completed_submissions() const noexcept {
   return completed <= submitted_ ? completed : 0;  // Device removal returns UINT64_MAX.
 }
 
-bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* left, DXGI_FORMAT left_format,
-                               ID3D12Resource* right, DXGI_FORMAT right_format) noexcept {
+bool SceneFrameOutput::prepare(ID3D12Resource* nose,
+                               DXGI_FORMAT nose_format,
+                               ID3D12Resource* left,
+                               DXGI_FORMAT left_format,
+                               ID3D12Resource* right,
+                               DXGI_FORMAT right_format) noexcept {
   if (calibration_only_ || !idle() || prepared_)
     return false;
   if (FAILED(device_->GetDeviceRemovedReason()))
@@ -265,8 +266,7 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
   const bool timed = gpu_timing_enabled_ && gpu_timing_.begin(device_, queue_, list_);
   if (timed)
     gpu_timing_.start(0);
-  if (FAILED(compositor_->record(list_, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST,
-                                 D3D12_RESOURCE_STATE_COPY_DEST)))
+  if (FAILED(compositor_->record(list_, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST)))
     return fail("Recording the camera composition failed.");
   if (timed) {
     gpu_timing_.end(0);

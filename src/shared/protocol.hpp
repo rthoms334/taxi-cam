@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cwchar>
 #include "../profiles/catalog.hpp"
+#include "camera_brightness.hpp"
 #include "camera_rate.hpp"
 #include "sim_messages.hpp"
 #include "version.hpp"
@@ -25,7 +26,9 @@ namespace taxi_camera::standalone {
 // for a one-shot display texture snapshot on PFD routing.
 // Protocol 23: Candidate panel name and Status named_mask for the PFD routing
 // cards; routed textures come first in the candidate list.
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 23;
+// Protocol 24: Settings day_brightness and night_brightness (EV trims on top
+// of the main view's exposure).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 24;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
@@ -63,6 +66,9 @@ struct Settings {
   // Protocol 22, session-only: a new serial asks for one snapshot of the
   // tracked display texture snapshot_id (see display_snapshot.hpp).
   std::uint64_t snapshot_request{}, snapshot_id{};
+  // Protocol 24: the user's camera brightness in EV (camera_brightness.hpp),
+  // by day and at night, blended by ambient light. Saved per aircraft profile.
+  float day_brightness = 0, night_brightness = 0;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -145,7 +151,8 @@ inline bool valid_settings(const Settings& s) noexcept {
   }
   if (s.parked_rate && (s.parked_rate < kMinimumParkedCameraRate || s.parked_rate > kMaximumCameraRate))
     return false;
-  return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate;
+  return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate &&
+         valid_camera_brightness(s.day_brightness) && valid_camera_brightness(s.night_brightness);
 }
 class Mailbox {
  public:

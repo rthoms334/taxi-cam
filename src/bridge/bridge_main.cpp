@@ -44,6 +44,8 @@ SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
 // The latest A:AMBIENT LIGHT SENSOR sample (-1: none), for the Camera tone line.
 double last_ambient = -1;
+// The camera brightness in use (EV), for the Camera tone line.
+float brightness_ev = 0;
 // Camera tone: hands the simulator's main-view exposure and tone-curve table,
 // as the graphics hooks copied them, to the composition. A table is read at
 // most once a second, only when a newer copy exists. An exposure older than
@@ -56,7 +58,8 @@ struct ToneFeed {
   float exposure = 0;
   std::vector<std::uint32_t> table;
   bool table_sent = false;
-  void update(std::uint64_t key, std::uint64_t now) {
+  // gain: the user's camera brightness (2^EV), applied to the exposure sent.
+  void update(std::uint64_t key, std::uint64_t now, float gain) {
     win::set_tone_capture_enabled(true);
     const auto status = win::tone_status();
     if (status.exposure_copies != exposure_copies && status.exposure_valid) {
@@ -76,14 +79,7 @@ struct ToneFeed {
       }
     }
     // The curve needs a table: until one is read, the exposure is not sent.
-    scene_runtime::set_tone_curve(key, fresh && table_sent ? exposure : 0.0f, offered);
-  }
-  // The exposure for the display's daylight range: held through the short
-  // gaps between copies, then 0 (pass-through) so a lost source cannot keep
-  // an old day or night exposure.
-  static constexpr std::uint64_t ScreenHoldMs = 10000;
-  float screen_exposure(std::uint64_t now) const noexcept {
-    return exposure_ms && now >= exposure_ms && now - exposure_ms <= ScreenHoldMs ? exposure : 0.0f;
+    scene_runtime::set_tone_curve(key, fresh && table_sent ? exposure * gain : 0.0f, offered);
   }
 };
 void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
@@ -1386,25 +1382,16 @@ DWORD run_impl() {
     scene_runtime::set_composition(key, composition);
     scene_runtime::set_reference_guides(key, drawing->reference_guides);
     const auto light = native_camera::get_lighting();
-    // The fallback exposure, used while the tone curve and the display scale
-    // are not: automatic from the ambient light with a fixed night boost.
+    // The fallback exposure, used while the tone curve is not: automatic from
+    // the ambient light with a fixed night boost.
     const auto display = exposure.update(now, drawing->exposure, light.valid, light.ambient, light.sample_ms);
-    scene_runtime::set_display_exposure(key, display.applied_ev);
+    // The user's camera brightness, by day and at night, on top of whichever
+    // exposure the camera images take.
+    brightness_ev = camera_brightness_ev(snap_camera_brightness(settings.day_brightness), snap_camera_brightness(settings.night_brightness),
+                                         display.darkness);
+    scene_runtime::set_display_exposure(key, display.applied_ev + brightness_ev);
     static ToneFeed tone;
-    tone.update(key, now);
-    // On an aircraft whose display is decoded, the camera image is written as
-    // scene light divided by the display's own full-code light, so the display
-    // gives the scene light back and the main view exposes, tonemaps and blooms
-    // it once. Camera texels hold scene light / 16. By day the display is far
-    // too dim for that (display_pass_through, with the latest main-view
-    // exposure held up to ten seconds), so the scale is 0 and the main view's
-    // tone curve, or Taxi Cam's fallback exposure, makes the image instead.
-    static bool pass_through = false;
-    pass_through = light.valid && profiles::display_pass_through(drawing->display_light, light.ambient, tone.screen_exposure(now), pass_through);
-    const double display_light = pass_through ? profiles::display_full_light(drawing->display_light, light.ambient) : 0.0;
-    const float display_scale = display_light > 0 ? static_cast<float>(16.0 / display_light) : 0.0f;
-    scene_runtime::set_screen_scale(
-        key, display_scale, light.valid ? static_cast<float>(profiles::display_floor(drawing->display_light, light.ambient)) : 0.0f);
+    tone.update(key, now, std::exp2(brightness_ev));
     last_ambient = light.valid ? light.ambient : -1.0;
     if (drawing->ground_speed)
       scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
@@ -1850,17 +1837,17 @@ DWORD run_impl() {
       std::snprintf(weather_detail, sizeof(weather_detail), "Camera weather: cloud_merges=%llu refused=%llu",
                     static_cast<unsigned long long>(clouds.redirects), static_cast<unsigned long long>(clouds.refusals));
       log_status(status, weather_detail);
-      // Camera tone: the simulator exposure in use (0: Taxi Cam's fallback
-      // exposure), copies of its exposure and table, and resource changes.
+      // Camera tone: the simulator exposure in use, with the camera brightness
+      // applied (0: Taxi Cam's fallback exposure), the brightness, copies of its
+      // exposure and table, and resource changes.
       const auto tone_copies = win::tone_status();
       char tone_detail[320];
       std::snprintf(tone_detail, sizeof(tone_detail),
-                    "Camera tone: active=%d exposure=%.6g screen_scale=%.6g ambient=%.6g exposure_copies=%llu "
+                    "Camera tone: active=%d exposure=%.6g brightness_ev=%.4g ambient=%.6g exposure_copies=%llu "
                     "table_copies=%llu source_changes=%llu readback_failed=%d",
-                    output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure), static_cast<double>(output.screen_scale),
-                    last_ambient, static_cast<unsigned long long>(tone_copies.exposure_copies),
-                    static_cast<unsigned long long>(tone_copies.table_copies), static_cast<unsigned long long>(tone_copies.source_changes),
-                    tone_copies.readback_failed ? 1 : 0);
+                    output.tone_active ? 1 : 0, static_cast<double>(output.tone_exposure), static_cast<double>(brightness_ev), last_ambient,
+                    static_cast<unsigned long long>(tone_copies.exposure_copies), static_cast<unsigned long long>(tone_copies.table_copies),
+                    static_cast<unsigned long long>(tone_copies.source_changes), tone_copies.readback_failed ? 1 : 0);
       log_status(status, tone_detail);
       // Camera fog: history resets written and camera fog volumes tracked.
       const auto fog = win::fog_status();

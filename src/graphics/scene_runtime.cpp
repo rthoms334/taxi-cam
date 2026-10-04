@@ -115,8 +115,8 @@ bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
   if (!config.generation)
     return config == QueuePatchConfig{};
   const auto* profile = profiles::find(config.profile);
-  if (!profile || config.profile != item.patch_profile || ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) ||
-      (config.waiting_mask & ~config.camera_mask))
+  if (!profile || config.profile != item.patch_profile ||
+      ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) || (config.waiting_mask & ~config.camera_mask))
     return false;
   for (unsigned side = 0; side < profile->sides; ++side)
     if (((config.camera_mask | config.calibration_mask) & (1u << side)) &&
@@ -301,8 +301,7 @@ bool prepare(std::uint64_t key) {
     return false;
   // The waiting page is cosmetic: failing to build it keeps the previous
   // behaviour (no display write until the camera image exists).
-  item->waiting_available =
-      item->waiting_output.initialize(item->native) && item->waiting_output.set_patch_profile(item->patch_profile);
+  item->waiting_available = item->waiting_output.initialize(item->native) && item->waiting_output.set_patch_profile(item->patch_profile);
   for (std::size_t i = 0; i < Formats.size(); ++i) {
     for (std::size_t depth = 0; depth < DepthFormats.size(); ++depth) {
       const auto slot = i * DepthFormats.size() + depth;
@@ -515,17 +514,6 @@ bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* tabl
   }
   return true;
 }
-bool set_screen_scale(std::uint64_t key, float scale, float floor) {
-  if (!std::isfinite(scale) || scale < 0 || !std::isfinite(floor) || floor < 0 || floor >= 1)
-    return false;
-  const std::lock_guard lock(runtime().mutex);
-  auto* item = find(key);
-  if (!item || item->status.failed)
-    return false;
-  item->status.screen_scale = scale;
-  item->status.screen_floor = floor;
-  return true;
-}
 void set_ground_speed(std::uint64_t key, float knots, bool valid) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
@@ -677,7 +665,6 @@ void service() {
         item.status.tone_exposure > 0)
       item.tone_table_pending = false;
     item.status.tone_active = item.output.tone_curve_active();
-    item.output.set_screen_scale(item.status.screen_scale, item.status.screen_floor);
     if (!item.output.set_display_exposure(item.status.display_exposure_ev) || !speed_ready ||
         !item.output.prepare(first.resource, scene_format(first.resource), second.resource, scene_format(second.resource), right,
                              scene_format(right))) {

@@ -83,9 +83,9 @@ On **Display**, set the camera frame rate and the ground-speed text colour (when
 
 On **Reference guides**, **Marking colour** changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Save changes** to retain the colour for the selected aircraft profile.
 
-The camera views always use the main view's lighting: the simulator's own exposure, tone curve and bloom, so they look like the main view by day and at night. There are no brightness settings. Until the simulator's exposure is available, for example in the first moments after a flight loads, Taxi Cam exposes the camera images itself and brightens them automatically as the ambient light drops.
+The camera views always use the main view's lighting: the simulator's own exposure, tone curve and bloom, so they look like the main view by day and at night. **Display → Daytime brightness** and **Night brightness** shift the camera images from −4 to +2 EV in 0.25 steps on top of that, per aircraft, for displays or lighting add-ons that look too bright or too dark; 0, the default, matches the main view. Dusk blends the two with the ambient light. Until the simulator's exposure is available, for example in the first moments after a flight loads, Taxi Cam exposes the camera images itself and brightens them automatically as the ambient light drops.
 
-All aircraft start with the same green ground-speed colour. Exposure and night boost settings saved by earlier versions are ignored. GS displays whole knots by dropping the fractional part: 12.9 knots displays as 12.
+All aircraft start with the same green ground-speed colour. Exposure and night boost settings saved by earlier versions are ignored; the brightness settings start at 0. GS displays whole knots by dropping the fractional part: 12.9 knots displays as 12.
 
 ### Identifying the PFDs
 

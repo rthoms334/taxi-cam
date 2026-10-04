@@ -38,12 +38,15 @@ int main() {
   context.settings.profile = 1;
   context.settings.manual_mask = 1;
   context.settings.camera_rate = 30;
+  context.settings.day_brightness = -1.5f;
+  context.settings.night_brightness = 0.25f;
   auto snapshot = bug_report_snapshot(context);
   assert(snapshot.find("not yet connected; status unavailable") != std::string::npos);
   assert(snapshot.find("captures=") == std::string::npos);
   assert(snapshot.find("unapplied text edits excluded); unsaved_edits=1") != std::string::npos);
   assert(snapshot.find("Profile=1/fbw-a380x") != std::string::npos);
   assert(snapshot.find("fps=30") != std::string::npos && snapshot.find("preview_mask=1") != std::string::npos);
+  assert(snapshot.find("Brightness_EV day/night=-1.5/0.25") != std::string::npos);
   context.bridge_seen = true;
   assert(bug_report_snapshot(context).find("disconnected; previous status unavailable") != std::string::npos);
 

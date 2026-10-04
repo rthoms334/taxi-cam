@@ -130,23 +130,6 @@ class CameraCompositorD3D12 {
     return true;
   }
   void clear_tone_curve() noexcept { tone_exposure_ = 0; }
-  // Scene light for an aircraft display (ScreenShader notes): the camera's HDR
-  // texels times `scale`, so that the display's own emissive conversion gives
-  // back the camera's scene light and the simulator exposes and tonemaps it
-  // once, like the world outside. scale is 1 / (display light at full code in
-  // texel units). Takes precedence over the tone curve; 0 turns it off.
-  // floor: light already falling on the display, as a fraction of its
-  // full-code light; it is subtracted so the display adds it back.
-  bool set_screen_scale(float scale, float floor = 0) noexcept {
-    if (!std::isfinite(scale) || scale < 0 || scale > 1e6f || !std::isfinite(floor) || floor < 0 || floor >= 1) {
-      screen_scale_ = 0;
-      return false;
-    }
-    screen_scale_ = scale;
-    screen_floor_ = floor;
-    return true;
-  }
-  float screen_scale() const noexcept { return screen_scale_; }
   bool tone_curve_active() const noexcept { return tone_exposure_ > 0 && (tone_ready_ || tone_pending_); }
 
   HRESULT initialize(ID3D12Device* device) noexcept {
@@ -317,9 +300,7 @@ class CameraCompositorD3D12 {
       tone_pending_ = false;
       tone_ready_ = true;
     }
-    if (screen_scale_ > 0)
-      hdr |= ScreenBit;
-    else if (tone_exposure_ > 0 && tone_ready_)
+    if (tone_exposure_ > 0 && tone_ready_)
       hdr |= ToneBit;
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     draw_output(private_list, hdr, ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u));
@@ -641,8 +622,7 @@ class CameraCompositorD3D12 {
   static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
   static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
   static constexpr UINT ToneBit = 256;
-  static constexpr UINT RootConstants = 35;
-  static constexpr UINT ScreenBit = 512;
+  static constexpr UINT RootConstants = 34;
   HRESULT initialize_tone_curve() noexcept {
     D3D12_HEAP_PROPERTIES properties{};
     properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -697,9 +677,7 @@ class CameraCompositorD3D12 {
     private_list->SetGraphicsRootDescriptorTable(2, srv_gpu(ToneSlot));
     // The simulator's exposure chain: scene units (16 x texel), its adapted
     // exposure, and its fixed 11190.6 and 300/10^4 scales (ToneShader notes).
-    const float exposure = (hdr & ScreenBit) ? screen_scale_
-                           : (hdr & ToneBit) ? static_cast<float>(11190.6 * 16 * 300e-4) * tone_exposure_
-                                             : std::exp2(exposure_ev_);
+    const float exposure = (hdr & ToneBit) ? static_cast<float>(11190.6 * 16 * 300e-4) * tone_exposure_ : std::exp2(exposure_ev_);
     const struct {
       UINT hdr_mask;
       float exposure;
@@ -707,14 +685,7 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-      float screen_floor;
-    } display{hdr,
-              exposure,
-              reference_guides_ ? 1u : 0u,
-              ground_speed_,
-              ground_speed_mode,
-              composition_,
-              screen_floor_};
+    } display{hdr, exposure, reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
     static_assert(sizeof(display) == RootConstants * sizeof(UINT));
     private_list->SetGraphicsRoot32BitConstants(1, RootConstants, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1041,9 +1012,7 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder;
- // Light already falling on the display, as a fraction of its full-code light.
- float ScreenFloor; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -1222,24 +1191,8 @@ float3 simulator_rgb(float3 rgb) {
   y = saturate(y);
   return float3(srgb_code(y.r), srgb_code(y.g), srgb_code(y.b));
 }
-// ScreenShader notes. The aircraft display turns each stored code into light
-// (sRGB decode times its own brightness) and the simulator then exposes and
-// tonemaps the cockpit, display included. Writing the camera's scene light
-// divided by the display's full-code light (Exposure) makes that conversion
-// return the scene light, so the camera image gets the main view's exposure,
-// tone curve and bloom exactly once. Light above the display's maximum clips;
-// by day the bridge turns this off (profiles::display_pass_through).
-// The +-0.5/255 dither, like the simulator's own, keeps dark night gradients,
-// which use only the lowest codes, from banding.
-static float2 PixelPosition;
-float3 screen_rgb(float3 rgb) {
-  float3 linear_light = saturate(max(rgb, 0) * Exposure - ScreenFloor);
-  float noise = frac(52.9829189 * frac(dot(PixelPosition, float2(0.06711056, 0.00583715)))) - 0.5;
-  return saturate(float3(srgb_code(linear_light.r), srgb_code(linear_light.g), srgb_code(linear_light.b)) + noise / 255);
-}
 float3 display_rgb(float3 rgb, uint feed) {
   if ((HdrMask & (1u << feed)) == 0) return rgb;
-  if ((HdrMask & 512u) != 0 && all(isfinite(rgb))) return screen_rgb(rgb);
   if ((HdrMask & 256u) != 0 && all(isfinite(rgb))) return simulator_rgb(rgb);
   return float3(hdr_channel(rgb.r), hdr_channel(rgb.g), hdr_channel(rgb.b));
 }
@@ -1278,7 +1231,6 @@ float4 split_bottom_t() {
   return ui_pixel(float3(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0));
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
-  PixelPosition = position.xy;
   // Mode 3 is the waiting page: no camera input is sampled.
   if (GroundSpeedValid == 3) return waiting_pixel(position.xy);
   // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
@@ -1374,8 +1326,6 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   Reference<ID3D12Resource> tone_upload_;
   unsigned char* tone_mapped_ = nullptr;
   float tone_exposure_ = 0;
-  float screen_scale_ = 0;
-  float screen_floor_ = 0;
   bool tone_pending_ = false;
   bool tone_ready_ = false;
   Reference<ID3D12DescriptorHeap> srv_heap_;

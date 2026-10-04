@@ -247,13 +247,30 @@ int main() {
     build_controls();
     require(!GetDlgItem(window, 236), "Camera weather has no control");
     // The camera views always take the main view's lighting: the Display page
-    // has no lighting or exposure controls, only the camera rate and the
-    // ground-speed colour.
+    // has no lighting toggle or automatic exposure, only the camera rate, the
+    // day and night camera brightness and the ground-speed colour.
     page = 2;
     build_controls();
-    require(!GetDlgItem(window, 237) && !GetDlgItem(window, 201) && !GetDlgItem(window, 222) && !GetDlgItem(window, 202) &&
-                GetDlgItem(window, 200) && GetDlgItem(window, 231),
-            "Display has no lighting or exposure controls");
+    require(!GetDlgItem(window, 237) && !GetDlgItem(window, 222) && GetDlgItem(window, 200) && GetDlgItem(window, 201) &&
+                GetDlgItem(window, 202) && GetDlgItem(window, 231),
+            "Display has the rate and brightness fields but no lighting or automatic exposure controls");
+    GetDlgItemTextW(window, 201, label, 96);
+    require(std::wstring(label) == L"+0.00", "Daytime brightness starts at 0 EV");
+    {
+      auto edited = current;
+      SetDlgItemTextW(window, 201, L"-1.25");
+      SetDlgItemTextW(window, 202, L"+2");
+      require(read_fields(edited) && edited.day_brightness == -1.25f && edited.night_brightness == 2,
+              "Brightness fields read in 0.25 EV steps");
+      for (const wchar_t* rejected : {L"0.1", L"-4.25", L"3", L"x"}) {
+        auto refused = current;
+        SetDlgItemTextW(window, 202, rejected);
+        require(!read_fields(refused) && refused.night_brightness == current.night_brightness,
+                "Brightness outside -4 to +2 EV or off a step is refused");
+      }
+      SetDlgItemTextW(window, 201, L"+0.00");
+      SetDlgItemTextW(window, 202, L"+0.00");
+    }
     page = 4;
     build_controls();
     SetDlgItemTextW(window, 203, L"1024");

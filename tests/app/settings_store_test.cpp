@@ -1,5 +1,6 @@
 #include "../../src/app/settings_store.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -62,7 +63,7 @@ bool same_preferences(const Settings& a, const Settings& b) {
          a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper && a.tail_corner == b.tail_corner &&
          a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi && a.auto_detect == b.auto_detect &&
          a.single_camera == b.single_camera && a.dynamic_tail == b.dynamic_tail && a.calibration_budget == b.calibration_budget &&
-         a.mounts == b.mounts;
+         a.mounts == b.mounts && a.day_brightness == b.day_brightness && a.night_brightness == b.night_brightness;
 }
 
 Settings customized(const profiles::AircraftProfile& profile) {
@@ -76,6 +77,8 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.parked_rate = 8;
   value.single_camera = 1;
   value.calibration_budget = 2048;
+  value.day_brightness = -1.25f;
+  value.night_brightness = 0.5f;
   value.speed_color = {0.125f, 0.5f, 0.875f};
   value.nose_dot = {0.125f, 0.75f};
   value.tail_upper = {0.25f, 0.625f};
@@ -172,6 +175,42 @@ void parked_rate_persists_and_defaults() {
   require(load_settings(loaded, L"missing-installation", saved.profile) && save_settings(saved) &&
               ini(path, L"display", L"camera_weather") == L"<missing>" && ini(path, L"display", L"camera_weather_revision") == L"<missing>",
           "A saved camera_weather key was not ignored and dropped");
+}
+
+// Camera brightness: 0 when missing, saved per profile, and a hand edit out of
+// range or off a step is snapped instead of rejecting the calibration file.
+void camera_brightness_persists_and_snaps() {
+  using namespace taxi_camera;
+  require(valid_camera_brightness(0) && valid_camera_brightness(-4) && valid_camera_brightness(2) && valid_camera_brightness(-1.25f) &&
+              !valid_camera_brightness(-4.25f) && !valid_camera_brightness(2.25f) && !valid_camera_brightness(0.1f) &&
+              !valid_camera_brightness(NAN),
+          "Brightness is -4 to +2 EV in 0.25 steps");
+  require(snap_camera_brightness(-9) == -4 && snap_camera_brightness(7) == 2 && snap_camera_brightness(0.3) == 0.25f &&
+              snap_camera_brightness(NAN) == 0,
+          "Brightness snaps into range and onto a step");
+  require(camera_brightness_ev(-1, 1, 0) == -1 && camera_brightness_ev(-1, 1, 1) == 1 && camera_brightness_ev(-1, 1, 0.5) == 0 &&
+              camera_brightness_ev(-1, 1, 7) == 1 && camera_brightness_ev(-1, 1, NAN) == -1,
+          "Day and night brightness blend by darkness");
+  require(ambient_darkness(4000) == 0 && ambient_darkness(1e6) == 0 && ambient_darkness(1) == 1 && ambient_darkness(0) == 1,
+          "Ambient 4000 is day and 1 is night");
+  select_fixture(L"camera-brightness");
+  auto saved = customized(profiles::Pmdg777300ER);
+  require(save_settings(saved), "Save a profile with camera brightness");
+  const auto path = settings_path(saved);
+  require(ini(path, L"display", L"day_brightness") == L"-1.25" && ini(path, L"display", L"night_brightness") == L"0.5",
+          "Save writes both brightness keys");
+  Settings loaded;
+  require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved), "Brightness survives a save");
+  patch(path, L"display", L"day_brightness", nullptr);
+  patch(path, L"display", L"night_brightness", L"9");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.day_brightness == 0 && loaded.night_brightness == 2 &&
+              loaded.mounts == saved.mounts,
+          "A missing brightness is 0 and an out-of-range one is clamped");
+  // The absolute exposure of 0.9.50 and earlier is not read as a brightness.
+  patch(path, L"display", L"night_brightness", nullptr);
+  patch(path, L"display", L"exposure", L"-8.8");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.day_brightness == 0 && loaded.night_brightness == 0,
+          "A retired exposure key does not become a brightness");
 }
 
 // The camera views always take the main view's lighting: the keys of the
@@ -290,6 +329,7 @@ int main() {
             "The shipped camera rate is ten and the parked floor is two");
     missing_rate_uses_shipped_default_without_rewriting_saved_fifteen();
     parked_rate_persists_and_defaults();
+    camera_brightness_persists_and_snaps();
     retired_lighting_keys_are_ignored();
     saved_enabled_key_is_ignored();
     rejected_preferences_are_left_unchanged();
