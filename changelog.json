@@ -1,10 +1,21 @@
 {
   "releases": [
     {
+      "version": "1.1.0",
+      "date": "2026-10-04",
+      "changes": [
+        "Displays are now found by their cockpit panel names on the FlyByWire A380, iniBuilds A380, iniBuilds A350, PMDG 777 and Aerosoft A340-600, so each camera goes to the right display every flight, also after switching aircraft and when the aircraft recreates a display. Other aircraft keep automatic detection.",
+        "PFD routing: the texture lists are replaced by cards showing a picture of each display texture with its panel name. Choose Left or Right on a card; select a picture to see it full size. Assigned displays shows each camera's screen and whether it was named, detected or chosen; Automatic goes back to automatic routing.",
+        "Overview: new Cockpit displays cards show the screen each camera draws on. The camera frame rate setting is now only on the Display page.",
+        "Swap left / right now also swaps displays that were found automatically.",
+        "PMDG 777: by day the camera pictures use the main view's exposure and tone curve, like other aircraft, so they are no longer washed out above sunlit clouds. Night and dusk are unchanged."
+      ]
+    },
+    {
       "version": "1.0.1",
       "date": "2026-10-03",
       "changes": [
-        "PMDG 777: the camera pictures are no longer almost white in daylight or above the clouds. The display cannot shine as brightly as the sunlit world, so by day the pictures use the main view's own exposure and tone curve, like on other aircraft. Night and dusk pictures are unchanged."
+        "PMDG 777: the camera pictures are no longer almost white in daylight. The display cannot shine as brightly as sunlit ground, so by day Taxi Cam now fits the picture into the display's brightness range. Night pictures are unchanged."
       ]
     },
     {
