@@ -347,6 +347,7 @@ struct Registry {
   // Display identity research: distinct (source ID << 32 | destination ID)
   // copies between two tracked display textures, set from recording hooks.
   std::array<std::atomic<std::uint64_t>, 64> display_feeds{};
+  std::atomic<std::uint64_t> display_feed_next{};
   std::array<std::uint64_t, MaxDisplaySides> named_targets{};  // Guarded by mutex.
   // Last snapshot failure step and HRESULT/Win32 code, for bridge.log.
   std::atomic<const char*> snapshot_failure{""};
@@ -1861,13 +1862,13 @@ void note_display_feed(ID3D12Resource* source, ID3D12Resource* destination) noex
   if (!from || !to || !from->alive || !to->alive)
     return;
   const auto key = from->id << 32 | (to->id & 0xffffffffull);
-  for (auto& slot : r.display_feeds) {
-    auto value = slot.load(std::memory_order_relaxed);
-    if (value == key)
+  for (const auto& slot : r.display_feeds)
+    if (slot.load(std::memory_order_relaxed) == key)
       return;
-    if (!value && (slot.compare_exchange_strong(value, key, std::memory_order_relaxed) || value == key))
-      return;
-  }
+  // A ring: aircraft switches in one session copy many textures, and named
+  // routing follows the newest copies. A racing duplicate is harmless.
+  r.display_feeds[r.display_feed_next.fetch_add(1, std::memory_order_relaxed) % r.display_feeds.size()].store(key,
+                                                                                                              std::memory_order_relaxed);
 }
 void copy_resource(void*,
                    ID3D12GraphicsCommandList* list,

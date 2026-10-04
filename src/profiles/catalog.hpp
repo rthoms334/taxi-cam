@@ -150,6 +150,14 @@ struct AircraftProfile {
   // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
   // routing by name. Empty keeps automatic detection for that side.
   std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
+  // Texture shapes of other panels, read from logged cockpit loads. Name
+  // pairing must land every listed panel on its shape, so extra textures from
+  // an aircraft switch cannot slide the names onto look-alike displays.
+  struct PanelShape {
+    const char* name;
+    unsigned width, height;
+  };
+  std::array<PanelShape, 6> panel_shapes{};
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -184,6 +192,11 @@ inline constexpr AircraftProfile A380 = [] {
                     1024,
                     5};
   p.panel_textures = {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", ""};
+  p.panel_shapes = {{{"SCREEN_DU_MFD", 1646, 1024},
+                     {"SCREEN_DU_EWD", 768, 1024},
+                     {"SCREEN_DU_SD", 768, 1024},
+                     {"SCREEN_DU_NDL", 768, 1024},
+                     {"SCREEN_DU_NDR", 768, 1024}}};
   return p;
 }();
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
@@ -217,6 +230,7 @@ inline constexpr AircraftProfile A359 = [] {
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
   p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
+  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 inline constexpr AircraftProfile A35K = [] {
@@ -240,6 +254,7 @@ inline constexpr AircraftProfile A35K = [] {
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
   p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
+  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 // iniBuilds A380 display layout started from FBW. Mounts and guide defaults
@@ -268,6 +283,7 @@ inline constexpr AircraftProfile IniA380 = [] {
   // only the one-mip typeless group, so mips stay unrestricted here.
   p.mips = 0;
   p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
+  p.panel_shapes = {{{"$INI_FAP", 2048, 1536}, {"$ND_CPT", 768, 1024}, {"$ND_FO", 768, 1024}, {"$EWD", 768, 1024}, {"$SD", 768, 1024}}};
   p.formats = {28, 29, 87, 91, 27, 90};
   p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
   // 31.3 both-PFD stamps/s at camera_rate 15 on installed 0.9.11 (no FG):

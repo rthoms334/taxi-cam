@@ -26,6 +26,9 @@ void add(Panels& panels, std::uint32_t index, const char* section, const char* t
 }
 }  // namespace
 
+bool any(const char*, std::uint32_t&, std::uint32_t&) {
+  return false;
+}
 int main() {
   // PMDG 777-300ER panel table as read live on 2026-10-04 (registry order is
   // not index order), and that session's multi-mip cockpit-load creations.
@@ -87,19 +90,19 @@ int main() {
     std::size_t pairs = 0;
     const std::vector<Creation> usual{
         {976, 1, 1644, 1024, 5, 28}, {977, 2, 1644, 1024, 5, 28}, {978, 3, 1644, 1024, 5, 28}, {981, 4, 2048, 2048, 5, 28}};
-    require(
-        resolve_names(a350, usual.data(), usual.size(), names, 3, fit, ids, out, pairs) == 0 && ids[0] == 978 && ids[1] == 977 && !ids[2],
-        "Usual A350 burst names without a shift");
+    require(resolve_names(a350, usual.data(), usual.size(), names, 3, fit, any, ids, out, pairs) == 0 && ids[0] == 978 && ids[1] == 977 &&
+                !ids[2],
+            "Usual A350 burst names without a shift");
     const std::vector<Creation> extras{{975, 0, 2048, 2048, 5, 28}, {976, 1, 1644, 1024, 5, 28}, {977, 2, 1644, 1024, 5, 28},
                                        {978, 3, 1644, 1024, 5, 28}, {979, 4, 2048, 2048, 5, 28}, {980, 5, 2048, 2048, 5, 28},
                                        {981, 6, 2048, 2048, 5, 28}};
-    require(resolve_names(a350, extras.data(), extras.size(), names, 3, fit, ids, out, pairs) == 2 && ids[0] == 978 && ids[1] == 977,
+    require(resolve_names(a350, extras.data(), extras.size(), names, 3, fit, any, ids, out, pairs) == 2 && ids[0] == 978 && ids[1] == 977,
             "Two trailing extras shift the A350 names back by two");
     const auto never = [](const Creation&) { return false; };
-    require(resolve_names(a350, extras.data(), extras.size(), names, 3, never, ids, out, pairs) == -1 && !ids[0] && !ids[1],
+    require(resolve_names(a350, extras.data(), extras.size(), names, 3, never, any, ids, out, pairs) == -1 && !ids[0] && !ids[1],
             "No display-shaped pairing leaves the names unresolved");
     const char* none[]{"", "", ""};
-    require(resolve_names(a350, extras.data(), extras.size(), none, 3, fit, ids, out, pairs) == -1,
+    require(resolve_names(a350, extras.data(), extras.size(), none, 3, fit, any, ids, out, pairs) == -1,
             "A profile without names resolves nothing");
   }
   // 777 names resolve unshifted from the recorded burst (DUS 233, EICASCDU 232).
@@ -112,9 +115,47 @@ int main() {
     for (const auto& c : burst)
       if (c.mips > 1 && c.format == 28)
         multimip.push_back(c);
-    require(resolve_names(panels, multimip.data(), multimip.size(), names, 3, fit, ids, out, pairs) == 0 && ids[0] == 233 &&
+    require(resolve_names(panels, multimip.data(), multimip.size(), names, 3, fit, any, ids, out, pairs) == 0 && ids[0] == 233 &&
                 ids[1] == 233 && ids[2] == 232,
             "777 names resolve without a shift");
+  }
+
+  // FlyByWire A380 after an aircraft switch, 2026-10-04: six 768 x 1024
+  // textures (NDR, NDL, PFDR, PFDL, SD, EWD), MFD at 1646 x 1024, then an
+  // extra 1646 x 1024 and four 768 x 1024 copies. The display shape alone
+  // accepts a shift of 3 (EWD's texture as PFDL); the MFD/EWD shapes force 5.
+  {
+    Panels fbw;
+    add(fbw, 0, "VCockpit01", "SCREEN_DU_MFD", 4, 1024);
+    add(fbw, 2, "VCockpit03", "SCREEN_DU_EWD", 4, 1024);
+    add(fbw, 3, "VCockpit04", "SCREEN_DU_SD", 4, 1024);
+    add(fbw, 4, "VCockpit05", "SCREEN_DU_PFDL", 4, 1024);
+    add(fbw, 5, "VCockpit06", "SCREEN_DU_PFDR", 4, 1024);
+    add(fbw, 6, "VCockpit07", "SCREEN_DU_NDL", 4, 1024);
+    add(fbw, 7, "VCockpit08", "SCREEN_DU_NDR", 4, 1024);
+    add(fbw, 11, "VCockpit12", "Clock", 4, 256);
+    const auto fit = [](const Creation& c) { return c.width == 768 && c.height == 1024; };
+    const auto shapes = [](const char* panel, std::uint32_t& width, std::uint32_t& height) {
+      width = std::strcmp(panel, "SCREEN_DU_MFD") == 0 ? 1646 : 768;
+      height = 1024;
+      return std::strcmp(panel, "SCREEN_DU_MFD") == 0 || std::strcmp(panel, "SCREEN_DU_EWD") == 0 ||
+             std::strcmp(panel, "SCREEN_DU_SD") == 0;
+    };
+    const std::vector<Creation> load{{0, 0, 2560, 1280, 5, 28},   {1519, 1, 768, 1024, 5, 28},  {1520, 2, 768, 1024, 5, 28},
+                                     {1521, 3, 768, 1024, 5, 28}, {1522, 4, 768, 1024, 5, 28},  {1523, 5, 768, 1024, 5, 28},
+                                     {1524, 6, 768, 1024, 5, 28}, {0, 7, 1646, 1024, 5, 28},    {0, 8, 1646, 1024, 5, 28},
+                                     {1527, 9, 768, 1024, 5, 28}, {1528, 10, 768, 1024, 5, 28}, {1529, 11, 768, 1024, 5, 28},
+                                     {1530, 12, 768, 1024, 5, 28}};
+    const char* names[]{"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", ""};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    require(resolve_names(fbw, load.data(), load.size(), names, 3, fit, any, ids, out, pairs) == 3 && ids[0] == 1524,
+            "Display shape alone takes EWD's texture as PFDL");
+    require(resolve_names(fbw, load.data(), load.size(), names, 3, fit, shapes, ids, out, pairs) == 5 && ids[0] == 1522 && ids[1] == 1521,
+            "MFD, EWD and SD shapes put PFDL and PFDR on their own textures");
+    const std::vector<Creation> fresh(load.begin(), load.begin() + 8);
+    require(resolve_names(fbw, fresh.data(), fresh.size(), names, 3, fit, shapes, ids, out, pairs) == 0 && ids[0] == 1522 && ids[1] == 1521,
+            "A fresh FlyByWire load names without a shift");
   }
 
   std::array<char, 8> name{};

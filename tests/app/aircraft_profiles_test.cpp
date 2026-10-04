@@ -402,8 +402,9 @@ int main() {
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 87));
-  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 5, 28));
-  assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 12, 87));
+  // The named $PFD_CPT/$PFD_FO panel textures are five-mip: any mip count.
+  assert(profiles::matches_display(profiles::IniA380, 768, 1024, 5, 28));
+  assert(profiles::matches_display(profiles::IniA380, 768, 1024, 12, 87));
   assert(profiles::matches_display(profiles::A380, 768, 1024, 5, 28));
   assert(!profiles::matches_display(profiles::A380, 768, 1024, 1, 28));
   assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 0, 28));

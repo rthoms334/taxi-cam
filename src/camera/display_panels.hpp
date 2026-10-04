@@ -80,23 +80,27 @@ inline std::size_t propose(const Panels& panels,
   return n;
 }
 // Resolves panel names to creations. Extra multi-mip textures created after
-// the named panels' (one iniBuilds A350 flight made two more 2048 x 2048
-// textures at the end of its burst) move every pairing back by the same
-// count. The window of the last textured-panel-count creations therefore
-// moves back one creation at a time, up to max_shift, until every non-empty
-// name lands on a creation fit() accepts (the profile's display shape).
-// Returns the shift used with ids and out filled, or -1 with ids zeroed.
-template <class Fit>
+// the named panels' (aircraft switched in flight: the iniBuilds A350 made two
+// more 2048 x 2048 textures, the FlyByWire A380 a 1646 x 1024 one and four
+// copies) move every pairing back by the same count. The window of the last
+// textured-panel-count creations therefore moves back one creation at a time,
+// up to max_shift, until every non-empty name lands on a creation fit()
+// accepts (the profile's display shape) and every panel expected() gives a
+// shape for lands on that shape. A repeated name is checked on its lowest
+// index, the texture created last. Returns the shift used with ids and out
+// filled, or -1 with ids zeroed.
+template <class Fit, class Expected>
 int resolve_names(const Panels& panels,
                   const Creation* creations,
                   std::size_t count,
                   const char* const* names,
                   std::size_t name_count,
                   Fit fit,
+                  Expected expected,
                   std::uint64_t* ids,
                   std::array<Assignment, kMaxPanels>& out,
                   std::size_t& paired,
-                  unsigned max_shift = 4) noexcept {
+                  unsigned max_shift = 8) noexcept {
   std::size_t textured_count = 0, wanted = 0;
   for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
     textured_count += textured(panels.panels[i]);
@@ -106,6 +110,16 @@ int resolve_names(const Panels& panels,
     bool complete = false;
     paired = propose(panels, creations + (count - textured_count - shift), textured_count, out, complete);
     bool all = complete;
+    for (std::size_t i = 0; all && i < paired; ++i) {
+      std::uint32_t width = 0, height = 0;
+      const auto* panel = out[i].panel;
+      if (!expected(panel->texture.data(), width, height))
+        continue;
+      bool lowest = true;
+      for (std::size_t j = 0; j < paired; ++j)
+        lowest = lowest && !(out[j].panel->index < panel->index && std::strcmp(out[j].panel->texture.data(), panel->texture.data()) == 0);
+      all = !lowest || (out[i].creation.width == width && out[i].creation.height == height);
+    }
     for (std::size_t k = 0; k < name_count; ++k) {
       ids[k] = 0;
       if (!names[k] || !names[k][0])

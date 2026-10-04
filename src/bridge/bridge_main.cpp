@@ -313,9 +313,23 @@ void service_panel_identity(PanelIdentityLog& state,
         if (!named[side] || alive(named[side]))
           continue;
         const auto& shape = state.locked_shapes[side];
-        std::uint64_t replacement = 0;
-        for (std::size_t i = 0; i < n; ++i) {
-          const auto& e = entries[i];
+        // The simulator copies a display into its replacement (FlyByWire
+        // A380: #1522 -> #1528); follow that chain to a live texture first.
+        std::uint64_t replacement = 0, successor = named[side];
+        const auto feeds = win::display_feed_pairs();
+        for (unsigned step = 0; step < 8; ++step) {
+          const auto next = std::find_if(feeds.begin(), feeds.end(), [&](const auto& feed) { return feed.first == successor; });
+          if (next == feeds.end())
+            break;
+          successor = next->second;
+          if (alive(successor) && !paired_elsewhere(successor) && std::find(named.begin(), named.end(), successor) == named.end()) {
+            replacement = successor;
+            break;
+          }
+        }
+        // Otherwise the newest live texture of the same shape created later.
+        for (std::size_t i = 0; !replacement && i < n; ++i) {
+          const auto& e = entries[n - 1 - i];
           if (e.id > named[side] && e.width == shape.width && e.height == shape.height && e.mips == shape.mips &&
               e.format == shape.format && alive(e.id) && std::find(named.begin(), named.end(), e.id) == named.end() &&
               !paired_elsewhere(e.id))
@@ -381,9 +395,18 @@ void service_panel_identity(PanelIdentityLog& state,
     const auto fit = [&](const display_identity::Creation& c) {
       return profile && profiles::matches_display(*profile, c.width, c.height, c.mips, c.format);
     };
+    const auto expected = [&](const char* name, std::uint32_t& width, std::uint32_t& height) {
+      for (const auto& shape : profile->panel_shapes)
+        if (shape.name && std::strcmp(shape.name, name) == 0) {
+          width = shape.width;
+          height = shape.height;
+          return true;
+        }
+      return false;
+    };
     const int shift = profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
-                                                                std::min<std::size_t>(profile->sides, MaxDisplaySides), fit, named.data(),
-                                                                proposal, paired)
+                                                                std::min<std::size_t>(profile->sides, MaxDisplaySides), fit, expected,
+                                                                named.data(), proposal, paired)
                               : -1;
     const bool resolved = shift >= 0;
     bool complete = resolved;
