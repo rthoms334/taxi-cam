@@ -362,6 +362,32 @@ int main(int argc, char** argv) {
       panel_depth = std::atoi(argv[a + 1]);
       panel_objects = 400000;
     }
+  // --refs <exe RVA>: list every aligned qword holding image_base + RVA (for
+  // example an engine vtable). --refs-abs <address>...: holders of those
+  // values (or of any value up to 0x40 below them, reported with the delta).
+  for (int a = 3; a + 1 < argc; ++a)
+    if (std::strcmp(argv[a], "--refs") == 0 || std::strcmp(argv[a], "--refs-abs") == 0) {
+      const bool absolute = argv[a][6] == '-';
+      std::set<std::uint64_t> values;
+      std::map<std::uint64_t, std::string> labels;
+      for (int b = a + 1; b < argc && argv[b][0] != '-'; ++b) {
+        const auto v = std::strtoull(argv[b], nullptr, 16 * absolute);
+        for (int d = 0; d <= (absolute ? 0x40 : 0); d += 8) {
+          const auto target = absolute ? v + d : image_base + v;
+          values.insert(target);
+          char label[64];
+          std::snprintf(label, sizeof(label), absolute ? "%llx-%#x" : "exe+%llx", static_cast<unsigned long long>(v), d);
+          labels[target] = label;
+        }
+      }
+      const auto hits = scan(values, 100000);
+      std::printf("refs: %zu\n", hits.size());
+      for (const auto& hit : hits)
+        std::printf("ref %llx %s -> %s\n", static_cast<unsigned long long>(hit.address), where(hit.address).c_str(),
+                    labels[hit.value].c_str());
+      CloseHandle(process);
+      return 0;
+    }
   walk_panels(natives);
   bool full = true;
   for (int a = 3; a < argc; ++a)
