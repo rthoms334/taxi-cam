@@ -8,6 +8,8 @@ namespace taxi_camera {
 // The user's camera brightness, in EV on top of the exposure the camera images
 // take (the main view's, or Taxi Cam's fallback). 0 shows them exactly as the
 // main view exposes them. Saved per aircraft profile, by day and at night.
+// Like any exposure it applies only to R11G11B10_FLOAT camera inputs; the
+// compositor passes other admitted formats' sampled colour through unchanged.
 inline constexpr float kMinimumCameraBrightnessEv = -4;
 inline constexpr float kMaximumCameraBrightnessEv = 2;
 inline constexpr float kCameraBrightnessStepEv = 0.25f;

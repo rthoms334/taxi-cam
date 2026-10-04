@@ -67,7 +67,7 @@ Earlier versions saved `camera_weather`, `camera_tone`, `automatic_exposure`, `e
 | `speed_red`, `speed_green`, `speed_blue` | 22 / 255, 109 / 255, 19 / 255 for all aircraft (`#166D13`) | Normalized RGB, 0–1, edited with the colour picker |
 | `guide_red`, `guide_green`, `guide_blue` | 1, 0, 1 for all aircraft (`#FF00FF`) | Normalized RGB, 0–1, saved in `[guides]`; **Marking colour** changes all reference marks independently of GS |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
-| `day_brightness` | 0 | Camera brightness in daylight, EV added to the exposure the camera images take (see [Exposure](#exposure)); −4 to +2 in 0.25 steps. A hand edit out of range or off a step is snapped when loaded. |
+| `day_brightness` | 0 | Camera brightness in daylight, EV added to the exposure the camera images take (see [Exposure](#exposure)); like that exposure, it applies only to `R11G11B10_FLOAT` camera inputs; −4 to +2 in 0.25 steps. A hand edit out of range or off a step is snapped when loaded. |
 | `night_brightness` | 0 | The same at night. Between day and night the two blend with the ambient light. |
 
 Boolean settings use 0 or 1. Numeric values must be finite. The single-camera test does not supply the two images required for the normal PFD composition.
@@ -213,7 +213,7 @@ darkness     = clamp(log2(4000 / max(ambient, 1)) / log2(4000), 0, 1)
 brightnessEV = day_brightness + (night_brightness - day_brightness) * darkness
 ~~~
 
-`darkness` comes from the latest valid ambient-light sample (0 until one arrives). The simulator's exposure is multiplied by 2^brightnessEV; the fallback below adds brightnessEV to its EV. Taxi Cam's own exposure is only the fallback for when the simulator's tone curve does not apply: the first moments after a flight loads, or a simulator exposure more than two seconds old. With valid ambient-light data the fallback computes:
+`darkness` comes from the latest valid ambient-light sample (0 until one arrives). Like the exposure it trims, the brightness applies only to `R11G11B10_FLOAT` camera inputs; other admitted formats pass their sampled colour through unchanged (below). The simulator's exposure is multiplied by 2^brightnessEV; the fallback below adds brightnessEV to its EV. Taxi Cam's own exposure is only the fallback for when the simulator's tone curve does not apply: the first moments after a flight loads, or a simulator exposure more than two seconds old. With valid ambient-light data the fallback computes:
 
 ~~~text
 darkness = clamp(log2(4000 / max(ambient, 1)) / log2(4000), 0, 1)
@@ -222,7 +222,7 @@ targetEV = clamp(dayEV + 4 * darkness, -16, 4)
 
 `dayEV` is the aircraft profile's daytime exposure, −8 EV on every aircraft, and 4 EV is the fixed night boost. The brightness is added after this target and its slew. Without lighting data, or with a sample older than 1.5 s, the target is −8.8 EV, the compositor's default. The first value applies at once; later changes move toward the target at one EV per second. Ambient uses the SimConnect variable's numeric scale, not lux.
 
-The shader applies exposure and tone mapping to `R11G11B10_FLOAT` camera inputs. Other supported formats use their sampled-colour path.
+The shader applies exposure, tone mapping and the camera brightness to `R11G11B10_FLOAT` camera inputs, the format of the simulator's camera views. Other supported formats use their sampled-colour path, which takes no exposure of any kind: neither the main view's, nor the fallback, nor `day_brightness`/`night_brightness`.
 
 Earlier builds encoded the camera codes a second time on displays drawn through an sRGB view, which brightened shadows.
 
