@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstddef>
 #include <vector>
 #include "../graphics/pfd_submission_proof.hpp"
@@ -265,4 +266,12 @@ struct DisplayResourceRecord {
   unsigned width = 0, height = 0, mips = 0, format = 0;
 };
 std::vector<DisplayResourceRecord> display_resource_records();
+// Call stack (return addresses, caller first) of each display-shaped texture
+// creation, kept in a 32-entry ring. bridge.log prints them module-relative.
+struct DisplayCreationRecord {
+  std::uint64_t serial = 0, id = 0, tick = 0;
+  unsigned width = 0, height = 0, mips = 0, format = 0, frames = 0;
+  std::array<std::uint64_t, 24> stack{};
+};
+std::vector<DisplayCreationRecord> display_creation_records(std::uint64_t after);
 }  // namespace taxi_camera::standalone

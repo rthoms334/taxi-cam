@@ -341,6 +341,10 @@ struct Registry {
     std::uint64_t serial{}, requested_ms{}, planned_ms{};
   } snapshot;
   std::uint64_t snapshot_serials{};
+  // Display identity research: call stacks of display-shaped texture
+  // creations, written under the registry lock, read by the control thread.
+  std::array<DisplayCreationRecord, 32> display_creations{};
+  std::uint64_t display_creation_count{};
   std::atomic<std::uint64_t> snapshot_completed{}, snapshot_plans{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(PfdSubmissionProof::Refusal::count)> queue_proof_refusals{};
@@ -1022,6 +1026,16 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
   if (FAILED(object->QueryInterface(IID_PPV_ARGS(&native))))
     return false;
   const auto desc = native->GetDesc();
+  // Display identity research: where the simulator creates display-shaped
+  // textures. Rare (cockpit load), so the stack walk costs nothing in flight.
+  DisplayCreationRecord creation{};
+  if (created)
+    for (const auto* profile : profiles::Catalog)
+      if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels, static_cast<UINT>(desc.Format))) {
+        creation.frames = static_cast<unsigned>(RtlCaptureStackBackTrace(1, static_cast<DWORD>(creation.stack.size()),
+                                                                         reinterpret_cast<void**>(creation.stack.data()), nullptr));
+        break;
+      }
   // Creation only: RTV and barrier backfill see the same resource again.
   if (created && desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1 &&
       (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 && desc.Width <= RenderTargetShapes::MaximumEdge)
@@ -1053,6 +1067,16 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
                                                                                  desc.MipLevels, static_cast<UINT>(desc.Format));
         r.resources[native] = item;
         r.resource_index.assign(native, item);
+        if (creation.frames) {
+          creation.id = item->id;
+          creation.width = static_cast<unsigned>(desc.Width);
+          creation.height = desc.Height;
+          creation.mips = desc.MipLevels;
+          creation.format = static_cast<unsigned>(desc.Format);
+          creation.tick = GetTickCount64();
+          creation.serial = ++r.display_creation_count;
+          r.display_creations[(creation.serial - 1) % r.display_creations.size()] = creation;
+        }
         for (const auto* profile : profiles::Catalog)
           if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels,
                                         static_cast<UINT>(desc.Format))) {
@@ -4149,6 +4173,16 @@ static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
       result.push_back({item->id, item->draws, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
                         static_cast<UINT>(item->desc.Format), item->submission_activity.load()});
   }
+  return result;
+}
+std::vector<DisplayCreationRecord> display_creation_records(std::uint64_t after) {
+  std::vector<DisplayCreationRecord> result;
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  for (const auto& record : r.display_creations)
+    if (record.serial > after)
+      result.push_back(record);
+  std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.serial < b.serial; });
   return result;
 }
 std::vector<DisplayResourceRecord> display_resource_records() {

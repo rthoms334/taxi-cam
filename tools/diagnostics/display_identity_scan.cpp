@@ -219,6 +219,8 @@ void dump(std::uint64_t center, int before, int after, const char* indent) {
 // +0x528, its index at +0x598 and kind at +0x680. Other builds are refused.
 constexpr std::uint32_t kTestedTimestamp = 1787653788, kTestedImageSize = 235963904;
 constexpr std::uint64_t kPanelRegistry = 0xa50b160, kPanelSize = 0x690;
+int panel_depth = 3;
+std::size_t panel_objects = 6000;
 void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
   unsigned char header[0x400]{};
   if (!image_base || !read(image_base, header, sizeof(header)) || header[0] != 'M' || header[1] != 'Z') {
@@ -273,7 +275,7 @@ void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
     std::vector<Node> queue{{panel, "panel", 0}};
     std::set<std::uint64_t> visited{panel};
     int found = 0;
-    for (std::size_t q = 0; q < queue.size() && q < 6000; ++q) {
+    for (std::size_t q = 0; q < queue.size() && q < panel_objects; ++q) {
       const auto node = queue[q];
       const std::size_t span = node.depth ? 0x400 : kPanelSize;
       std::vector<std::uint64_t> words(span / 8);
@@ -284,16 +286,16 @@ void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
         char step[48];
         std::snprintf(step, sizeof(step), "+%#zx", w * 8);
         if (const auto it = natives.find(v); it != natives.end()) {
-          std::printf("  FOUND %s%s = native %s\n", node.path.c_str(), step, it->second.c_str());
-          ++found;
-        } else if (node.depth < 3 && (v & 7) == 0 && where(v) == "heap" && visited.insert(v).second) {
+          if (found++ < 12)
+            std::printf("  FOUND %s%s = native %s\n", node.path.c_str(), step, it->second.c_str());
+        } else if (node.depth < panel_depth && (v & 7) == 0 && where(v) == "heap" && visited.insert(v).second) {
           queue.push_back({v, node.path + step + "->", node.depth + 1});
         }
       }
     }
     if (!found)
       std::printf("  no tracked native within 3 pointer levels (%zu objects)\n", queue.size());
-    if (i < 3)
+    if (i < 3 && panel_depth == 3)
       dump(panel, 0, static_cast<int>(kPanelSize), "    ");
   }
 }
@@ -355,6 +357,11 @@ int main(int argc, char** argv) {
     std::fclose(file);
   }
   std::printf("natives=%zu\n", natives.size());
+  for (int a = 3; a + 1 < argc; ++a)
+    if (std::strcmp(argv[a], "--depth") == 0) {
+      panel_depth = std::atoi(argv[a + 1]);
+      panel_objects = 400000;
+    }
   walk_panels(natives);
   bool full = true;
   for (int a = 3; a < argc; ++a)

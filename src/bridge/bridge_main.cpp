@@ -118,6 +118,20 @@ void write_display_candidates(std::uint64_t snapshot_id, const std::array<std::u
   } catch (...) {
   }
 }
+// "module+0xoffset" for a return address; no absolute addresses in the log.
+void describe_frame(std::uint64_t address, char* out, std::size_t size) noexcept {
+  HMODULE module{};
+  wchar_t path[MAX_PATH]{};
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(address), &module) ||
+      !GetModuleFileNameW(module, path, MAX_PATH)) {
+    std::snprintf(out, size, "?");
+    return;
+  }
+  const wchar_t* name = wcsrchr(path, L'\\');
+  name = name ? name + 1 : path;
+  std::snprintf(out, size, "%ls+%#llx", name, static_cast<unsigned long long>(address - reinterpret_cast<std::uint64_t>(module)));
+}
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
     wchar_t directory[32768]{};
@@ -416,7 +430,7 @@ DWORD run_impl() {
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
-  std::uint64_t next_inventory{};
+  std::uint64_t next_inventory{}, logged_creation{};
   // Display snapshot (PFD routing): the last handled request and its outcome.
   struct SnapshotState {
     std::uint64_t serial{}, id{};
@@ -1165,6 +1179,20 @@ DWORD run_impl() {
     if (now >= next_inventory) {
       inventory = win::pfd_inventory();
       next_inventory = now + 1000;
+      for (const auto& creation : win::display_creation_records(logged_creation)) {
+        logged_creation = creation.serial;
+        char detail[2048];
+        int used =
+            std::snprintf(detail, sizeof(detail), "Display creation: n=%llu id=%llu %ux%u mips=%u format=%u tick=%llu stack=",
+                          static_cast<unsigned long long>(creation.serial), static_cast<unsigned long long>(creation.id), creation.width,
+                          creation.height, creation.mips, creation.format, static_cast<unsigned long long>(creation.tick));
+        for (unsigned f = 0; f < creation.frames && f < creation.stack.size() && used > 0 && used < 1900; ++f) {
+          char frame[96];
+          describe_frame(creation.stack[f], frame, sizeof(frame));
+          used += std::snprintf(detail + used, sizeof(detail) - used, f ? ",%s" : "%s", frame);
+        }
+        log_status(status, detail);
+      }
       win::service_live_backfill(now, inventory.size());
     }
     status.candidate_count = static_cast<UINT>(std::min<size_t>(inventory.size(), 16));
