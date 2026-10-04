@@ -182,6 +182,17 @@ int main() {
     TaxiButtonRoutes moved;
     require(moved.select_explicit({228, 0}) && !moved.adopt_named({229, 228, 0}, 2) && moved.targets[0] == 228 && !moved.targets[1],
             "A texture chosen for the other side is not named onto this one");
+    TaxiButtonRoutes swapped;
+    require(swapped.adopt_detected({6, 5}) && swapped.adopt_named({5, 6, 0}, 2) && swapped.targets[0] == 5 && swapped.targets[1] == 6,
+            "Names correct a swapped automatic pair");
+    TaxiButtonRoutes a346;
+    require(a346.select_single(500) && !a346.adopt_named({937, 937, 937}, 3) && a346.targets[0] == 500 && a346.targets[1] == 500 &&
+                a346.targets[2] == 500,
+            "A single-display choice keeps every side, side 2 included");
+    TaxiButtonRoutes pmdg;
+    require(
+        pmdg.adopt_single(7, true) && pmdg.adopt_lower(8) && pmdg.adopt_named({8, 8, 7}, 3) && pmdg.targets[0] == 8 && pmdg.targets[2] == 7,
+        "Names correct a swapped automatic 777 guess");
     TaxiButtonRoutes single;
     require(single.adopt_named({233, 233, 232}, 3) && single.targets[2] == 232 && single.targets[0] == single.targets[1],
             "Single-display profiles name one texture for both sides and a separate lower");

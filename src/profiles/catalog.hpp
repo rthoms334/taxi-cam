@@ -150,6 +150,10 @@ struct AircraftProfile {
   // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
   // routing by name. Empty keeps automatic detection for that side.
   std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
+  // A second accepted mip count (0 = none), for named panel textures whose
+  // mip count differs from the detected display targets'. Kept narrow: every
+  // profile's shape admits display candidates on every aircraft.
+  unsigned panel_mips = 0;
   // Texture shapes of other panels, read from logged cockpit loads. Name
   // pairing must land every listed panel on its shape, so extra textures from
   // an aircraft switch cannot slide the names onto look-alike displays.
@@ -280,8 +284,9 @@ inline constexpr AircraftProfile IniA380 = [] {
   // five-mip panel textures named in panel.cfg; routing by name stamps the
   // named $PFD_CPT/$PFD_FO panel textures (2026-10-04 panel table: eight
   // 768 x 1024 five-mip displays). The allocation-group fallback still pairs
-  // only the one-mip typeless group, so mips stay unrestricted here.
-  p.mips = 0;
+  // only the one-mip typeless group.
+  p.mips = 1;
+  p.panel_mips = 5;
   p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
   p.panel_shapes = {{{"$INI_FAP", 2048, 1536}, {"$ND_CPT", 768, 1024}, {"$ND_FO", 768, 1024}, {"$EWD", 768, 1024}, {"$SD", 768, 1024}}};
   p.formats = {28, 29, 87, 91, 27, 90};
@@ -550,7 +555,7 @@ inline bool camera_candidate(unsigned width, unsigned height) noexcept {
   return false;
 }
 inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
-  if (width != p.width || height != p.height || !mips || mips > 12 || (p.mips && p.mips != mips) || !format)
+  if (width != p.width || height != p.height || !mips || mips > 12 || (p.mips && p.mips != mips && p.panel_mips != mips) || !format)
     return false;
   bool listed = false;
   for (auto supported : p.formats) {
@@ -562,6 +567,15 @@ inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, 
   }
   // No scanned format list: admit the known size and leave a shared size ambiguous.
   return !listed;
+}
+// Automatic detection: the profile's own mip count only. panel_mips admits
+// named panel textures for routing by name, not for detection.
+inline constexpr bool matches_detection(const AircraftProfile& p,
+                                        unsigned width,
+                                        unsigned height,
+                                        unsigned mips,
+                                        unsigned format) noexcept {
+  return matches_display(p, width, height, mips, format) && (!p.mips || mips == p.mips);
 }
 inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) noexcept {
   const auto equal = [](std::string_view a, std::string_view b) {

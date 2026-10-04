@@ -339,6 +339,10 @@ struct Registry {
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     bool bgra{};
     std::uint64_t serial{}, requested_ms{}, planned_ms{};
+    // Copies planned for this serial. A replan can overlap an earlier copy
+    // into the same buffer, so only the latest plan's completion
+    // ((serial << 8) | plans) means the buffer is final.
+    std::uint64_t plans{};
   } snapshot;
   std::uint64_t snapshot_serials{};
   // Display identity research: call stacks of display-shaped texture
@@ -2635,7 +2639,7 @@ void plan_display_submission(void*,
   auto& snapshot = r.snapshot;
   const auto now = snapshot.buffer ? GetTickCount64() : 0;
   if (snapshot.buffer && snapshot.target && snapshot.target->alive &&
-      r.snapshot_completed.load(std::memory_order_acquire) < snapshot.serial &&
+      r.snapshot_completed.load(std::memory_order_acquire) < (snapshot.serial << 8 | snapshot.plans) && snapshot.plans < 255 &&
       (!snapshot.planned_ms || now - snapshot.planned_ms >= kDisplaySnapshotReplanMs)) {
     const PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(snapshot.target->native), snapshot.target->id};
     snapshot_overlay = PfdSubmissionProof::batch_overlay(batch.data(), count, key);
@@ -2719,11 +2723,12 @@ void plan_display_submission(void*,
                  desc.Height,
                  true,
                  &r.snapshot_completed,
-                 snapshot.serial};
+                 snapshot.serial << 8 | (snapshot.plans + 1)};
     item.copy.target->AddRef();
     item.copy.source->AddRef();
     ++plan.count;
     snapshot.planned_ms = now ? now : 1;
+    ++snapshot.plans;
     r.snapshot_plans.fetch_add(1, std::memory_order_relaxed);
   }
   if (plan.count)
@@ -4364,7 +4369,7 @@ DXGI_FORMAT snapshot_copy_format(DXGI_FORMAT format, bool& bgra) noexcept {
 ID3D12Resource* take_snapshot(Registry& r) noexcept {
   auto* buffer = std::exchange(r.snapshot.buffer, nullptr);
   r.snapshot.target.reset();
-  r.snapshot.planned_ms = r.snapshot.requested_ms = 0;
+  r.snapshot.planned_ms = r.snapshot.requested_ms = r.snapshot.plans = 0;
   return buffer;
 }
 void release_snapshot_buffer(ID3D12Resource* buffer) noexcept {
@@ -4436,6 +4441,7 @@ DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t n
       r.snapshot.footprint = footprint;
       r.snapshot.bgra = bgra;
       r.snapshot.serial = ++r.snapshot_serials;
+      r.snapshot.plans = 0;
       r.snapshot.requested_ms = now ? now : 1;
     }
   }
@@ -4460,7 +4466,7 @@ DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
     poll.width = static_cast<unsigned>(snapshot.target->desc.Width);
     poll.height = snapshot.target->desc.Height;
     poll.format = static_cast<unsigned>(snapshot.target->desc.Format);
-    if (r.snapshot_completed.load(std::memory_order_acquire) >= snapshot.serial) {
+    if (snapshot.plans && r.snapshot_completed.load(std::memory_order_acquire) >= (snapshot.serial << 8 | snapshot.plans)) {
       footprint = snapshot.footprint;
       bgra = snapshot.bgra;
       buffer = take_snapshot(r);
@@ -4716,8 +4722,9 @@ void discover_pfds(std::uint64_t now) noexcept {
         ++i;
     }
     // Panel-name identity first: only live textures of this profile's display
-    // shape, and only when every named side resolves.
-    {
+    // shape, and only when every named side resolves. Naming is automatic
+    // selection too, so Auto detect off (now == 0) leaves it out.
+    if (now) {
       std::array<std::uint64_t, MaxDisplaySides> named{};
       bool usable = false, complete = true;
       for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {

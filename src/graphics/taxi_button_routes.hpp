@@ -199,19 +199,27 @@ class TaxiButtonRoutes {
   // guess. Detection changes never withdraw a named side; destruction does.
   // Single-display profiles may name one texture for several sides.
   bool adopt_named(const Sides& named, unsigned sides) noexcept {
+    // A side the user chose: neither detected nor named. Single-display
+    // choices also set side 2 this way; the 777 lower DU has its own flag.
+    const auto chosen = [&](unsigned side) {
+      return (side == 2 && lower_explicit_) ||
+             (targets[side] && targets[side] != detected_targets_[side] && targets[side] != named_targets_[side]);
+    };
+    std::array<bool, MaxDisplaySides> user{};
+    for (unsigned side = 0; side < targets.size(); ++side)
+      user[side] = chosen(side);
     bool changed = false;
     for (unsigned side = 0; side < sides && side < targets.size(); ++side) {
       const auto id = named[side];
-      if (!id || targets[side] == id)
+      if (!id || targets[side] == id || user[side])
         continue;
-      const bool chosen =
-          side == 2 ? lower_explicit_ : targets[side] && targets[side] != detected_targets_[side] && targets[side] != named_targets_[side];
-      // A texture another side holds for another reason (the user moved the
-      // right PFD's texture to the left) never serves this side as well.
+      // A texture the user put on another side (the right PFD's texture moved
+      // to the left) never serves this side as well. Automatic sides do not
+      // block: a swapped detected pair takes its names in this one pass.
       bool held = false;
       for (unsigned other = 0; other < targets.size(); ++other)
-        held = held || (other != side && targets[other] == id && named[other] != id);
-      if (chosen || held)
+        held = held || (other != side && user[other] && targets[other] == id && named[other] != id);
+      if (held)
         continue;
       targets[side] = named_targets_[side] = id;
       detected_targets_[side] = 0;
