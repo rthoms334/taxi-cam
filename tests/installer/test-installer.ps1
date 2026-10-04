@@ -68,7 +68,7 @@ function Get-Entries([string]$Name = '') {
     return ,@($launch.SelectNodes($query))
 }
 $knownSettings = @('Taxi Cam/settings.ini','Taxi Cam/hotkeys.ini','Taxi Cam/startup-state')
-foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-300er','pmdg-777f','aerosoft-a346','ini-a340-300')) {
+foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-200lr','pmdg-777-300er','pmdg-777f','aerosoft-a346','ini-a340-300')) {
     foreach ($folder in @('Taxi Cam','380 Taxi Cam')) { $knownSettings += "$folder/profiles/$key.ini" }
 }
 $unrelatedSettings = @('Taxi Cam/logs/history.log','Taxi Cam/profiles/custom-aircraft.ini','Taxi Cam/readme.txt','380 Taxi Cam/profiles/custom-aircraft.ini')

@@ -145,10 +145,11 @@ void guide_settings_tests() {
            defaults.tail_corner == profile->composition.tail_corner && defaults.tail_inner == profile->composition.tail_inner &&
            defaults.guide_color == profile->composition.guide_color);
     Settings edited = defaults;
-    edited.nose_dot = {profile->id * 0.03125f, 0.25f};
-    edited.tail_upper = {0.125f, 0.375f + profile->id * 0.03125f};
+    // Per-profile steps of 1/64 keep every guide in range up to profile id 18.
+    edited.nose_dot = {profile->id * 0.015625f, 0.25f};
+    edited.tail_upper = {0.125f, 0.375f + profile->id * 0.015625f};
     edited.tail_corner = {0.21875f, 0.6875f};
-    edited.tail_inner = {0.375f, 0.71875f + profile->id * 0.03125f};
+    edited.tail_inner = {0.375f, 0.71875f + profile->id * 0.015625f};
     edited.mounts[0][1] += 0.125;
     edited.speed_color = {0.25f, 0.5f, 0.75f};
     edited.guide_color = {profile->id * 0.0625f, 0.125f, 0.875f};
@@ -288,7 +289,7 @@ int main() {
   assert(!profiles::detect_aircraft("Airbus", "SimObjects/Airplanes/Other_A380/presets/inibuilds/aircraft.cfg"));
   assert(!profiles::detect_aircraft("A359", ini_a380_path));
   assert(profiles::IniA380.taxi_control == profiles::TaxiControl::manual_only);
-  for (const auto* pmdg_profile : {&profiles::Pmdg777, &profiles::Pmdg777300ER, &profiles::Pmdg777F}) {
+  for (const auto* pmdg_profile : {&profiles::Pmdg777, &profiles::Pmdg777200LR, &profiles::Pmdg777300ER, &profiles::Pmdg777F}) {
     // The Display Select Panel is read only; Taxi Cam never commands it.
     assert(pmdg_profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam && !profiles::commandable_buttons(*pmdg_profile));
     assert(pmdg_profile->sides == 3 && profiles::side_mask(*pmdg_profile) == 7 && profiles::separate_lower_texture(*pmdg_profile));
@@ -313,12 +314,19 @@ int main() {
          profiles::Pmdg777300ER.id);
   assert(profiles::detect_aircraft("B77F", "Community/pmdg-aircraft-77f/SimObjects/Airplanes/PMDG 777F/aircraft.cfg") ==
          profiles::Pmdg777F.id);
+  // The 200LR folder follows the other variants' naming (path not yet logged).
+  assert(profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
+                                   "SimObjects\\Airplanes\\PMDG 777-200LR\\presets\\pmdg\\PMDG 777-200LR GE\\config\\aircraft.CFG") ==
+         profiles::Pmdg777200LR.id);
+  assert(!profiles::detect_aircraft("777", "SimObjects/Airplanes/PMDG 777-200LR-copy/aircraft.cfg"));
+  assert(profiles::Pmdg777200LR.mounts == profiles::Pmdg777.mounts);
   assert(profiles::Pmdg777300ER.mounts[0][0] == 0 && profiles::Pmdg777300ER.mounts[0][1] == -2 &&
          profiles::Pmdg777300ER.mounts[0][2] == 22 && profiles::Pmdg777300ER.mounts[0][3] == -18 &&
          profiles::Pmdg777300ER.mounts[0][4] == 0 && profiles::Pmdg777300ER.mounts[0][5] == 1);
   assert(profiles::Pmdg777300ER.mounts[0] != profiles::Pmdg777.mounts[0]);
   assert(profiles::Pmdg777F.mounts[0] == profiles::Pmdg777.mounts[0]);
-  assert(profiles::Pmdg777300ER.key != profiles::Pmdg777.key && profiles::Pmdg777F.key != profiles::Pmdg777.key);
+  assert(profiles::Pmdg777300ER.key != profiles::Pmdg777.key && profiles::Pmdg777F.key != profiles::Pmdg777.key &&
+         profiles::Pmdg777200LR.key != profiles::Pmdg777.key);
   assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text", "Community/pmdg-aircraft-77er/aircraft.cfg"));
   assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
                                     "SimObjects\\Airplanes\\Other\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG"));
@@ -358,6 +366,9 @@ int main() {
     assert(profile->exposure == -8.f);
   assert(settings_path(pmdg_300) != settings_path(pmdg) && settings_path(pmdg_f) != settings_path(pmdg));
   assert(settings_path(pmdg_300) != settings_path(pmdg_f));
+  Settings pmdg_lr;
+  assert(load_settings(pmdg_lr, L"missing", profiles::Pmdg777200LR.id));
+  assert(pmdg_lr.follow_taxi && pmdg_lr.mounts == profiles::Pmdg777.mounts && settings_path(pmdg_lr) != settings_path(pmdg));
   {
     // Profiles saved while the 777 was manual-only turn CAM control on once.
     const auto pmdg_path = settings_path(pmdg_f);
