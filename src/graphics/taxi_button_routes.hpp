@@ -194,12 +194,35 @@ class TaxiButtonRoutes {
     return true;
   }
 
+  // Panel-name identity (the simulator's VCockpit texture= names): a side the
+  // user did not choose takes the texture named for it, replacing an automatic
+  // guess. Detection changes never withdraw a named side; destruction does.
+  // Single-display profiles may name one texture for several sides.
+  bool adopt_named(const Sides& named, unsigned sides) noexcept {
+    bool changed = false;
+    for (unsigned side = 0; side < sides && side < targets.size(); ++side) {
+      const auto id = named[side];
+      if (!id || targets[side] == id)
+        continue;
+      const bool chosen =
+          side == 2 ? lower_explicit_ : targets[side] && targets[side] != detected_targets_[side] && targets[side] != named_targets_[side];
+      if (chosen)
+        continue;
+      targets[side] = named_targets_[side] = id;
+      detected_targets_[side] = 0;
+      assigned_ = changed = true;
+    }
+    return changed;
+  }
+  bool named(unsigned side) const noexcept { return side < targets.size() && targets[side] && targets[side] == named_targets_[side]; }
+
   void forget(std::uint64_t id) noexcept {
     assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0 || targets[2] != 0;
     for (unsigned side = 0; side < targets.size(); ++side)
       if (targets[side] == id) {
         targets[side] = 0;
         detected_targets_[side] = 0;
+        named_targets_[side] = 0;
         if (side == 2)
           lower_explicit_ = false;
       }
@@ -234,6 +257,7 @@ class TaxiButtonRoutes {
   bool assigned_ = false;
   bool lower_explicit_ = false;
   Sides detected_targets_{};
+  Sides named_targets_{};
 };
 
 }  // namespace taxi_camera

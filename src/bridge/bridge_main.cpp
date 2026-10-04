@@ -168,6 +168,10 @@ struct PanelIdentityLog {
   display_identity::Panels panels{};
   std::vector<std::uint64_t> feeds;  // Logged (source << 32 | destination) pairs.
   std::vector<std::pair<std::uint64_t, std::string>> names;  // Proposed ID -> panel name.
+  std::uint64_t next_analysis_ms{};
+  std::string proposal_text;
+  std::array<std::uint64_t, MaxDisplaySides> named{};
+  std::uint32_t named_profile{};
 };
 // Joins items into "prefix [part/total]: ..." lines of bounded length.
 void log_chunks(const win::Status& status, const char* prefix, const std::vector<std::string>& items) noexcept {
@@ -208,7 +212,8 @@ void service_panel_identity(PanelIdentityLog& state,
                             const win::Status& status,
                             std::uint64_t now,
                             std::uint64_t epoch,
-                            bool session_ready) noexcept {
+                            bool session_ready,
+                            const profiles::AircraftProfile* profile) noexcept {
   if (now < state.next_ms)
     return;
   state.next_ms = now + 2000;
@@ -274,8 +279,11 @@ void service_panel_identity(PanelIdentityLog& state,
   // for 30 s with the session ready. Panel textures are recreated when the
   // cockpit reloads, so the latest multi-mip creations since the session
   // began are the current ones.
-  if (state.burst_logged || !session_ready || state.seen_ms < state.epoch_ms || now - state.seen_ms < 30000)
+  if (!session_ready || state.seen_ms < state.epoch_ms || now - state.seen_ms < 30000 || now < state.next_analysis_ms)
     return;
+  // Re-checked every 10 s: a recreated display texture gets its name back.
+  state.next_analysis_ms = now + 10000;
+  const bool first = !state.burst_logged;
   state.burst_logged = true;
   try {
     static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
@@ -301,7 +309,8 @@ void service_panel_identity(PanelIdentityLog& state,
     char head[96];
     std::snprintf(head, sizeof(head), " multimip_f28=%zu textured_panels=%zu", burst.size(), textured);
     items.insert(items.begin(), head);
-    log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
+    if (first)
+      log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
     if (burst.size() > textured)
       burst.erase(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(textured));
     std::array<display_identity::Assignment, display_identity::kMaxPanels> proposal{};
@@ -321,8 +330,40 @@ void service_panel_identity(PanelIdentityLog& state,
                     a.creation.width, a.creation.height, a.creation.mips);
       pairs.push_back(item);
     }
-    log_chunks(status, "Display identity (proposed, not used)", pairs);
-    state.feeds.clear();  // Log known feeds again, now with names.
+    std::string text;
+    for (const auto& item : pairs)
+      text += item;
+    if (text != state.proposal_text) {
+      state.proposal_text = text;
+      log_chunks(status, "Display identity (proposed)", pairs);
+      state.feeds.clear();  // Log known feeds again, now with names.
+    }
+    // Route by name: every named side of the selected profile must resolve to
+    // a texture the bridge tracks, or nothing is published for this profile.
+    std::array<std::uint64_t, MaxDisplaySides> named{};
+    bool resolved = complete && profile;
+    for (unsigned side = 0; resolved && side < profile->sides && side < MaxDisplaySides; ++side) {
+      const char* name = profile->panel_textures[side];
+      if (!name[0])
+        continue;
+      for (std::size_t i = 0; i < paired; ++i)
+        if (proposal[i].creation.id && std::strcmp(proposal[i].panel->texture.data(), name) == 0)
+          named[side] = proposal[i].creation.id;
+      resolved = named[side] != 0;
+    }
+    if (!resolved)
+      named = {};
+    const auto profile_id = profile ? profile->id : 0u;
+    if (named != state.named || profile_id != state.named_profile) {
+      state.named = named;
+      state.named_profile = profile_id;
+      win::set_named_targets(named);
+      char detail[192];
+      std::snprintf(detail, sizeof(detail), "Display named routing: profile=%u resolved=%d ids=%llu,%llu,%llu", profile_id,
+                    resolved ? 1 : 0, static_cast<unsigned long long>(named[0]), static_cast<unsigned long long>(named[1]),
+                    static_cast<unsigned long long>(named[2]));
+      log_status(status, detail);
+    }
   } catch (...) {
   }
 }
@@ -1362,7 +1403,8 @@ DWORD run_impl() {
       inventory = win::pfd_inventory();
       next_inventory = now + 1000;
       service_panel_identity(panel_identity, status, now, native_camera::get_aircraft_session_epoch(),
-                             native_camera::get_aircraft_session_readiness().ready);
+                             native_camera::get_aircraft_session_readiness().ready,
+                             profiles::find(applied_profile ? applied_profile : settings.profile));
       for (const auto& creation : win::display_creation_records(logged_creation)) {
         logged_creation = creation.serial;
         char detail[2048];

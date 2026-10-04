@@ -347,6 +347,7 @@ struct Registry {
   // Display identity research: distinct (source ID << 32 | destination ID)
   // copies between two tracked display textures, set from recording hooks.
   std::array<std::atomic<std::uint64_t>, 64> display_feeds{};
+  std::array<std::uint64_t, MaxDisplaySides> named_targets{};  // Guarded by mutex.
   // Last snapshot failure step and HRESULT/Win32 code, for bridge.log.
   std::atomic<const char*> snapshot_failure{""};
   std::atomic<long> snapshot_failure_code{};
@@ -4488,6 +4489,11 @@ DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
   release_snapshot_buffer(buffer);
   return poll;
 }
+void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) noexcept {
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  r.named_targets = ids;
+}
 bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();
   const WorkerRegistryLock lock(r);
@@ -4593,6 +4599,7 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   {
     const WorkerRegistryLock lock(r);
     r.active_mask = r.calibration_mask = 0;
+    r.named_targets = {};
     // This entry point starts an explicit aircraft/profile session, including a
     // reload of the same adapter. Ordinary texture replacement uses forget().
     r.routes.reset();
@@ -4683,6 +4690,31 @@ void discover_pfds(std::uint64_t now) noexcept {
         i = r.rtvs.erase(i);
       } else
         ++i;
+    }
+    // Panel-name identity first: only live textures of this profile's display
+    // shape, and only when every named side resolves.
+    {
+      std::array<std::uint64_t, MaxDisplaySides> named{};
+      bool usable = false, complete = true;
+      for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {
+        if (!r.profile->panel_textures[side][0])
+          continue;
+        const auto id = r.named_targets[side];
+        bool live = false;
+        if (id)
+          for (const auto& [native, item] : r.resources) {
+            (void)native;
+            if (item->id == id) {
+              live = item->alive && display_item(r, *item);
+              break;
+            }
+          }
+        complete = complete && live;
+        named[side] = live ? id : 0;
+        usable = usable || live;
+      }
+      if (usable && complete)
+        r.routes.adopt_named(named, r.profile->sides);
     }
     const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
     const bool single_display = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;

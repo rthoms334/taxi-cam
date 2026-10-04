@@ -147,6 +147,9 @@ struct AircraftProfile {
   // Decoded camera-display brightness, used to match the main view's lighting;
   // emissive 0: not decoded for this aircraft.
   DisplayLight display_light{};
+  // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
+  // routing by name. Empty keeps automatic detection for that side.
+  std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -209,6 +212,7 @@ inline constexpr AircraftProfile A359 = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
+  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
   return p;
 }();
 inline constexpr AircraftProfile A35K = [] {
@@ -231,6 +235,7 @@ inline constexpr AircraftProfile A35K = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
+  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
   return p;
 }();
 // iniBuilds A380 display layout started from FBW. Mounts and guide defaults
@@ -385,6 +390,7 @@ inline constexpr auto make_pmdg_777 =
       // full-code light (30 points, 1.2 codes RMS); the day capture's offset is
       // about 0.013. With these the ND's ground and sky matched the window.
       p.display_light = {148.8235f, 200, 2000, 0.15f, 11.0f, 0.0013f, 0.0134f};
+      p.panel_textures = {Pmdg777Texture, Pmdg777Texture, Pmdg777LowerTexture};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 =
@@ -455,6 +461,7 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
   p.pfd_detection = PfdDetectionPolicy::single_display;
   p.display_texture = A346Texture;
+  p.panel_textures = {A346Texture, A346Texture, A346Texture};
   return p;
 }();
 // iniBuilds A340-300 (streamed fs24-inibuilds-aircraft-a340; encrypted, so no

@@ -248,6 +248,10 @@ std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept;
 void reset_display_session() noexcept;
 void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;
+// Texture IDs named for each display side by the panel table (0 = none).
+// discover_pfds routes them first; explicit choices and dead textures are
+// never overridden or kept.
+void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) noexcept;
 // Display texture snapshot for PFD routing. Control thread only. Replaces any
 // earlier request, then copies the tracked display texture's base mip into a
 // private READBACK buffer at the next proven submission boundary, the same

@@ -3,6 +3,7 @@
 #include <cstring>
 #include <vector>
 #include "../../src/camera/display_panels.hpp"
+#include "../../src/graphics/taxi_button_routes.hpp"
 
 namespace {
 using namespace taxi_camera::display_identity;
@@ -78,6 +79,26 @@ int main() {
   const unsigned char stop[] = {'D', 'U', 'S', 0, 'Z'};
   copy_name(stop, sizeof(stop), name);
   require(std::strcmp(name.data(), "DUS") == 0, "Names stop at NUL");
+  // Named routing replaces automatic guesses, never an explicit choice, and a
+  // destroyed named texture leaves the side to detection again.
+  {
+    using taxi_camera::TaxiButtonRoutes;
+    TaxiButtonRoutes routes;
+    require(routes.adopt_detected({5, 6}), "Automatic pair adopted");
+    require(routes.adopt_named({229, 228, 0}, 2) && routes.targets[0] == 229 && routes.targets[1] == 228 && routes.named(0),
+            "Names replace an automatic pair");
+    require(!routes.adopt_detected({5, 6}) && routes.targets[0] == 229, "Detection does not withdraw a named side");
+    routes.forget(229);
+    require(!routes.targets[0] && !routes.named(0) && routes.targets[1] == 228, "A destroyed named texture clears only its side");
+    TaxiButtonRoutes chosen;
+    require(chosen.select_explicit({7, 8}) && !chosen.adopt_named({229, 228, 0}, 2) && chosen.targets[0] == 7,
+            "An explicit choice is never overridden");
+    TaxiButtonRoutes single;
+    require(single.adopt_named({233, 233, 232}, 3) && single.targets[2] == 232 && single.targets[0] == single.targets[1],
+            "Single-display profiles name one texture for both sides and a separate lower");
+    single.select_lower(240);
+    require(!single.adopt_named({233, 233, 232}, 3) && single.targets[2] == 240, "An explicit lower choice is kept");
+  }
   std::printf("PASS: %u display identity checks.\n", checks);
   return 0;
 }
