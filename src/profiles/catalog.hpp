@@ -170,18 +170,22 @@ inline constexpr bool commandable_buttons(const AircraftProfile& p) noexcept {
 // age that brings the page back while the side stays on.
 inline constexpr std::uint64_t WaitingPageMinimumMs = 750;
 inline constexpr std::uint64_t WaitingPageStaleMs = 1000;
-inline constexpr AircraftProfile A380{1,
-                                      "fbw-a380x",
-                                      L"FlyByWire A380X",
-                                      {"L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON", "L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON"},
-                                      {"A32NX.FCU_EFIS_L_TAXI_PUSH", "A32NX.FCU_EFIS_R_TAXI_PUSH"},
-                                      {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"},
-                                      {{{0, -1.75, 26.950668984, -17.5, 0, 1.24},
-                                        {0, 18, -25, -32, 0, 1.02},
-                                        {0, 18, -25, -32, 0, 1.02}}},
-                                      768,
-                                      1024,
-                                      5};
+// panel.cfg texture names were read live on 2026-10-04 and match the
+// cockpit material labels.
+inline constexpr AircraftProfile A380 = [] {
+  AircraftProfile p{1,
+                    "fbw-a380x",
+                    L"FlyByWire A380X",
+                    {"L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON", "L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON"},
+                    {"A32NX.FCU_EFIS_L_TAXI_PUSH", "A32NX.FCU_EFIS_R_TAXI_PUSH"},
+                    {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"},
+                    {{{0, -1.75, 26.950668984, -17.5, 0, 1.24}, {0, 18, -25, -32, 0, 1.02}, {0, 18, -25, -32, 0, 1.02}}},
+                    768,
+                    1024,
+                    5};
+  p.panel_textures = {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", ""};
+  return p;
+}();
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
 // The accepted -900 calibration transfers to the -1000 with its physical
 // longitudinal offsets, retaining the same height, pitch and lens. Composition
