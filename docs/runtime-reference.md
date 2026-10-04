@@ -43,7 +43,7 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er`, `pmdg-777f`, `aerosoft-a346` and `ini-a340-300`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` (`left`, `right`, `both`, `sd`) and apply to all aircraft.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-200lr`, `pmdg-777-300er`, `pmdg-777f`, `aerosoft-a346` and `ini-a340-300`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` (`left`, `right`, `both`, `sd`) and apply to all aircraft.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 

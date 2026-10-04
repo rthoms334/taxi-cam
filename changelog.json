@@ -8,6 +8,7 @@
         "PFD routing: the texture lists are replaced by cards showing a picture of each display texture with its panel name. Choose Left or Right on a card; select a picture to see it full size. Assigned displays shows each camera's screen and whether it was named, detected or chosen; Automatic goes back to automatic routing.",
         "Overview: new Cockpit displays cards show the screen each camera draws on. The camera frame rate setting is now only on the Display page.",
         "Swap left / right now also swaps displays that were found automatically.",
+        "PMDG 777-200LR: new aircraft profile. It uses the same cameras, displays and CAM button as the other PMDG 777 variants, with the 777-200ER camera positions to start with. Not yet tested in the simulator.",
         "PMDG 777: the camera pictures are no longer washed out in daylight. The 777 now uses the main view's exposure and tone curve like every other aircraft, day and night, instead of its own display brightness model, so lighting add-ons and HDR affect it the same way.",
         "New: Display → Daytime brightness and Night brightness make the camera pictures brighter or darker than the main view, from −4 to +2 EV, separately for each aircraft. Leave them at 0 to match the main view."
       ]

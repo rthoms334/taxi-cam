@@ -12,7 +12,8 @@ namespace taxi_camera::native_camera {
 //   otherwise. Exactly one was lit at a time.
 // - Momentary switch_NNN_a animations read 100 while pushed, for 0.1-0.25 s.
 // - After CAM was removed from R INBD the lamp returned to LWR CTR by itself.
-// Switch numbers match the 777-200ER and 777F cockpit behaviour files.
+// Switch numbers match the 777-200ER and 777F cockpit behaviour files; the
+// 777-200LR shares the 200ER cockpit.
 // The CAM page itself is PMDG state that Taxi Cam cannot read. This decoder
 // follows the same button presses, so pages changed another way (for example
 // by a display failure or reversion) can leave it out of step until CAM is
