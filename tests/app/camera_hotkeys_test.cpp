@@ -338,7 +338,11 @@ void ui_checks() {
   build_controls();
   require(GetDlgItem(window, 645) && !GetDlgItem(window, 106),
           "Shortcut editor opens from Flight-deck control without adding another navigation page");
+  // The camera rate field lives on Display (Overview shows the display cards).
+  page = 2;
+  build_controls();
   const auto rate = GetDlgItem(window, 200);
+  require(rate != nullptr, "Display page has the camera rate field");
   for (const auto value : {5u, 10u, 15u, 60u}) {
     const auto text = std::to_wstring(value);
     SetWindowTextW(rate, text.c_str());
