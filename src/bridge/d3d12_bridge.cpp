@@ -4572,6 +4572,14 @@ std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept {
   const WorkerRegistryLock lock(r);
   return r.routes.targets;
 }
+unsigned named_target_mask() noexcept {
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  unsigned mask = 0;
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
+    mask |= r.routes.named(side) ? 1u << side : 0u;
+  return mask;
+}
 void reset_display_session() noexcept {
   auto& r = registry();
   // The same order is used by native Reset/list registration. Do not mutate

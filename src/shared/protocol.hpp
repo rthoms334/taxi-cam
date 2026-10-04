@@ -23,7 +23,9 @@ namespace taxi_camera::standalone {
 // night_boost (the camera views always take the main view's lighting).
 // Protocol 22: Settings snapshot_request/snapshot_id and Status snapshot_*
 // for a one-shot display texture snapshot on PFD routing.
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 22;
+// Protocol 23: Candidate panel name and Status named_mask for the PFD routing
+// cards; routed textures come first in the candidate list.
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 23;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
@@ -72,6 +74,9 @@ inline void reset_guide_settings(Settings& settings, const profiles::AircraftPro
 struct Candidate {
   std::uint64_t id{}, draws{};
   std::uint32_t width{}, height{}, mips{}, format{};
+  // Protocol 23: the simulator's VCockpit texture= name for this texture,
+  // when the panel table pairs it this flight; empty otherwise.
+  char name[32]{};
 };
 struct Status {
   std::uint64_t heartbeat{}, captures{}, composed{}, stamps{}, left_id{}, right_id{}, hook_failures{};
@@ -101,6 +106,8 @@ struct Status {
   // Width, height and DXGI format describe the texture, not the image.
   std::uint64_t snapshot_serial{}, snapshot_id{};
   std::uint32_t snapshot_result{}, snapshot_width{}, snapshot_height{}, snapshot_format{};
+  // Protocol 23: display sides routed by panel name (bit per side).
+  std::uint32_t named_mask{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};

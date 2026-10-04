@@ -245,6 +245,8 @@ void set_target_mask(unsigned mask) noexcept;
 void set_waiting_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
 std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept;
+// Sides whose route came from the panel-name table (bit per side).
+unsigned named_target_mask() noexcept;
 // Control-thread flight reset: drop routes/activity and make all older recording
 // proofs ineligible. Keep native metadata and already-recorded GPU ownership.
 void reset_display_session() noexcept;

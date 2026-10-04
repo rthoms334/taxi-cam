@@ -93,6 +93,9 @@ int main() {
     TaxiButtonRoutes chosen;
     require(chosen.select_explicit({7, 8}) && !chosen.adopt_named({229, 228, 0}, 2) && chosen.targets[0] == 7,
             "An explicit choice is never overridden");
+    TaxiButtonRoutes moved;
+    require(moved.select_explicit({228, 0}) && !moved.adopt_named({229, 228, 0}, 2) && moved.targets[0] == 228 && !moved.targets[1],
+            "A texture chosen for the other side is not named onto this one");
     TaxiButtonRoutes single;
     require(single.adopt_named({233, 233, 232}, 3) && single.targets[2] == 232 && single.targets[0] == single.targets[1],
             "Single-display profiles name one texture for both sides and a separate lower");

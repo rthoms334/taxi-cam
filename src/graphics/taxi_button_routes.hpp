@@ -206,7 +206,12 @@ class TaxiButtonRoutes {
         continue;
       const bool chosen =
           side == 2 ? lower_explicit_ : targets[side] && targets[side] != detected_targets_[side] && targets[side] != named_targets_[side];
-      if (chosen)
+      // A texture another side holds for another reason (the user moved the
+      // right PFD's texture to the left) never serves this side as well.
+      bool held = false;
+      for (unsigned other = 0; other < targets.size(); ++other)
+        held = held || (other != side && targets[other] == id && named[other] != id);
+      if (chosen || held)
         continue;
       targets[side] = named_targets_[side] = id;
       detected_targets_[side] = 0;

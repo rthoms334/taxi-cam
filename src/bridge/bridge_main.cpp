@@ -246,6 +246,7 @@ void service_panel_identity(PanelIdentityLog& state,
     state.signature = 0;
     state.locked = false;
     state.burst_logged = false;
+    state.names.clear();
   }
   const auto panels = display_identity::read_panels();
   if (panels.error) {
@@ -421,6 +422,20 @@ void service_panel_identity(PanelIdentityLog& state,
     }
   } catch (...) {
   }
+}
+// Panel name of a display texture in this flight for the PFD routing cards,
+// or empty. A named texture the simulator recreated keeps its side's name.
+const char* panel_texture_name(const PanelIdentityLog& state, std::uint64_t id, const profiles::AircraftProfile* profile) noexcept {
+  if (!id)
+    return "";
+  if (profile && state.named_profile == profile->id)
+    for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
+      if (state.named[side] == id && profile->panel_textures[side][0])
+        return profile->panel_textures[side];
+  for (const auto& [named, panel] : state.names)
+    if (named == id)
+      return panel.c_str();
+  return "";
 }
 struct StartupTiming {
   unsigned intent_mask{}, attempts{};
@@ -1423,6 +1438,7 @@ DWORD run_impl() {
     status.left_id = targets[0];
     status.right_id = targets[1];
     status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
+    status.named_mask = win::named_target_mask();
     status.snapshot_serial = snapshot.serial;
     status.snapshot_id = snapshot.id;
     status.snapshot_result = static_cast<std::uint32_t>(snapshot.result);
@@ -1476,10 +1492,21 @@ DWORD run_impl() {
       }
       win::service_live_backfill(now, inventory.size());
     }
-    status.candidate_count = static_cast<UINT>(std::min<size_t>(inventory.size(), 16));
-    for (UINT i = 0; i < status.candidate_count; ++i)
-      status.candidates[i] = {inventory[i].id,     inventory[i].draws,  inventory[i].width,
-                              inventory[i].height, inventory[i].levels, inventory[i].format};
+    // Routed textures first, so the companion's assigned cards always find
+    // their shape and name within the sixteen rows.
+    std::vector<std::size_t> order(inventory.size());
+    for (std::size_t i = 0; i < order.size(); ++i)
+      order[i] = i;
+    std::stable_partition(order.begin(), order.end(),
+                          [&](std::size_t i) { return std::find(targets.begin(), targets.end(), inventory[i].id) != targets.end(); });
+    const auto* name_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
+    status.candidate_count = static_cast<UINT>(std::min<size_t>(order.size(), 16));
+    for (UINT i = 0; i < status.candidate_count; ++i) {
+      const auto& item = inventory[order[i]];
+      status.candidates[i] = {item.id, item.draws, item.width, item.height, item.levels, item.format};
+      std::strncpy(status.candidates[i].name, panel_texture_name(panel_identity, item.id, name_profile),
+                   sizeof(status.candidates[i].name) - 1);
+    }
     char aircraft_message[sizeof(status.message)] = "Waiting for a supported aircraft identity or profile switch.";
     const auto* detected_profile = identity.fresh ? profiles::find(identity.detected_profile) : nullptr;
     const auto* selected_profile = profiles::find(applied_profile);
