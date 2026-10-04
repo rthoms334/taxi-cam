@@ -280,12 +280,14 @@ void service_panel_identity(PanelIdentityLog& state,
   try {
     static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
     const auto n = win::render_target_creation_sequence().snapshot(0, entries);
-    const auto start = state.epoch_ms > 5000 ? state.epoch_ms - 5000 : 0;
+
     std::vector<display_identity::Creation> burst;
     std::vector<std::string> items;
     for (std::size_t i = 0; i < n; ++i) {
       const auto& e = entries[i];
-      if (e.tick < start || e.mips < 2)
+      // Panel textures seen so far are multi-mip R8G8B8A8_UNORM (format 28);
+      // camera and scene buffers use other formats.
+      if (e.mips < 2 || e.format != 28)
         continue;
       burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format});
       char item[96];
@@ -297,7 +299,7 @@ void service_panel_identity(PanelIdentityLog& state,
     for (std::uint32_t i = 0; i < state.panels.count; ++i)
       textured += display_identity::textured(state.panels.panels[i]);
     char head[96];
-    std::snprintf(head, sizeof(head), " multimip_since_session=%zu textured_panels=%zu", burst.size(), textured);
+    std::snprintf(head, sizeof(head), " multimip_f28=%zu textured_panels=%zu", burst.size(), textured);
     items.insert(items.begin(), head);
     log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
     if (burst.size() > textured)
@@ -307,7 +309,7 @@ void service_panel_identity(PanelIdentityLog& state,
     const auto paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
     std::vector<std::string> pairs;
     char summary[96];
-    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip complete=%d paired=%zu", complete ? 1 : 0, paired);
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu", complete ? 1 : 0, paired);
     pairs.emplace_back(summary);
     state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {

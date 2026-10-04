@@ -4465,8 +4465,10 @@ DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
   // The covering fence has passed, so the CPU can read the copy without waiting.
   std::uint8_t* bytes = nullptr;
   const auto& layout = footprint.Footprint;
+  // The last row has no pitch padding after it: end at its last texel.
   const D3D12_RANGE readable{static_cast<SIZE_T>(footprint.Offset),
-                             static_cast<SIZE_T>(footprint.Offset + std::uint64_t{layout.RowPitch} * layout.Height)};
+                             static_cast<SIZE_T>(footprint.Offset + std::uint64_t{layout.RowPitch} * (layout.Height - 1) +
+                                                 std::uint64_t{layout.Width} * 4)};
   poll.result = DisplaySnapshotResult::failed;
   const auto mapped = buffer->Map(0, &readable, reinterpret_cast<void**>(&bytes));
   r.snapshot_failure_code.store(mapped, std::memory_order_relaxed);
