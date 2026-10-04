@@ -346,10 +346,16 @@ void service_panel_identity(PanelIdentityLog& state,
       // camera and scene buffers use other formats.
       if (e.mips < 2 || e.format != 28)
         continue;
-      burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format});
+      // Cockpit load creates the panel textures before the panel table is
+      // seen settled. Later ones (the PMDG 777 made nine 1024 x 1024
+      // textures 18-29 s after) belong to something else and would shift
+      // the last-N pairing.
+      const bool late = e.tick > state.seen_ms + 5000;
+      if (!late)
+        burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format});
       char item[96];
-      std::snprintf(item, sizeof(item), " %llu:%ux%u:m%u:f%u:%+lld", static_cast<unsigned long long>(e.id), e.width, e.height, e.mips,
-                    e.format, static_cast<long long>(e.tick) - static_cast<long long>(state.seen_ms));
+      std::snprintf(item, sizeof(item), " %llu:%ux%u:m%u:f%u:%+lld%s", static_cast<unsigned long long>(e.id), e.width, e.height, e.mips,
+                    e.format, static_cast<long long>(e.tick) - static_cast<long long>(state.seen_ms), late ? ":late" : "");
       items.push_back(item);
     }
     std::size_t textured = 0;
