@@ -162,6 +162,10 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
 // Display identity research (diagnostics only): the VCockpit panel table and
 // the render-target creation order at cockpit load. Bounded reads on this
 // control thread only; nothing routes by the proposal.
+// Panel-texture creations later than this after the panel table is seen are
+// not cockpit-load textures (see service_panel_identity).
+constexpr std::uint64_t kPanelLateMs = 5000, kPanelSettleMs = 6000;
+static_assert(kPanelSettleMs > kPanelLateMs);
 struct PanelIdentityLog {
   std::uint64_t signature{}, seen_ms{}, next_ms{}, epoch{}, epoch_ms{};
   bool burst_logged{}, refusal_logged{};
@@ -283,10 +287,12 @@ void service_panel_identity(PanelIdentityLog& state,
     }
   }
   // Only a table that appeared in this flight session and stayed unchanged
-  // for 30 s with the session ready. Panel textures are recreated when the
-  // cockpit reloads, so the latest multi-mip creations since the session
-  // began are the current ones.
-  if (!session_ready || state.seen_ms < state.epoch_ms || now - state.seen_ms < 30000 || now < state.next_analysis_ms)
+  // for kPanelSettleMs with the session ready. Logged loads show the table
+  // complete when first seen and every panel texture created before it, so
+  // the wait only has to outlast kPanelLateMs, after which the creation
+  // window cannot change. Panel textures are recreated when the cockpit
+  // reloads, so the latest multi-mip creations are the current ones.
+  if (!session_ready || state.seen_ms < state.epoch_ms || now - state.seen_ms < kPanelSettleMs || now < state.next_analysis_ms)
     return;
   // Re-checked every 10 s: a recreated display texture gets its name back.
   state.next_analysis_ms = now + 10000;
@@ -370,7 +376,7 @@ void service_panel_identity(PanelIdentityLog& state,
       // seen settled. Later ones (the PMDG 777 made nine 1024 x 1024
       // textures 18-29 s after) belong to something else and would shift
       // the last-N pairing.
-      const bool late = e.tick > state.seen_ms + 5000;
+      const bool late = e.tick > state.seen_ms + kPanelLateMs;
       if (!late)
         burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format});
       char item[96];
