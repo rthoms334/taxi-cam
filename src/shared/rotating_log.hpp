@@ -1,5 +1,7 @@
 #pragma once
 #include <windows.h>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cwchar>
 #include <string>
@@ -85,14 +87,24 @@ inline bool rotate(HANDLE file, const std::wstring& path, std::uint64_t length, 
 }
 }  // namespace log_detail
 
-// The caller supplies a full path and complete UTF-8 log records. Best effort:
-// contention or an I/O error drops this record instead of blocking startup or
-// allowing a full log to grow. Logging resumes on the next successful append.
-inline bool append_rotating_log(const std::wstring& path, std::string_view record, std::uint64_t limit) noexcept {
+// The caller supplies a full path and complete UTF-8 log records, written in
+// order under one lock and one file open: closing a changed file can wait for
+// an on-access antivirus scan, so a burst of records costs one wait, not one
+// per record. Every record is checked before anything is written; one invalid
+// record rejects the whole call. Each record keeps its own size check and
+// rotation. Best effort: contention drops every record, and an I/O error drops
+// the failing record and the rest, instead of blocking startup or allowing a
+// full log to grow. Logging resumes on the next successful append.
+inline bool append_rotating_log_records(const std::wstring& path,
+                                        const std::string_view* records,
+                                        std::size_t count,
+                                        std::uint64_t limit) noexcept {
   try {
-    if (path.empty() || path.size() > 32700 || record.empty() || record.size() > MaxLogRecordBytes || !limit || limit > BridgeLogBytes ||
-        record.size() > limit)
+    if (!records || !count || path.empty() || path.size() > 32700 || !limit || limit > BridgeLogBytes)
       return false;
+    for (std::size_t i = 0; i < count; ++i)
+      if (records[i].empty() || records[i].size() > MaxLogRecordBytes || records[i].size() > limit)
+        return false;
     wchar_t mutex_name[80]{};
     std::swprintf(mutex_name, 80, L"Local\\TaxiCam.Log.%016llx", static_cast<unsigned long long>(log_detail::path_key(path)));
     log_detail::Handle mutex(CreateMutexW(nullptr, FALSE, mutex_name));
@@ -106,24 +118,87 @@ inline bool append_rotating_log(const std::wstring& path, std::string_view recor
                                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (file.value == INVALID_HANDLE_VALUE)
       return false;
-    LARGE_INTEGER length{};
-    if (!GetFileSizeEx(file.value, &length) || length.QuadPart < 0)
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto record = records[i];
+      LARGE_INTEGER length{};
+      if (!GetFileSizeEx(file.value, &length) || length.QuadPart < 0)
+        return false;
+      if (static_cast<std::uint64_t>(length.QuadPart) > limit - record.size() &&
+          !log_detail::rotate(file.value, path, static_cast<std::uint64_t>(length.QuadPart), limit))
+        return false;
+      LARGE_INTEGER end{};
+      if (!SetFilePointerEx(file.value, {}, &end, FILE_END))
+        return false;
+      if (log_detail::write(file.value, record))
+        continue;
+      // A partial write must not leave half a diagnostic record for the next
+      // writer. Failure to roll back still cannot exceed the checked byte limit.
+      if (SetFilePointerEx(file.value, end, nullptr, FILE_BEGIN))
+        SetEndOfFile(file.value);
       return false;
-    if (static_cast<std::uint64_t>(length.QuadPart) > limit - record.size() &&
-        !log_detail::rotate(file.value, path, static_cast<std::uint64_t>(length.QuadPart), limit))
-      return false;
-    LARGE_INTEGER end{};
-    if (!SetFilePointerEx(file.value, {}, &end, FILE_END))
-      return false;
-    if (log_detail::write(file.value, record))
-      return true;
-    // A partial write must not leave half a diagnostic record for the next
-    // writer. Failure to roll back still cannot exceed the checked byte limit.
-    if (SetFilePointerEx(file.value, end, nullptr, FILE_BEGIN))
-      SetEndOfFile(file.value);
-    return false;
+    }
+    return true;
   } catch (...) {
     return false;
   }
 }
+// One record; see append_rotating_log_records.
+inline bool append_rotating_log(const std::wstring& path, std::string_view record, std::uint64_t limit) noexcept {
+  return append_rotating_log_records(path, &record, 1, limit);
+}
+
+// Records held for one append_rotating_log_records call, for a writer that
+// logs in bursts. Bounded: add() hands the held records to flush first when
+// another would exceed MaxRecords or MaxBytes. One owner; not thread-safe.
+class LogRecordBuffer {
+ public:
+  static constexpr std::size_t MaxRecords = 64, MaxBytes = 64 * 1024;
+  // Allocates the byte bound once, so add() never allocates.
+  bool reserve() noexcept {
+    try {
+      bytes_.reserve(MaxBytes);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+  // write(const std::string_view* records, std::size_t count) receives every
+  // held record in order. A record that is not held (empty, over
+  // MaxLogRecordBytes, or no storage) returns false after the held records
+  // are written, so the caller can write it alone without reordering.
+  template <class Write>
+  bool add(std::string_view record, Write&& write) noexcept {
+    if (count_ == MaxRecords || bytes_.size() + record.size() > MaxBytes)
+      flush(write);
+    if (record.empty() || record.size() > MaxLogRecordBytes || bytes_.size() + record.size() > bytes_.capacity()) {
+      flush(write);
+      return false;
+    }
+    bytes_.append(record);  // Within capacity: no allocation, no throw.
+    ends_[count_++] = bytes_.size();
+    return true;
+  }
+  // Hands over and clears the held records, whether or not write succeeds.
+  template <class Write>
+  void flush(Write&& write) noexcept {
+    if (count_) {
+      try {
+        std::array<std::string_view, MaxRecords> records;
+        const std::string_view all(bytes_);
+        for (std::size_t i = 0, begin = 0; i < count_; begin = ends_[i++])
+          records[i] = all.substr(begin, ends_[i] - begin);
+        write(records.data(), count_);
+      } catch (...) {
+      }
+    }
+    bytes_.clear();
+    count_ = 0;
+  }
+  std::size_t size() const noexcept { return count_; }
+
+ private:
+  std::string bytes_;
+  std::array<std::size_t, MaxRecords> ends_{};
+  std::size_t count_ = 0;
+};
 }  // namespace taxi_camera::standalone

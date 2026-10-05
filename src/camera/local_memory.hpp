@@ -30,6 +30,10 @@ struct LocalMemoryMetrics {
   std::uint64_t read_calls = 0;
   std::uint64_t requested_bytes = 0;
   std::uint64_t query_ticks = 0;
+  // query_ticks by kind (allocation, working-set page, region fallback) and
+  // each kind's slowest single call, which names the kernel call that stalls.
+  std::uint64_t query_allocation_ticks = 0, query_page_ticks = 0, query_fallback_ticks = 0;
+  std::uint64_t query_allocation_max_ticks = 0, query_page_max_ticks = 0, query_fallback_max_ticks = 0;
   std::uint64_t read_ticks = 0;
   std::uint64_t query_cache_hits = 0;
   std::uint64_t query_cache_validation_failures = 0;
@@ -103,9 +107,14 @@ class ScopedLocalMemoryQueryCache {
   static constexpr std::size_t kRegionLimit = 64;
   static constexpr std::size_t kPageLimit = 128;
   static constexpr std::size_t kAllocationLimit = 64;
+  // Pages queried alongside a miss: earlier scopes' pages on this thread in
+  // the same allocation. Only their addresses carry over between scopes.
+  static constexpr std::size_t kCandidateLimit = 64;
   // private_pages keeps fresh allocation identity/extent and the protection of
   // every requested private page, rather than the unrelated homogeneous suffix.
-  // Cold/unavailable pages and capacity overflow use the full-region backend.
+  // A cold private page is read with RPM first and then proven. Pages still
+  // out of the working set (including cold image pages), failed page queries
+  // and capacity overflow use the full-region backend.
   // Explicit image-page readers share these bounded proofs with distinct image
   // allocation identity. Direct MBI/default image queries stay exact.
   explicit ScopedLocalMemoryQueryCache(LocalMemoryQueryMode mode = LocalMemoryQueryMode::full_regions) noexcept;
@@ -118,7 +127,11 @@ class ScopedLocalMemoryQueryCache {
   // Reader implementation only. A failed RPM also poisons this stage.
   SIZE_T query(const void* address, MEMORY_BASIC_INFORMATION& region) noexcept;
   bool uses_private_pages() const noexcept { return mode_ == LocalMemoryQueryMode::private_pages; }
-  bool validate_private_range(std::uintptr_t address, std::size_t size) noexcept;
+  // With cold, a page of a proven ordinary private allocation that is outside
+  // the working set sets *cold and returns false without a proof or refusal:
+  // the caller reads it with RPM (which faults it in and never consumes a
+  // guard page) and validates again before using the bytes.
+  bool validate_private_range(std::uintptr_t address, std::size_t size, bool* cold = nullptr) noexcept;
   bool validate_image_range(std::uintptr_t address, std::size_t size, std::uintptr_t module) noexcept;
   void fail(const void* address, SIZE_T requested, SIZE_T copied, DWORD error) noexcept;
   const LocalMemoryQueryFailure& failure() const noexcept { return failure_; }
@@ -136,7 +149,8 @@ class ScopedLocalMemoryQueryCache {
     std::size_t allocation = 0;
   };
   bool finish_pages() noexcept;
-  bool validate_page_range(std::uintptr_t address, std::size_t size, DWORD type, std::uintptr_t allocation) noexcept;
+  bool query_page_batch(std::uintptr_t base, std::size_t allocation, std::uintptr_t& requested_flags) noexcept;
+  bool validate_page_range(std::uintptr_t address, std::size_t size, DWORD type, std::uintptr_t allocation, bool* cold = nullptr) noexcept;
   bool refuse(const char* stage,
               const char* field,
               std::uintptr_t address,
@@ -148,8 +162,12 @@ class ScopedLocalMemoryQueryCache {
   LocalMemoryQueryMode mode_;
   std::array<AllocationProof, kAllocationLimit> allocations_{};
   std::array<PageProof, kPageLimit> pages_{};
+  // Fresh proofs from a batch query, used only once a read requests the page
+  // (then it moves to pages_ and its endpoint is checked by finish()).
+  std::array<PageProof, kCandidateLimit> candidates_{};
   std::size_t allocation_count_ = 0;
   std::size_t page_count_ = 0;
+  std::size_t candidate_count_ = 0;
   std::array<MEMORY_BASIC_INFORMATION, kRegionLimit> regions_{};
   std::size_t count_ = 0;
   LocalMemoryQueryFailure failure_{};

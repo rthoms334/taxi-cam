@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -151,11 +152,99 @@ void access_types_and_cold_fallback() {
     std::array<std::uint8_t, 16> output;
     output.fill(0xad);
     require(reader.read(cold.address(), output.data(), output.size()) && filled(output, 0) && cache.finish(),
-            "A cold demand-zero page failed its safe legacy fallback");
-    require(metrics.query_fallback_calls != 0 && metrics.read_calls == 1 && metrics.requested_bytes == output.size(),
-            "Cold-page fallback was omitted or changed the exact field read");
+            "A cold demand-zero page failed its RPM-first page proof");
+    // The exact RPM faults the page in; its proof then comes from page metadata,
+    // never from VirtualQuery's region scan (about 1 us per MB of suffix).
+    require(metrics.query_fallback_calls == 0 && metrics.query_page_calls >= 2 && metrics.read_calls == 1 &&
+                metrics.requested_bytes == output.size(),
+            "A cold page used the region-scan fallback or changed the exact field read");
   }
   accounting(metrics);
+}
+
+// A page trimmed from the working set after the program touched it is the
+// MSFS case: the first read of an inspection finds it nonresident.
+void trimmed_page_initial_read() {
+  const auto page = page_size();
+  Allocation allocation(page * 4);
+  require(!VirtualUnlock(allocation.data + page, page) && GetLastError() == ERROR_NOT_LOCKED &&
+              !page_info(allocation.data + page).VirtualAttributes.Valid,
+          "The trimmed-page fixture stayed resident");
+  LocalMemoryMetrics metrics;
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache(LocalMemoryQueryMode::private_pages);
+    LocalMemoryReader reader;
+    std::uint64_t value = 0;
+    require(reader.read(allocation.address(page + 8), &value, sizeof(value)) && value == 0x3939393939393939ull,
+            "A trimmed private page was not read exactly");
+    const auto queries = metrics.query_calls;
+    require(reader.read(allocation.address(page + 16), &value, sizeof(value)) && metrics.query_calls == queries,
+            "A trimmed page's proof was not recorded for later fields");
+    protect(allocation, page, page, PAGE_READONLY);
+    require(!cache.finish(), "A trimmed page's recorded proof missed an endpoint protection change");
+  }
+  require(metrics.query_fallback_calls == 0 && metrics.read_calls == 2, "A trimmed page used the region-scan fallback");
+  accounting(metrics);
+  // A trimmed page that becomes inaccessible is refused by the RPM itself.
+  protect(allocation, page, page, PAGE_READWRITE);
+  require(!VirtualUnlock(allocation.data + page * 2, page) && GetLastError() == ERROR_NOT_LOCKED, "Second trim fixture failed");
+  protect(allocation, page * 2, page, PAGE_NOACCESS);
+  {
+    ScopedLocalMemoryQueryCache cache(LocalMemoryQueryMode::private_pages);
+    LocalMemoryReader reader;
+    std::array<std::uint8_t, 8> output;
+    output.fill(0xad);
+    require(!reader.read(allocation.address(page * 2), output.data(), output.size()) && filled(output, 0xad) && !cache.finish(),
+            "An inaccessible nonresident page was read or left the scope usable");
+  }
+}
+
+// Proven reads copy directly. A page that disappears or changes after its
+// proof must fail the read like RPM did, never crash, and never keep a guard
+// page consumed. Another thread flips the page while this one reads.
+void proven_copy_faults() {
+  const auto page = page_size();
+  Allocation allocation(page * 2);
+  {
+    ScopedLocalMemoryQueryCache cache(LocalMemoryQueryMode::private_pages);
+    LocalMemoryReader reader;
+    std::uint64_t value = 0;
+    require(reader.read(allocation.address(page + 8), &value, sizeof(value)), "Proven-copy setup failed");
+    require(VirtualFree(allocation.data + page, page, MEM_DECOMMIT) != FALSE, "Could not decommit a proven page");
+    value = 0x1234;
+    require(!reader.read(allocation.address(page + 8), &value, sizeof(value)) && value == 0x1234 &&
+                std::strcmp(cache.failure().stage, "read") == 0 && !cache.finish(),
+            "A direct copy from a decommitted page succeeded, exposed bytes or left the scope usable");
+  }
+  require(VirtualAlloc(allocation.data + page, page, MEM_COMMIT, PAGE_READWRITE) == allocation.data + page,
+          "Could not recommit the proven-copy page");
+  std::atomic<bool> stop{false};
+  std::thread flipper([&] {
+    while (!stop.load()) {
+      VirtualFree(allocation.data + page, page, MEM_DECOMMIT);
+      VirtualAlloc(allocation.data + page, page, MEM_COMMIT, PAGE_READWRITE);
+      std::memset(allocation.data + page, 0x39, 64);
+    }
+  });
+  unsigned succeeded = 0, failed = 0;
+  for (unsigned round = 0; round < 20000; ++round) {
+    ScopedLocalMemoryQueryCache cache(LocalMemoryQueryMode::private_pages);
+    LocalMemoryReader reader;
+    std::uint64_t first = 0, second = 0;
+    const bool ok = reader.read(allocation.address(page + 8), &first, sizeof(first)) &&
+                    reader.read(allocation.address(page + 8), &second, sizeof(second)) && cache.finish();
+    if (ok) {
+      require((first == 0x3939393939393939ull || first == 0) && (second == 0x3939393939393939ull || second == 0),
+              "A racing direct copy returned bytes the page never held");
+      ++succeeded;
+    } else {
+      ++failed;
+    }
+  }
+  stop = true;
+  flipper.join();
+  require(succeeded + failed == 20000, "Racing direct copies were not all accounted for");
 }
 
 void rejected_allocation_types() {
@@ -354,6 +443,77 @@ void nonresident_endpoint_fallback() {
   accounting(metrics);
 }
 
+// A later scope on the same thread queries the pages an earlier one proved in
+// the same allocation with its first miss, in one call. Only the addresses
+// carry over: each proof is fresh in its own scope, and a batched page that is
+// never read is not endpoint-checked.
+void batched_page_hints() {
+  const auto page = page_size();
+  constexpr std::size_t pages = 12;
+  Allocation allocation(page * (pages + 2));
+  LockedPages locked(allocation.data, allocation.size);
+  const auto walk = [&](std::size_t count) {
+    LocalMemoryReader reader;
+    std::uint64_t value = 0;
+    for (std::size_t index = 0; index < count; ++index)
+      require(reader.read(allocation.address(index * page + 24), &value, sizeof(value)) && value == 0x3939393939393939ull,
+              "A hinted page read returned the wrong bytes");
+  };
+  {
+    ScopedLocalMemoryQueryCache first(LocalMemoryQueryMode::private_pages);
+    walk(pages);
+    require(first.finish(), "The hint-seeding scope did not finish");
+  }
+  LocalMemoryMetrics metrics;
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache second(LocalMemoryQueryMode::private_pages);
+    walk(pages);
+    require(metrics.query_page_calls == 1 && metrics.query_fallback_calls == 0 && metrics.read_calls == pages,
+            "A repeated walk did not prove its pages in one batched page query");
+    require(second.finish(), "A batched scope refused unchanged pages");
+  }
+  accounting(metrics);
+  {
+    ScopedLocalMemoryQueryCache third(LocalMemoryQueryMode::private_pages);
+    walk(pages / 2);
+    // Batched but never read in this scope: its change must not fail the scope.
+    protect(allocation, (pages - 1) * page, page, PAGE_READONLY);
+    require(third.finish(), "An unread batched page was endpoint-checked");
+  }
+  protect(allocation, (pages - 1) * page, page, PAGE_READWRITE);
+  {
+    ScopedLocalMemoryQueryCache fourth(LocalMemoryQueryMode::private_pages);
+    walk(pages);
+    // Read after batching: a changed protection must fail the endpoint.
+    protect(allocation, 2 * page, page, PAGE_READONLY);
+    require(!fourth.finish(), "A batched page that was read escaped endpoint validation");
+  }
+  protect(allocation, 2 * page, page, PAGE_READWRITE);
+}
+
+// A batched page made inaccessible between the batch query and its read: the
+// direct copy faults, the read fails and the scope is poisoned.
+void batched_page_made_inaccessible() {
+  const auto page = page_size();
+  Allocation allocation(page * 4);
+  LocalMemoryReader reader;
+  std::uint64_t value = 0;
+  {
+    ScopedLocalMemoryQueryCache seed(LocalMemoryQueryMode::private_pages);
+    require(reader.read(allocation.address(24), &value, sizeof(value)) &&
+                reader.read(allocation.address(3 * page + 24), &value, sizeof(value)) && seed.finish(),
+            "Batch seed scope failed");
+  }
+  ScopedLocalMemoryQueryCache scope(LocalMemoryQueryMode::private_pages);
+  require(reader.read(allocation.address(24), &value, sizeof(value)), "Batch seed read failed");
+  protect(allocation, 3 * page, page, PAGE_NOACCESS);
+  value = 0x1234;
+  require(!reader.read(allocation.address(3 * page + 24), &value, sizeof(value)) && value == 0x1234 && !scope.finish(),
+          "A batched page made inaccessible before its read was read or accepted");
+  protect(allocation, 3 * page, page, PAGE_READWRITE);
+}
+
 void exact_budgets_and_invalid_requests() {
   Allocation allocation(page_size());
   LocalMemoryMetrics metrics;
@@ -502,6 +662,10 @@ int main() {
   endpoint_page_changes();
   cached_rpm_failures_and_replacement_identity();
   nonresident_endpoint_fallback();
+  trimmed_page_initial_read();
+  proven_copy_faults();
+  batched_page_hints();
+  batched_page_made_inaccessible();
   exact_budgets_and_invalid_requests();
   capacity_fallback_preserves_prior_proofs();
   nested_thread_and_legacy_isolation();

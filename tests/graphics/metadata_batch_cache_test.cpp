@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -20,9 +21,7 @@ void require(bool value, const char* message) {
 }
 struct Scope {
   Cache& cache;
-  Scope(Cache& value, std::uintptr_t native, std::uint64_t id, std::shared_ptr<Record> record) : cache(value) {
-    cache.begin(native, id, std::move(record));
-  }
+  Scope(Cache& value, std::uintptr_t native, std::uint64_t id, Record* record) : cache(value) { cache.begin(native, id, record); }
   ~Scope() { cache.end(); }
 };
 }
@@ -37,16 +36,20 @@ int main() {
     second->recording = 11;
     require(!cache.current(100, 7), "Absent scope was reused");
     {
-      Scope outer(cache, 100, 7, first);
+      Scope unobserved(cache, 100, 7, nullptr);
+      require(!cache.current(100, 7), "Scope without a record served metadata");
+    }
+    {
+      Scope outer(cache, 100, 7, first.get());
       require(cache.current(100, 7) == first.get(), "Live batch was not cached");
       require(!cache.current(101, 7) && !cache.current(100, 8), "Foreign native or generation reused batch");
       {
-        Scope nested(cache, 200, 8, second);
+        Scope nested(cache, 200, 8, second.get());
         require(cache.current(200, 8) == second.get() && !cache.current(100, 7), "Nested scope did not replace context");
       }
       require(cache.current(100, 7) == first.get(), "Nested end lost outer context");
       {
-        Scope nested(cache, 100, 7, first);
+        Scope nested(cache, 100, 7, first.get());
         require(cache.current(100, 7) == first.get(), "Same-list nested scope lost context");
       }
       require(cache.current(100, 7) == first.get(), "Same-list nested end lost outer context");
@@ -55,7 +58,7 @@ int main() {
     }
     require(!cache.current(100, 7), "End leaked metadata scope");
     {
-      Scope outer(cache, 100, 7, first);
+      Scope outer(cache, 100, 7, first.get());
       first->alive = false;
       require(!cache.current(100, 7), "Retired record was reused");
       first->alive = true;
@@ -64,7 +67,7 @@ int main() {
     }
     first->id = 7;
     for (unsigned n = 0; n < 10; ++n)
-      cache.begin(100, 7, first);
+      cache.begin(100, 7, first.get());
     require(!cache.current(100, 7), "Nesting overflow did not request ordinary lookup");
     cache.end();
     require(!cache.current(100, 7), "Partial overflow unwind exposed wrong scope");
@@ -78,8 +81,10 @@ int main() {
       auto ephemeral = std::make_shared<Record>();
       ephemeral->id = 3;
       weak = ephemeral;
-      Scope exception_scope(cache, 300, 3, std::move(ephemeral));
-      require(!weak.expired(), "Scope failed to retain metadata lifetime");
+      // Declared after its owner, as the bridge's hook-scoped use nests, so the
+      // scope ends before the record can go.
+      Scope exception_scope(cache, 300, 3, ephemeral.get());
+      require(cache.current(300, 3) == ephemeral.get() && weak.use_count() == 1, "Scope did not borrow metadata without owning it");
       throw 1;
     } catch (int) {
     }
@@ -104,7 +109,8 @@ int main() {
     const auto old_calls = calls;
     calls = 0;
     for (unsigned batch = 0; batch < Batches; ++batch) {
-      Scope scope(cache, 100, 7, lookup());
+      const auto owner = lookup();
+      Scope scope(cache, 100, 7, owner.get());
       for (unsigned n = 0; n < Barriers; ++n)
         for (unsigned operation = 0; operation < 3; ++operation) {
           const auto* record = cache.current(100, 7);

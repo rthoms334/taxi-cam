@@ -3,6 +3,7 @@
 #include "../shared/camera_rate.hpp"
 #include "aircraft_mounts.hpp"
 #include "entry_pair.hpp"
+#include "lifecycle_timing.hpp"
 #include "scene_recovery.hpp"
 
 #include <array>
@@ -23,10 +24,12 @@ enum class ProbeStage : std::size_t {
   activation,
   publication,
   aa,
+  placement,  // place_feeds' engine calls on an opening pulse, split from pose. After aa: not in the IPC status.
   count
 };
 inline constexpr std::array<const char*, static_cast<std::size_t>(ProbeStage::count)> kProbeStageNames{
-    "manager", "pool", "lifecycle", "entries", "view 1", "view 2", "handoff", "pose", "activation", "publication", "AA"};
+    "manager", "pool", "lifecycle", "entries", "view 1", "view 2", "handoff", "pose", "activation", "publication", "AA", "placement"};
+static_assert(kLifecycleStageCount == static_cast<std::size_t>(ProbeStage::count));
 
 struct ProbePerformance {
   // Last serviced callback only. Stages are disjoint; lifecycle includes any
@@ -46,6 +49,10 @@ struct ProbePerformance {
   std::uint64_t query_cache_hits = 0;
   std::uint64_t query_cache_validation_failures = 0;
   double query_ms = 0;
+  // query_ms by kind (allocation, page, region) and each kind's slowest
+  // single call, in microseconds.
+  double query_allocation_ms = 0, query_page_ms = 0, query_fallback_ms = 0;
+  double query_allocation_max_us = 0, query_page_max_us = 0, query_fallback_max_us = 0;
   double read_ms = 0;
   std::uint32_t entry_count = 0;
   std::uint32_t bucket_count = 0;
@@ -106,6 +113,12 @@ struct ProbeSnapshot {
   // revalidation and took the full reset instead (begin_flight_change).
   std::uint64_t flight_change_holds = 0, flight_change_fallbacks = 0;
   std::string mount_contract_error;
+  // Camera shadow slices (view_cascades.hpp): the contract proof and the hook.
+  bool cascades_available = false;
+  bool cascades_installed = false;
+  unsigned cascades_requested = 0;
+  std::uint64_t cascades_hits = 0, cascades_writes = 0;
+  std::string cascades_error;
   std::array<std::uint8_t, kMaxCameraFeeds> mount_state{};
   std::uint64_t mount_attaches = 0, mount_restores = 0, mount_refused = 0, mount_rehomes = 0;
   const char* mount_error = "";
@@ -186,5 +199,9 @@ bool request_scene_mounts(const MountPair& mounts) noexcept;
 ProbeSnapshot scene_snapshot();
 // Diagnostics only; the worker logs one peak per status interval.
 ObserverPeak take_observer_peak() noexcept;
+// Diagnostics only, bridge worker thread only (the ring's single consumer):
+// every camera-manager update over kLifecycleEventMs since the previous take,
+// oldest first, and how many found the ring full.
+std::size_t take_lifecycle_events(std::array<LifecycleEvent, kLifecycleEventCapacity>& events, std::uint64_t& dropped) noexcept;
 
 }  // namespace taxi_camera::native_camera

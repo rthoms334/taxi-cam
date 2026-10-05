@@ -151,6 +151,102 @@ void lock_waits_are_classified(double per_us) {
   require(slot.waits[ht::recording_wait].load() == uncontended, "Uncontended acquisition was recorded as a wait");
 }
 
+// The same waits are also counted against the lock they named: an expired
+// submit-budget wait on submission_mutex_ and a successful lifecycle wait on
+// the registry land in their own cells, an untagged one in "other".
+void lock_waits_name_their_lock() {
+  const auto cell = [](ht::Wait wait, ht::WaitLock lock) -> ht::LockWaits& { return ht::lock_waits[ht::lock_wait_cell(wait, lock)]; };
+  static_assert(ht::lock_wait_cell(ht::submit_wait, ht::manager_lock) != ht::lock_wait_cell(ht::submit_wait, ht::submission_lock));
+  static_assert(ht::lock_wait_cell(ht::other_wait, ht::WaitLockCount) == ht::LockWaitCells - 1);
+  auto& submission = cell(ht::submit_wait, ht::submission_lock);
+  auto& manager = cell(ht::submit_wait, ht::manager_lock);
+  auto& registry = cell(ht::lifecycle_wait, ht::registry_lock);
+  auto& other = cell(ht::lifecycle_wait, ht::other_lock);
+  const auto submission_waits = submission.waits.load(), submission_expired = submission.expired.load();
+  const auto manager_waits = manager.waits.load(), registry_waits = registry.waits.load(), registry_expired = registry.expired.load();
+  const auto other_waits = other.waits.load();
+  std::mutex mutex;
+  std::atomic<bool> held{false}, release{false};
+  std::thread blocker([&] {
+    const std::lock_guard guard(mutex);
+    held.store(true, std::memory_order_release);
+    while (!release.load(std::memory_order_acquire))
+      SwitchToThread();
+  });
+  while (!held.load(std::memory_order_acquire))
+    SwitchToThread();
+  {
+    const taxi_camera::BoundedLock lock(mutex, taxi_camera::wait_budget::submit_us, nullptr, ht::submission_lock);
+    require(!lock.owns_lock(), "1 ms bounded lock acquired a held mutex");
+  }
+  release = true;
+  blocker.join();
+  require(submission.waits.load() == submission_waits + 1 && submission.expired.load() == submission_expired + 1,
+          "An expired submit wait was not counted against submission_mutex_");
+  require(manager.waits.load() == manager_waits, "A submission_mutex_ wait was counted against mutex_");
+  require(submission.max_wait.load() > 0, "An expired wait's length was not recorded for its lock");
+
+  held = false;
+  std::thread owner([&] {
+    const std::lock_guard guard(mutex);
+    held.store(true, std::memory_order_release);
+    spin_us(1500);
+  });
+  while (!held.load(std::memory_order_acquire))
+    SwitchToThread();
+  {
+    const taxi_camera::BoundedLock lock(mutex, taxi_camera::wait_budget::lifecycle_us, nullptr, ht::registry_lock);
+    require(lock.owns_lock(), "5 ms bounded lock did not acquire after a 1.5 ms hold");
+  }
+  owner.join();
+  require(registry.waits.load() == registry_waits + 1 && registry.expired.load() == registry_expired,
+          "A successful lifecycle wait was not counted against the registry");
+  require(other.waits.load() == other_waits, "A registry wait was counted as an untagged one");
+
+  held = false;
+  std::thread untagged([&] {
+    const std::lock_guard guard(mutex);
+    held.store(true, std::memory_order_release);
+    spin_us(1500);
+  });
+  while (!held.load(std::memory_order_acquire))
+    SwitchToThread();
+  {
+    const taxi_camera::BoundedLock lock(mutex, taxi_camera::wait_budget::lifecycle_us);
+    require(lock.owns_lock(), "Untagged 5 ms bounded lock did not acquire after a 1.5 ms hold");
+  }
+  untagged.join();
+  require(other.waits.load() == other_waits + 1 && registry.waits.load() == registry_waits + 1,
+          "An untagged wait was not counted as other");
+}
+
+// The site line lists the interval's nonzero wait cells after " | by_lock".
+void report_lists_lock_waits() {
+  ht::Report report;
+  char sites[1400], threads[1400];
+  report.sample(sites, sizeof(sites), threads, sizeof(threads));
+  // Tens of millions of TSC ticks: whole microseconds at any TSC rate.
+  ht::record_wait(taxi_camera::wait_budget::submit_us, 40000000, false, ht::manager_lock);
+  ht::record_wait(taxi_camera::wait_budget::submit_us, 20000000, true, ht::manager_lock);
+  ht::record_wait(taxi_camera::wait_budget::recording_us, 1000, true, ht::index_lock);
+  require(report.sample(sites, sizeof(sites), threads, sizeof(threads)), "Report sample was not produced");
+  const char* section = std::strstr(sites, " | by_lock");
+  const char* classes = std::strstr(sites, " wait_other=");
+  require(section && classes && classes < section, "Lock waits did not follow the wait classes");
+  unsigned long long waits = 0, expired = 0;
+  double total_us = -1, max_us = -1;
+  const char* manager = std::strstr(section, " wait1000_manager=");
+  require(manager && std::sscanf(manager, " wait1000_manager=%llu/%lf/%lf/%llu", &waits, &total_us, &max_us, &expired) == 4,
+          "The submit wait on mutex_ was not listed");
+  require(waits == 2 && expired == 1 && max_us > 0 && max_us < total_us, "The mutex_ submit waits were miscounted");
+  require(std::strstr(section, " wait100_index=1/") != nullptr, "The index-shard wait was not listed");
+  require(std::strstr(section, "_submission=") == nullptr && std::strstr(section, "_registry=") == nullptr,
+          "A lock without waits this interval was listed");
+  require(report.sample(sites, sizeof(sites), threads, sizeof(threads)), "Idle report sample was not produced");
+  section = std::strstr(sites, " | by_lock");
+  require(section && !std::strcmp(section, " | by_lock"), "An idle interval listed lock waits or kept a maximum");
+}
+
 void report_names_threads() {
   ht::Report report;
   char sites[1024], threads[1024];
@@ -256,6 +352,8 @@ int main() {
     nested_hooks_record_once(per_us);
     sampled_sites_estimate_totals(per_us);
     lock_waits_are_classified(per_us);
+    lock_waits_name_their_lock();
+    report_lists_lock_waits();
     report_names_threads();
     report_keeps_main_thread();
     report_removes_measurement_floor();

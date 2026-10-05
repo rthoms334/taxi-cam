@@ -13,6 +13,14 @@ namespace taxi_camera::native_camera {
 // apply every returned state through freshly validated owned engine entries.
 class RenderSchedule {
  public:
+  // Closed updates after each pulse's closing update. Opening and closing a
+  // gate each cost a validated inspection on the simulator's main thread. With
+  // no idle update a frame-limited schedule changes a gate on every update: the
+  // 2026-10-04 RJTT log showed an inspection on 95-100 % of updates while
+  // taxiing, at rate 5 and 10 alike. One idle update caps gate changes at two
+  // of every three updates and an extra view at one frame in three.
+  static constexpr unsigned kIdleUpdatesAfterClose = 1;
+
   // Parked floors go below the moving minimum; see kMinimumParkedCameraRate.
   // nose_priority turns every other turn of feeds 1 and 2 into an idle slot
   // (NosePriorityPolicy); feed 0 keeps its cadence.
@@ -38,6 +46,7 @@ class RenderSchedule {
     next_feed_ = 0;
     skip_turn_ = {};
     skipped_ = false;
+    idle_updates_ = 0;
   }
 
   std::array<bool, kMaxCameraFeeds> tick(std::uint64_t now_ms, bool suspended = false) noexcept {
@@ -55,13 +64,24 @@ class RenderSchedule {
         last_[i] = now_ms;
       last_any_ = now_ms;
       previous_time_ = now_ms;
+      if (was_active)
+        idle_updates_ = kIdleUpdatesAfterClose;
       return active_;
     }
     have_time_ = true;
     previous_time_ = now_ms;
     // Even after a long stall, close the last pulse for an entire observer
     // interval. Never leave a gate continuously on while trying to catch up.
-    if (was_active || suspended)
+    if (was_active) {
+      idle_updates_ = kIdleUpdatesAfterClose;
+      return active_;
+    }
+    // A suspended update is closed too, so it counts as idle.
+    if (idle_updates_) {
+      --idle_updates_;
+      return active_;
+    }
+    if (suspended)
       return active_;
     const auto per_feed_ms = (1000u + rate_ - 1) / rate_;
     const auto total_rate = rate_ * feeds_;
@@ -101,6 +121,7 @@ class RenderSchedule {
   unsigned next_feed_ = 0;
   bool nose_priority_ = false;
   bool skipped_ = false;
+  unsigned idle_updates_ = 0;
   std::array<bool, kMaxCameraFeeds> skip_turn_{};
   bool have_time_ = false;
   std::uint64_t previous_time_ = 0;

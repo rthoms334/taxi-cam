@@ -4,6 +4,7 @@
 #undef main
 #include <chrono>
 #include <future>
+#include "../../src/camera/aircraft_mounts.hpp"
 #include "../../src/graphics/native_device_identity.hpp"
 #include "../../src/hooks/queue_submit_observer.hpp"
 
@@ -15,9 +16,13 @@ struct Device {
 struct Queue {
   void** table;
   Device* device;
-  std::uint64_t last_signal = 0;
+  std::uint64_t last_signal = 0, last_wait = 0;
   unsigned waits = 0, signals = 0;
   bool future_wait = false;
+  ULONG references = 1;
+  // Set: each Release checks from another thread that the manager mutex is free.
+  const Manager* lock_probe = nullptr;
+  bool released_under_lock = false;
 };
 HRESULT STDMETHODCALLTYPE identity(void* self, REFIID iid, void** result) {
   *result = nullptr;
@@ -28,6 +33,19 @@ HRESULT STDMETHODCALLTYPE identity(void* self, REFIID iid, void** result) {
 }
 ULONG STDMETHODCALLTYPE reference(void*) {
   return 1;
+}
+ULONG STDMETHODCALLTYPE add_queue_reference(Queue* queue) {
+  return ++queue->references;
+}
+ULONG STDMETHODCALLTYPE release_queue_reference(Queue* queue) {
+  if (queue->lock_probe) {
+    auto& mutex = queue->lock_probe->mutex_;
+    queue->released_under_lock |= !std::async(std::launch::async, [&mutex] {
+                                     std::unique_lock probe(mutex, std::try_to_lock);
+                                     return probe.owns_lock();
+                                   }).get();
+  }
+  return --queue->references;
 }
 HRESULT STDMETHODCALLTYPE get_device(Queue* queue, REFIID, void** result) {
   *result = queue->device;
@@ -47,8 +65,20 @@ HRESULT STDMETHODCALLTYPE signal(Queue* queue, ID3D12Fence*, std::uint64_t value
 }
 HRESULT STDMETHODCALLTYPE wait_on(Queue* queue, ID3D12Fence*, std::uint64_t value) {
   queue->future_wait |= value > queue->last_signal;
+  queue->last_wait = value;
   ++queue->waits;
   return S_OK;
+}
+// The fake DIRECT queue vtable: identity through GetDevice, counted references.
+std::array<void*, 19> queue_vtable() {
+  std::array<void*, 19> table{};
+  table[1] = reinterpret_cast<void*>(&add_queue_reference);
+  table[2] = reinterpret_cast<void*>(&release_queue_reference);
+  table[7] = reinterpret_cast<void*>(&get_device);
+  table[14] = reinterpret_cast<void*>(&signal);
+  table[15] = reinterpret_cast<void*>(&wait_on);
+  table[18] = reinterpret_cast<void*>(&description);
+  return table;
 }
 struct Discovery {
   Manager* manager;
@@ -80,17 +110,13 @@ HRESULT STDMETHODCALLTYPE cpu_signal(Timeline* self, std::uint64_t value) {
 void reshade_present_gate() {
   void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
   Device device{device_table};
-  std::array<void*, 19> queue_table{};
-  queue_table[7] = reinterpret_cast<void*>(&get_device);
-  queue_table[14] = reinterpret_cast<void*>(&signal);
-  queue_table[15] = reinterpret_cast<void*>(&wait_on);
-  queue_table[18] = reinterpret_cast<void*>(&description);
-  Queue queue{queue_table.data(), &device};
+  auto queue_table = queue_vtable();
+  // Only a receipt on another queue than the last Signal's queues a Wait.
+  Queue queue{queue_table.data(), &device}, other_queue{queue_table.data(), &device};
   std::array<void*, 11> fence_table{};
   fence_table[8] = reinterpret_cast<void*>(&completed_value);
   fence_table[10] = reinterpret_cast<void*>(&cpu_signal);
   Timeline timeline{fence_table.data()};
-  auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
   taxi_camera::SceneHandoff handoff;
   auto manager = std::make_unique<Manager>(handoff);
   auto& owner = manager->devices_[0];
@@ -113,16 +139,17 @@ void reshade_present_gate() {
   require(timeline.cpu_signals.load() == 0, "Closing the gate with no queued Wait signaled a fence");
   manager->set_submission_gate(true);
   require(timeline.cpu_signals.load() == 0, "Opening the gate signaled a fence");
-  const auto submit = [&] {
+  const auto submit = [&](Queue& target) {
+    auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&target);
     ID3D12CommandList* batch[]{known};
     const auto receipt = manager->before_submission(native_queue, 1, batch);
     require(receipt != 0, "ReShade-present fixture did not open an ordered transaction");
     manager->after_submission(native_queue, receipt);
   };
-  submit();
-  submit();
-  require(queue.signals == 2 && queue.waits == 1 && manager->published_timelines_[0].waited.load() == 1 &&
-              timeline.completed.load() == 0 && timeline.cpu_signals.load() == 0,
+  submit(queue);
+  submit(other_queue);
+  require(queue.signals == 1 && other_queue.signals == 1 && !queue.waits && other_queue.waits == 1 && other_queue.last_wait == 1 &&
+              manager->published_timelines_[0].waited.load() == 1 && timeline.completed.load() == 0 && timeline.cpu_signals.load() == 0,
           "The queued Wait value was not published ahead of the ReShade flush");
   std::promise<void> locked;
   std::promise<void> release_holder;
@@ -157,8 +184,8 @@ void reshade_present_gate() {
   manager->set_submission_gate(false);
   manager->set_submission_gate(true);
   require(timeline.cpu_signals.load() == 1, "A repeated close or an open signaled the fence again");
-  submit();
-  require(manager->published_timelines_[0].waited.load() == 2 && timeline.completed.load() == 1,
+  submit(queue);
+  require(manager->published_timelines_[0].waited.load() == 2 && queue.last_wait == 2 && timeline.completed.load() == 1,
           "A later transaction did not publish its new Wait");
   manager->set_submission_gate(false);
   require(timeline.cpu_signals.load() == 2 && timeline.completed.load() >= 2 && manager->statistics().released_waits == 2,
@@ -167,15 +194,548 @@ void reshade_present_gate() {
   manager->set_submission_gate(false);
   require(timeline.cpu_signals.load() == 2, "Closing the gate after the waited value completed signaled again");
 }
+// Plans one display copy for device 7 while active; the copy names no target
+// or source, so Pool::record refuses it.
+struct DisplayPlanFixture {
+  std::atomic<std::uint64_t> generation{1};
+  bool active = false;
+};
+void plan_unrecordable_copy(void* opaque,
+                            ID3D12CommandQueue*,
+                            UINT,
+                            ID3D12CommandList* const*,
+                            Manager::DisplaySubmissionPlan& plan) noexcept {
+  auto& fixture = *static_cast<DisplayPlanFixture*>(opaque);
+  if (!fixture.active)
+    return;
+  plan.device_key = 7;
+  plan.generation = 1;
+  plan.current_generation = &fixture.generation;
+  plan.count = 1;
+}
+// Receipts without source work (consumer-only, private, display and in-list
+// capture) must still Signal, be accounted and, when the device fails between
+// before and after, quarantine their packets.
+void receipts_without_source_work() {
+  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
+  Device device{device_table};
+  auto queue_table = queue_vtable();
+  Queue queue{queue_table.data(), &device}, private_queue{queue_table.data(), &device};
+  std::array<void*, 11> fence_table{};
+  fence_table[8] = reinterpret_cast<void*>(&completed_value);
+  fence_table[10] = reinterpret_cast<void*>(&cpu_signal);
+  Timeline timeline{fence_table.data()};
+  auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
+  auto* private_native = reinterpret_cast<ID3D12CommandQueue*>(&private_queue);
+  taxi_camera::SceneHandoff handoff;
+  auto manager = std::make_unique<Manager>(handoff);
+  auto& owner = manager->devices_[0];
+  owner.key = 7;
+  owner.native = reinterpret_cast<ID3D12Device*>(&device);
+  owner.timeline = reinterpret_cast<ID3D12Fence*>(&timeline);
+  owner.active = true;
+  manager->published_devices_[0].store(owner.native);
+  std::uintptr_t marker = 0;
+  auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&marker);
+  auto& recording = manager->lists_[0];
+  recording.native = known;
+  recording.device_key = 7;
+  recording.object_generation = 21;
+  recording.session_generation = owner.session_generation;
+  recording.consumer = true;
+  manager->list_indices_.emplace(known, 0);
+  manager->publish_list(recording);
+  ID3D12CommandList* batch[]{known};
+  auto receipt = manager->before_submission(native_queue, 1, batch);
+  require(receipt != 0 && !manager->transaction_.source_work, "A consumer-only batch did not open a receipt without source work");
+  manager->after_submission(native_queue, receipt);
+  require(queue.signals == 1 && queue.last_signal == 1 && owner.last_signal == 1 && manager->statistics().submissions == 1 &&
+              !owner.failed && !manager->transaction_.id,
+          "A consumer-only receipt was not signaled and accounted");
+  recording.consumer = false;
+  recording.source_touched = true;
+  manager->publish_list(recording);
+  receipt = manager->before_submission(native_queue, 1, batch);
+  require(receipt != 0 && manager->transaction_.source_work, "A source batch did not open a receipt with source work");
+  manager->after_submission(native_queue, receipt);
+  require(queue.signals == 2 && owner.last_signal == 2 && manager->statistics().submissions == 2, "A source receipt was not accounted");
+  recording.source_touched = false;
+  const auto consume = manager->begin_private_submission(owner.key, private_native);
+  require(consume.receipt != 0 && consume.value == 3, "Begin a private receipt");
+  const bool ended = manager->end_private_submission(consume.receipt);
+  require(ended && private_queue.signals == 1 && private_queue.last_signal == 3 && owner.last_signal == 3 &&
+              manager->statistics().submissions == 3,
+          "A private receipt was not signaled and accounted");
+  // A display receipt whose planned copy the pool cannot record (never
+  // serviced, no target or source): counted as a record failure, no copy.
+  DisplayPlanFixture plan;
+  require(manager->set_display_submission_planner(plan_unrecordable_copy, &plan), "Install the display plan fixture");
+  plan.active = true;
+  receipt = manager->before_submission(native_queue, 1, batch);
+  plan.active = false;
+  require(receipt != 0 && !manager->transaction_.source_work && !manager->transaction_.display_count &&
+              manager->transaction_.display_unrecorded == 1,
+          "A display plan did not open a receipt that counts its unrecorded copy");
+  manager->after_submission(native_queue, receipt);
+  require(queue.signals == 3 && owner.last_signal == 4 && manager->statistics().submissions == 4 &&
+              manager->statistics().display_record_failures == 1 && !manager->statistics().display_copies,
+          "An unrecorded display copy was not counted once");
+  // An in-list capture receipt: its packet is not one fail_device quarantines
+  // by itself, so only the finishing receipt can quarantine it.
+  recording.packets = 1;
+  manager->publish_list(recording);
+  receipt = manager->before_submission(native_queue, 1, batch);
+  require(receipt != 0 && !manager->transaction_.source_work && manager->packets_[0].in_flight == 1,
+          "A capture batch did not open a receipt without source work");
+  {
+    const std::lock_guard lock(manager->mutex_);
+    manager->fail_device(owner);  // Another thread fails the device mid-receipt.
+  }
+  require(!manager->packets_[0].quarantined, "The fixture packet was quarantined before its receipt finished");
+  const auto quarantined = manager->statistics().quarantined;
+  manager->after_submission(native_queue, receipt);
+  require(queue.signals == 4 && queue.last_signal == 5 && owner.last_signal == 5 && manager->statistics().submissions == 5 &&
+              manager->statistics().display_record_failures == 1,
+          "A receipt on a device failed mid-flight did not Signal its forwarded work or was not accounted");
+  require(manager->packets_[0].quarantined && !manager->packets_[0].in_flight && !manager->packets_[0].submitted &&
+              manager->statistics().quarantined == quarantined + 1 && owner.failed && !manager->transaction_.id,
+          "A receipt on a device failed mid-flight did not quarantine its packet");
+}
+// A receipt Waits on the timeline only when the previous Signal was queued on
+// another queue; on one queue, queue order already serializes the receipts.
+// Every path (consumer, source, capture, private) Waits once per queue change,
+// the watchdog sees only those Waits and Signals stay monotonic. The manager
+// owns one reference to the last Signal's queue and never releases one under
+// its mutex.
+void queue_change_waits() {
+  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
+  Device device{device_table};
+  auto queue_table = queue_vtable();
+  Queue a{queue_table.data(), &device}, b{queue_table.data(), &device};
+  std::array<void*, 11> fence_table{};
+  fence_table[8] = reinterpret_cast<void*>(&completed_value);
+  fence_table[10] = reinterpret_cast<void*>(&cpu_signal);
+  Timeline timeline{fence_table.data()};
+  taxi_camera::SceneHandoff handoff;
+  auto manager = std::make_unique<Manager>(handoff);
+  a.lock_probe = b.lock_probe = manager.get();
+  auto& owner = manager->devices_[0];
+  owner.key = 7;
+  owner.native = reinterpret_cast<ID3D12Device*>(&device);
+  owner.timeline = reinterpret_cast<ID3D12Fence*>(&timeline);
+  owner.active = true;
+  manager->published_devices_[0].store(owner.native);
+  std::uintptr_t marker = 0;
+  auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&marker);
+  auto& recording = manager->lists_[0];
+  recording.native = known;
+  recording.device_key = 7;
+  recording.object_generation = 23;
+  recording.session_generation = owner.session_generation;
+  recording.consumer = true;
+  manager->list_indices_.emplace(known, 0);
+  manager->publish_list(recording);
+  std::uint64_t expected = 0;
+  const auto submit = [&](Queue& target) {
+    auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&target);
+    ID3D12CommandList* batch[]{known};
+    const auto receipt = manager->before_submission(native_queue, 1, batch);
+    require(receipt != 0, "Queue-change fixture did not open an ordered transaction");
+    manager->after_submission(native_queue, receipt);
+    ++expected;
+    require(owner.last_signal == expected && target.last_signal == expected, "Timeline Signals did not stay monotonic across queues");
+  };
+  const auto waited = [&] { return manager->published_timelines_[0].waited.load(); };
+  submit(a);
+  submit(a);
+  require(!a.waits && !b.waits && !waited() && a.references == 2 && b.references == 1,
+          "Consumer receipts on one queue queued a Wait or did not hold that queue");
+  recording.consumer = false;
+  recording.source_touched = true;
+  manager->publish_list(recording);
+  submit(b);
+  require(b.waits == 1 && b.last_wait == 2 && waited() == 2 && a.references == 1 && b.references == 2,
+          "A source receipt on a new queue did not Wait for the other queue's Signal");
+  submit(b);
+  require(b.waits == 1 && waited() == 2, "A second source receipt on the same queue queued a Wait");
+  recording.source_touched = false;
+  recording.packets = 1;
+  manager->publish_list(recording);
+  submit(a);
+  require(a.waits == 1 && a.last_wait == 4 && waited() == 4 && a.references == 2 && b.references == 1,
+          "A capture receipt back on the first queue did not Wait for the other queue's Signal");
+  submit(a);
+  require(a.waits == 1 && waited() == 4, "A second capture receipt on the same queue queued a Wait");
+  recording.packets = 0;
+  manager->publish_list(recording);
+  for (unsigned i = 0; i < 2; ++i) {
+    const auto work = manager->begin_private_submission(owner.key, reinterpret_cast<ID3D12CommandQueue*>(&b));
+    require(work.receipt != 0 && work.value == expected + 1, "Begin a queue-change private receipt");
+    require(manager->end_private_submission(work.receipt), "End a queue-change private receipt");
+    ++expected;
+    require(owner.last_signal == expected && b.last_signal == expected, "Private Signals did not stay monotonic across queues");
+  }
+  require(b.waits == 2 && b.last_wait == 6 && waited() == 6 && a.references == 1 && b.references == 2,
+          "Private receipts did not Wait exactly once on their queue change");
+  manager->set_submission_gate(false);
+  require(timeline.cpu_signals.load() == 1 && timeline.completed.load() == 6 && manager->statistics().released_waits == 1,
+          "Gate close did not release the last cross-queue Wait once");
+  manager->set_submission_gate(true);
+  require(!a.released_under_lock && !b.released_under_lock, "A queue reference was released under the manager mutex");
+  a.lock_probe = b.lock_probe = nullptr;
+  manager.reset();
+  require(a.references == 1 && b.references == 1, "The manager leaked or over-released a queue reference");
+}
+struct FakeList {
+  void** table;
+  Device* device;
+};
+HRESULT STDMETHODCALLTYPE list_device(FakeList* list, REFIID, void** result) {
+  *result = list->device;
+  return S_OK;
+}
+D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE direct_type(FakeList*) {
+  return D3D12_COMMAND_LIST_TYPE_DIRECT;
+}
+// A Reset of a list its last retirement left clean takes no manager lock. The
+// scenario runs twice: `fast` passes back the slot each Reset returned, as the
+// bridge does, and the other run never passes one, so all of its Resets lock.
+// Both runs must reach the same observable state at every step; only
+// fast_resets shows which path a Reset took.
+void clean_reset_fast_path() {
+  using Model = taxi_camera::source_state::Model;
+  constexpr auto barrier_batch = taxi_camera::engine_hook::render_boundary::InvalidationBarrierBatch;
+  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
+  Device device{device_table};
+  std::array<void*, 9> list_table{};
+  list_table[0] = reinterpret_cast<void*>(&identity);
+  list_table[1] = list_table[2] = reinterpret_cast<void*>(&reference);
+  list_table[7] = reinterpret_cast<void*>(&list_device);
+  list_table[8] = reinterpret_cast<void*>(&direct_type);
+  std::array<FakeList, 3> objects{{{list_table.data(), &device}, {list_table.data(), &device}, {list_table.data(), &device}}};
+  std::array<ID3D12GraphicsCommandList*, 3> natives{};
+  for (std::size_t index = 0; index < natives.size(); ++index)
+    natives[index] = reinterpret_cast<ID3D12GraphicsCommandList*>(&objects[index]);
+  auto* const source = reinterpret_cast<ID3D12Resource*>(std::uintptr_t{0x2340});
+  const std::uint64_t source_generation = 5;
+  D3D12_RESOURCE_DESC desc{};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = 736;
+  desc.Height = 251;
+  desc.DepthOrArraySize = desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  const auto scenario = [&](bool fast) {
+    std::vector<std::vector<std::uint64_t>> snapshots;
+    taxi_camera::SceneHandoff handoff;
+    auto manager = std::make_unique<Manager>(handoff);
+    auto& owner = manager->devices_[0];
+    owner.key = 7;
+    owner.native = reinterpret_cast<ID3D12Device*>(&device);
+    owner.active = true;
+    manager->published_devices_[0].store(owner.native);
+    std::array<std::uint32_t, 3> slots{Manager::NoListSlot, Manager::NoListSlot, Manager::NoListSlot};
+    std::array<std::uint64_t, 3> generations{31, 32, 33};
+    const auto reset = [&](std::size_t index) {
+      const auto slot = manager->successful_reset(natives[index], generations[index], fast ? slots[index] : Manager::NoListSlot);
+      if (fast)
+        slots[index] = slot;
+      return slot;
+    };
+    std::uint64_t fast_seen = 0;
+    auto paths_seen = manager->reset_paths();
+    // Checks how the Resets since the last call were retired: lock_free of
+    // them without the lock, `locked` with it (the run without slots locks
+    // every Reset), and `expired` of the locked ones deferred by an expired
+    // wait.
+    const auto took = [&](std::uint64_t lock_free, const char* label, std::uint64_t locked = 0, std::uint64_t expired = 0) {
+      const auto now = manager->statistics().fast_resets;
+      require(now == fast_seen + (fast ? lock_free : 0), label);
+      fast_seen = now;
+      const auto paths = manager->reset_paths();
+      require(paths.fast - paths_seen.fast == (fast ? lock_free : 0), "Reset paths miscounted the lock-free Resets");
+      require(paths.locked - paths_seen.locked == locked + (fast ? 0 : lock_free), "Reset paths miscounted the locked Resets");
+      require(paths.expired - paths_seen.expired == expired, "Reset paths miscounted the expired Resets");
+      paths_seen = paths;
+    };
+    const auto snapshot = [&] {
+      std::vector<std::uint64_t> state;
+      for (auto* native : natives) {
+        const auto found = manager->list_indices_.find(native);
+        state.push_back(found != manager->list_indices_.end());
+        if (found == manager->list_indices_.end())
+          continue;
+        const auto& item = manager->lists_[found->second];
+        state.insert(state.end(),
+                     {item.object_generation, item.packets, item.feeds, item.consumer, item.source_touched, item.source_effects.count,
+                      item.source_effects.invalid, item.source_effects.overflowed, item.session_generation, item.awaiting_native_reset,
+                      item.source_lease_count, manager->published_lists_[found->second].effects.load() & 0xffffffffull});
+      }
+      const auto stats = manager->statistics();
+      state.insert(state.end(),
+                   {stats.resets, stats.clean_resets, stats.deferred_retirements, stats.contended_lifecycle, stats.contended_evidence,
+                    stats.deferred_evidence, stats.deferred_overflows, stats.wipes, stats.source_retirements, stats.source_draws,
+                    stats.unordered_consumers, owner.session_generation, owner.failed});
+      snapshots.push_back(std::move(state));
+    };
+    // Runs call on another thread while this thread holds the manager lock.
+    const auto while_held = [&](auto&& call) {
+      std::unique_lock held(manager->mutex_);
+      auto result = std::async(std::launch::async, [&] {
+        call();
+        return Manager::last_call_contended();
+      });
+      const bool returned = result.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+      held.unlock();
+      const bool contended = result.get();
+      require(returned, "A Reset fixture call was parked on the held manager lock");
+      return contended;
+    };
+
+    require(manager->register_command_list(natives[0], owner.key, generations[0]), "Register the clean-Reset list");
+    snapshot();
+    require(reset(0) < Manager::MaximumLists, "A locked Reset did not return its list's slot");
+    took(0, "The first Reset after admission did not take the lock", 1);
+    snapshot();
+    reset(0);
+    took(1, "A clean list's Reset with its slot took the manager lock");
+    snapshot();
+    if (fast) {
+      require(!while_held([&] { reset(0); }), "A clean Reset waited for the held manager lock");
+      require(manager->statistics().deferred_retirements == 0, "A clean Reset was deferred instead of retired");
+    } else {
+      reset(0);
+    }
+    took(1, "A clean Reset under a held manager lock was not lock-free");
+    snapshot();
+
+    // Every change to the list forgets its mark first.
+    manager->invalidate_source_recording(natives[0], generations[0], false, barrier_batch);  // Local: no publish.
+    snapshot();
+    reset(0);
+    took(0, "A Reset after a local invalidation skipped the retirement", 1);
+    snapshot();
+    reset(0);
+    took(1, "A list retired again was not clean");
+    manager->invalidate_source_recording(natives[0], generations[0], true, barrier_batch);  // Touches sources: publishes.
+    reset(0);
+    took(0, "A Reset after a global invalidation skipped the retirement", 1);
+    snapshot();
+    require(manager->register_consumer_recording(natives[0]), "Register a consumer recording");
+    snapshot();
+    reset(0);
+    took(0, "A consumer recording was retired without the lock", 1);
+    snapshot();
+    reset(0);
+    took(1, "A retired consumer list was not clean");
+
+    // A ring entry, even a peeked one whose apply has not committed, makes the
+    // next Reset take the lock (here: defer behind it).
+    require(while_held([&] { manager->invalidate_source_recording(natives[0], generations[0], false, barrier_batch); }),
+            "Evidence under a held lock was not deferred");
+    require(while_held([&] { reset(0); }), "A Reset behind a deferred entry did not take the lock");
+    took(0, "A Reset behind a deferred entry was lock-free", 1, 1);
+    snapshot();
+    manager->apply_deferred();
+    snapshot();
+    reset(0);
+    took(1, "A list retired by the drain was not clean");
+    {
+      std::unique_lock held(manager->mutex_);
+      Manager::DeferredWork work;
+      work.kind = Manager::DeferredWork::Kind::recording_report;
+      work.native = natives[0];
+      work.generation = generations[0];
+      work.reasons = barrier_batch;
+      manager->defer(work);
+      Manager::DeferredWork entry;
+      require(manager->deferred_work_.peek(entry) && entry.native == natives[0], "Peek the deferred entry");
+      auto& item = manager->lists_[manager->list_indices_.at(natives[0])];
+      manager->forget_clean(item);  // As the drain does, before applying.
+      manager->apply_recording_report(item, false, barrier_batch);
+      require(!manager->deferred_work_.idle(), "A peeked entry left the ring idle before its commit");
+      auto behind = std::async(std::launch::async, [&] {
+        reset(0);
+        return Manager::last_call_contended();
+      });
+      const bool returned = behind.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+      manager->deferred_work_.commit();
+      manager->apply_deferred_work();  // The deferred Reset, behind the committed entry.
+      held.unlock();
+      require(returned && behind.get(), "A Reset during an uncommitted apply did not take the lock");
+    }
+    took(0, "A Reset during an uncommitted apply was lock-free", 1, 1);
+    snapshot();
+    reset(0);
+    took(1, "A list retired after the committed entry was not clean");
+
+    // A lost entry: the overflowed ring makes the next Reset lock, and a drain
+    // by any holder forgets every list before it clears the flag.
+    const auto overflow = [&] {
+      const std::unique_lock held(manager->mutex_);
+      Manager::DeferredWork work;
+      work.kind = Manager::DeferredWork::Kind::recording_report;
+      work.native = natives[2];  // Not registered yet: drained as a no-op.
+      work.generation = generations[2];
+      for (unsigned index = 0; index <= 256; ++index)
+        manager->defer(work);
+      require(manager->deferred_work_.overflowed(), "The fixture did not overflow the ring");
+    };
+    overflow();
+    reset(0);
+    took(0, "A Reset with an overflowed ring was lock-free", 1);
+    snapshot();
+    reset(0);
+    took(1, "A list retired after the overflow drain was not clean");
+    overflow();
+    manager->apply_deferred();  // Another holder drains the overflow first.
+    require(manager->deferred_work_.idle(), "The overflow drain left the ring busy");
+    snapshot();
+    reset(0);
+    took(0, "A Reset after another holder's overflow drain skipped the retirement", 1);
+    snapshot();
+    reset(0);
+    took(1, "A list retired after the overflow invalidation was not clean");
+
+    // Pending device work keeps its retirement time: such a Reset locks.
+    manager->submission_refused_completed(1);
+    reset(0);
+    took(0, "A Reset with deferred source work pending was lock-free", 1);
+    snapshot();
+    manager->deferred_recordings_.store(true);
+    reset(0);
+    took(0, "A Reset with a deferred recording notice pending was lock-free", 1);
+    reset(0);
+    took(1, "A list retired after deferred device work was not clean");
+    snapshot();
+
+    // This thread's draw-repeat filter is settled by a locked Reset of any list.
+    require(manager->register_command_list(natives[1], owner.key, generations[1]), "Register the second list");
+    reset(1);
+    took(0, "The second list's first Reset did not take the lock", 1);
+    require(manager->register_source_candidate(owner.key, source, source_generation, desc, Model::legacy_rt), "Register a source");
+    for (unsigned draw = 0; draw < 3; ++draw)
+      manager->observe_source_draw_after(natives[0], generations[0], 1, &source, &source_generation, true, 7);
+    snapshot();
+    reset(1);
+    took(0, "A Reset with this thread's draw-repeat filter armed was lock-free", 1);
+    snapshot();
+    reset(1);
+    took(1, "A clean list's Reset after the settle took the lock");
+    reset(0);
+    took(0, "A Reset after source draws skipped the retirement", 1);
+    snapshot();
+
+    // A session reset forgets every mark; the next Reset adopts the session.
+    reset(0);
+    took(1, "A list retired after its draws was not clean");
+    require(manager->reset_session(owner.key) != 0, "Reset the session");
+    reset(0);
+    took(0, "A Reset after a session reset kept the previous session", 1);
+    snapshot();
+    reset(0);
+    took(1, "A list retired in the new session was not clean");
+
+    // Destroy and slot reuse: a stale slot never names another list.
+    const auto stale = slots[0];
+    manager->destroy_command_list(natives[0], generations[0]);
+    require(manager->successful_reset(natives[0], generations[0], fast ? stale : Manager::NoListSlot) == Manager::NoListSlot,
+            "A Reset of a destroyed list found a slot");
+    took(0, "A Reset of a destroyed list was lock-free", 1);
+    snapshot();
+    require(manager->register_command_list(natives[2], owner.key, generations[2]), "Register a list in the freed slot");
+    require(!fast || manager->list_indices_.at(natives[2]) == stale, "The freed slot was not reused");
+    reset(2);
+    took(0, "A reused slot's first Reset did not take the lock", 1);
+    require(manager->successful_reset(natives[0], generations[0], fast ? stale : Manager::NoListSlot) == Manager::NoListSlot &&
+                manager->successful_reset(natives[0], generations[2], fast ? stale : Manager::NoListSlot) == Manager::NoListSlot,
+            "A stale slot retired the list that reused it");
+    took(0, "A stale slot took the lock-free path", 2);
+    reset(2);
+    took(1, "The reusing list's clean Reset took the lock");
+    snapshot();
+    generations[0] = 34;  // A new list object at the destroyed list's address.
+    require(manager->register_command_list(natives[0], owner.key, generations[0]), "Register a list at a recycled address");
+    slots[0] = fast ? stale : Manager::NoListSlot;
+    reset(0);
+    took(0, "A recycled address took a stale slot's lock-free path", 1);
+    reset(0);
+    took(1, "The recycled address's clean Reset took the lock");
+    snapshot();
+    return snapshots;
+  };
+  const auto fast = scenario(true);
+  const auto locked = scenario(false);
+  require(fast.size() == locked.size(), "The clean-Reset scenarios took different steps");
+  for (std::size_t step = 0; step < fast.size(); ++step) {
+    if (fast[step] != locked[step])
+      for (std::size_t field = 0; field < std::min(fast[step].size(), locked[step].size()); ++field)
+        if (fast[step][field] != locked[step][field])
+          std::fprintf(stderr, "clean Reset step %zu field %zu: %llu (lock-free) != %llu (locked)\n", step, field,
+                       static_cast<unsigned long long>(fast[step][field]), static_cast<unsigned long long>(locked[step][field]));
+    require(fast[step] == locked[step], "A lock-free Reset left a different state than the locked Reset");
+  }
+}
+// An ordered batch that cannot take a lock within the submit budget escapes,
+// and its wait1000 wait is reported against the lock it waited for.
+void ordered_waits_name_their_lock() {
+  namespace ht = taxi_camera::hook_timing;
+  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
+  Device device{device_table};
+  auto queue_table = queue_vtable();
+  Queue queue{queue_table.data(), &device};
+  auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
+  taxi_camera::SceneHandoff handoff;
+  auto manager = std::make_unique<Manager>(handoff);
+  auto& owner = manager->devices_[0];
+  owner.key = 7;
+  owner.native = reinterpret_cast<ID3D12Device*>(&device);
+  owner.active = true;
+  manager->published_devices_[0].store(owner.native);
+  std::uintptr_t marker = 0;
+  auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&marker);
+  auto& recording = manager->lists_[0];
+  recording.native = known;
+  recording.device_key = 7;
+  recording.object_generation = 27;
+  recording.session_generation = owner.session_generation;
+  recording.packets = 1;  // Owned work: never proven unrelated.
+  manager->list_indices_.emplace(known, 0);
+  manager->publish_list(recording);
+  const auto expired = [](ht::WaitLock lock) { return ht::lock_waits[ht::lock_wait_cell(ht::submit_wait, lock)].expired.load(); };
+  const auto escape_behind = [&](auto& mutex, ht::WaitLock waited, const char* label) {
+    const auto before = manager->statistics();
+    const auto manager_expired = expired(ht::manager_lock), submission_expired = expired(ht::submission_lock);
+    std::unique_lock held(mutex);
+    auto completed = std::async(std::launch::async, [&] {
+      ID3D12CommandList* batch[]{known};
+      const auto receipt = manager->before_submission(native_queue, 1, batch);
+      if (!receipt)
+        manager->forwarded_unordered(native_queue);
+      return receipt;
+    });
+    const bool returned = completed.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    held.unlock();
+    const auto receipt = completed.get();
+    const auto after = manager->statistics();
+    require(returned && !receipt && after.contended_submissions == before.contended_submissions + 1 &&
+                after.unordered_submissions == before.unordered_submissions + 1,
+            "An ordered batch behind a held lock did not escape within its budget");
+    require(expired(ht::manager_lock) == manager_expired + (waited == ht::manager_lock) &&
+                expired(ht::submission_lock) == submission_expired + (waited == ht::submission_lock),
+            label);
+  };
+  escape_behind(manager->mutex_, ht::manager_lock, "A wait1000 wait on mutex_ was not reported against the manager");
+  escape_behind(manager->submission_mutex_, ht::submission_lock, "A wait1000 wait on submission_mutex_ was not reported against it");
+  require(!queue.signals && !queue.waits, "An escaped batch queued a timeline operation");
+}
 void run() {
   void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
   Device device{device_table};
-  std::array<void*, 19> queue_table{};
-  queue_table[7] = reinterpret_cast<void*>(&get_device);
-  queue_table[14] = reinterpret_cast<void*>(&signal);
-  queue_table[15] = reinterpret_cast<void*>(&wait_on);
-  queue_table[18] = reinterpret_cast<void*>(&description);
-  Queue queue{queue_table.data(), &device};
+  auto queue_table = queue_vtable();
+  // Both queues outlive the manager, which may hold a reference to either.
+  Queue queue{queue_table.data(), &device}, helper_queue{queue_table.data(), &device};
   auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
   taxi_camera::SceneHandoff handoff;
   auto manager = std::make_unique<Manager>(handoff);
@@ -306,8 +866,10 @@ void run() {
   recording.packets = 1;
   ordered(known, true);
   recording.packets = 0;
-  require(queue.signals == 3 && queue.waits == 2 && !queue.future_wait && owner.last_signal == 3,
-          "Consumer/source/capture paths preserve ordered Wait and Signal receipts");
+  // One queue: queue order already serializes the receipts, so none Waits
+  // (queue_change_waits covers the Wait on every queue change).
+  require(queue.signals == 3 && !queue.waits && owner.last_signal == 3,
+          "Consumer/source/capture paths preserve ordered Signal receipts without same-queue Waits");
   recording.awaiting_native_reset = true;
   ordered(known, false);
   held_lock(known, false, true);
@@ -329,7 +891,7 @@ void run() {
               manager->statistics().source_retirements == retirements_before_unknown + 1 &&
               (manager->statistics().last_retirement_origins & Manager::OriginRefusedCompleted),
           "An escaped unknown list did not name its retirement origin");
-  require(queue.signals == 3 && queue.waits == 2, "Unobserved recordings never invent a receipt");
+  require(queue.signals == 3 && !queue.waits, "Unobserved recordings never invent a receipt");
   ordered(unknown, false);
   // The ordered path still has the list in hand and knows nothing about its
   // recording: this remains a genuine wipe through unknown_lists_no_owner.
@@ -445,7 +1007,6 @@ void run() {
     manager->publish_list(recording);
   }
 
-  Queue helper_queue{queue_table.data(), &device};
   auto* helper_native = reinterpret_cast<ID3D12CommandQueue*>(&helper_queue);
   recording.source_touched = true;
   manager->publish_list(recording);
@@ -532,7 +1093,7 @@ void run() {
   constexpr std::uint64_t escaped = 1u << 28;
   const auto old_word = publication.effects.fetch_or(escaped);
   manager->deferred_recordings_.store(false);  // Notifier has not posted its wake bit.
-  manager->retire_list(recording);
+  manager->retire_native_list(recording, false);  // retire_list resets fields; this publishes once.
   require(manager->packets_[0].quarantined && manager->packets_[0].assigned && manager->packets_[0].retired,
           "Reset consumes the exact recording mark before its packet can be recycled");
   manager->packets_[1].assigned = true;
@@ -564,9 +1125,13 @@ void run() {
               !manager->classify_unobserved(helper_native, 1, helper_batch).unrelated,
           "Publication version exhaustion stays permanently conservative instead of wrapping to an ABA match");
   reshade_present_gate();
+  receipts_without_source_work();
+  queue_change_waits();
+  clean_reset_fast_path();
+  ordered_waits_name_their_lock();
   std::printf(
-      "PASS CPU-only submission locks: cross-queue helpers, nonblocking refusals/private deferral, exact retirement marks and GPU "
-      "guards.\n");
+      "PASS CPU-only submission locks: cross-queue helpers, nonblocking refusals/private deferral, exact retirement marks, GPU "
+      "guards and lock-free clean Resets.\n");
 }
 }  // namespace submission_lock_fixture
 struct TailContext {
@@ -662,6 +1227,222 @@ void tail_enhanced(void* context,
 }
 void tail_draw(void* context, ID3D12GraphicsCommandList* list, std::uint64_t generation, bool allowed) noexcept {
   static_cast<TailContext*>(context)->manager->after_source_draw(list, generation, allowed);
+}
+// Forwards to a native queue and records the list count of every
+// ExecuteCommandLists call made through it. GetDevice reports the native
+// device, so the manager accepts it as the receipt's queue.
+class CountingQueue final : public ID3D12CommandQueue {
+ public:
+  explicit CountingQueue(ID3D12CommandQueue* native) noexcept : native_(native) {}
+  std::vector<UINT> executions;
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override { return native_->QueryInterface(iid, result); }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+  ULONG STDMETHODCALLTYPE Release() override { return --references_; }  // Never deleted: lives until exit.
+  HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, UINT* size, void* data) override {
+    return native_->GetPrivateData(guid, size, data);
+  }
+  HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, UINT size, const void* data) override {
+    return native_->SetPrivateData(guid, size, data);
+  }
+  HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID guid, const IUnknown* data) override {
+    return native_->SetPrivateDataInterface(guid, data);
+  }
+  HRESULT STDMETHODCALLTYPE SetName(const WCHAR* name) override { return native_->SetName(name); }
+  HRESULT STDMETHODCALLTYPE GetDevice(REFIID iid, void** device) override { return native_->GetDevice(iid, device); }
+  void STDMETHODCALLTYPE UpdateTileMappings(ID3D12Resource* resource,
+                                            UINT region_count,
+                                            const D3D12_TILED_RESOURCE_COORDINATE* starts,
+                                            const D3D12_TILE_REGION_SIZE* sizes,
+                                            ID3D12Heap* heap,
+                                            UINT range_count,
+                                            const D3D12_TILE_RANGE_FLAGS* flags,
+                                            const UINT* offsets,
+                                            const UINT* counts,
+                                            D3D12_TILE_MAPPING_FLAGS mapping) override {
+    native_->UpdateTileMappings(resource, region_count, starts, sizes, heap, range_count, flags, offsets, counts, mapping);
+  }
+  void STDMETHODCALLTYPE CopyTileMappings(ID3D12Resource* destination,
+                                          const D3D12_TILED_RESOURCE_COORDINATE* destination_start,
+                                          ID3D12Resource* source,
+                                          const D3D12_TILED_RESOURCE_COORDINATE* source_start,
+                                          const D3D12_TILE_REGION_SIZE* size,
+                                          D3D12_TILE_MAPPING_FLAGS flags) override {
+    native_->CopyTileMappings(destination, destination_start, source, source_start, size, flags);
+  }
+  void STDMETHODCALLTYPE ExecuteCommandLists(UINT count, ID3D12CommandList* const* lists) override {
+    executions.push_back(count);
+    native_->ExecuteCommandLists(count, lists);
+  }
+  void STDMETHODCALLTYPE SetMarker(UINT metadata, const void* data, UINT size) override { native_->SetMarker(metadata, data, size); }
+  void STDMETHODCALLTYPE BeginEvent(UINT metadata, const void* data, UINT size) override { native_->BeginEvent(metadata, data, size); }
+  void STDMETHODCALLTYPE EndEvent() override { native_->EndEvent(); }
+  HRESULT STDMETHODCALLTYPE Signal(ID3D12Fence* fence, UINT64 value) override { return native_->Signal(fence, value); }
+  HRESULT STDMETHODCALLTYPE Wait(ID3D12Fence* fence, UINT64 value) override { return native_->Wait(fence, value); }
+  HRESULT STDMETHODCALLTYPE GetTimestampFrequency(UINT64* frequency) override { return native_->GetTimestampFrequency(frequency); }
+  HRESULT STDMETHODCALLTYPE GetClockCalibration(UINT64* gpu, UINT64* cpu) override { return native_->GetClockCalibration(gpu, cpu); }
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+  using ID3D12CommandQueue::GetDesc;
+  D3D12_COMMAND_QUEUE_DESC* STDMETHODCALLTYPE GetDesc(D3D12_COMMAND_QUEUE_DESC* result) override {
+    *result = native_->GetDesc();
+    return result;
+  }
+#else
+  D3D12_COMMAND_QUEUE_DESC STDMETHODCALLTYPE GetDesc() override { return native_->GetDesc(); }
+#endif
+
+ private:
+  ID3D12CommandQueue* native_;
+  ULONG references_ = 1;
+};
+static_assert(Manager::TailFeeds >= taxi_camera::native_camera::kMaxCameraFeeds, "A receipt must be able to capture every camera feed");
+// Three published feeds drawn in ONE receipt, as when a split-display profile's
+// three views share an ExecuteCommandLists (not yet seen live). Every feed's
+// tail is recorded, the three run in one ExecuteCommandLists after the
+// application's, and each snapshot holds its own feed's last draw; a two-list
+// batch left the third snapshot unwritten but published. A manager and handoff
+// of its own keep the two-feed receipt counts unchanged. Needs the boundary
+// observer enabled (render_boundary::operational).
+void three_feed_tail(ID3D12Device* device, DrawFixture& draw) {
+  constexpr std::uint64_t DeviceKey = 77, Generation = 7070;
+  auto* handoff = new taxi_camera::SceneHandoff;
+  auto* manager = new Manager(*handoff);  // Lives until exit, like the receipts above.
+  handoff->register_device(DeviceKey);
+  require(manager->register_device(DeviceKey, device), "Register three-feed device");
+  Commands producer, consumer;
+  producer.initialize(device);
+  consumer.initialize(device);
+  auto* queue = new CountingQueue(producer.queue.p);
+  require(manager->register_command_list(producer.list.p, DeviceKey, Generation), "Register three-feed producer");
+  Ref<ID3D12GraphicsCommandList7> list7;
+  check(producer.list->QueryInterface(IID_PPV_ARGS(list7.put())), "Get three-feed producer interface7");
+  Ref<ID3D12DescriptorHeap> rtvs;
+  D3D12_DESCRIPTOR_HEAP_DESC rtv_desc{};
+  rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  rtv_desc.NumDescriptors = 3;
+  check(device->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(rtvs.put())), "Create three-feed RTV heap");
+  const auto rtv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  constexpr UINT width = 736;
+  constexpr std::array<UINT, 3> heights{251, 496, 496};  // Nose, left and right panes of the split profiles.
+  constexpr std::array<std::uint64_t, 3> ids{39265, 39266, 39267};
+  constexpr float colors[3][4] = {{0.25f, 0.5f, 0.75f, 1}, {2, 4, 0.125f, 1}, {0.125f, 1, 2, 1}};
+  constexpr std::array<std::uint32_t, 3> words{0x340u | (0x380u << 11) | (0x1d0u << 22), 0x400u | (0x440u << 11) | (0x180u << 22),
+                                               0x300u | (0x3c0u << 11) | (0x200u << 22)};
+  std::array<Ref<ID3D12Resource>, 3> sources, readbacks;
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 3> handles{};
+  std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 3> footprints{};
+  std::array<UINT64, 3> readback_bytes{};
+  for (unsigned feed = 0; feed < 3; ++feed) {
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width;
+    desc.Height = heights[feed];
+    desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    const auto default_heap = heap(D3D12_HEAP_TYPE_DEFAULT);
+    check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                          IID_PPV_ARGS(sources[feed].put())),
+          "Create three-feed source");
+    handoff->register_resource(DeviceKey, reinterpret_cast<std::uint64_t>(sources[feed].p), ids[feed]);
+    require(manager->register_source_candidate(DeviceKey, sources[feed].p, ids[feed], desc, taxi_camera::source_state::Model::legacy_rt),
+            "Register three-feed candidate");
+    handles[feed].ptr = rtvs->GetCPUDescriptorHandleForHeapStart().ptr + feed * rtv_stride;
+    device->CreateRenderTargetView(sources[feed].p, nullptr, handles[feed]);
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &footprints[feed], nullptr, nullptr, &readback_bytes[feed]);
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = readback_bytes[feed];
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const auto readback_heap = heap(D3D12_HEAP_TYPE_READBACK);
+    check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(readbacks[feed].put())),
+          "Create three-feed readback");
+  }
+  handoff->begin_scene();
+  const auto ticket = handoff->begin_capture();
+  require(handoff->publish(ticket, {45, 3}, {9101, 9102, 9103},
+                           {reinterpret_cast<std::uint64_t>(sources[0].p), reinterpret_cast<std::uint64_t>(sources[1].p),
+                            reinterpret_cast<std::uint64_t>(sources[2].p)}),
+          "Publish three feeds");
+  manager->begin_source_tracking();
+  for (unsigned feed = 0; feed < 3; ++feed) {
+    ID3D12Resource* target = sources[feed].p;
+    const float first_color[]{1, 0, 1, 1};
+    draw.record(list7.p, handles[feed], first_color, false, width, heights[feed]);
+    manager->observe_source_draw_after(producer.list.p, Generation, 1, &target, &ids[feed], true);
+    draw.record(list7.p, handles[feed], colors[feed], false, width, heights[feed]);
+    manager->observe_source_draw_after(producer.list.p, Generation, 1, &target, &ids[feed], true);
+  }
+  check(producer.list->Close(), "Close three-feed recording");
+  ID3D12CommandList* batch[]{producer.list.p};
+  const auto receipt = manager->before_submission(queue, 1, batch);
+  require(receipt != 0, "Three drawn feeds opened no ordered receipt");
+  queue->ExecuteCommandLists(1, batch);  // The application's own call, between before and after.
+  manager->after_submission(queue, receipt);
+  const auto statistics = manager->statistics();
+  require(statistics.tail_submissions == 3 && statistics.tail_captures == 3 && statistics.submissions == 1 &&
+              std::strcmp(statistics.tail_status, "captured") == 0,
+          "One receipt did not capture all three drawn feeds");
+  for (unsigned feed = 0; feed < 3; ++feed)
+    require(statistics.phases[feed].captures[static_cast<std::size_t>(taxi_camera::capture_phase::Kind::after_multi)] == 1,
+            "A feed's capture was not counted after its complete render");
+  require(queue->executions == std::vector<UINT>{1, 3},
+          "The receipt's three tails did not run in one ExecuteCommandLists after the application's");
+  std::array<Manager::Frame, 3> frames{};
+  std::size_t frame_count = 0;
+  wait([&] {
+    frame_count += manager->poll_completed_frames(frames.data() + frame_count, frames.size() - frame_count);
+    return frame_count == frames.size();
+  });
+  unsigned seen = 0;
+  for (const auto& result : frames) {
+    const auto feed = result.match.feed;
+    require(feed < 3 && !(seen & (1u << feed)) && result.order.submission == 1, "Bad or repeated three-feed snapshot");
+    seen |= 1u << feed;
+    barrier(consumer.list.p, result.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = result.resource;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.pResource = readbacks[feed].p;
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint = footprints[feed];
+    consumer.list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    barrier(consumer.list.p, result.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+  }
+  check(consumer.list->Close(), "Close three-feed consumer");
+  const auto consume = manager->begin_private_submission(DeviceKey, consumer.queue.p);
+  require(consume.receipt != 0, "Begin three-feed consumer");
+  ID3D12CommandList* read = consumer.list.p;
+  consumer.queue->ExecuteCommandLists(1, &read);
+  require(manager->end_private_submission(consume.receipt), "Submit three-feed consumer");
+  for (const auto& result : frames)
+    require(manager->finish_consumption(result.token, consume.fence, consume.value), "Finish three-feed consumer lease");
+  Ref<ID3D12Fence> completed;
+  check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(completed.put())), "Create three-feed fence");
+  check(consumer.queue->Signal(completed.p, 1), "Signal three-feed completion");
+  wait([&] { return completed->GetCompletedValue() >= 1; });
+  for (unsigned feed = 0; feed < 3; ++feed) {
+    void* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(readback_bytes[feed])};
+    check(readbacks[feed]->Map(0, &range, &mapped), "Map three-feed pixels");
+    bool exact = true;
+    for (UINT y = 0; y < heights[feed]; ++y)
+      for (UINT x = 0; x < width; ++x) {
+        std::uint32_t pixel = 0;
+        std::memcpy(
+            &pixel,
+            static_cast<const std::uint8_t*>(mapped) + footprints[feed].Offset + UINT64(y) * footprints[feed].Footprint.RowPitch + x * 4,
+            4);
+        exact &= pixel == words[feed];
+      }
+    const D3D12_RANGE empty{0, 0};
+    readbacks[feed]->Unmap(0, &empty);
+    require(exact, "A three-feed snapshot is not its own feed's last draw");
+  }
+  require(SUCCEEDED(device->GetDeviceRemovedReason()), "Three-feed GPU work removed device");
 }
 void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   Ref<IDXGIFactory4> factory;
@@ -1135,6 +1916,56 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   for (std::size_t i = 0; i < unused_count; ++i)
     require(manager->discard_frame(unused[i].token), "Discard unused rate-check frame");
   require(manager->poll_completed_frames(unused.data(), unused.size()) == 0, "Rate-check frame remained unretired");
+  {
+    // Capture spacing. The schedule opens a feed on GetTickCount64 at observer
+    // time, so a parked render it made due can reach the tail a little inside
+    // the interval: it is captured, not discarded. A render well inside the
+    // interval, a second batch of a captured render and, from rate 10 up, any
+    // render inside the full interval are refused.
+    struct Case {
+      std::uint32_t rate;
+      std::uint64_t elapsed_us;
+      bool captured;
+      const char* label;
+    };
+    const auto steady_us = [] {
+      return static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    const auto submit = [&] {
+      const auto before = manager->statistics().tail_captures;
+      producer.queue->ExecuteCommandLists(1, &original);
+      return manager->statistics().tail_captures - before;
+    };
+    for (const auto& item : {Case{2, 250000, false, "A parked render at half the interval was captured"},
+                             Case{2, 450000, true, "A due parked render 0.9 of the interval after the last capture was discarded"},
+                             Case{1, 800000, false, "The rate 1 tolerance exceeded 125 ms"},
+                             Case{1, 900000, true, "A due rate 1 render inside the 125 ms tolerance was discarded"},
+                             Case{5, 160000, true, "A due rate 5 render inside the tolerance was discarded"},
+                             Case{10, 76000, false, "The rate 10 capture interval was shortened"}}) {
+      manager->set_source_rate(item.rate);
+      const auto previous = steady_us() - item.elapsed_us;
+      manager->last_tail_us_[0] = manager->last_tail_us_[1] = previous;
+      const auto captured = submit();
+      if (!item.captured) {
+        require(captured == 0 && std::strcmp(manager->statistics().tail_status, "sample_interval") == 0, item.label);
+        require(manager->last_tail_us_[0] == previous && manager->last_tail_us_[1] == previous, item.label);
+        continue;
+      }
+      require(captured == 2 && std::strcmp(manager->statistics().tail_status, "captured") == 0, item.label);
+      require(submit() == 0 && std::strcmp(manager->statistics().tail_status, "sample_interval") == 0,
+              "A feed was captured twice within one interval");
+      drain(producer.queue.p);
+      std::size_t completed = 0;
+      wait([&] {
+        completed += manager->poll_completed_frames(unused.data() + completed, unused.size() - completed);
+        return completed >= 2;
+      });
+      for (std::size_t i = 0; i < completed; ++i)
+        require(manager->discard_frame(unused[i].token), "Discard spacing-check frame");
+    }
+    manager->set_source_rate(20);
+  }
   // Capture phase: the simulator renders a camera view in two submissions,
   // one draw (deferred lighting) and then several (sky, clouds, lights).
   // The tail holds the first and copies the second. The observed lists stay
@@ -1310,6 +2141,7 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   require(manager->statistics().wipes > wipes_before_unknown &&
               manager->statistics().wipe_counts[static_cast<std::size_t>(Manager::WipeSite::unknown_lists_no_owner)] > 0,
           "An unregistered list's wipe was not attributed to unknown_lists_no_owner");
+  three_feed_tail(device.p, draw);
   require(Boundary::remove().protection_restored, "Remove boundary observation");
   producer.queue->ExecuteCommandLists(1, &original);
   drain(producer.queue.p);
@@ -1329,7 +2161,7 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       "{\"passed\":true,\"warp\":%s,\"enhanced\":%s,\"born_render_target\":%s,\"checked_pixels\":%llu,\"tail_captures\":%llu,\"replayed\":"
       "true,"
       "\"two_producer_queues\":true,\"persistent_rt\":true,\"reset_receipt_lease\":true,\"stop_releases_sources\":true,"
-      "\"tail_device_reuse\":true,\"scoped_target_invalidation\":true,\"idle_reset_recovery\":true,"
+      "\"tail_device_reuse\":true,\"scoped_target_invalidation\":true,\"idle_reset_recovery\":true,\"three_feed_tail\":true,"
       "\"baseline_tail_captures\":6,\"gpu_timing_samples\":6,\"replay_tail_captures\":%llu,\"checks\":%u}\n",
       warp_requested ? "true" : "false", enhanced ? "true" : "false", born_render_target ? "true" : "false",
       static_cast<unsigned long long>(checked_pixels), static_cast<unsigned long long>(rate_checked_captures),

@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "1.1.1",
+      "date": "2026-10-04",
+      "changes": [
+        "Smoother taxiing with the cameras on: Taxi Cam does much less work on the simulator's threads, and the cameras start faster.",
+        "Camera views draw sun shadows only near the camera, to about 55-100 m, instead of to the main view's full shadow distance. Distant shadows can't be seen at display size, and each camera update has less shadow work for the simulator. The main view is unchanged.",
+        "PMDG 777: when all three cameras were drawn together, the third camera's picture was sometimes not copied. Fixed. Not yet tested in the simulator."
+      ]
+    },
+    {
       "version": "1.1.0",
       "date": "2026-10-04",
       "changes": [

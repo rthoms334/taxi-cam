@@ -32,6 +32,10 @@ class SceneCaptureManager {
   static constexpr std::size_t MaximumLists = 4096;
   static constexpr std::size_t MaximumPackets = 16;
   static constexpr std::uint64_t MaximumBytes = 256ull * 1024 * 1024;
+  // Camera feeds a receipt can capture at its queue tail: one per published
+  // handoff entry (kMaxCameraFeeds in camera/aircraft_mounts.hpp, asserted
+  // in the .cpp).
+  static constexpr std::size_t TailFeeds = 3;
   struct FrameOrder {
     // Actual serialized device timeline and list position within that submit.
     // Allocation tokens and CPU retirement times do not order rendered images.
@@ -128,7 +132,14 @@ class SceneCaptureManager {
   struct Statistics {
     GpuTimingStatistics capture_copy_gpu;
     std::uint64_t captures = 0, submissions = 0, resets = 0;
+    // Resets whose list held nothing to retire: no packet, consumer, source
+    // effect or lease, observed, and in the current session. Both counts
+    // include fast_resets, the clean Resets retired without mutex_.
+    std::uint64_t clean_resets = 0, fast_resets = 0;
     std::uint64_t display_copies = 0;
+    // Planned display copies the submission pool did not record (no ready
+    // packet, an invalid copy or a failed Close); none of them was inserted.
+    std::uint64_t display_record_failures = 0;
     std::uint64_t completed = 0, skipped = 0, quarantined = 0, bytes = 0;
     // Snapshot textures created. Steady captures reuse packets of their shape.
     std::uint64_t allocations = 0;
@@ -138,7 +149,7 @@ class SceneCaptureManager {
     std::array<CopyDiagnostic, 3> copies{};
     std::uint64_t source_candidates = 0, source_draws = 0, tail_submissions = 0, tail_captures = 0;
     const char* tail_status = "not_started";
-    std::array<CapturePhaseDiagnostic, 3> phases{};
+    std::array<CapturePhaseDiagnostic, TailFeeds> phases{};
     std::uint64_t unknown_submitted_lists = 0, invalid_source_recordings = 0, scoped_source_invalidations = 0;
     // Limited global reports (PassBegin, PassState, unsupported work) on a list
     // that never named a published camera source; nothing was retired.
@@ -198,7 +209,21 @@ class SceneCaptureManager {
   bool register_unobserved_command_list(ID3D12GraphicsCommandList*, std::uint64_t device_key, std::uint64_t generation) noexcept;
   using UnknownListObserver = void (*)(void*, ID3D12GraphicsCommandList*, std::uint64_t device_key) noexcept;
   bool set_unknown_list_observer(UnknownListObserver, void* context) noexcept;
-  void successful_reset(ID3D12GraphicsCommandList* native_list, std::uint64_t object_generation) noexcept;
+  static constexpr std::uint32_t NoListSlot = UINT32_MAX;
+  // Returns the list's slot for the caller to pass to its next Reset. The slot
+  // is a hint, always verified, that saves the index lookup; with it a list its
+  // last Reset left clean is retired without mutex_.
+  std::uint32_t successful_reset(ID3D12GraphicsCommandList* native_list,
+                                 std::uint64_t object_generation,
+                                 std::uint32_t slot = NoListSlot) noexcept;
+  // Reset paths for the bridge log, totals since construction. fast: lock-free
+  // Resets; locked: the rest; expired: locked Resets whose bounded wait
+  // expired, retired later by the ring.
+  struct ResetPaths {
+    std::uint64_t fast = 0, locked = 0, expired = 0;
+  };
+  // Lock-free.
+  ResetPaths reset_paths() const noexcept;
   void destroy_command_list(ID3D12GraphicsCommandList* native_list, std::uint64_t object_generation) noexcept;
 
   // Candidate/model observation starts at resource creation, before scene
@@ -231,12 +256,16 @@ class SceneCaptureManager {
   void after_source_draw(ID3D12GraphicsCommandList*, std::uint64_t object_generation, bool allowed) noexcept;
   // Equivalent to adjacent stage/after calls after the actual native draw,
   // with one lookup/lock and the same generation and resource-lease checks.
+  // recording: the adapter's count of this list's successful native Resets
+  // (0: unknown). With it, a draw that could only raise the count of sources
+  // already drawn twice in this recording skips the lock (draw-repeat filter).
   void observe_source_draw_after(ID3D12GraphicsCommandList*,
                                  std::uint64_t object_generation,
                                  UINT count,
                                  ID3D12Resource* const* targets,
                                  const std::uint64_t* resource_generations,
-                                 bool allowed) noexcept;
+                                 bool allowed,
+                                 std::uint64_t recording = 0) noexcept;
   void observe_source_legacy(ID3D12GraphicsCommandList*, std::uint64_t object_generation, const D3D12_RESOURCE_BARRIER&) noexcept;
   void observe_source_enhanced(ID3D12GraphicsCommandList*, std::uint64_t object_generation, const D3D12_TEXTURE_BARRIER&) noexcept;
   void invalidate_source_recording(ID3D12GraphicsCommandList*,
@@ -365,9 +394,22 @@ class SceneCaptureManager {
     ID3D12Device* native = nullptr;
     ID3D12Fence* timeline = nullptr;
     std::uint64_t last_signal = 0;
+    // Owned reference to the queue that Signaled last_signal. Written and read
+    // only by the submission_mutex_ owner, together with last_signal; released
+    // when replaced (never under mutex_) and by the destructor. Like native and
+    // timeline, a destroyed or failed slot keeps it for the process lifetime:
+    // destroy_device holds only mutex_, while a receipt already in flight reads
+    // it without mutex_ and would take it again in finish_transaction.
+    ID3D12CommandQueue* last_signal_queue = nullptr;
     bool active = false, failed = false;
     std::uint64_t session_generation = 1;
     bool session_active = true;
+    // session_generation << 1 | session_active, stored under mutex_ with them
+    // so augment_submission can check the session without taking mutex_.
+    std::atomic<std::uint64_t> published_session{session_generation << 1 | (session_active ? 1u : 0u)};
+    void publish_session() noexcept {
+      published_session.store(session_generation << 1 | (session_active ? 1u : 0u), std::memory_order_release);
+    }
     source_state::Tracker source_states;
     pfd_submission::Pool display_copies;
   };
@@ -421,7 +463,7 @@ class SceneCaptureManager {
     std::uint32_t last_position = 0;
     std::array<engine_hook::queue_submit::Insertion, engine_hook::queue_submit::kMaximumInsertions> display_insertions{};
     std::array<unsigned, engine_hook::queue_submit::kMaximumInsertions> display_slots{};
-    UINT display_count = 0, display_accepted = 0;
+    UINT display_count = 0, display_accepted = 0, display_unrecorded = 0;
     std::uint64_t session_generation = 0;
   };
   struct SourceCandidate {
@@ -431,10 +473,20 @@ class SceneCaptureManager {
   };
   // Contended callbacks cannot acquire mutex_. Publish only the bounded
   // classification of an actual native recording, never borrowed COM state.
-  struct PublishedList {
+  // One cache line each: the lock-free Reset reads native and clean together.
+  struct alignas(32) PublishedList {
     std::atomic<std::uint64_t> revision{};
     std::atomic<ID3D12GraphicsCommandList*> native{};
     std::atomic<std::uint64_t> effects{};
+    // Object generation while the list is exactly as its last retirement left
+    // it in the current session, else 0. Written under mutex_ only.
+    std::atomic<std::uint64_t> clean{};
+    // Before any change a Reset would undo. Load first: most changes hit a list
+    // already dirty, and a store would pull the line from lock-free readers.
+    void forget_clean() noexcept {
+      if (clean.load(std::memory_order_relaxed))
+        clean.store(0, std::memory_order_relaxed);
+    }
   };
   struct UnobservedBatch {
     std::uint32_t sources = 0, uncertain = 0;
@@ -458,8 +510,9 @@ class SceneCaptureManager {
     std::array<ID3D12Resource*, 8> targets{};
     std::array<std::uint64_t, 8> target_generations{};
   };
+  // One closed private list per captured feed, executed in one call.
   struct TailBatch {
-    std::array<ID3D12CommandList*, 2> lists{};
+    std::array<ID3D12CommandList*, TailFeeds> lists{};
     unsigned count = 0;
   };
   // Simulator-thread lock acquisition with a budget. Failure records
@@ -485,8 +538,13 @@ class SceneCaptureManager {
   List* list(ID3D12GraphicsCommandList*) noexcept;
   bool register_list(ID3D12GraphicsCommandList*, std::uint64_t, std::uint64_t, bool observed) noexcept;
   bool observe_unknown_lists(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
+  // Field resets only; retire_native_list publishes the result once.
   void retire_list(List&) noexcept;
-  void publish_list(const List&) noexcept;
+  // A caller that already knows the list's lists_ index skips the lookup.
+  void publish_list(const List&, std::size_t slot = MaximumLists) noexcept;
+  // Under mutex_, for an entry of lists_ changed without publish_list: its next
+  // Reset takes the lock.
+  void forget_clean(const List&) noexcept;
   void touch_sources(List&) noexcept;
   std::uint32_t queue_devices(ID3D12CommandQueue*) const noexcept;
   UnobservedBatch classify_unobserved(ID3D12CommandQueue*,
@@ -497,6 +555,16 @@ class SceneCaptureManager {
   void apply_recording_refusal(std::uint32_t effects, bool fatal) noexcept;
   void apply_deferred() noexcept;
   void apply_source_draw(List&, source_state::Key, bool allowed) noexcept;
+  // Under mutex_: arm this thread's draw-repeat filter after a locked draw;
+  // settle adds the draws it skipped to their effects and disarms it.
+  void arm_draw_repeat(List&,
+                       std::uint64_t recording,
+                       std::uint64_t epoch,
+                       UINT,
+                       ID3D12Resource* const*,
+                       const std::uint64_t*,
+                       unsigned) noexcept;
+  void settle_draw_repeat() noexcept;
   static void release_source_leases(std::array<SourceLease, source_state::Tracker::capacity>&, std::size_t&) noexcept;
   static bool retain_source_lease(std::array<SourceLease, source_state::Tracker::capacity>&,
                                   std::size_t&,
@@ -531,6 +599,9 @@ class SceneCaptureManager {
   // returns them for the caller to Execute after releasing it.
   void record_queue_tail(Transaction&, TailBatch&) noexcept;
   bool compatible_queue(ID3D12CommandQueue*, const Device&) noexcept;
+  // Lock-free: bit i set when the queue is DIRECT on published device i.
+  // Lets the ordered paths do the COM identity calls before taking mutex_.
+  std::uint32_t compatible_devices(ID3D12CommandQueue*) const noexcept;
   bool capture_source(List&,
                       Device&,
                       const SceneCopyMatch&,
@@ -541,7 +612,12 @@ class SceneCaptureManager {
                       const char** copy_refusal = nullptr,
                       Packet* required_packet = nullptr) noexcept;
   bool record_copy(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*, bool, std::uint64_t, bool) noexcept;
-  Submission begin_transaction(Device&, ID3D12CommandQueue*, std::uint16_t, bool) noexcept;
+  // Under both mutexes: reserves the receipt. The last argument is
+  // compatible_devices(queue); a clear bit is rechecked under the lock.
+  Submission begin_transaction(Device&, ID3D12CommandQueue*, std::uint16_t, bool, std::uint32_t) noexcept;
+  // The reserving thread, after releasing mutex_: queues the receipt's Wait.
+  // False after a failed Wait undid the reservation and failed the device.
+  bool queue_transaction_wait(Device&, ID3D12CommandQueue*) noexcept;
   void publish_queued_wait(Device&) noexcept;
   void release_queued_waits() noexcept;
   bool finish_transaction(std::uint64_t, bool refused, bool fatal = true) noexcept;
@@ -552,6 +628,20 @@ class SceneCaptureManager {
   std::array<Device, MaximumDevices> devices_{};
   std::array<List, MaximumLists> lists_{};
   std::array<PublishedList, MaximumLists> published_lists_{};
+  // Reset paths, one set per hook_timing thread slot so that Reset threads
+  // never write a shared line: lock-free Resets, locked ones, and the locked
+  // ones whose bounded wait expired.
+  struct alignas(64) ResetCounts {
+    std::atomic<std::uint64_t> fast{}, locked{}, expired{};
+  };
+  static_assert(sizeof(ResetCounts) == 64);
+  std::array<ResetCounts, hook_timing::MaxThreads + 1> reset_counts_{};
+  // Draw-repeat filter invalidation. list_epochs_: written under mutex_ only,
+  // odd while a filter is armed on the list, bumped by its next list() lookup.
+  // draw_repeat_epoch_: bumped by every deferral and by global lifecycle,
+  // tracking, session, candidate and capture-phase changes.
+  std::array<std::atomic<std::uint64_t>, MaximumLists> list_epochs_{};
+  std::atomic<std::uint64_t> draw_repeat_epoch_{};
   std::array<std::atomic<ID3D12Device*>, MaximumDevices> published_devices_{};
   // Fence pointer and the timeline value already passed to queue Wait. The
   // watchdog reads these without mutex_ so a stuck submit can still be released.
@@ -581,12 +671,12 @@ class SceneCaptureManager {
   bool capture_enabled_ = true;
   bool gpu_timing_enabled_ = false;
   std::uint32_t source_rate_ = kDefaultCameraRate;
-  std::array<std::uint64_t, 3> last_tail_us_{};
+  std::array<std::uint64_t, TailFeeds> last_tail_us_{};
   struct PhaseFeed {
     source_state::Key source;
     capture_phase::Feed state;
   };
-  std::array<PhaseFeed, 3> phase_feeds_{};
+  std::array<PhaseFeed, TailFeeds> phase_feeds_{};
   Transaction transaction_;
   std::uint64_t next_token_ = 0, next_receipt_ = 0;
   Statistics stats_;

@@ -99,6 +99,69 @@ void deferred_ring() {
   while (shared.pop(value))
     ++drained;
   require(drained == accepted && drained <= 64 && shared.empty(), "Concurrent ring lost or duplicated accepted entries");
+
+  // peek leaves its entry queued, and the ring not idle, until commit: a lock-free
+  // reader that sees the ring idle has seen everything done before the commit.
+  taxi_camera::DeferredRing<unsigned, 4> staged;
+  require(staged.idle() && !staged.overflowed() && !staged.peek(value), "An empty ring was not idle");
+  require(staged.push(7) && !staged.idle() && !staged.empty(), "A queued entry left the ring idle");
+  require(staged.peek(value) && value == 7 && staged.peek(value) && value == 7 && !staged.idle(), "peek consumed its entry");
+  staged.commit();
+  require(staged.idle() && staged.empty() && !staged.peek(value), "commit did not consume the peeked entry");
+  // A lost entry keeps the ring busy after the drain until a consumer takes it.
+  for (unsigned i = 1; i <= 4; ++i)
+    require(staged.push(i), "Staged ring refused a value within capacity");
+  require(!staged.push(5) && staged.overflowed() && !staged.idle(), "An overflowed ring was idle");
+  for (unsigned i = 1; i <= 4; ++i) {
+    require(staged.peek(value) && value == i && !staged.idle(), "Staged ring lost order or went idle before its commit");
+    staged.commit();
+  }
+  require(staged.empty() && staged.overflowed() && !staged.idle(), "A drained ring hid its lost entry");
+  require(staged.take_overflow() && !staged.overflowed() && staged.idle() && !staged.take_overflow(),
+          "Taking the overflow did not leave the ring idle exactly once");
+  // Wraparound through peek/commit, and pop after a peek returns the same entry.
+  for (unsigned round = 0; round < 6; ++round) {
+    require(staged.push(30 + round) && staged.peek(value) && value == 30 + round, "Wrapped staged ring lost a value");
+    require(staged.pop(value) && value == 30 + round && staged.idle(), "pop after peek did not consume the peeked entry");
+  }
+  // A consumer committing while producers push: every accepted entry exactly once.
+  taxi_camera::DeferredRing<unsigned, 16> streamed;
+  std::atomic<unsigned> streamed_accepted{0}, accepted_sum{0};
+  std::atomic<bool> producing{true};
+  unsigned streamed_drained = 0, streamed_sum = 0;
+  std::thread consumer([&] {
+    unsigned entry = 0;
+    for (;;) {
+      const bool done = !producing.load(std::memory_order_acquire);
+      while (streamed.peek(entry)) {
+        streamed_sum += entry;
+        ++streamed_drained;
+        streamed.commit();
+      }
+      if (done && streamed.empty())
+        break;
+      SwitchToThread();
+    }
+  });
+  std::thread streamers[3];
+  for (unsigned n = 0; n < 3; ++n)
+    streamers[n] = std::thread([&, n] {
+      for (unsigned i = 1; i <= 200; ++i)
+        if (streamed.push(n * 1000 + i)) {
+          streamed_accepted.fetch_add(1, std::memory_order_relaxed);
+          accepted_sum.fetch_add(n * 1000 + i, std::memory_order_relaxed);
+        }
+    });
+  for (auto& streamer : streamers)
+    streamer.join();
+  producing.store(false, std::memory_order_release);
+  consumer.join();
+  require(streamed_drained == streamed_accepted && streamed_sum == accepted_sum && streamed.empty(),
+          "A committing consumer lost or duplicated accepted entries");
+  // Every refused push reported itself; taking it leaves the ring idle.
+  require(streamed.overflowed() == (streamed_accepted < 600), "Concurrent overflow was not reported");
+  streamed.take_overflow();
+  require(streamed.idle(), "A drained ring with its overflow taken was not idle");
 }
 
 taxi_camera::FreezeWatchdog::Sample sample(std::uint64_t now, std::uint64_t pulse, std::uint64_t frames, bool armed = true) {

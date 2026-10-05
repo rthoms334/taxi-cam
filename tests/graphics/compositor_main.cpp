@@ -446,6 +446,10 @@ void pixel_case(ID3D12Device* device,
 void bloom_case(ID3D12Device* device, Result& result) {
   Compositor compositor;
   check(compositor.initialize(device), compositor.last_error());
+  // The first compositor in this process compiled all five shaders. This one
+  // builds its pipelines from that bytecode, and the oracle below still holds.
+  require(compositor.statistics().shader_compiles == 0 && SUCCEEDED(Compositor::prepare_shaders()),
+          "A later compositor recompiled cached shader bytecode");
   std::array<Reference<ID3D12Resource>, 2> sources;
   create_texture(device, texture_description(768, 255, DXGI_FORMAT_R11G11B10_FLOAT), sources[0].put());
   create_texture(device, texture_description(768, 504, DXGI_FORMAT_R11G11B10_FLOAT), sources[1].put());

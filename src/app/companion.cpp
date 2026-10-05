@@ -1975,6 +1975,13 @@ DWORD WINAPI connection_worker(void*) {
   std::uint64_t ignore_heartbeat_through = 0;
   win::LaunchRetry startup_retry;
   HANDLE process{};
+  // A full process scan costs 7-12 ms (CreateToolhelp32Snapshot of every
+  // process on the system). The attached simulator is not rescanned while it
+  // runs: its handle keeps the PID from being reused and shows its exit. With
+  // nothing attached, a scan runs once a second, or at once for Connect.
+  constexpr std::uint64_t kDetachedRescanMs = 1000;
+  win::SimulatorAttach attach;
+  std::uint64_t last_scan_ms = 0;
   while (running.load()) {
     if (preview_ui) {
       Sleep(100);
@@ -2008,7 +2015,18 @@ DWORD WINAPI connection_worker(void*) {
       }
       PostMessageW(window, StatusMessage, 0, 0);
     }
-    const auto attach = win::find_simulator_attach(expected_simulator);
+    const auto now_ms = GetTickCount64();
+    const bool attached_alive = attached && process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+    // An attached process that exited, or one without a handle, is rescanned
+    // every loop as before. A skipped scan clears the last result, which could
+    // name a process that has since exited.
+    if (!attached_alive && (attached || !last_scan_ms || command == win::ConnectCommand::connect || command == win::ConnectCommand::reset ||
+                            now_ms - last_scan_ms >= kDetachedRescanMs)) {
+      attach = win::find_simulator_attach(expected_simulator);
+      last_scan_ms = now_ms;
+    } else if (!attached_alive) {
+      attach = {};
+    }
     const DWORD pid = attach.pid;
     if (attached && (pid != attached || (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0))) {
       mailbox.close();
@@ -2498,7 +2516,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       show_notifications();
       update_gallery_buttons();
       service_thumbnails();
-      if (IsWindowVisible(hwnd))
+      if (IsWindowVisible(hwnd) && !IsIconic(hwnd))
         InvalidateRect(hwnd, nullptr, FALSE);
       return 0;
     case WhatsNewMessage:

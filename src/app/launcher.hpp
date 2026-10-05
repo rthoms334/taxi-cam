@@ -272,7 +272,8 @@ inline SimulatorAttach find_simulator_attach(const std::wstring& expected) {
     return result;
   DWORD session{};
   ProcessIdToSessionId(GetCurrentProcessId(), &session);
-  const auto known = discover_msfs2024_executables(expected);
+  std::vector<std::wstring> known;
+  bool discovered = false;
   std::vector<SimulatorMatch> matches;
   PROCESSENTRY32W entry{};
   entry.dwSize = sizeof(entry);
@@ -287,8 +288,15 @@ inline SimulatorAttach find_simulator_attach(const std::wstring& expected) {
         continue;
       wchar_t path[32768]{};
       DWORD length = 32768;
-      const bool ok =
-          QueryFullProcessImageNameW(process, 0, path, &length) && same_user(process) && accepted_simulator_image(path, expected, known);
+      bool ok = QueryFullProcessImageNameW(process, 0, path, &length) && same_user(process);
+      // Discovery probes every drive, the Store folder and Steam. The configured
+      // image is accepted without it, so it runs at most once a scan, and only
+      // for another simulator image.
+      if (ok && !discovered && (expected.empty() || !same_path(expected, path))) {
+        known = discover_msfs2024_executables(expected);
+        discovered = true;
+      }
+      ok = ok && accepted_simulator_image(path, expected, known);
       CloseHandle(process);
       if (ok)
         matches.push_back({entry.th32ProcessID, path});

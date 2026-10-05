@@ -91,8 +91,17 @@ void run(bool warp) {
   require(manager->register_command_list(idle_list.value, 1, 11), "Register idle-created list");
   require(!manager->list(idle_list.value)->source_effects.invalid, "Idle-created list lost observed recording proof");
   require(SUCCEEDED(idle_list.value->Close()) && SUCCEEDED(idle_list.value->Reset(idle_allocator.value, nullptr)), "Reset idle list");
-  manager->successful_reset(idle_list.value, 11);
+  const auto idle_slot = manager->successful_reset(idle_list.value, 11);
   require(!manager->list(idle_list.value)->source_effects.invalid, "Reset while idle lost observed recording proof");
+  // Nothing changed the list since: its next Reset with the returned slot is
+  // retired without the manager lock and counted like a locked clean Reset.
+  require(SUCCEEDED(idle_list.value->Close()) && SUCCEEDED(idle_list.value->Reset(idle_allocator.value, nullptr)), "Reset clean idle list");
+  const auto before_clean = manager->statistics();
+  require(manager->successful_reset(idle_list.value, 11, idle_slot) == idle_slot &&
+              manager->statistics().fast_resets == before_clean.fast_resets + 1 &&
+              manager->statistics().resets == before_clean.resets + 1 &&
+              manager->statistics().clean_resets == before_clean.clean_resets + 1,
+          "A clean list's Reset took the manager lock or was not counted");
   require(SUCCEEDED(list.value->Close()) && SUCCEEDED(list.value->Reset(allocator.value, nullptr)), "Reset spanning list");
   manager->successful_reset(list.value, 10);
   require(!recording->source_effects.invalid && !recording->consumer && recording->source_lease_count == 0,

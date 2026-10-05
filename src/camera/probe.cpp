@@ -21,6 +21,7 @@
 #include "scene_session_reset.hpp"
 #include "source_view.hpp"
 #include "view_aa.hpp"
+#include "view_cascades.hpp"
 #include "view_clip.hpp"
 #include "view_creation_wait.hpp"
 #include "view_output.hpp"
@@ -111,6 +112,11 @@ struct Runtime {
   double peak_local_ms = 0;
   std::atomic<bool> peak_reset{false};
   ObserverPeak peak;
+  // This update's native engine call and lifecycle proof times (observer
+  // thread, reset as each update starts), and every update over
+  // kLifecycleEventMs for the worker's 'Lifecycle event' lines.
+  LifecycleTimers lifecycle_timers;
+  LifecycleEventLog lifecycle_events;
   // Proven aircraft controller for the camera pose (observer thread). A session
   // reset from any thread advances pose_source_resets, which retires it.
   PoseSourceCache pose_source;
@@ -118,6 +124,18 @@ struct Runtime {
   // Node is used only in the update that read it (mount_scene_update).
   AircraftScenePose mount_scene{};
   std::uint64_t mount_scene_update = 0;
+  // Pure reads taken inside an established pair's fused inspection on an
+  // opening pulse (prepare_fused_reads): the session-proven controller's scene
+  // (fused_scene_user, zero when not read) and the first opened feed's mount
+  // check (fused_mount_feed, kMaxCameraFeeds when not attached). Usable only
+  // while fused_update == updates: set once that scope's endpoint succeeds,
+  // cleared when its views go unused or the pulse changes. Consumers also
+  // require !lifecycle_touched, so no engine call has run since.
+  std::uint64_t fused_update = 0;
+  std::uint64_t fused_scene_user = 0;
+  AircraftScenePose fused_scene{};
+  unsigned fused_mount_feed = kMaxCameraFeeds;
+  FeedMount fused_mount{};
   // Camera Nodes attached to the aircraft model Node (node_mount.hpp), per
   // feed (observer thread). Empty when the parent contract did not resolve.
   std::array<FeedMount, kMaxCameraFeeds> feed_mounts{};
@@ -125,6 +143,7 @@ struct Runtime {
   const char* mount_error = "";
   // Set once with the contract, before the observer is installed.
   std::string mount_contract_error;
+  std::string cascades_contract_error;
   std::atomic<std::uint64_t> pose_source_resets{0};
   RenderSchedule schedule;
   ProbeInspectionGate inspection_gate;
@@ -310,7 +329,8 @@ void publish_transition(Runtime& runtime, ProbeSnapshot& report) {
 
 class StageTimer {
  public:
-  StageTimer(Runtime& runtime, ProbeStage stage) noexcept : runtime_(runtime), stage_(stage) {
+  StageTimer(Runtime& runtime, ProbeStage stage) noexcept
+      : runtime_(runtime), stage_(stage), native_before_(runtime.lifecycle_timers.native_ticks) {
     if (const auto* metrics = active_local_memory_metrics()) {
       reads_ = metrics->read_calls;
       queries_ = metrics->query_calls;
@@ -321,9 +341,14 @@ class StageTimer {
     LARGE_INTEGER finished{};
     const auto index = static_cast<std::size_t>(stage_);
     if (QueryPerformanceCounter(&finished) && started_.QuadPart > 0 && finished.QuadPart >= started_.QuadPart &&
-        runtime_.counter_frequency.QuadPart > 0)
+        runtime_.counter_frequency.QuadPart > 0) {
       runtime_.performance.stage_ms[index] +=
           static_cast<double>(finished.QuadPart - started_.QuadPart) * 1000.0 / runtime_.counter_frequency.QuadPart;
+      // Stages are disjoint, so the native calls timed since this section
+      // began ran inside it; the rest of it is the lifecycle's proofs.
+      if (stage_ == ProbeStage::lifecycle)
+        runtime_.lifecycle_timers.record_lifecycle(finished.QuadPart - started_.QuadPart, native_before_);
+    }
     if (const auto* metrics = active_local_memory_metrics()) {
       runtime_.performance.stage_reads[index] += static_cast<std::uint32_t>(metrics->read_calls - reads_);
       runtime_.performance.stage_queries[index] += static_cast<std::uint32_t>(metrics->query_calls - queries_);
@@ -333,14 +358,55 @@ class StageTimer {
  private:
   Runtime& runtime_;
   ProbeStage stage_;
+  std::int64_t native_before_ = 0;
   LARGE_INTEGER started_{};
   std::uint64_t reads_ = 0, queries_ = 0;
+};
+
+// Times native engine calls for this update's lifecycle sub-timers (observer
+// thread): two QPC reads and plain adds, no lock, allocation or formatting.
+// pause()/resume() leave out bridge work between the calls of one timing.
+class NativeCallTimer {
+ public:
+  NativeCallTimer(Runtime& runtime, LifecycleTimer timer) noexcept : runtime_(runtime), timer_(timer) { resume(); }
+  ~NativeCallTimer() {
+    pause();
+    runtime_.lifecycle_timers.record(timer_, elapsed_);
+  }
+  NativeCallTimer(const NativeCallTimer&) = delete;
+  NativeCallTimer& operator=(const NativeCallTimer&) = delete;
+  void pause() noexcept {
+    LARGE_INTEGER now{};
+    if (started_ > 0 && QueryPerformanceCounter(&now) && now.QuadPart >= started_)
+      elapsed_ += now.QuadPart - started_;
+    started_ = 0;
+  }
+  void resume() noexcept {
+    LARGE_INTEGER now{};
+    started_ = QueryPerformanceCounter(&now) ? now.QuadPart : 0;
+  }
+
+ private:
+  Runtime& runtime_;
+  LifecycleTimer timer_;
+  std::int64_t started_ = 0, elapsed_ = 0;
 };
 
 template <typename Operation>
 decltype(auto) timed(Runtime& runtime, ProbeStage stage, Operation&& operation) {
   StageTimer timer(runtime, stage);
   return operation();
+}
+
+// A pure inspection scope whose endpoint validation refused: its result is
+// discarded and the refusal recorded for the caller's stop detail.
+void note_inspection_changed(Runtime& runtime, const ScopedLocalMemoryQueryCache& queries, std::string* failure_detail = nullptr) {
+  runtime.inspection_changed = true;
+  runtime.inspection_error =
+      "Memory-region metadata changed during inspection; no result was accepted: " + describe_local_memory_query_failure(queries.failure());
+  runtime.stage_error = runtime.inspection_error.c_str();
+  if (failure_detail)
+    *failure_detail = runtime.inspection_error;
 }
 
 // Cache metadata only while a pure inspection builds an unpublished result.
@@ -351,12 +417,7 @@ auto inspected(Runtime& runtime, Operation&& operation, std::string* failure_det
   ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
   auto result = operation();
   if (!queries.finish()) {
-    runtime.inspection_changed = true;
-    runtime.inspection_error = "Memory-region metadata changed during inspection; no result was accepted: " +
-                               describe_local_memory_query_failure(queries.failure());
-    runtime.stage_error = runtime.inspection_error.c_str();
-    if (failure_detail)
-      *failure_detail = runtime.inspection_error;
+    note_inspection_changed(runtime, queries, failure_detail);
     return decltype(result){};
   }
   return result;
@@ -370,6 +431,13 @@ Function function(Runtime& runtime, std::uint32_t rva) noexcept {
 template <typename T>
 bool word(LocalMemoryReader& reader, std::uint64_t address, T& output) noexcept {
   return reader.read(address, &output, sizeof(output));
+}
+
+// The native activate_entry(manager, id, open), timed as native_activate.
+void activate_owned_entry(Runtime& runtime, std::uint64_t manager, ec::EntryId id, bool open) noexcept {
+  using Activate = void (*)(void*, std::uint64_t, bool);
+  const NativeCallTimer timer(runtime, LifecycleTimer::native_activate);
+  function<Activate>(runtime, runtime.contract.functions.activate_entry)(reinterpret_cast<void*>(manager), id, open);
 }
 
 // Called only from this manager's update thunk, immediately before its original.
@@ -545,7 +613,9 @@ std::optional<bool> capture_trusted_pose(Runtime& runtime, std::string& memory_d
   LocalMemoryReader objects;
   AircraftScenePose scene;
   std::uint64_t user = runtime.pose_source.reuse(now, epoch, resets);
-  if (user)
+  if (user && runtime.fused_update == runtime.updates && !runtime.lifecycle_touched && runtime.fused_scene_user == user)
+    scene = runtime.fused_scene;  // Read and validated in this update's fused inspection.
+  else if (user)
     scene = inspected(
         runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
   if (!user || !scene.complete) {
@@ -764,18 +834,28 @@ bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFe
   runtime.pose_captured = true;
   return true;
 }
+// Table, pool and view share one read-only region-query scope, like
+// inspect_pair: every field and trace is still reread, and the whole scope is
+// revalidated before any result is used. No engine call runs inside it, and
+// nothing proven here survives it.
 ec::OwnedViewSnapshot inspect_entry(Runtime& runtime, std::uint64_t id) {
   LocalMemoryReader reader;
-  const auto entries = inspected(runtime, [&] { return ec::inspect_owned_entries(reader, runtime.manager, {id, 0, 0}); });
+  ec::OwnedViewSnapshot view;
+  ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
+  const auto entries = ec::inspect_owned_entries(reader, runtime.manager, {id, 0, 0});
   if (!entries.complete || !entries.entries[0].found) {
-    ec::OwnedViewSnapshot failed;
-    failed.error = entries.complete ? "The created entry ID is absent from the manager table." : entries.error;
-    return failed;
+    view.error = entries.complete ? "The created entry ID is absent from the manager table." : entries.error;
+  } else {
+    reader.reset_budget();
+    const auto pool = ec::inspect_view_pool(reader, runtime.renderer);
+    reader.reset_budget();
+    view = ec::inspect_owned_view(reader, entries.entries[0].address, id, pool);
   }
-  reader.reset_budget();
-  const auto pool = inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
-  reader.reset_budget();
-  return inspected(runtime, [&] { return ec::inspect_owned_view(reader, entries.entries[0].address, id, pool); });
+  if (!queries.finish()) {
+    note_inspection_changed(runtime, queries);
+    return {};
+  }
+  return view;
 }
 
 // Pool, table and both views share one read-only region-query scope. Every
@@ -955,13 +1035,18 @@ bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair,
     // to the normal full inspection without trusting the cached gate booleans.
     const auto activate = function<bool (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry);
     for (unsigned i = 0; i < views.size(); ++i) {
-      if (!pair.owned_ids[i])
+      if (!pair.owned_ids[i] || (views[i].flags[0] & 1u) != 0)
         continue;
-      if ((views[i].flags[0] & 1u) == 0 && !activate(reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false))
+      const NativeCallTimer timer(runtime, LifecycleTimer::native_activate);
+      if (!activate(reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false))
         return false;
     }
+    // Two flag-word reads per owned view. A budget sized for two feeds refused
+    // the third feed's reads, so every three-feed close fell back to the full
+    // inspection.
     ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
-    LocalMemoryReader reader(64);
+    LocalMemoryReader reader(kMaxCameraFeeds * 2 * sizeof(std::array<std::uint64_t, 2>));
+    static_assert(std::tuple_size_v<decltype(pair.owned_ids)> <= kMaxCameraFeeds);
     for (unsigned i = 0; i < views.size(); ++i) {
       if (!pair.owned_ids[i])
         continue;
@@ -1057,12 +1142,15 @@ void apply_camera_clip(Runtime& runtime, const ec::OwnedViewSnapshot& view, unsi
 void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose, unsigned feed) noexcept {
   if (!session_work_allowed(runtime))
     return;
+  NativeCallTimer timer(runtime, LifecycleTimer::native_pose);
   using SetVector = void (*)(void*, const double*);
   function<SetVector>(runtime, runtime.contract.functions.set_position)(reinterpret_cast<void*>(view.node_address), pose.position.data());
   function<SetVector>(runtime, runtime.contract.functions.set_up)(reinterpret_cast<void*>(view.camera_address), pose.up.data());
   function<SetVector>(runtime, runtime.contract.functions.set_target)(reinterpret_cast<void*>(view.camera_address), pose.target.data());
   function<void (*)(void*, float)>(runtime, runtime.contract.functions.set_fov)(reinterpret_cast<void*>(view.camera_address), pose.fov);
+  timer.pause();
   apply_camera_clip(runtime, view, feed);
+  timer.resume();
   function<void (*)(void*)>(runtime, runtime.contract.functions.update_view)(reinterpret_cast<void*>(view.view_address));
 }
 
@@ -1085,6 +1173,22 @@ enum class MountState { none, attached, lost };
 
 enum class GiveBack { returned, unreferenced, held };
 
+// A child-list confirmation after a native detach/attach. A fresh private-page
+// scope opened after the call proves pages from allocation and working-set
+// metadata instead of a VirtualQuery region scan per read; a refused endpoint
+// repeats the check unscoped, like give_back's read_state, so a transient
+// metadata change never marks a mount lost or refused.
+bool listed_after_call(LocalMemoryReader& reader, std::uint64_t parent, std::uint64_t node) noexcept {
+  {
+    ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
+    const bool listed = listed_child(reader, parent, node);
+    if (queries.finish())
+      return listed;
+  }
+  reader.reset_budget();
+  return listed_child(reader, parent, node);
+}
+
 // Puts a mounted camera Node back under the Node it was created under (the
 // world root), with the camera Node's own generation handle kept at attach.
 //   returned: it was moved back (detach + attach while the aircraft Node is
@@ -1100,10 +1204,30 @@ GiveBack give_back(Runtime& runtime, FeedMount& mount) noexcept {
     return GiveBack::unreferenced;
   LocalMemoryReader reader;
   const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
-  const auto camera = read_node_links(reader, mount.node, node_vtable);
-  const auto root = read_node_links(reader, mount.root, node_vtable);
-  const bool alive = handle_alive(reader, mount.parent_handle, mount.parent);
-  const bool own = handle_alive(reader, mount.node_handle, mount.node);
+  NodeLinks camera, root;
+  bool alive = false, own = false, home_lists = false, parent_lists = false;
+  const auto read_state = [&] {
+    camera = read_node_links(reader, mount.node, node_vtable);
+    root = read_node_links(reader, mount.root, node_vtable);
+    alive = handle_alive(reader, mount.parent_handle, mount.parent);
+    own = handle_alive(reader, mount.node_handle, mount.node);
+    home_lists = camera.valid && camera.parent == mount.root && listed_child(reader, mount.root, mount.node);
+    parent_lists = alive && camera.valid && camera.parent == mount.parent && listed_child(reader, mount.parent, mount.node);
+  };
+  // Every mount comes back on each pause and camera stop. Page-metadata proofs
+  // avoid VirtualQuery region scans (10 ms main-thread stalls in the
+  // 2026-10-04 log); a refused endpoint repeats the reads unscoped, so a
+  // transient metadata change can never mark the mount lost.
+  bool proven = false;
+  {
+    ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
+    read_state();
+    proven = queries.finish();
+  }
+  if (!proven) {
+    reader.reset_budget();
+    read_state();
+  }
   const auto refuse = [&](const char* error) {
     mount.lost = true;
     runtime.mount_error = error;
@@ -1111,7 +1235,7 @@ GiveBack give_back(Runtime& runtime, FeedMount& mount) noexcept {
   };
   if (!own || !camera.valid)
     return refuse("mount_camera_unreadable");
-  if (camera.parent == mount.root && listed_child(reader, mount.root, mount.node)) {
+  if (home_lists) {
     mount = {};
     return GiveBack::unreferenced;
   }
@@ -1120,16 +1244,20 @@ GiveBack give_back(Runtime& runtime, FeedMount& mount) noexcept {
   const auto node = mount.node, home = mount.root;
   const auto handle = mount.node_handle;
   if (alive && camera.parent == mount.parent) {
-    if (!listed_child(reader, mount.parent, node)) {
+    if (!parent_lists) {
       mount = {};
       return GiveBack::unreferenced;
     }
+    const NativeCallTimer timer(runtime, LifecycleTimer::native_mount);
     function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(node), true, false);
   } else if (alive || camera.parent != mount.parent) {
     return refuse("mount_parent_changed");
   }
-  function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(home), &handle, false);
-  if (!listed_child(reader, home, node))
+  {
+    const NativeCallTimer timer(runtime, LifecycleTimer::native_mount);
+    function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(home), &handle, false);
+  }
+  if (!listed_after_call(reader, home, node))
     return refuse("mount_return_unconfirmed");
   mount = {};
   return GiveBack::returned;
@@ -1140,17 +1268,41 @@ GiveBack give_back(Runtime& runtime, FeedMount& mount) noexcept {
 // the aircraft Node went away (a flight ended with the cameras on), the camera
 // Node goes back to the world root and the caller mounts it on the current
 // aircraft. A lost camera is never placed again, because set_position walks the
-// parent chain the camera Node names.
-MountState current_mount(Runtime& runtime, unsigned feed, const ec::OwnedViewSnapshot& view) noexcept {
+// parent chain the camera Node names. scene_fresh: no engine call has run since
+// this update's capture_pose.
+MountState current_mount(Runtime& runtime, unsigned feed, const ec::OwnedViewSnapshot& view, bool scene_fresh) noexcept {
   auto& mount = runtime.feed_mounts[feed];
   if (!mount.node || mount.node != view.node_address)
     return MountState::none;
   if (mount.lost)
     return MountState::lost;
-  LocalMemoryReader reader;
-  std::uint64_t parent = 0;
-  if (handle_alive(reader, mount.parent_handle, mount.parent) && reader.read(mount.node + kNodeParent, &parent, sizeof(parent)) &&
-      parent == mount.parent)
+  // The fused inspection found this same mount attached (prepare_fused_reads)
+  // and no engine call has run since: these reads would repeat its result.
+  const auto& fused = runtime.fused_mount;
+  if (scene_fresh && runtime.fused_update == runtime.updates && !runtime.lifecycle_touched && runtime.fused_mount_feed == feed &&
+      fused.entry == mount.entry && fused.node == mount.node && fused.parent == mount.parent &&
+      fused.parent_handle.control == mount.parent_handle.control && fused.parent_handle.generation == mount.parent_handle.generation)
+    return MountState::attached;
+  // This update's scene read already checked this exact handle (control+28 is
+  // its generation, control+0 its Node) in a finished scope, and no engine
+  // call has run since: only the camera Node's parent link needs reading.
+  const auto& scene = runtime.mount_scene;
+  const bool handle_read = scene_fresh && runtime.mount_scene_update == runtime.updates && scene.complete && mount.parent == scene.node &&
+                           mount.parent_handle.control == scene.node_control && mount.parent_handle.generation == scene.node_generation;
+  // Every opening pulse of a mounted feed runs this check. Unscoped reads prove
+  // each page with VirtualQuery, which scans the whole homogeneous region (in
+  // MSFS heaps hundreds of us per read); a private-page scope proves pages from
+  // allocation and working-set metadata instead. No engine call runs inside it.
+  bool attached = false;
+  {
+    ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
+    LocalMemoryReader reader;
+    std::uint64_t parent = 0;
+    attached = (handle_read || handle_alive(reader, mount.parent_handle, mount.parent)) &&
+               reader.read(mount.node + kNodeParent, &parent, sizeof(parent)) && parent == mount.parent;
+    attached = queries.finish() && attached;
+  }
+  if (attached)
     return MountState::attached;
   if (give_back(runtime, mount) == GiveBack::held)
     return MountState::lost;
@@ -1191,25 +1343,42 @@ bool mount_on_aircraft(Runtime& runtime,
     return refuse("mount_unavailable");
   LocalMemoryReader reader;
   const auto node_vtable = runtime.base + runtime.contract.layout.scene_node_vtable;
-  const auto camera = read_node_links(reader, view.node_address, node_vtable);
-  const auto aircraft = read_node_links(reader, scene.node, node_vtable);
-  if (!camera.valid || !aircraft.valid)
-    return refuse("mount_node_unreadable");
-  if (camera.parent == scene.node || camera.first_child || camera.world < 0 || camera.world != aircraft.world ||
-      view.node_address == scene.node)
-    return refuse("mount_node_state");
-  const auto root = read_node_links(reader, camera.parent, node_vtable);
-  if (!root.valid || !listed_child(reader, camera.parent, view.node_address))
-    return refuse("mount_root_unverified");
+  NodeLinks camera;
   NodeHandle node_handle, aircraft_handle{scene.node_control, scene.node_generation, 0};
-  if (!read_node_handle(reader, view.view_address, 104, view.node_address, node_handle) ||
-      !handle_alive(reader, aircraft_handle, scene.node))
-    return refuse("mount_handle");
-  function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(view.node_address), true, false);
-  function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(scene.node), &node_handle, false);
+  {
+    // Pure reads, proven from page metadata (no VirtualQuery region scans) and
+    // validated before any engine call below.
+    ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
+    camera = read_node_links(reader, view.node_address, node_vtable);
+    const auto aircraft = read_node_links(reader, scene.node, node_vtable);
+    const char* refusal = nullptr;
+    if (!camera.valid || !aircraft.valid)
+      refusal = "mount_node_unreadable";
+    else if (camera.parent == scene.node || camera.first_child || camera.world < 0 || camera.world != aircraft.world ||
+             view.node_address == scene.node)
+      refusal = "mount_node_state";
+    else if (const auto root = read_node_links(reader, camera.parent, node_vtable);
+             !root.valid || !listed_child(reader, camera.parent, view.node_address))
+      refusal = "mount_root_unverified";
+    else if (!read_node_handle(reader, view.view_address, 104, view.node_address, node_handle) ||
+             !handle_alive(reader, aircraft_handle, scene.node))
+      refusal = "mount_handle";
+    if (!queries.finish() && !refusal)
+      refusal = "mount_node_unreadable";
+    if (refusal)
+      return refuse(refusal);
+  }
+  {
+    const NativeCallTimer detach(runtime, LifecycleTimer::native_mount);
+    function<DetachNode>(runtime, runtime.contract.functions.detach_node)(reinterpret_cast<void*>(view.node_address), true, false);
+  }
+  {
+    const NativeCallTimer attach(runtime, LifecycleTimer::native_mount);
+    function<AttachChild>(runtime, runtime.contract.functions.attach_child)(reinterpret_cast<void*>(scene.node), &node_handle, false);
+  }
   ++runtime.mount_attaches;
   mount = {entry, view.node_address, scene.node, camera.parent, aircraft_handle, node_handle, false};
-  if (!listed_child(reader, scene.node, view.node_address)) {
+  if (!listed_after_call(reader, scene.node, view.node_address)) {
     mount.lost = true;
     return refuse("mount_attach_unconfirmed");
   }
@@ -1261,13 +1430,17 @@ void place_feeds(Runtime& runtime,
                  const std::array<bool, kMaxCameraFeeds>& desired) noexcept {
   const auto& scene = runtime.mount_scene;
   const bool mounting = mounting_allowed(runtime) && runtime.mount_scene_update == runtime.updates && scene.complete;
+  // Only the first opened feed follows capture_pose directly; any later one
+  // follows the engine calls (give_back, attach, apply_pose) made before it.
+  bool scene_fresh = true;
   for (unsigned i = 0; i < desired.size(); ++i) {
     if (!desired[i])
       continue;
     const auto& mount = runtime.feed_mounts[i];
-    auto mounted = mounting                                            ? current_mount(runtime, i, views[i])
+    auto mounted = mounting                                            ? current_mount(runtime, i, views[i], scene_fresh)
                    : mount.node && mount.node == views[i].node_address ? MountState::lost
                                                                        : MountState::none;
+    scene_fresh = false;
     if (mounted == MountState::none && mounting && mount_on_aircraft(runtime, i, ids[i], views[i], scene))
       mounted = MountState::attached;
     if (mounted == MountState::lost || (mounted == MountState::attached && runtime.feed_mounts[i].parent != scene.node))
@@ -1276,14 +1449,52 @@ void place_feeds(Runtime& runtime,
   }
 }
 
+// On an opening pulse the established pair's fused inspection also reads the
+// session-proven controller's scene and the first opened feed's mount check,
+// sharing its page and allocation proofs instead of opening scopes of their
+// own. Pure reads; the caller publishes them (fused_update) only once that
+// scope's endpoint succeeds. capture_trusted_pose and current_mount use them
+// in this update only while no engine call has run since, and otherwise read
+// in their own scopes as before. False when this pulse opens no feed.
+bool prepare_fused_reads(Runtime& runtime,
+                         const std::array<bool, kMaxCameraFeeds>& desired,
+                         const std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds>& views) noexcept {
+  const auto opened = std::find(desired.begin(), desired.end(), true);
+  if (opened == desired.end())
+    return false;
+  const auto feed = static_cast<unsigned>(opened - desired.begin());
+  runtime.fused_scene_user = 0;
+  runtime.fused_mount_feed = kMaxCameraFeeds;
+  timed(runtime, ProbeStage::pose, [&] {
+    const auto epoch = get_aircraft_session_readiness().epoch;
+    const auto resets = runtime.pose_source_resets.load(std::memory_order_acquire);
+    const auto trusted = runtime.pose_source.session_proven(epoch, resets);
+    if (trusted && runtime.pose_source.reuse(GetTickCount64(), epoch, resets) == trusted) {
+      LocalMemoryReader objects;
+      runtime.fused_scene = inspect_aircraft_scene_pose(objects, trusted, runtime.base, runtime.contract.layout);
+      if (runtime.fused_scene.complete)
+        runtime.fused_scene_user = trusted;
+    }
+    const auto& mount = runtime.feed_mounts[feed];
+    if (mount.node && !mount.lost && views[feed].complete && views[feed].ready && mount.node == views[feed].node_address) {
+      LocalMemoryReader reader;
+      std::uint64_t parent = 0;
+      if (handle_alive(reader, mount.parent_handle, mount.parent) && reader.read(mount.node + kNodeParent, &parent, sizeof(parent)) &&
+          parent == mount.parent) {
+        runtime.fused_mount_feed = feed;
+        runtime.fused_mount = mount;
+      }
+    }
+  });
+  return true;
+}
+
 void apply_gates(Runtime& runtime,
                  const std::array<ec::EntryId, kMaxCameraFeeds>& ids,
                  const std::array<bool, kMaxCameraFeeds>& desired,
                  const ProbeSnapshot& inspected,
                  bool initialize_gates) {
   auto allowed = session_work_allowed(runtime) ? desired : std::array<bool, kMaxCameraFeeds>{};
-  using Activate = void (*)(void*, std::uint64_t, bool);
-  const auto activate = function<Activate>(runtime, runtime.contract.functions.activate_entry);
   // The captured false path ORs the separately verified {1,0} mask into P48/56.
   // Close gates before opening one. On a new pair, explicitly close both even
   // when setup already left bit0 set; no original update runs between calls.
@@ -1292,17 +1503,17 @@ void apply_gates(Runtime& runtime,
       continue;
     const bool observed_active = (inspected.flags[i][0] & 1u) == 0;
     if (initialize_gates || (!allowed[i] && (runtime.gates[i] || observed_active)))
-      activate(reinterpret_cast<void*>(runtime.manager), ids[i], false);
+      activate_owned_entry(runtime, runtime.manager, ids[i], false);
   }
   for (unsigned i = 0; i < ids.size(); ++i) {
     if (!ids[i])
       continue;
     const bool observed_active = (inspected.flags[i][0] & 1u) == 0;
     if (allowed[i] && session_work_allowed(runtime) && (initialize_gates || !runtime.gates[i] || !observed_active)) {
-      activate(reinterpret_cast<void*>(runtime.manager), ids[i], true);
+      activate_owned_entry(runtime, runtime.manager, ids[i], true);
       ++runtime.activation_counts[i];
     } else if (allowed[i] && !session_work_allowed(runtime)) {
-      activate(reinterpret_cast<void*>(runtime.manager), ids[i], false);
+      activate_owned_entry(runtime, runtime.manager, ids[i], false);
       allowed[i] = false;
     }
   }
@@ -1595,6 +1806,7 @@ bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
   }
   if (!runtime.creation_valid || !session_work_allowed(runtime))
     return false;
+  const NativeCallTimer timer(runtime, LifecycleTimer::native_initialize);
   function<void (*)(void*)>(runtime, runtime.contract.functions.initialize_descriptor)(descriptor.bytes.data());
   return true;
 }
@@ -1623,8 +1835,12 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     runtime.stage_error = "Available view capacity changed before camera creation.";
     return 0;
   }
-  const auto id = function<std::uint64_t (*)(void*, const void*)>(runtime, runtime.contract.functions.create_entry)(
-      reinterpret_cast<void*>(token.identity), descriptor.bytes.data());
+  std::uint64_t id = 0;
+  {
+    const NativeCallTimer timer(runtime, LifecycleTimer::native_create);
+    id = function<std::uint64_t (*)(void*, const void*)>(runtime, runtime.contract.functions.create_entry)(
+        reinterpret_cast<void*>(token.identity), descriptor.bytes.data());
+  }
   if (!id) {
     runtime.stage_error = "The native creation call returned no owned ID.";
     return 0;
@@ -1648,8 +1864,7 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     // Setup may already have queued its initial primary-size allocation. Close
     // this new owned gate before pose/resolution work, while no original update
     // has run. The existing engine mismatch path replaces its own outputs.
-    function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
-        reinterpret_cast<void*>(runtime.manager), id, false);
+    activate_owned_entry(runtime, runtime.manager, id, false);
     view = inspect_entry(runtime, id);
     runtime.creation_valid = view.complete && view.ready && (view.flags[0] & 1u);
     if (!runtime.creation_valid) {
@@ -1693,6 +1908,7 @@ ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned ind
         auto& current = *static_cast<Runtime*>(opaque);
         if (!session_work_allowed(current))
           return false;
+        const NativeCallTimer timer(current, LifecycleTimer::native_resize_projection);
         function<void (*)(void*)>(current, current.contract.functions.update_view)(reinterpret_cast<void*>(address));
         return true;
       },
@@ -1700,6 +1916,7 @@ ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned ind
         auto& current = *static_cast<Runtime*>(opaque);
         if (!session_work_allowed(current))
           return 0;
+        const NativeCallTimer timer(current, LifecycleTimer::native_output);
         return reinterpret_cast<std::uintptr_t>(
             function<void* (*)(void*)>(current, current.contract.functions.refresh_output)(reinterpret_cast<void*>(address)));
       }};
@@ -1731,6 +1948,8 @@ ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned ind
 bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   auto& runtime = *static_cast<Runtime*>(opaque);
   runtime.lifecycle_touched = true;
+  // A pooled view can be reused by another owner after the erase.
+  view_cascades::publish_views({});
   if (!manager_context(runtime, reinterpret_cast<void*>(token.identity)) || token != runtime.token)
     return false;
   LocalMemoryReader reader;
@@ -1750,8 +1969,7 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   const auto view = inspect_entry(runtime, id);
   const auto action = runtime.retirement.observe(token, id, runtime.updates, view);
   if (action == ViewRetirement::Action::close_gate) {
-    function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
-        reinterpret_cast<void*>(token.identity), id, false);
+    activate_owned_entry(runtime, token.identity, id, false);
     const auto pair = runtime.pair.snapshot();
     for (unsigned i = 0; i < pair.owned_ids.size(); ++i)
       if (pair.owned_ids[i] == id)
@@ -1844,6 +2062,7 @@ void clear_retired_pair(Runtime& runtime) {
   // Only the observer may clear these fields, after PairController confirms
   // that its exact owned IDs are absent. A public event is not that proof.
   scene_handoff().stop_scene();
+  view_cascades::publish_views({});
   // ID disappearance may be observed without our erase callback (flight
   // teardown). Transfer last verified pooled identities before discarding the
   // pair's other metadata. No saved address is dereferenced by this ledger.
@@ -1916,8 +2135,7 @@ void park_unready_session(Runtime& runtime, void* manager, ProbeSnapshot& report
     if (!view.complete || !view.ready)
       continue;
     if ((view.flags[0] & 1u) == 0)
-      function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
-          reinterpret_cast<void*>(runtime.manager), id, false);
+      activate_owned_entry(runtime, runtime.manager, id, false);
     runtime.gates[i] = false;
   }
 }
@@ -1934,6 +2152,29 @@ bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
   begin_flight_change(runtime);
   return true;
 }
+// Observer thread, for an update over kLifecycleEventMs: plain values into the
+// fixed ring, which the worker formats. No formatting, allocation or lock
+// here; a full ring counts a drop.
+void record_lifecycle_event(Runtime& runtime, double total_ms, double pre_ms, bool serviced, double milliseconds_per_tick) noexcept {
+  LifecycleEvent event;
+  event.update = runtime.updates;
+  event.tick_ms = GetTickCount64();
+  event.total_ms = total_ms;
+  event.pre_ms = pre_ms;
+  event.serviced = serviced;
+  event.feeds = runtime.schedule.feeds();
+  if (serviced) {
+    const auto& performance = runtime.performance;
+    event.stage_ms = performance.stage_ms;
+    event.query_ms = performance.query_ms;
+    event.read_ms = performance.read_ms;
+    event.queries = performance.query_calls;
+    event.reads = performance.read_calls;
+  }
+  copy_lifecycle_timers(runtime.lifecycle_timers, milliseconds_per_tick, event);
+  runtime.lifecycle_events.push(event);
+}
+
 // Observer thread. Measures the whole update after its own work, including
 // throttled and idle returns, and keeps the interval's slowest one.
 void record_observer_peak(Runtime& runtime, LARGE_INTEGER entered, LARGE_INTEGER started, bool serviced) noexcept {
@@ -1947,14 +2188,17 @@ void record_observer_peak(Runtime& runtime, LARGE_INTEGER entered, LARGE_INTEGER
     runtime.peak_local_ms = 0;
   const auto milliseconds_per_tick = 1000.0 / static_cast<double>(runtime.counter_frequency.QuadPart);
   const auto total_ms = static_cast<double>(finished.QuadPart - entered.QuadPart) * milliseconds_per_tick;
+  serviced = serviced && started.QuadPart >= entered.QuadPart;
+  const auto pre_ms = serviced ? static_cast<double>(started.QuadPart - entered.QuadPart) * milliseconds_per_tick : total_ms;
+  if (total_ms > kLifecycleEventMs)
+    record_lifecycle_event(runtime, total_ms, pre_ms, serviced, milliseconds_per_tick);
   if (total_ms <= runtime.peak_local_ms)
     return;
   runtime.peak_local_ms = total_ms;
-  serviced = serviced && started.QuadPart >= entered.QuadPart;
   try {
     const std::lock_guard lock(runtime.mutex);
     runtime.peak.total_ms = total_ms;
-    runtime.peak.pre_ms = serviced ? static_cast<double>(started.QuadPart - entered.QuadPart) * milliseconds_per_tick : total_ms;
+    runtime.peak.pre_ms = pre_ms;
     runtime.peak.serviced = serviced;
     runtime.peak.performance = serviced ? runtime.performance : ProbePerformance{};
   } catch (...) {
@@ -1984,6 +2228,7 @@ void observer(void* manager) noexcept {
   ScopedLocalMemoryMetrics memory_scope(memory_metrics);
   try {
     ++runtime.updates;
+    runtime.lifecycle_timers = {};
     // Mounts come off the aircraft while paused or not in a ready flight, every
     // update, so quitting or ending a flight never unloads an aircraft that
     // still holds a camera Node (return_all_mounts).
@@ -2099,6 +2344,8 @@ void observer(void* manager) noexcept {
     std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds> prepared_views{};
     SceneCaptureTicket prepared_ticket{};
     std::uint32_t prepared_free_views = 0;
+    // The early pulse the fused pre-reads (prepare_fused_reads) were taken for.
+    std::array<bool, kMaxCameraFeeds> fused_desired{};
     ManagerInspection manager_inspection;
     const auto inspect_manager = [&] {
       if (fuse_pair) {
@@ -2106,12 +2353,20 @@ void observer(void* manager) noexcept {
         ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
         const bool manager_valid =
             timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, &queries, &manager_inspection); });
-        if (manager_valid && runtime.token == before.owner)
+        bool fused_reads = false;
+        if (manager_valid && runtime.token == before.owner) {
           inspect_pair(runtime, before.owned_ids, report, prepared_views, false, &queries);
+          if (report.ready[0] && report.ready[1] && (!before.owned_ids[2] || report.ready[2]))
+            fused_reads = prepare_fused_reads(runtime, desired, prepared_views);
+        }
         const bool stable = queries.finish();
         if (manager_valid && stable) {
           prepared_pair = runtime.token == before.owner;
           prepared_free_views = report.free_views;
+          if (prepared_pair && fused_reads) {
+            runtime.fused_update = runtime.updates;
+            fused_desired = desired;
+          }
           return true;
         }
         // Never consume a provisional identity after failed endpoint validation.
@@ -2331,9 +2586,11 @@ void observer(void* manager) noexcept {
             initial_resize_failed = true;
         }
         std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds> views{};
+        bool fused_views = false;
         if (!closed_warmup && !output_warmup && !initial_resize_failed) {
           if (prepared_pair && !runtime.lifecycle_touched && pair.owner == before.owner && pair.owned_ids == before.owned_ids &&
               pair.failure == ec::Failure::none && pair.blocked == ec::Blocked::none && !pair.request_pending && !pair.creation_pending) {
+            fused_views = true;
             views = prepared_views;
             report.free_views = prepared_free_views;
             if (report.ready[0] && report.ready[1] && (!pair.owned_ids[2] || report.ready[2]) && session_work_allowed(runtime))
@@ -2345,6 +2602,9 @@ void observer(void* manager) noexcept {
             inspect_pair(runtime, pair.owned_ids, report, views);
           }
         }
+        // The fused pre-reads go with the fused views only.
+        if (!fused_views)
+          runtime.fused_update = 0;
         const bool wait_for_views = runtime.view_wait.observe(now, pair,
                                                               !runtime.resize_warmup.pending() && runtime.scheduled_ids == pair.owned_ids &&
                                                                   runtime.resized_ids == pair.owned_ids &&
@@ -2385,8 +2645,7 @@ void observer(void* manager) noexcept {
             const auto& view = views[i];
             if (view.complete && view.ready && view.status == ec::OwnedViewStatus::ready) {
               if ((view.flags[0] & 1u) == 0)
-                function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
-                    reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false);
+                activate_owned_entry(runtime, runtime.manager, pair.owned_ids[i], false);
               runtime.gates[i] = false;
             }
           }
@@ -2493,9 +2752,27 @@ void observer(void* manager) noexcept {
             ++runtime.rt_record_holds;
           } else if (desired[0] || desired[1] || desired[2])
             runtime.rt_record_refusals = 0;
+          // These verified views are Taxi Cam's for the shadow-slice hook, which
+          // only ever writes into the view the simulator is preparing.
+          view_cascades::publish_views(view_addresses(views));
+          if (runtime.contract.view_cascade_slot) {
+            // The scene vtable must lie in read-only, non-executable static
+            // image data, like the camera-manager slot.
+            const auto slot = runtime.contract.view_cascade_slot;
+            const auto section = std::find_if(runtime.image.sections.begin(), runtime.image.sections.end(), [slot](const auto& item) {
+              return (item.flags & 0x40000000u) && !(item.flags & 0xa2000000u) && slot >= item.rva && slot - item.rva <= item.size &&
+                     sizeof(void*) <= item.size - (slot - item.rva);
+            });
+            if (section != runtime.image.sections.end())
+              view_cascades::install(runtime.base, runtime.contract.view_cascade_setup, slot, section->rva, section->size);
+          }
           // Every scheduled feed needs the shared aircraft body pose. Omitting the
           // third slot left the right-wing camera at a stale world transform.
           const bool needs_pose = desired[0] || desired[1] || desired[2];
+          // A late pulse other than the early one the fused pre-reads were
+          // taken for reads its pose and mounts in their own scopes.
+          if (desired != fused_desired)
+            runtime.fused_update = 0;
           const bool pose_ready =
               !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime, view_addresses(views)); });
           bool aa_ready = true;
@@ -2513,7 +2790,7 @@ void observer(void* manager) noexcept {
             // Position changes happen only inside the validated observer phase,
             // before the original manager update can consume a newly opened gate.
             if (needs_pose)
-              timed(runtime, ProbeStage::pose, [&] { place_feeds(runtime, pair.owned_ids, views, desired); });
+              timed(runtime, ProbeStage::placement, [&] { place_feeds(runtime, pair.owned_ids, views, desired); });
             if (needs_pose && runtime.retained_recalibration) {
               // The retained pair now carries the arrival pose. Reopen its scene
               // like a retained profile resume; the next inspection republishes.
@@ -2595,8 +2872,7 @@ void observer(void* manager) noexcept {
             for (unsigned i = 0; i < pair.owned_ids.size(); ++i)
               if (report.ready[i]) {
                 if (runtime.gates[i] || (report.flags[i][0] & 1u) == 0)
-                  function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
-                      reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false);
+                  activate_owned_entry(runtime, runtime.manager, pair.owned_ids[i], false);
                 runtime.gates[i] = false;
               }
           });
@@ -2716,6 +2992,12 @@ void observer(void* manager) noexcept {
     if (runtime.counter_frequency.QuadPart > 0) {
       const auto milliseconds_per_tick = 1000.0 / static_cast<double>(runtime.counter_frequency.QuadPart);
       runtime.performance.query_ms = memory_metrics.query_ticks * milliseconds_per_tick;
+      runtime.performance.query_allocation_ms = memory_metrics.query_allocation_ticks * milliseconds_per_tick;
+      runtime.performance.query_page_ms = memory_metrics.query_page_ticks * milliseconds_per_tick;
+      runtime.performance.query_fallback_ms = memory_metrics.query_fallback_ticks * milliseconds_per_tick;
+      runtime.performance.query_allocation_max_us = memory_metrics.query_allocation_max_ticks * milliseconds_per_tick * 1000.0;
+      runtime.performance.query_page_max_us = memory_metrics.query_page_max_ticks * milliseconds_per_tick * 1000.0;
+      runtime.performance.query_fallback_max_us = memory_metrics.query_fallback_max_ticks * milliseconds_per_tick * 1000.0;
       runtime.performance.read_ms = memory_metrics.read_ticks * milliseconds_per_tick;
     }
     // Sample after diagnostic/private work and status publication. The original
@@ -2757,6 +3039,15 @@ void observer(void* manager) noexcept {
       runtime.published.flight_change_fallbacks = runtime.flight_change_fallbacks;
       runtime.published.sim_paused = get_aircraft_session_readiness().paused;
       runtime.published.mount_contract_error = runtime.mount_contract_error;
+      {
+        const auto cascades = view_cascades::statistics();
+        runtime.published.cascades_available = runtime.contract.view_cascade_slot != 0;
+        runtime.published.cascades_installed = cascades.installed;
+        runtime.published.cascades_requested = cascades.requested;
+        runtime.published.cascades_hits = cascades.hits;
+        runtime.published.cascades_writes = cascades.writes;
+        runtime.published.cascades_error = !runtime.cascades_contract_error.empty() ? runtime.cascades_contract_error : cascades.error;
+      }
       runtime.published.pose_session_proven =
           runtime.pose_source.session_proven(get_aircraft_session_readiness().epoch,
                                              runtime.pose_source_resets.load(std::memory_order_acquire)) != 0;
@@ -2799,6 +3090,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
       }
       runtime.contract = contract.contract;
       runtime.mount_contract_error = contract.parent_error;
+      runtime.cascades_contract_error = contract.cascades_error;
       const auto disable_mask = inspect_activation_disable_mask(reader, runtime.image, runtime.contract.layout);
       if (!disable_mask.valid)
         throw std::runtime_error("Native activation-mask verification refused: " + disable_mask.error);
@@ -3050,6 +3342,10 @@ ObserverPeak take_observer_peak() noexcept {
   }
   runtime.peak_reset.store(true, std::memory_order_release);
   return result;
+}
+
+std::size_t take_lifecycle_events(std::array<LifecycleEvent, kLifecycleEventCapacity>& events, std::uint64_t& dropped) noexcept {
+  return state().lifecycle_events.take(events, dropped);
 }
 
 }  // namespace taxi_camera::native_camera
