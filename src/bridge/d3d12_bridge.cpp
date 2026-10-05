@@ -1385,9 +1385,9 @@ struct ContendedLists {
 };
 thread_local ContendedLists contended_lists;
 // True after a find_list whose registry lookup expired: the null result says
-// nothing about whether the list is known. Admission must not act on it. Both
-// flags are read only after a null lookup, which always ends in a find_list
-// that set them; a cached hit leaves them as they were.
+// nothing about whether the list is known. Admission must not act on it. It
+// is read only after a null lookup, which always ends in a find_list that set
+// it; a cached hit leaves it as it was.
 thread_local bool lookup_contended = false;
 void invalidate_contended_recording(List& list) noexcept {
   registry().contended_invalidations.fetch_add(1, std::memory_order_relaxed);
@@ -3960,6 +3960,7 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
     observe_safely([&] {
       auto* item = found ? found : find_hooked_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native));
       std::shared_ptr<List> admitted;
+      // The lookup misses only through find_list, which sets lookup_contended.
       if (!item && !lookup_contended && (admitted = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native))))
         item = admitted.get();
       if (item) {
