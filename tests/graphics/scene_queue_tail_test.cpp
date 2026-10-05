@@ -301,91 +301,6 @@ void receipts_without_source_work() {
               manager->statistics().quarantined == quarantined + 1 && owner.failed && !manager->transaction_.id,
           "A receipt on a device failed mid-flight did not quarantine its packet");
 }
-// A receipt Waits on the timeline only when the previous Signal was queued on
-// another queue; on one queue, queue order already serializes the receipts.
-// Every path (consumer, source, capture, private) Waits once per queue change,
-// the watchdog sees only those Waits and Signals stay monotonic. The manager
-// owns one reference to the last Signal's queue and never releases one under
-// its mutex.
-void queue_change_waits() {
-  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
-  Device device{device_table};
-  auto queue_table = queue_vtable();
-  Queue a{queue_table.data(), &device}, b{queue_table.data(), &device};
-  std::array<void*, 11> fence_table{};
-  fence_table[8] = reinterpret_cast<void*>(&completed_value);
-  fence_table[10] = reinterpret_cast<void*>(&cpu_signal);
-  Timeline timeline{fence_table.data()};
-  taxi_camera::SceneHandoff handoff;
-  auto manager = std::make_unique<Manager>(handoff);
-  a.lock_probe = b.lock_probe = manager.get();
-  auto& owner = manager->devices_[0];
-  owner.key = 7;
-  owner.native = reinterpret_cast<ID3D12Device*>(&device);
-  owner.timeline = reinterpret_cast<ID3D12Fence*>(&timeline);
-  owner.active = true;
-  manager->published_devices_[0].store(owner.native);
-  std::uintptr_t marker = 0;
-  auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&marker);
-  auto& recording = manager->lists_[0];
-  recording.native = known;
-  recording.device_key = 7;
-  recording.object_generation = 23;
-  recording.session_generation = owner.session_generation;
-  recording.consumer = true;
-  manager->list_indices_.emplace(known, 0);
-  manager->publish_list(recording);
-  std::uint64_t expected = 0;
-  const auto submit = [&](Queue& target) {
-    auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&target);
-    ID3D12CommandList* batch[]{known};
-    const auto receipt = manager->before_submission(native_queue, 1, batch);
-    require(receipt != 0, "Queue-change fixture did not open an ordered transaction");
-    manager->after_submission(native_queue, receipt);
-    ++expected;
-    require(owner.last_signal == expected && target.last_signal == expected, "Timeline Signals did not stay monotonic across queues");
-  };
-  const auto waited = [&] { return manager->published_timelines_[0].waited.load(); };
-  submit(a);
-  submit(a);
-  require(!a.waits && !b.waits && !waited() && a.references == 2 && b.references == 1,
-          "Consumer receipts on one queue queued a Wait or did not hold that queue");
-  recording.consumer = false;
-  recording.source_touched = true;
-  manager->publish_list(recording);
-  submit(b);
-  require(b.waits == 1 && b.last_wait == 2 && waited() == 2 && a.references == 1 && b.references == 2,
-          "A source receipt on a new queue did not Wait for the other queue's Signal");
-  submit(b);
-  require(b.waits == 1 && waited() == 2, "A second source receipt on the same queue queued a Wait");
-  recording.source_touched = false;
-  recording.packets = 1;
-  manager->publish_list(recording);
-  submit(a);
-  require(a.waits == 1 && a.last_wait == 4 && waited() == 4 && a.references == 2 && b.references == 1,
-          "A capture receipt back on the first queue did not Wait for the other queue's Signal");
-  submit(a);
-  require(a.waits == 1 && waited() == 4, "A second capture receipt on the same queue queued a Wait");
-  recording.packets = 0;
-  manager->publish_list(recording);
-  for (unsigned i = 0; i < 2; ++i) {
-    const auto work = manager->begin_private_submission(owner.key, reinterpret_cast<ID3D12CommandQueue*>(&b));
-    require(work.receipt != 0 && work.value == expected + 1, "Begin a queue-change private receipt");
-    require(manager->end_private_submission(work.receipt), "End a queue-change private receipt");
-    ++expected;
-    require(owner.last_signal == expected && b.last_signal == expected, "Private Signals did not stay monotonic across queues");
-  }
-  require(b.waits == 2 && b.last_wait == 6 && waited() == 6 && a.references == 1 && b.references == 2,
-          "Private receipts did not Wait exactly once on their queue change");
-  manager->set_submission_gate(false);
-  require(timeline.cpu_signals.load() == 1 && timeline.completed.load() == 6 && manager->statistics().released_waits == 1,
-          "Gate close did not release the last cross-queue Wait once");
-  manager->set_submission_gate(true);
-  require(!a.released_under_lock && !b.released_under_lock, "A queue reference was released under the manager mutex");
-  a.lock_probe = b.lock_probe = nullptr;
-  manager.reset();
-  require(a.references == 1 && b.references == 1, "The manager leaked or over-released a queue reference");
-}
 struct FakeList {
   void** table;
   Device* device;
@@ -866,10 +781,8 @@ void run() {
   recording.packets = 1;
   ordered(known, true);
   recording.packets = 0;
-  // One queue: queue order already serializes the receipts, so none Waits
-  // (queue_change_waits covers the Wait on every queue change).
-  require(queue.signals == 3 && !queue.waits && owner.last_signal == 3,
-          "Consumer/source/capture paths preserve ordered Signal receipts without same-queue Waits");
+  require(queue.signals == 3 && queue.waits == 2 && !queue.future_wait && owner.last_signal == 3,
+          "Consumer/source/capture paths preserve ordered Wait and Signal receipts");
   recording.awaiting_native_reset = true;
   ordered(known, false);
   held_lock(known, false, true);
@@ -891,7 +804,7 @@ void run() {
               manager->statistics().source_retirements == retirements_before_unknown + 1 &&
               (manager->statistics().last_retirement_origins & Manager::OriginRefusedCompleted),
           "An escaped unknown list did not name its retirement origin");
-  require(queue.signals == 3 && !queue.waits, "Unobserved recordings never invent a receipt");
+  require(queue.signals == 3 && queue.waits == 2, "Unobserved recordings never invent a receipt");
   ordered(unknown, false);
   // The ordered path still has the list in hand and knows nothing about its
   // recording: this remains a genuine wipe through unknown_lists_no_owner.
@@ -1126,7 +1039,6 @@ void run() {
           "Publication version exhaustion stays permanently conservative instead of wrapping to an ABA match");
   reshade_present_gate();
   receipts_without_source_work();
-  queue_change_waits();
   clean_reset_fast_path();
   ordered_waits_name_their_lock();
   std::printf(

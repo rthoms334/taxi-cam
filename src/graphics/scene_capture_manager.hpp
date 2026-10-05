@@ -394,13 +394,6 @@ class SceneCaptureManager {
     ID3D12Device* native = nullptr;
     ID3D12Fence* timeline = nullptr;
     std::uint64_t last_signal = 0;
-    // Owned reference to the queue that Signaled last_signal. Written and read
-    // only by the submission_mutex_ owner, together with last_signal; released
-    // when replaced (never under mutex_) and by the destructor. Like native and
-    // timeline, a destroyed or failed slot keeps it for the process lifetime:
-    // destroy_device holds only mutex_, while a receipt already in flight reads
-    // it without mutex_ and would take it again in finish_transaction.
-    ID3D12CommandQueue* last_signal_queue = nullptr;
     bool active = false, failed = false;
     std::uint64_t session_generation = 1;
     bool session_active = true;

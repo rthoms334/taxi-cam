@@ -6,7 +6,6 @@
 
 #include <chrono>
 #include <limits>
-#include <utility>
 
 namespace taxi_camera {
 namespace {
@@ -99,14 +98,7 @@ static_assert(capture_spacing_us(9) == 100000 && capture_spacing_us(10) == 10000
 SceneCaptureManager::SceneCaptureManager(SceneHandoff& handoff) noexcept : handoff_(handoff) {
   list_indices_.reserve(MaximumLists);
 }
-SceneCaptureManager::~SceneCaptureManager() {
-  // Native device/timeline leases are intentionally process-lifetime, and so
-  // is each slot's last-Signal queue lease in production, where the manager is
-  // never destroyed. No submission can own the manager while it is destroyed.
-  for (auto& owner : devices_)
-    if (owner.last_signal_queue)
-      owner.last_signal_queue->Release();
-}
+SceneCaptureManager::~SceneCaptureManager() = default;  // Native device/timeline leases intentionally process-lifetime.
 
 bool SceneCaptureManager::last_call_contended() noexcept {
   return contended_call;
@@ -1968,9 +1960,8 @@ SceneCaptureManager::Submission SceneCaptureManager::begin_transaction(Device& o
                                                                        std::uint32_t compatible) noexcept {
   // Both mutexes held; no future transaction enters until end/refused releases
   // submission_mutex_. The caller then releases mutex_ and queues this
-  // receipt's Wait when its queue differs from the last Signal's
-  // (queue_transaction_wait), which therefore still targets an ALREADY queued
-  // Signal and precedes the forward.
+  // receipt's Wait (queue_transaction_wait), which therefore still targets an
+  // ALREADY queued Signal and precedes the forward.
   apply_deferred();
   const auto bit = 1u << static_cast<unsigned>(&owner - devices_.data());
   if (!owner.active || owner.failed || (!(compatible & bit) && !compatible_queue(queue, owner)) || next_receipt_ >= MaximumCounter ||
@@ -1988,20 +1979,10 @@ SceneCaptureManager::Submission SceneCaptureManager::begin_transaction(Device& o
   return {transaction_.id, owner.timeline, transaction_.value};
 }
 bool SceneCaptureManager::queue_transaction_wait(Device& owner, ID3D12CommandQueue* queue) noexcept {
-  // Only submission_mutex_ is held. last_signal and last_signal_queue change
-  // only in finish_transaction on that mutex's owner, which is this thread,
-  // and the receipt reaches the forward only after this returns.
+  // Only submission_mutex_ is held. last_signal changes only in
+  // finish_transaction on that mutex's owner, which is this thread, and the
+  // receipt reaches the forward only after this returns.
   if (!owner.last_signal)
-    return true;
-  // The previous receipt's Signal is already on this queue. D3D12 executes one
-  // queue's ExecuteCommandLists calls and Signals in submission order, and work
-  // of separate calls does not overlap (the guarantee the private tails rely
-  // on), so this receipt already runs after that Signal and all it covered.
-  // No Wait is queued, so nothing is published for the watchdog: a same-queue
-  // Wait never needs a CPU release, its Signal being ahead of it. The held
-  // reference keeps the address from being reused by another queue; a wrapper
-  // and its native queue compare unequal and keep the Wait.
-  if (queue == owner.last_signal_queue)
     return true;
   if (SUCCEEDED(queue->Wait(owner.timeline, owner.last_signal))) {
     publish_queued_wait(owner);  // Still after its Wait, for the watchdog.
@@ -2214,7 +2195,6 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
   bool success = false;
   TailBatch tails;
   ID3D12CommandQueue* queue = nullptr;
-  ID3D12CommandQueue* replaced_queue = nullptr;
   ID3D12Fence* timeline = nullptr;
   std::uint64_t value = 0;
   {
@@ -2249,13 +2229,8 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
     apply_deferred();
     auto& pending = transaction_;
     refused |= pending.device->failed;
-    if (success) {
+    if (success)
       pending.device->last_signal = pending.value;
-      if (pending.device->last_signal_queue != pending.queue) {
-        pending.queue->AddRef();
-        replaced_queue = std::exchange(pending.device->last_signal_queue, pending.queue);
-      }
-    }
     if (!success || (refused && fatal))
       fail_device(*pending.device);
     else if (refused)
@@ -2294,8 +2269,6 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
     pending = {};
     collect();
   }
-  if (replaced_queue)
-    replaced_queue->Release();  // Outside mutex_: a queue is never released under it.
   transaction_owner = nullptr;
   thread_receipt = 0;
   submission_mutex_.unlock();
