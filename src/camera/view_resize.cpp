@@ -1,8 +1,8 @@
 #include "view_resize.hpp"
+#include "local_memory.hpp"
 
 #include <windows.h>
 
-#include <algorithm>
 #include <cstring>
 #include <limits>
 
@@ -20,35 +20,13 @@ bool dimensions_bounded(const ViewDimensions& dimensions) noexcept {
   return true;
 }
 
-bool writable_private(std::uint64_t address, std::size_t bytes) noexcept {
-  if (!address || address > std::numeric_limits<std::uintptr_t>::max() - bytes)
-    return false;
-  const auto end = address + bytes;
-  void* allocation = nullptr;
-  while (address < end) {
-    MEMORY_BASIC_INFORMATION region{};
-    if (VirtualQuery(reinterpret_cast<void*>(address), &region, sizeof(region)) != sizeof(region) || region.State != MEM_COMMIT ||
-        region.Type != MEM_PRIVATE || region.Protect != PAGE_READWRITE || !region.AllocationBase)
-      return false;
-    if (allocation && allocation != region.AllocationBase)
-      return false;
-    allocation = region.AllocationBase;
-    const auto begin = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
-    if (begin > address || region.RegionSize > std::numeric_limits<std::uintptr_t>::max() - begin || begin + region.RegionSize <= address)
-      return false;
-    address = std::min<std::uint64_t>(end, begin + region.RegionSize);
-  }
-  return true;
-}
-
+// One exact, timed RPM of a whole field, published only when complete. RPM
+// itself refuses inaccessible and guard pages, so each reread after a write or
+// native call needs no earlier proof.
 template <typename T>
 bool read(std::uint64_t address, T& output) noexcept {
-  SIZE_T count = 0;
-  T local{};
-  if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(address), &local, sizeof(local), &count) || count != sizeof(local))
-    return false;
-  output = local;
-  return true;
+  static_assert(sizeof(T) <= kLocalBytesReadLimit);
+  return read_local_bytes(address, &output, sizeof(output));
 }
 }  // namespace
 
@@ -94,7 +72,12 @@ static ViewResizeResult change_view_dimensions(const engine_camera::OwnedViewSna
   if (!initialize_output && (view.mode != 2 || !view.resource_present || view.output_dimensions != desired[0]))
     return fail(ViewResizeStatus::output_mismatch);
   const auto field = view.view_address + 16;
-  if (!writable_private(field, sizeof(desired)) || !writable_private(view.view_address + 48, sizeof(view.flags)))
+  // One fresh proof of P+16..P+63: the dimensions, the gap before the flags
+  // and both flag words, in one private allocation and exactly PAGE_READWRITE.
+  // Resident pages take allocation and working-set metadata, not a region
+  // scan of the heap; a page outside the working set takes the timed walk.
+  static_assert(sizeof(desired) == 24 && sizeof(view.flags) == 16);
+  if (!writable_private_span(field, 48))
     return fail(ViewResizeStatus::invalid_mapping);
   ViewDimensions current{};
   std::array<std::uint64_t, 2> flags{};
@@ -107,10 +90,9 @@ static ViewResizeResult change_view_dimensions(const engine_camera::OwnedViewSna
     result.complete = true;
     return result;
   }
-  SIZE_T written = 0;
+  // The write takes its own fresh proof of the 24 bytes immediately before it.
   result.write_attempted = true;
-  if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(field), desired.data(), sizeof(desired), &written) ||
-      written != sizeof(desired))
+  if (!write_local_private(field, desired.data(), sizeof(desired)))
     return fail(ViewResizeStatus::write_failed);
   if (!read(field, current) || !read(view.view_address + 48, flags))
     return fail(ViewResizeStatus::read_failed);

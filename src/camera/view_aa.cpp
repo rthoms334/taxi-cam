@@ -46,9 +46,9 @@ ViewAaResult disable_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
   auto desired = current;
   desired[0] &= ~kViewAaFlag;
   if (desired != current) {
-    SIZE_T written = 0;
+    // A fresh proof of the 8-byte word immediately before its store.
     result.write_attempted = true;
-    if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(field), &desired[0], 8, &written) || written != 8)
+    if (!write_local_private(field, &desired[0], 8))
       return fail("aa_write_failed");
   }
   if (!read_flags(field, current) || !read_overrides(image, again, layout))
@@ -79,9 +79,8 @@ ViewAaResult restore_view_aa_flag(std::uint64_t view_address) noexcept {
   auto desired = current;
   desired[0] |= kViewAaFlag;
   if (desired != current) {
-    SIZE_T written = 0;
     result.write_attempted = true;
-    if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(field), &desired[0], 8, &written) || written != 8)
+    if (!write_local_private(field, &desired[0], 8))
       return fail("aa_write_failed");
   }
   if (!read_flags(field, current))

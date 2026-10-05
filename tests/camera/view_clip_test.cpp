@@ -1,4 +1,5 @@
 #include "../../src/camera/view_clip.hpp"
+#include "../../src/camera/local_memory.hpp"
 
 #include <windows.h>
 
@@ -42,7 +43,7 @@ int main() {
 
   // A private read-write page stands in for the camera object.
   auto* camera = static_cast<unsigned char*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-  if (!require(camera != nullptr, "Test camera allocation failed"))
+  if (!require(camera != nullptr && VirtualLock(camera, 0x1000) != FALSE, "Test camera allocation failed"))
     return 1;
   const auto address = reinterpret_cast<std::uint64_t>(camera);
   store(camera, own.near_plane, own.far_plane, own.default_far);
@@ -54,7 +55,16 @@ int main() {
   ok &= require(result.complete && !result.write_attempted && result.after == own, "A camera already at its target was written");
 
   camera_far_target(own, main_view, target);
-  result = apply_camera_far(address, target);
+  LocalMemoryMetrics metrics;
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    result = apply_camera_far(address, target);
+  }
+  // Two fresh O(1) proofs (the 12-byte field, then the store's own 8 bytes),
+  // one timed store and the two exact reads; no region scan.
+  ok &= require(
+      metrics.write_calls == 1 && metrics.read_calls == 2 && metrics.query_fallback_calls == 0 && metrics.query_allocation_calls == 2,
+      "The far write or its proofs were untimed or scanned the region");
   float next = 0;
   std::memcpy(&next, camera + kCameraNearOffset + 12, sizeof(next));
   ok &= require(result.complete && result.write_attempted && result.before == own && result.after == target && read_camera_clip(address, read) &&

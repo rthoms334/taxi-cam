@@ -82,6 +82,7 @@ void success(unsigned offset) {
           "resident AA flags did not use bounded page validation");
   // The mock image owns its override reads. Only the two exact flag reads count.
   require(metrics.read_calls == 2 && metrics.requested_bytes == 32, "AA flag reads were uncounted or widened");
+  require(metrics.write_calls == 1, "the AA flag store was untimed or repeated");
   auto expected = fixture.before;
   auto flags = fixture.view.flags;
   flags[0] &= ~nc::kViewAaFlag;
@@ -98,7 +99,8 @@ void success(unsigned offset) {
   }();
   require(repeated.complete && !repeated.write_attempted, "already-disabled view rewritten");
   accounting(metrics);
-  require(metrics.read_calls == 2 && metrics.requested_bytes == 32, "already-disabled AA skipped its exact read bracket");
+  require(metrics.read_calls == 2 && metrics.requested_bytes == 32 && metrics.write_calls == 0,
+          "already-disabled AA skipped its exact read bracket or stored");
   require(fixture.image.reads == 8, "already-disabled AA skipped its override bracket");
   fixture.unchanged();
   require(VirtualUnlock(fixture.allocation, 8192) != FALSE, "could not unpin the AA fixture");
@@ -203,6 +205,8 @@ void access_changes_during_update() {
             "AA changed-access failure was misclassified");
     require(metrics.read_calls == (already_clear ? 2u : 1u) && metrics.requested_bytes == (already_clear ? 32u : 16u),
             "AA failed access attempts were uncounted or widened");
+    // The write's own fresh proof refuses the changed page: nothing is stored.
+    require(metrics.write_calls == 0, "AA stored into flags made inaccessible after the first proof");
     DWORD previous = 0;
     require(VirtualProtect(fixture.allocation, 4096, PAGE_READWRITE, &previous) != FALSE, "AA changed-access restore failed");
     fixture.unchanged();

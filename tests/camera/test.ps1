@@ -12,7 +12,7 @@ foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activa
     $output = Join-Path $outputDirectory ($component + '-test.exe')
     $testSource = $component + '_test.cpp'
     $componentSources = @((Join-Path $repoRoot ('src/camera/' + $component + '.cpp')))
-    if ($component -eq 'view_aa') { $componentSources += (Join-Path $repoRoot 'src/camera/local_memory.cpp') }
+    if ($component -eq 'view_aa' -or $component -eq 'view_resize') { $componentSources += (Join-Path $repoRoot 'src/camera/local_memory.cpp') }
     & $compiler @common @componentSources `
         (Join-Path $PSScriptRoot $testSource) '-o' $output
     if ($LASTEXITCODE -ne 0) { throw "Native camera component compilation failed: $component" }

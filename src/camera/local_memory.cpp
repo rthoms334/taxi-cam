@@ -40,6 +40,9 @@ struct PageHints {
 thread_local PageHints page_hints;
 #ifdef TAXI_LOCAL_MEMORY_TESTING
 thread_local LocalMemoryQueryTestFaults query_test_faults;
+thread_local LocalMemoryWriteTestHook write_test_hook = nullptr;
+thread_local void* write_test_context = nullptr;
+thread_local bool write_without_guarded_copy = false;
 #endif
 
 std::uint64_t performance_tick() noexcept {
@@ -364,14 +367,21 @@ bool directory_valid(const discovery::Inventory& image, std::uint32_t rva, std::
 void set_local_memory_query_test_faults(LocalMemoryQueryTestFaults faults) noexcept {
   query_test_faults = faults;
 }
+
+void set_local_memory_write_test_hook(LocalMemoryWriteTestHook hook, void* context, bool without_guarded_copy) noexcept {
+  write_test_hook = hook;
+  write_test_context = context;
+  write_without_guarded_copy = without_guarded_copy;
+}
 #endif
 
 bool writable_private_span(std::uint64_t address, std::size_t size) noexcept {
-  if (!address || !size || size > 16 || address > std::numeric_limits<std::uintptr_t>::max() - size)
+  if (!address || !size || size > kLocalWriteLimit || address > std::numeric_limits<std::uintptr_t>::max() - size)
     return false;
   const auto value = static_cast<std::uintptr_t>(address);
   const auto page_bytes = page_size();
-  if (!page_bytes)
+  // A span of at most one page touches at most two: first and last below.
+  if (!page_bytes || size > page_bytes)
     return false;
   WIN32_MEMORY_REGION_INFORMATION allocation{};
   DWORD error = ERROR_SUCCESS;
@@ -419,15 +429,52 @@ bool writable_private_span(std::uint64_t address, std::size_t size) noexcept {
 }
 
 bool read_local_flag_words(std::uint64_t address, std::array<std::uint64_t, 2>& flags) noexcept {
-  std::array<std::uint64_t, 2> temporary{};
-  if (!address || address > std::numeric_limits<std::uintptr_t>::max() - sizeof(temporary))
+  return read_local_bytes(address, flags.data(), sizeof(flags));
+}
+
+bool read_local_bytes(std::uint64_t address, void* destination, std::size_t size) noexcept {
+  std::array<std::uint8_t, kLocalBytesReadLimit> temporary{};
+  if (!destination || !address || !size || size > temporary.size() || address > std::numeric_limits<std::uintptr_t>::max() - size)
     return false;
   SIZE_T copied = 0;
-  if (!read_memory(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)), temporary.data(), sizeof(temporary), copied) ||
-      copied != sizeof(temporary))
+  if (!read_memory(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)), temporary.data(), size, copied) || copied != size)
     return false;
-  flags = temporary;
+  std::memcpy(destination, temporary.data(), size);
   return true;
+}
+
+bool write_local_private(std::uint64_t address, const void* data, std::size_t size) noexcept {
+  // KernelBase's WriteProcessMemory first takes a basic-information query,
+  // the same homogeneous-region walk as VirtualQuery (0.2-1.8 ms in MSFS
+  // heaps), before it writes; the span proof is O(1) for resident pages.
+#ifdef TAXI_LOCAL_MEMORY_TESTING
+  const bool guarded = !write_without_guarded_copy && guarded_copy_available();
+#else
+  const bool guarded = guarded_copy_available();
+#endif
+  if (!data || !writable_private_span(address, size))
+    return false;
+#ifdef TAXI_LOCAL_MEMORY_TESTING
+  if (write_test_hook)
+    write_test_hook(write_test_context, address, size);
+#endif
+  auto* const destination = reinterpret_cast<void*>(static_cast<std::uintptr_t>(address));
+  auto* const metrics = active_metrics;
+  const auto start = metrics ? performance_tick() : 0;
+  bool result = false;
+  if (guarded) {
+    // A page decommitted, protected or guarded since the proof faults inside
+    // the copy; the handler ends it as a failure and re-arms a guard page.
+    result = taxi_guarded_copy(destination, data, size) == 0;
+  } else {
+    SIZE_T written = 0;
+    result = WriteProcessMemory(GetCurrentProcess(), destination, data, size, &written) != FALSE && written == size;
+  }
+  if (metrics) {
+    ++metrics->write_calls;
+    metrics->write_ticks += elapsed_ticks(start);
+  }
+  return result;
 }
 
 const LocalMemoryMetrics* active_local_memory_metrics() noexcept {

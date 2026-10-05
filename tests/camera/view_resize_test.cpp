@@ -1,4 +1,5 @@
 #include "../../src/camera/view_resize.hpp"
+#include "../../src/camera/local_memory.hpp"
 
 #include <windows.h>
 
@@ -220,6 +221,51 @@ void refusals() {
   }
 }
 
+// Every proof, read and write is a timed local_memory call: one O(1) proof of
+// the 48 bytes from the dimensions to the flags, the write's own fresh proof
+// of its 24 bytes, one store and the four exact rereads. No region scan.
+void metered_memory_calls() {
+  for (const bool restore : {false, true}) {
+    Fixture fixture;
+    require(VirtualLock(fixture.allocation, 8192) != FALSE, "could not pin the resize fixture");
+    auto callbacks = fixture.callbacks();
+    if (restore) {
+      fixture.view.resource_present = true;
+      fixture.view.output_dimensions = fixture.desired[0];
+      callbacks.ensure_output = nullptr;
+    }
+    const auto change = [&] {
+      return restore ? nc::restore_owned_view_dimensions(fixture.view, fixture.feed, fixture.desired, callbacks)
+                     : nc::resize_owned_view(fixture.view, fixture.feed, fixture.desired, callbacks);
+    };
+    nc::LocalMemoryMetrics metrics;
+    {
+      nc::ScopedLocalMemoryMetrics measured(metrics);
+      const auto result = change();
+      require(result.complete && result.write_attempted &&
+                  result.status == (restore ? nc::ViewResizeStatus::dimensions_restored : nc::ViewResizeStatus::resized),
+              "metered resize failed");
+    }
+    require(metrics.query_fallback_calls == 0 && metrics.query_allocation_calls == 2 && metrics.query_page_calls == 2 &&
+                metrics.query_calls == 4,
+            "resize proofs were not two fresh O(1) span proofs");
+    require(metrics.write_calls == 1 && metrics.read_calls == 8 && metrics.requested_bytes == 4 * 40,
+            "the dimension write or its four exact rereads were untimed or widened");
+    fixture.view.dimensions = fixture.desired;
+    metrics = {};
+    {
+      nc::ScopedLocalMemoryMetrics measured(metrics);
+      const auto again = change();
+      require(again.complete && !again.write_attempted && again.status == nc::ViewResizeStatus::unchanged,
+              "metered unchanged view mutated");
+    }
+    require(metrics.query_calls == 2 && metrics.query_fallback_calls == 0 && metrics.write_calls == 0 && metrics.read_calls == 2 &&
+                metrics.requested_bytes == 40,
+            "an unchanged view did not take one fresh proof and one exact read pair");
+    require(VirtualUnlock(fixture.allocation, 8192) != FALSE, "could not unpin the resize fixture");
+  }
+}
+
 void callback_failures() {
   for (unsigned failure = 1; failure <= 4; ++failure) {
     Fixture fixture;
@@ -412,6 +458,7 @@ int main() {
     success(1);
     refusals();
     callback_failures();
+    metered_memory_calls();
     stale_fields_and_boundary(false);
     stale_fields_and_boundary(true);
     empty_manager_warmup({{{3413, 913}, {3413, 913}, {3413, 913}}});
