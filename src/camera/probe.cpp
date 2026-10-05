@@ -117,6 +117,9 @@ struct Runtime {
   // kLifecycleEventMs for the worker's 'Lifecycle event' lines.
   LifecycleTimers lifecycle_timers;
   LifecycleEventLog lifecycle_events;
+  // This thread's CPU sample at the serviced start (observer thread, taken
+  // only by a serviced update, read only by that update's event).
+  ThreadCpuSample serviced_cpu{};
   // Proven aircraft controller for the camera pose (observer thread). A session
   // reset from any thread advances pose_source_resets, which retires it.
   PoseSourceCache pose_source;
@@ -334,6 +337,7 @@ class StageTimer {
     if (const auto* metrics = active_local_memory_metrics()) {
       reads_ = metrics->read_calls;
       queries_ = metrics->query_calls;
+      memory_ticks_ = memory_ticks(*metrics);
     }
     QueryPerformanceCounter(&started_);
   }
@@ -344,10 +348,15 @@ class StageTimer {
         runtime_.counter_frequency.QuadPart > 0) {
       runtime_.performance.stage_ms[index] +=
           static_cast<double>(finished.QuadPart - started_.QuadPart) * 1000.0 / runtime_.counter_frequency.QuadPart;
-      // Stages are disjoint, so the native calls timed since this section
-      // began ran inside it; the rest of it is the lifecycle's proofs.
-      if (stage_ == ProbeStage::lifecycle)
-        runtime_.lifecycle_timers.record_lifecycle(finished.QuadPart - started_.QuadPart, native_before_);
+      // Stages are disjoint, so the native calls and the timed memory calls
+      // since this section began ran inside it; the rest of it is the
+      // lifecycle's proofs, and what no memory-call timer saw is untimed.
+      if (stage_ == ProbeStage::lifecycle) {
+        const auto* metrics = active_local_memory_metrics();
+        const auto memory = metrics ? memory_ticks(*metrics) - memory_ticks_ : 0;
+        runtime_.lifecycle_timers.record_lifecycle(finished.QuadPart - started_.QuadPart, native_before_,
+                                                   static_cast<std::int64_t>(memory));
+      }
     }
     if (const auto* metrics = active_local_memory_metrics()) {
       runtime_.performance.stage_reads[index] += static_cast<std::uint32_t>(metrics->read_calls - reads_);
@@ -356,11 +365,15 @@ class StageTimer {
   }
 
  private:
+  // QPC ticks of every timed local_memory query, read and write so far.
+  static std::uint64_t memory_ticks(const LocalMemoryMetrics& metrics) noexcept {
+    return metrics.query_ticks + metrics.read_ticks + metrics.write_ticks;
+  }
   Runtime& runtime_;
   ProbeStage stage_;
   std::int64_t native_before_ = 0;
   LARGE_INTEGER started_{};
-  std::uint64_t reads_ = 0, queries_ = 0;
+  std::uint64_t reads_ = 0, queries_ = 0, memory_ticks_ = 0;
 };
 
 // Times native engine calls for this update's lifecycle sub-timers (observer
@@ -2154,7 +2167,8 @@ bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
 }
 // Observer thread, for an update over kLifecycleEventMs: plain values into the
 // fixed ring, which the worker formats. No formatting, allocation or lock
-// here; a full ring counts a drop.
+// here; a full ring counts a drop. A serviced update samples this thread's
+// CPU time once more here (thread_cpu_ms).
 void record_lifecycle_event(Runtime& runtime, double total_ms, double pre_ms, bool serviced, double milliseconds_per_tick) noexcept {
   LifecycleEvent event;
   event.update = runtime.updates;
@@ -2164,12 +2178,15 @@ void record_lifecycle_event(Runtime& runtime, double total_ms, double pre_ms, bo
   event.serviced = serviced;
   event.feeds = runtime.schedule.feeds();
   if (serviced) {
+    event.cpu_ms = thread_cpu_ms(runtime.serviced_cpu, sample_thread_cpu(), total_ms - pre_ms);
     const auto& performance = runtime.performance;
     event.stage_ms = performance.stage_ms;
     event.query_ms = performance.query_ms;
     event.read_ms = performance.read_ms;
     event.queries = performance.query_calls;
     event.reads = performance.read_calls;
+    event.write_ms = performance.write_ms;
+    event.writes = performance.write_calls;
   }
   copy_lifecycle_timers(runtime.lifecycle_timers, milliseconds_per_tick, event);
   runtime.lifecycle_events.push(event);
@@ -2322,6 +2339,7 @@ void observer(void* manager) noexcept {
     if (!runtime.counter_frequency.QuadPart)
       QueryPerformanceFrequency(&runtime.counter_frequency);
     QueryPerformanceCounter(&started);
+    runtime.serviced_cpu = sample_thread_cpu();
     runtime.performance = {};
     runtime.inspection_changed = false;
     ProbeSnapshot report;
@@ -2986,6 +3004,7 @@ void observer(void* manager) noexcept {
     runtime.performance.query_page_calls = memory_metrics.query_page_calls;
     runtime.performance.query_fallback_calls = memory_metrics.query_fallback_calls;
     runtime.performance.read_calls = memory_metrics.read_calls;
+    runtime.performance.write_calls = memory_metrics.write_calls;
     runtime.performance.requested_bytes = memory_metrics.requested_bytes;
     runtime.performance.query_cache_hits = memory_metrics.query_cache_hits;
     runtime.performance.query_cache_validation_failures = memory_metrics.query_cache_validation_failures;
@@ -2999,6 +3018,7 @@ void observer(void* manager) noexcept {
       runtime.performance.query_page_max_us = memory_metrics.query_page_max_ticks * milliseconds_per_tick * 1000.0;
       runtime.performance.query_fallback_max_us = memory_metrics.query_fallback_max_ticks * milliseconds_per_tick * 1000.0;
       runtime.performance.read_ms = memory_metrics.read_ticks * milliseconds_per_tick;
+      runtime.performance.write_ms = memory_metrics.write_ticks * milliseconds_per_tick;
     }
     // Sample after diagnostic/private work and status publication. The original
     // manager update executes only after this observer returns through the thunk.

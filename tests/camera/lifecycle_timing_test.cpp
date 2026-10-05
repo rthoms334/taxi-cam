@@ -52,9 +52,65 @@ void timers() {
   require(event.timer_ms[index(LifecycleTimer::native_create)] == 37.5 && event.timer_max_ms[index(LifecycleTimer::native_create)] == 20 &&
               event.timer_calls[index(LifecycleTimer::native_create)] == 3 && event.timer_ms[index(LifecycleTimer::proofs)] == 35,
           "Timer ticks were not converted to milliseconds");
+  require(timers.untimed_ticks == 70 && event.untimed_ms == 35, "Sections without memory calls were not wholly untimed");
   timers = {};
-  require(timers.native_ticks == 0 && timers.calls == std::array<std::uint32_t, nc::kLifecycleTimerCount>{},
+  require(timers.native_ticks == 0 && timers.untimed_ticks == 0 && timers.calls == std::array<std::uint32_t, nc::kLifecycleTimerCount>{},
           "Per-update reset kept values");
+}
+
+// Untimed is each section's proofs less the query, read and write ticks
+// recorded inside it, never below zero and never taking native time twice.
+void untimed() {
+  nc::LifecycleTimers timers;
+  timers.record(LifecycleTimer::native_resize_projection, 5);
+  timers.record_lifecycle(100, 0, 30);  // 95 proofs, 30 of them timed memory calls.
+  require(timers.ticks[index(LifecycleTimer::proofs)] == 95 && timers.untimed_ticks == 65, "Timed memory calls were not taken off proofs");
+  timers.record_lifecycle(40, timers.native_ticks, 60);  // More memory than proofs clamps at zero.
+  require(timers.ticks[index(LifecycleTimer::proofs)] == 135 && timers.untimed_ticks == 65, "Untimed ticks went negative");
+  timers.record_lifecycle(20, timers.native_ticks, -8);  // A negative memory delta counts as none.
+  require(timers.untimed_ticks == 85, "A negative memory delta added untimed ticks");
+  nc::LifecycleEvent event;
+  nc::copy_lifecycle_timers(timers, 0.1, event);
+  require(event.untimed_ms > 8.49 && event.untimed_ms < 8.51 && event.timer_ms[index(LifecycleTimer::proofs)] > 15.49,
+          "Untimed ticks were not converted to milliseconds");
+}
+
+// cpu_ms is wall time scaled by cycles over time-stamp ticks; unusable
+// samples are negative, so the line leaves cpu_ms out.
+void thread_cpu() {
+  const nc::ThreadCpuSample start{1000, 5000};
+  require(nc::thread_cpu_ms(start, {1500, 6000}, 8.0) == 4.0, "Half the cycles of the interval were not half its wall time");
+  require(nc::thread_cpu_ms(start, {2000, 6000}, 8.0) == 8.0, "A fully running thread did not match its wall time");
+  require(nc::thread_cpu_ms({0, 5000}, {1500, 6000}, 8.0) < 0 && nc::thread_cpu_ms(start, {0, 6000}, 8.0) < 0 &&
+              nc::thread_cpu_ms(start, {900, 6000}, 8.0) < 0 && nc::thread_cpu_ms(start, {1500, 5000}, 8.0) < 0 &&
+              nc::thread_cpu_ms(start, {1500, 6000}, 0) < 0,
+          "An unusable CPU sample produced a CPU time");
+  // This thread, measured: a busy interval runs most of its wall time and a
+  // sleeping one almost none of it.
+  const auto measure = [](bool busy) {
+    LARGE_INTEGER frequency{}, begin{}, end{};
+    QueryPerformanceFrequency(&frequency);
+    const auto first = nc::sample_thread_cpu();
+    QueryPerformanceCounter(&begin);
+    if (busy) {
+      volatile std::uint64_t sink = 0;
+      do {
+        for (unsigned i = 0; i < 1000; ++i)
+          sink = sink + i;
+        QueryPerformanceCounter(&end);
+      } while ((end.QuadPart - begin.QuadPart) * 1000 < frequency.QuadPart * 30);
+    } else {
+      Sleep(40);
+      QueryPerformanceCounter(&end);
+    }
+    const auto last = nc::sample_thread_cpu();
+    const double wall = static_cast<double>(end.QuadPart - begin.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+    return std::array<double, 2>{nc::thread_cpu_ms(first, last, wall), wall};
+  };
+  const auto busy = measure(true);
+  require(busy[0] > busy[1] * 0.3 && busy[0] < busy[1] * 1.1, "A busy interval's CPU time was far from its wall time");
+  const auto idle = measure(false);
+  require(idle[0] >= 0 && idle[0] < idle[1] * 0.5, "A sleeping interval reported most of its wall time as CPU");
 }
 
 nc::LifecycleEvent numbered(std::uint64_t update) {
@@ -160,9 +216,23 @@ void formatting() {
               std::strstr(line, " native_initialize=0.000/0/0.000 ") && std::strstr(line, " proofs=1.300/1/1.300 ") &&
               std::strstr(line, " placement=0.00 native_initialize="),
           "Lifecycle event stages or sub-timers");
-  const char* tail = " query_ms=1.47 read_ms=0.00 queries=351 reads=1360";
+  // Not measured: no cpu_ms.
+  const char* tail = " query_ms=1.47 read_ms=0.00 queries=351 reads=1360 write_ms=0.00 writes=0 untimed_ms=0.00";
   const auto length = std::strlen(line), tail_length = std::strlen(tail);
   require(length < 700 && length > tail_length && std::strcmp(line + length - tail_length, tail) == 0, "Lifecycle event memory totals");
+  event.write_ms = 0.42;
+  event.writes = 4;
+  event.untimed_ms = 7.35;
+  event.cpu_ms = 14.5;
+  nc::format_lifecycle_event(line, sizeof(line), event, StageNames);
+  const char* measured = " reads=1360 write_ms=0.42 writes=4 untimed_ms=7.35 cpu_ms=14.50";
+  require(std::strlen(line) < 700 && std::strlen(line) > std::strlen(measured) &&
+              std::strcmp(line + std::strlen(line) - std::strlen(measured), measured) == 0,
+          "Lifecycle event writes, untimed or CPU time");
+  event.serviced = false;  // An unserviced update has no CPU time.
+  nc::format_lifecycle_event(line, sizeof(line), event, StageNames);
+  require(!std::strstr(line, "cpu_ms") && std::strstr(line, " untimed_ms=7.35"), "An unserviced update reported CPU time");
+  event.serviced = true;
   // A short buffer truncates in place and stays terminated.
   for (const std::size_t size : {1u, 20u, 120u, 300u}) {
     std::array<char, 400> buffer;
@@ -176,6 +246,8 @@ void formatting() {
 int main() {
   try {
     timers();
+    untimed();
+    thread_cpu();
     event_log();
     concurrent_event_log();
     formatting();

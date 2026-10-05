@@ -38,6 +38,9 @@ struct LifecycleTimers {
   // Every native_* tick so far in this update. A lifecycle stage section
   // subtracts what was recorded inside it to leave its proofs.
   std::int64_t native_ticks = 0;
+  // The proofs that no memory-call timer saw: each section's proofs less the
+  // local_memory query, read and write ticks recorded inside it.
+  std::int64_t untimed_ticks = 0;
 
   void record(LifecycleTimer timer, std::int64_t elapsed) noexcept {
     const auto index = static_cast<std::size_t>(timer);
@@ -50,11 +53,40 @@ struct LifecycleTimers {
       native_ticks += elapsed;
   }
   // One lifecycle stage section of elapsed ticks; native_before is
-  // native_ticks when it began.
-  void record_lifecycle(std::int64_t elapsed, std::int64_t native_before) noexcept {
-    record(LifecycleTimer::proofs, std::max<std::int64_t>(0, elapsed - (native_ticks - native_before)));
+  // native_ticks when it began, memory the local_memory query, read and write
+  // ticks recorded inside it (the same QPC ticks).
+  void record_lifecycle(std::int64_t elapsed, std::int64_t native_before, std::int64_t memory = 0) noexcept {
+    const auto proofs = std::max<std::int64_t>(0, elapsed - (native_ticks - native_before));
+    record(LifecycleTimer::proofs, proofs);
+    untimed_ticks += std::max<std::int64_t>(0, proofs - std::max<std::int64_t>(0, memory));
   }
 };
+
+// The calling thread's CPU cycles (QueryThreadCycleTime, user and kernel) and
+// the time-stamp counter read beside them. Windows accounts thread cycles in
+// time-stamp counter ticks, so between two samples cycles / tsc is the share
+// of the interval the thread ran. Zero cycles when the query failed.
+struct ThreadCpuSample {
+  std::uint64_t cycles = 0, tsc = 0;
+};
+
+inline ThreadCpuSample sample_thread_cpu() noexcept {
+  ThreadCpuSample sample;
+  ULONG64 cycles = 0;
+  if (QueryThreadCycleTime(GetCurrentThread(), &cycles))
+    sample.cycles = cycles;
+  sample.tsc = hook_timing::ticks();
+  return sample;
+}
+
+// The thread's CPU time over wall_ms, the wall time between the samples:
+// near wall_ms for CPU-bound work, far below it when the thread was preempted
+// or waiting. Negative when either sample or the interval is unusable.
+inline double thread_cpu_ms(const ThreadCpuSample& start, const ThreadCpuSample& end, double wall_ms) noexcept {
+  if (!start.cycles || !end.cycles || end.cycles < start.cycles || end.tsc <= start.tsc || !(wall_ms > 0))
+    return -1;
+  return wall_ms * static_cast<double>(end.cycles - start.cycles) / static_cast<double>(end.tsc - start.tsc);
+}
 
 // Stages of ProbePerformance (ProbeStage::count, asserted in probe.hpp).
 inline constexpr std::size_t kLifecycleStageCount = 12;
@@ -64,6 +96,10 @@ inline constexpr unsigned kLifecycleEventCapacity = 16;
 
 // One camera-manager update over kLifecycleEventMs, as plain values. Stage and
 // memory-call totals are those of a serviced update (zero otherwise).
+// untimed_ms is the part of the lifecycle proofs that no query, read or write
+// timer saw. cpu_ms, for a serviced update only, is the main thread's CPU
+// time (user and kernel) over its serviced part, total_ms less pre_ms
+// (thread_cpu_ms); negative when not measured.
 struct LifecycleEvent {
   std::uint64_t update = 0;
   std::uint64_t tick_ms = 0;
@@ -75,6 +111,9 @@ struct LifecycleEvent {
   std::array<std::uint32_t, kLifecycleTimerCount> timer_calls{};
   double query_ms = 0, read_ms = 0;
   std::uint64_t queries = 0, reads = 0;
+  double write_ms = 0;
+  std::uint64_t writes = 0;
+  double untimed_ms = 0, cpu_ms = -1;
 };
 
 inline void copy_lifecycle_timers(const LifecycleTimers& timers, double milliseconds_per_tick, LifecycleEvent& event) noexcept {
@@ -83,6 +122,7 @@ inline void copy_lifecycle_timers(const LifecycleTimers& timers, double millisec
     event.timer_max_ms[i] = static_cast<double>(timers.max_ticks[i]) * milliseconds_per_tick;
     event.timer_calls[i] = timers.calls[i];
   }
+  event.untimed_ms = static_cast<double>(timers.untimed_ticks) * milliseconds_per_tick;
 }
 
 // Fixed ring between the observer, its only producer, and the bridge worker,
@@ -114,7 +154,8 @@ class LifecycleEventLog {
 
 // One bridge.log line: 'Lifecycle event: update=N tick=ms total_ms= pre_ms=
 // serviced= feeds=', each stage as name=ms, each sub-timer as
-// name=ms/calls/slowest-call-ms, then the update's memory-call totals.
+// name=ms/calls/slowest-call-ms, the update's memory-call totals with its
+// writes, untimed_ms and, for a serviced update that measured it, cpu_ms.
 // Truncates rather than overflowing out.
 inline void format_lifecycle_event(char* out,
                                    std::size_t size,
@@ -137,6 +178,11 @@ inline void format_lifecycle_event(char* out,
   if (used < size)
     advance(std::snprintf(out + used, size - used, " query_ms=%.2f read_ms=%.2f queries=%llu reads=%llu", event.query_ms, event.read_ms,
                           static_cast<unsigned long long>(event.queries), static_cast<unsigned long long>(event.reads)));
+  if (used < size)
+    advance(std::snprintf(out + used, size - used, " write_ms=%.2f writes=%llu untimed_ms=%.2f", event.write_ms,
+                          static_cast<unsigned long long>(event.writes), event.untimed_ms));
+  if (event.serviced && event.cpu_ms >= 0 && used < size)
+    advance(std::snprintf(out + used, size - used, " cpu_ms=%.2f", event.cpu_ms));
 }
 
 }  // namespace taxi_camera::native_camera

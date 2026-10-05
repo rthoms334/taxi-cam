@@ -54,6 +54,9 @@ struct ProbePerformance {
   double query_allocation_ms = 0, query_page_ms = 0, query_fallback_ms = 0;
   double query_allocation_max_us = 0, query_page_max_us = 0, query_fallback_max_us = 0;
   double read_ms = 0;
+  // Proven view-field stores (write_local_private) and their time.
+  std::uint64_t write_calls = 0;
+  double write_ms = 0;
   std::uint32_t entry_count = 0;
   std::uint32_t bucket_count = 0;
 };

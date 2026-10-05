@@ -676,7 +676,8 @@ constexpr std::array<const char*, static_cast<std::size_t>(native_camera::ProbeS
 // previous record, with its stage breakdown when it serviced the pair. Idle
 // intervals (under 1 ms) are not logged. query_kind_ms and query_kind_max_us
 // are allocation/page/region query time and slowest single call, which shows
-// the kernel call that stalls. Worker thread only.
+// the kernel call that stalls; write_ms and writes are the proven view-field
+// stores. Worker thread only.
 void log_observer_peak(const win::Status& status) noexcept {
   const auto peak = native_camera::take_observer_peak();
   if (peak.total_ms < 1)
@@ -697,11 +698,12 @@ void log_observer_peak(const win::Status& status) noexcept {
     if (used < sizeof(detail))
       std::snprintf(detail + used, sizeof(detail) - used,
                     " unstaged=%.2f query_ms=%.2f read_ms=%.2f queries=%llu reads=%llu cache_hits=%llu query_kind_ms=%.3f/%.3f/%.3f "
-                    "query_kind_max_us=%.1f/%.1f/%.1f",
+                    "query_kind_max_us=%.1f/%.1f/%.1f write_ms=%.3f writes=%llu",
                     std::max(0.0, peak.total_ms - peak.pre_ms - staged), p.query_ms, p.read_ms,
                     static_cast<unsigned long long>(p.query_calls), static_cast<unsigned long long>(p.read_calls),
                     static_cast<unsigned long long>(p.query_cache_hits), p.query_allocation_ms, p.query_page_ms, p.query_fallback_ms,
-                    p.query_allocation_max_us, p.query_page_max_us, p.query_fallback_max_us);
+                    p.query_allocation_max_us, p.query_page_max_us, p.query_fallback_max_us, p.write_ms,
+                    static_cast<unsigned long long>(p.write_calls));
   }
   log_status(status, detail);
 }
