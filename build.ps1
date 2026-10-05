@@ -47,7 +47,7 @@ $engine = @(
  'src/camera/probe.cpp','src/camera/local_memory.cpp','src/camera/code_contract.cpp','src/camera/activation_mask.cpp',
  'src/camera/camera_contract.cpp','src/camera/camera_contract_model.cpp','src/camera/relocatable_contract.cpp','src/camera/rtti_vtables.cpp',
  'src/camera/view_resize.cpp','src/camera/view_aa.cpp','src/camera/view_clip.cpp','src/camera/source_view.cpp','src/camera/body_pose_provider.cpp','src/camera/mount_config.cpp',
- 'src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp','src/camera/display_panels.cpp',
+ 'src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp','src/camera/display_panels.cpp','src/camera/view_cascades.cpp',
  'src/camera/owned_entry_inventory.cpp','src/camera/owned_view.cpp','src/camera/view_pool.cpp',
  'src/hooks/observer_hook.cpp','src/hooks/observer_thunk.S','tools/diagnostics/image_inventory.cpp'
 )
@@ -320,7 +320,7 @@ if ($Validate) {
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
         @{Name='connection-recoverability'; Sources=@('tests/app/connection_recoverability_test.cpp')},
-        @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp')},
+        @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp','src/camera/local_memory.cpp')},
         @{Name='profile-selection'; Sources=@('tests/app/profile_selection_test.cpp')},
         @{Name='waiting-page'; Sources=@('tests/app/waiting_page_test.cpp')},
         @{Name='settings-store'; Sources=@('tests/app/settings_store_test.cpp')},

@@ -19,6 +19,99 @@ bool depth_format_supported(DXGI_FORMAT f) noexcept {
   return f == DXGI_FORMAT_UNKNOWN || f == DXGI_FORMAT_D16_UNORM || f == DXGI_FORMAT_D24_UNORM_S8_UINT || f == DXGI_FORMAT_D32_FLOAT ||
          f == DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
 }
+// Compositor RGB bytes are display-referred codes; its alpha byte is a
+// per-pixel encoding flag. Camera pixels (alpha 255) are linearized in sRGB
+// PSOs so the view's hardware encode stores the original code. Overlays
+// (alpha 0) pass through, so an sRGB view encodes them like aircraft UI.
+constexpr char StampShader[] = R"(
+ByteAddressBuffer Pixels : register(t0);
+cbuffer Parameters : register(b0) {
+  uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY;
+  uint InsetLeft; uint InsetTop; uint InsetRight; uint InsetBottom;
+};
+#if SRGB_TARGET
+float srgb_to_linear(float value) {
+  return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+}
+#endif
+float4 vs_main(uint id : SV_VertexID) : SV_Position {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+}
+float4 ps_main(float4 position : SV_Position) : SV_Target {
+  float2 local = position.xy - float2(OriginX, OriginY);
+  uint2 contentEnd = uint2(TargetWidth - InsetRight, TargetHeight - InsetBottom);
+  if (local.x < InsetLeft || local.y < InsetTop || local.x >= contentEnd.x || local.y >= contentEnd.y)
+    return float4(0, 0, 0, 1);
+  uint2 contentSize = contentEnd - uint2(InsetLeft, InsetTop);
+  uint x = min((uint)((local.x - InsetLeft) * 768 / contentSize.x), 767);
+  uint y = min((uint)((local.y - InsetTop) * 763 / contentSize.y), 762);
+  uint rgba = Pixels.Load(y * 3072 + x * 4);
+  float3 code = float3(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255) / 255.0;
+#if SRGB_TARGET
+  if ((rgba >> 24) >= 128)
+    code = float3(srgb_to_linear(code.r), srgb_to_linear(code.g), srgb_to_linear(code.b));
+#endif
+  return float4(code, 1);
+}
+)";
+// Every stamp serializes the same root signature and compiles the same source
+// and flags; only SRGB_TARGET varies with the target format. Each distinct
+// input set is built once per process and its blob shared, byte for byte what
+// a fresh call with those inputs returns. Only successes are kept, so a
+// failure is retried by the next caller. Slots are written once under
+// stamp_blob_lock and never released, so a pointer read under the lock stays
+// valid after the lock is dropped. The blobs are immutable; concurrent readers
+// only call GetBufferPointer/GetBufferSize.
+struct StampBlobs {
+  ID3DBlob* root = nullptr;
+  ID3DBlob* vertex[2]{};  // Indexed by SRGB_TARGET.
+  ID3DBlob* pixel[2]{};
+  std::uint32_t compiles = 0;
+};
+SRWLOCK stamp_blob_lock = SRWLOCK_INIT;
+StampBlobs stamp_blobs;
+template <class Build>
+HRESULT cached_blob(ID3DBlob*& slot, ID3DBlob*& result, Build&& build) noexcept {
+  AcquireSRWLockExclusive(&stamp_blob_lock);
+  HRESULT hr = S_OK;
+  if (!slot) {
+    ID3DBlob* blob = nullptr;
+    hr = build(&blob);
+    if (SUCCEEDED(hr) && !blob)
+      hr = E_FAIL;
+    if (SUCCEEDED(hr))
+      slot = blob;
+    else
+      release_pointer(blob);
+  }
+  result = slot;
+  ReleaseSRWLockExclusive(&stamp_blob_lock);
+  return hr;
+}
+HRESULT stamp_root(ID3DBlob*& serialized) noexcept {
+  return cached_blob(stamp_blobs.root, serialized, [](ID3DBlob** blob) noexcept {
+    D3D12_ROOT_PARAMETER params[2]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[1].Constants.Num32BitValues = 8;
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+    desc.NumParameters = 2;
+    desc.pParameters = params;
+    return D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob, nullptr);
+  });
+}
+HRESULT stamp_shader(bool pixel, bool srgb_target, ID3DBlob*& bytecode) noexcept {
+  auto& slot = (pixel ? stamp_blobs.pixel : stamp_blobs.vertex)[srgb_target ? 1 : 0];
+  return cached_blob(slot, bytecode, [&](ID3DBlob** blob) noexcept {
+    const D3D_SHADER_MACRO defines[]{{"SRGB_TARGET", srgb_target ? "1" : "0"}, {nullptr, nullptr}};
+    ++stamp_blobs.compiles;
+    return D3DCompile(StampShader, sizeof(StampShader) - 1, "pfd_stamp", defines, nullptr, pixel ? "ps_main" : "vs_main",
+                      pixel ? "ps_5_0" : "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob, nullptr);
+  });
+}
 }  // namespace
 HRESULT PfdStampFrame::initialize(ID3D12Device* device) noexcept {
   if (!device || device_)
@@ -92,63 +185,15 @@ void PfdStampFrame::abandon() noexcept {
 HRESULT PfdStampD3D12::initialize(ID3D12Device* device, DXGI_FORMAT format, DXGI_FORMAT depth_format) noexcept {
   if (!device || device_ || !format_supported(format) || !depth_format_supported(depth_format))
     return E_INVALIDARG;
-  // Compositor RGB bytes are display-referred codes; its alpha byte is a
-  // per-pixel encoding flag. Camera pixels (alpha 255) are linearized in sRGB
-  // PSOs so the view's hardware encode stores the original code. Overlays
-  // (alpha 0) pass through, so an sRGB view encodes them like aircraft UI.
-  constexpr char shader[] = R"(
-ByteAddressBuffer Pixels : register(t0);
-cbuffer Parameters : register(b0) {
-  uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY;
-  uint InsetLeft; uint InsetTop; uint InsetRight; uint InsetBottom;
-};
-#if SRGB_TARGET
-float srgb_to_linear(float value) {
-  return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
-}
-#endif
-float4 vs_main(uint id : SV_VertexID) : SV_Position {
-  float2 uv = float2((id << 1) & 2, id & 2);
-  return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
-}
-float4 ps_main(float4 position : SV_Position) : SV_Target {
-  float2 local = position.xy - float2(OriginX, OriginY);
-  uint2 contentEnd = uint2(TargetWidth - InsetRight, TargetHeight - InsetBottom);
-  if (local.x < InsetLeft || local.y < InsetTop || local.x >= contentEnd.x || local.y >= contentEnd.y)
-    return float4(0, 0, 0, 1);
-  uint2 contentSize = contentEnd - uint2(InsetLeft, InsetTop);
-  uint x = min((uint)((local.x - InsetLeft) * 768 / contentSize.x), 767);
-  uint y = min((uint)((local.y - InsetTop) * 763 / contentSize.y), 762);
-  uint rgba = Pixels.Load(y * 3072 + x * 4);
-  float3 code = float3(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255) / 255.0;
-#if SRGB_TARGET
-  if ((rgba >> 24) >= 128)
-    code = float3(srgb_to_linear(code.r), srgb_to_linear(code.g), srgb_to_linear(code.b));
-#endif
-  return float4(code, 1);
-}
-)";
   const bool srgb_target = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-  const D3D_SHADER_MACRO defines[]{{"SRGB_TARGET", srgb_target ? "1" : "0"}, {nullptr, nullptr}};
-  ID3DBlob *serialized = nullptr, *vs = nullptr, *ps = nullptr;
-  D3D12_ROOT_PARAMETER params[2]{};
-  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-  params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-  params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-  params[1].Constants.Num32BitValues = 8;
-  D3D12_ROOT_SIGNATURE_DESC desc{};
-  desc.NumParameters = 2;
-  desc.pParameters = params;
-  HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, nullptr);
+  ID3DBlob *serialized = nullptr, *vs = nullptr, *ps = nullptr;  // Process-retained; never released here.
+  HRESULT hr = stamp_root(serialized);
   if (SUCCEEDED(hr))
     hr = device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&root_));
   if (SUCCEEDED(hr))
-    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", defines, nullptr, "vs_main", "vs_5_0",
-                    D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vs, nullptr);
+    hr = stamp_shader(false, srgb_target, vs);
   if (SUCCEEDED(hr))
-    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", defines, nullptr, "ps_main", "ps_5_0",
-                    D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &ps, nullptr);
+    hr = stamp_shader(true, srgb_target, ps);
   if (SUCCEEDED(hr)) {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
     p.pRootSignature = root_;
@@ -178,9 +223,6 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     p.DSVFormat = depth_format;
     hr = device->CreateGraphicsPipelineState(&p, IID_PPV_ARGS(&pipeline_));
   }
-  release_pointer(serialized);
-  release_pointer(vs);
-  release_pointer(ps);
   if (FAILED(hr)) {
     release();
     return hr;
@@ -190,6 +232,23 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   format_ = format;
   depth_format_ = depth_format;
   return S_OK;
+}
+HRESULT PfdStampD3D12::prepare_shaders() noexcept {
+  ID3DBlob* blob = nullptr;
+  HRESULT hr = stamp_root(blob);
+  for (const bool srgb_target : {false, true}) {
+    if (SUCCEEDED(hr))
+      hr = stamp_shader(false, srgb_target, blob);
+    if (SUCCEEDED(hr))
+      hr = stamp_shader(true, srgb_target, blob);
+  }
+  return hr;
+}
+std::uint32_t PfdStampD3D12::shader_compiles() noexcept {
+  AcquireSRWLockShared(&stamp_blob_lock);
+  const auto compiles = stamp_blobs.compiles;
+  ReleaseSRWLockShared(&stamp_blob_lock);
+  return compiles;
 }
 bool PfdStampD3D12::record(ID3D12GraphicsCommandList* list,
                            const PfdGraphicsState& state,

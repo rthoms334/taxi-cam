@@ -485,10 +485,12 @@ void run(bool warp, bool render_target, bool enhanced, bool native_boundary, boo
     require(boundary_context.copy_accepted == 4 && boundary_context.copy_refused == (texture_copy ? 2u : 0u),
             "Native copies recursed or missed whole operations");
     require(manager->statistics().copy_writes == 4 && manager->statistics().copy_rewrites == 2, "Native final-copy rewrite missing");
-    for (const auto& diagnostic : manager->statistics().copies)
+    for (unsigned feed = 0; feed < 2; ++feed) {  // The fixture publishes two of the three feeds.
+      const auto diagnostic = manager->statistics().copies[feed];
       require(diagnostic.matched_copies == 2 && diagnostic.width == Width && diagnostic.height == Height && diagnostic.mips == 1 &&
                   diagnostic.format == DXGI_FORMAT_R8G8B8A8_UNORM && std::strcmp(diagnostic.last_refusal, "none") == 0,
               "Native copy diagnostics mismatch");
+    }
     boundary_context.capture_copies = false;
   }
   check(application.list->Close(), "Close application recording");

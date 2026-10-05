@@ -466,7 +466,10 @@ void known_list_and_idle_checks() {
   for (unsigned i = 0; i < iterations; ++i)
     PipelineHook::invoke(forward_pipeline, native, nullptr);
   const auto active_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - active_start).count();
-  require(pipeline_forwards == iterations && win::metadata_lookup_calls == iterations && win::registry_lookup_calls == 1,
+  // One lookup per operation (list_lookup_calls counts raw and shared ones);
+  // only the first, uncached one takes the shared find_list path.
+  require(pipeline_forwards == iterations && r.list_lookup_calls == iterations && win::metadata_lookup_calls == 1 &&
+              win::registry_lookup_calls == 1,
           "Known production setters must forward each operation and acquire registry once per stable cached recording");
   require(r.list_cache_hits == iterations - 1 && r.list_registry_lookups == 1, "Opt-in cache diagnostics disagree with lock acquisitions");
   ++item->recording;
@@ -598,8 +601,8 @@ void known_list_and_idle_checks() {
   require(!win::recording_observed(*item), "ClearState must not renew an idle recording's native Reset proof");
   item->pfd_dirty = true;
   item->pending_rt = {true, true};
-  win::stage_pfd(native, item->id);
-  win::drain_pfds(native, item->id, true);
+  win::stage_pfd(*item, item->id);
+  win::drain_pfds(*item, item->id, true);
   require(item->pfd_dirty, "Stale recording admission must return before consuming any pending shader state");
   win::list_reset.original = reinterpret_cast<void*>(&forward_reset);
   reset_result = ResetResult::success;
@@ -1036,12 +1039,83 @@ void contended_admission_checks() {
   win::known_lists = {};
   pipeline_forwards = 0;
 }
+// The state hooks inline the cached list lookup. A hit keeps every identity
+// check, and a stale entry is forgotten before the hook observes anything: a
+// Reset recorded on another thread, a retired list at the same address and an
+// expired registration each reach only the live List. Admission reads the
+// lookup flags only after a miss, which sets them afresh.
+void state_hook_lookup_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x8800);
+  auto* pipeline = reinterpret_cast<ID3D12PipelineState*>(0x8810);
+  const auto make = [&](std::uint64_t id) {
+    auto list = std::make_shared<win::List>();
+    list->native = native;
+    list->id = id;
+    list->ready = true;
+    list->graphics.reset(list->recording, true);
+    return list;
+  };
+  // A fresh observed state reports pipeline_missing until a SetPipelineState is applied.
+  const auto bound = [](const win::List& list) { return std::string(list.graphics.incomplete_reason()) == "root_layout_missing"; };
+  const auto call = [&] { PipelineHook::invoke(forward_pipeline, native, pipeline); };
+  auto item = make(88);
+  r.lists[native] = item;
+  r.ready = true;
+  win::set_graphics_observation_demand(true);
+  require(win::observation_enabled(), "State-hook lookup fixture needs observation enabled");
+  win::known_lists = {};
+  win::registry_lookup_calls = 0;
+  call();
+  require(bound(*item) && win::registry_lookup_calls == 1, "A state hook's first call must resolve its list through the registry");
+  item->graphics.reset(item->recording, true);
+  call();
+  require(bound(*item) && win::registry_lookup_calls == 1, "A state hook's cached hit must observe without a registry lookup");
+  ++item->recording;  // A Reset recorded on another thread; this thread's entry is stale.
+  item->graphics.reset(item->recording, true);
+  call();
+  require(bound(*item) && win::registry_lookup_calls == 2, "A recording change must forget the cached entry and relearn it");
+  auto replacement = make(89);
+  item->alive = false;
+  item->graphics.reset(item->recording, true);
+  r.lists[native] = replacement;
+  call();
+  require(bound(*replacement) && !bound(*item) && win::registry_lookup_calls == 3,
+          "A retired list's cached entry must never receive the replacement's state");
+  std::weak_ptr<win::List> expired = replacement;
+  r.lists.erase(native);
+  replacement.reset();
+  require(expired.expired(), "Fixture still owns the replaced list");
+  auto third = make(90);
+  r.lists[native] = third;
+  call();
+  require(bound(*third) && win::registry_lookup_calls == 4, "An expired registration must be forgotten before the hook observes");
+  const auto invalidations = r.contended_invalidations.load();
+  win::contended_lists.remember(native);  // A lookup of this list expired earlier on this thread.
+  call();
+  require(std::string(third->graphics.incomplete_reason()) == "registry_contended" && r.contended_invalidations == invalidations + 1 &&
+              win::registry_lookup_calls == 4,
+          "The next state-hook hit after a contended miss must invalidate that recording once");
+  win::lookup_contended = true;  // As a contended lookup earlier on this thread left it.
+  third->graphics.reset(third->recording, true);
+  call();
+  require(bound(*third), "A cached hit after a contended lookup elsewhere must still observe");
+  require(!win::find_list_raw(reinterpret_cast<ID3D12GraphicsCommandList*>(0x8900)) && !win::lookup_contended,
+          "A miss after a hit must report its own uncontended result to admission");
+  require(pipeline_forwards == 7, "Every state-hook call must forward exactly once");
+  r.lists.erase(native);
+  win::known_lists = {};
+  pipeline_forwards = 0;
+  std::puts("PASS state-hook lookup: cached hits, stale recording, retired and expired lists, contended recording, lookup flags.");
+}
 
 int main() {
   namespace win = taxi_camera::standalone;
   namespace boundary = taxi_camera::engine_hook::render_boundary;
   try {
     contended_admission_checks();
+    state_hook_lookup_checks();
     state_reentry_checks();
     descriptor_identity_checks();
     submission_close_endpoint_checks();
@@ -1095,10 +1169,14 @@ int main() {
     barriers.back().Transition = {second_native, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_RENDER_TARGET,
                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     std::array<double, 2> ms{};
-    std::array<std::uint64_t, 2> lookups{};
+    std::array<std::uint64_t, 2> lookups{}, shared_lookups{};
+    // list_lookup_calls counts every list lookup, raw or shared, while the
+    // diagnostics are on; metadata_lookup_calls only the shared find_list ones.
+    win::set_graphics_diagnostics_enabled(true);
     for (unsigned batched = 0; batched < 2; ++batched) {
       initialize();
       win::metadata_lookup_calls = 0;
+      const auto lookups_before = r.list_lookup_calls.load();
       const auto start = std::chrono::steady_clock::now();
       if (batched)
         win::metadata_begin(nullptr, native, item->id);
@@ -1110,7 +1188,8 @@ int main() {
       if (batched)
         win::metadata_end(nullptr, native, item->id);
       ms[batched] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-      lookups[batched] = win::metadata_lookup_calls;
+      lookups[batched] = r.list_lookup_calls - lookups_before;
+      shared_lookups[batched] = win::metadata_lookup_calls;
       require(item->pfd_transition && !item->pending_rt[0] && !item->pending_rt[1],
               "Matching transitions did not invalidate pending RTT evidence");
       require(item->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::unknown, "Pre-forward metadata became capture permission");
@@ -1121,6 +1200,9 @@ int main() {
               "Batched ordered model differs from direct metadata delivery");
     }
     require(lookups[0] == (barriers.size() - 1) * 3 && lookups[1] == 1, "Production bridge did not resolve once per metadata batch");
+    // Unbatched metadata resolves through the raw lookup (metadata_list): only
+    // the first misses the thread's list cache and reads the registry.
+    require(shared_lookups[0] == 1 && !shared_lookups[1], "Metadata batch did not borrow its cached list without a shared lookup");
     require(!win::metadata_batches.current(native, item->id), "Production metadata end retained its scope");
     initialize();
     D3D12_TEXTURE_BARRIER texture{};
@@ -1129,12 +1211,15 @@ int main() {
     texture.AccessAfter = D3D12_BARRIER_ACCESS_RENDER_TARGET;
     texture.Subresources = {0, 1, 0, 1, 0, 1};
     win::metadata_lookup_calls = 0;
+    const auto enhanced_lookups_before = r.list_lookup_calls.load();
     win::metadata_begin(nullptr, native, item->id);
     win::observe_enhanced(nullptr, reinterpret_cast<ID3D12GraphicsCommandList7*>(native), item->id, texture, scope);
     win::metadata_end(nullptr, native, item->id);
+    const auto enhanced_lookups = r.list_lookup_calls - enhanced_lookups_before;
+    win::set_graphics_diagnostics_enabled(false);
     item->copy_proof.after_draw(first_key);
-    require(win::metadata_lookup_calls == 1 && item->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::enhanced_rt &&
-                !item->pending_rt[0] && item->pending_rt[1],
+    require(enhanced_lookups == 1 && !win::metadata_lookup_calls &&
+                item->copy_proof.mode(first_key) == win::PfdCopyProof::Mode::enhanced_rt && !item->pending_rt[0] && item->pending_rt[1],
             "Enhanced metadata did not preserve matching/unrelated semantics");
 
     win::metadata_begin(nullptr, native, item->id);
@@ -1142,7 +1227,9 @@ int main() {
     item->copy_proof.reset(true);
     win::metadata_lookup_calls = 0;
     win::observe_legacy(nullptr, native, item->id, barriers[5000], scope);
-    require(win::metadata_lookup_calls == 3, "Reset recording mismatch did not use a fresh registry lookup");
+    // The renewed recording misses the thread's list cache, so the first
+    // lookup reads the registry and refills the cache for the other two.
+    require(win::metadata_lookup_calls == 1, "Reset recording mismatch did not use a fresh registry lookup");
     auto replacement = std::make_shared<win::List>();
     replacement->native = native;
     replacement->id = 41;

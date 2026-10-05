@@ -8,6 +8,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace taxi_camera::standalone {
 // Comparison-only metadata for adding an owned copy list immediately before
@@ -109,8 +110,10 @@ class PfdSubmissionProof {
     Key key{};
     UINT operation = UINT_MAX;
   };
+  // Index queries return {} from this slot on.
+  std::size_t used_slots() const noexcept { return used_; }
   PrefixRefusal prefix_refusal(std::size_t index, std::uint64_t generation) const noexcept {
-    if (index < slots_.size() && complete(generation)) {
+    if (index < used_ && complete(generation)) {
       const auto& slot = slots_[index];
       if (slot.seen && slot.prefix_blocker != UINT_MAX)
         return {slot.key, slot.prefix_blocker};
@@ -122,7 +125,9 @@ class PfdSubmissionProof {
   // renew a stale receipt by reusing a recording generation, even after failure.
   void reset(std::uint64_t generation, bool observed) noexcept {
     const bool advances = generation && generation > recording_;
-    slots_ = {};
+    for (auto& slot : occupied())  // Slots from used_ on were never written.
+      slot = {};
+    used_ = 0;
     recording_ = generation > recording_ ? generation : recording_;
     known_ = advances && observed;
     refusal_ = known_ ? Refusal::none : advances ? Refusal::unobserved : Refusal::reset_generation;
@@ -167,7 +172,7 @@ class PfdSubmissionProof {
         prefix_blocker_ = operation;
       // COMMON promotes to RT on the first write in the Execute. A prefix
       // overlay copied before that promotion is then replaced by the instrument.
-      for (auto& slot : slots_)
+      for (auto& slot : occupied())
         if (slot.seen && slot.after == D3D12_RESOURCE_STATE_COMMON) {
           slot.wrote = true;
           if (!slot.prefix_exit)
@@ -221,7 +226,7 @@ class PfdSubmissionProof {
       return;
     }
     Slot* slot = nullptr;
-    for (auto& item : slots_) {
+    for (auto& item : occupied()) {
       if (item.key == key) {
         slot = &item;
         break;
@@ -231,14 +236,11 @@ class PfdSubmissionProof {
         return;
       }
     }
-    if (!slot)
-      for (auto& item : slots_)
-        if (!item.key.resource) {
-          item.key = key;
-          item.first_before = before;
-          slot = &item;
-          break;
-        }
+    if (!slot && used_ < slots_.size()) {
+      slot = &slots_[used_++];
+      slot->key = key;
+      slot->first_before = before;
+    }
     if (!slot || (slot->seen && slot->after != before)) {
       invalidate(slot ? Refusal::transition_chain : Refusal::capacity);
       return;
@@ -275,13 +277,13 @@ class PfdSubmissionProof {
   // inspects the producer prefix AND all later lists for pass uncertainty.
   Candidate candidate(Key key, std::uint64_t generation) const noexcept {
     if (complete(generation) && barrier_only_)
-      for (const auto& slot : slots_)
+      for (const auto& slot : occupied())
         if (slot.key == key && slot.seen && slot.exit)
           return {key, generation, slot.first_before, slot.after, slot.subresource};
     return {};
   }
   Candidate candidate(std::size_t index, std::uint64_t generation) const noexcept {
-    if (index < slots_.size() && complete(generation) && barrier_only_) {
+    if (index < used_ && complete(generation) && barrier_only_) {
       const auto& slot = slots_[index];
       if (slot.seen && slot.exit)
         return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
@@ -290,13 +292,13 @@ class PfdSubmissionProof {
   }
   Candidate prefix_candidate(Key key, std::uint64_t generation) const noexcept {
     if (complete(generation))
-      for (const auto& slot : slots_)
+      for (const auto& slot : occupied())
         if (slot.key == key && slot.seen && slot.prefix_exit)
           return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
     return {};
   }
   Candidate prefix_candidate(std::size_t index, std::uint64_t generation) const noexcept {
-    if (index < slots_.size() && complete(generation)) {
+    if (index < used_ && complete(generation)) {
       const auto& slot = slots_[index];
       if (slot.seen && slot.prefix_exit)
         return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
@@ -308,14 +310,14 @@ class PfdSubmissionProof {
   // exit, but the overlay must run after the last proven write.
   Candidate suffix_candidate(Key key, std::uint64_t generation) const noexcept {
     if (complete(generation))
-      for (const auto& slot : slots_)
+      for (const auto& slot : occupied())
         if (suffix_site(slot))
           if (slot.key == key)
             return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
     return {};
   }
   Candidate suffix_candidate(std::size_t index, std::uint64_t generation) const noexcept {
-    if (index < slots_.size() && complete(generation)) {
+    if (index < used_ && complete(generation)) {
       const auto& slot = slots_[index];
       if (suffix_site(slot))
         return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
@@ -324,7 +326,7 @@ class PfdSubmissionProof {
   }
   bool overwrote(Key key, std::uint64_t generation) const noexcept {
     if (complete(generation))
-      for (const auto& slot : slots_)
+      for (const auto& slot : occupied())
         if (slot.key == key && slot.seen && slot.wrote)
           return true;
     return false;
@@ -336,7 +338,7 @@ class PfdSubmissionProof {
     state_disjoint_work(operation);
     if (!open())
       return;
-    for (auto& slot : slots_) {
+    for (auto& slot : occupied()) {
       if (!slot.seen)
         continue;
       if (slot.after != D3D12_RESOURCE_STATE_COMMON && !(static_cast<UINT>(slot.after) & D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
@@ -370,13 +372,13 @@ class PfdSubmissionProof {
   // without stamping before TAA/DLSS or a second instrument pass.
   Candidate activity_candidate(Key key, std::uint64_t generation) const noexcept {
     if (complete(generation))
-      for (const auto& slot : slots_)
+      for (const auto& slot : occupied())
         if (slot.key == key && slot.seen && slot.leading_exit)
           return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
     return {};
   }
   Candidate activity_candidate(std::size_t index, std::uint64_t generation) const noexcept {
-    if (index < slots_.size() && complete(generation)) {
+    if (index < used_ && complete(generation)) {
       const auto& slot = slots_[index];
       if (slot.seen && slot.leading_exit)
         return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
@@ -435,7 +437,7 @@ class PfdSubmissionProof {
   bool mentions(Key key, std::uint64_t generation) const noexcept {
     if (!complete(generation) || !key.resource)
       return false;
-    for (const auto& slot : slots_)
+    for (const auto& slot : occupied())
       if (slot.seen && slot.key == key)
         return true;
     return false;
@@ -454,7 +456,7 @@ class PfdSubmissionProof {
     if (!out || !capacity || !complete(generation))
       return 0;
     UINT count = 0;
-    for (const auto& slot : slots_) {
+    for (const auto& slot : occupied()) {
       if (!slot.seen || !slot.key.resource)
         continue;
       if (count >= capacity)
@@ -518,7 +520,7 @@ class PfdSubmissionProof {
     if (!open() || !key.resource || !key.generation)
       return;
     Slot* slot = nullptr;
-    for (auto& item : slots_) {
+    for (auto& item : occupied()) {
       if (item.key == key) {
         slot = &item;
         break;
@@ -531,15 +533,11 @@ class PfdSubmissionProof {
     if (slot && slot->seen && slot->after != state)
       return;
     if (!slot) {
-      for (auto& item : slots_)
-        if (!item.key.resource) {
-          slot = &item;
-          break;
-        }
-      if (!slot) {
+      if (used_ == slots_.size()) {
         invalidate(Refusal::capacity);
         return;
       }
+      slot = &slots_[used_++];
       slot->key = key;
     }
     if (!slot->seen) {
@@ -559,10 +557,16 @@ class PfdSubmissionProof {
     }
     return true;
   }
+  // Keys are only ever written to slots_[used_] and cleared only all at once,
+  // so [0, used_) holds every key and every seen slot. Scans stop there: most
+  // recordings touch no display, and gpu_work runs on every draw.
+  std::span<Slot> occupied() noexcept { return {slots_.data(), used_}; }
+  std::span<const Slot> occupied() const noexcept { return {slots_.data(), used_}; }
   std::array<Slot, maximum_resources> slots_{};
   std::uint64_t recording_{};
   bool known_{}, closed_{}, active_pass_{}, barrier_only_{true};
   bool prefix_interference_{};
+  std::uint8_t used_{};
   UINT first_gpu_work_{UINT_MAX}, prefix_blocker_{UINT_MAX};
   Refusal refusal_{Refusal::unobserved};
 };

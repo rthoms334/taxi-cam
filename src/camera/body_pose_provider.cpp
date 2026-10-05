@@ -153,6 +153,11 @@ bool accept_identity_packet(const void* raw, DWORD bytes, std::uint64_t now) noe
   return changed;
 }
 void service_world_invalidation() noexcept {
+  // Runs on every worker wake. Without a notice the section below changes
+  // nothing, so skip its exclusive hold. A notice set after this load waits
+  // for the next call, as one set after the locked load did.
+  if (!(invalid_world.load(std::memory_order_acquire) & 1u))
+    return;
   AcquireSRWLockExclusive(&state.lock);
   auto pending = invalid_world.load(std::memory_order_acquire);
   if ((pending & 1u) && invalid_world.compare_exchange_strong(pending, 2, std::memory_order_acq_rel)) {

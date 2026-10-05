@@ -47,6 +47,25 @@ constexpr Wait wait_class(std::uint32_t budget_us) noexcept {
          : budget_us == 5000 ? lifecycle_wait
                              : other_wait;
 }
+// The lock a bounded wait was for. Several locks share each budget: wait1000
+// is the capture manager's mutex_ and its submission_mutex_, and the other
+// budgets mix the registry, its index shards and observation mutex, the
+// manager, the scene runtime and the handoff.
+enum WaitLock : unsigned {
+  manager_lock,
+  submission_lock,
+  registry_lock,
+  index_lock,
+  observation_lock,
+  runtime_lock,
+  handoff_lock,
+  other_lock,
+  WaitLockCount
+};
+constexpr const char* wait_lock_name(unsigned lock) noexcept {
+  constexpr const char* names[] = {"manager", "submission", "registry", "index", "observation", "runtime", "handoff", "other"};
+  return lock < WaitLockCount ? names[lock] : "unknown";
+}
 
 struct alignas(64) ThreadSlot {
   std::atomic<std::uint32_t> tid{};
@@ -56,6 +75,19 @@ struct alignas(64) ThreadSlot {
 inline constexpr unsigned MaxThreads = 128;
 // Slot MaxThreads is shared by threads that find no free slot.
 inline std::array<ThreadSlot, MaxThreads + 1> slots;
+// Bounded-lock waits by budget class and lock. A wait already spun past a
+// failed try_lock, so these are shared relaxed counters rather than per-thread
+// ones: a few adds on a rare path. BoundedLock records an acquired wait just
+// after taking the lock, so these adds (a few hundred per 5 s with the cameras
+// on) lengthen that hold by tens of nanoseconds; accepted as diagnostic cost.
+struct alignas(32) LockWaits {
+  std::atomic<std::uint64_t> waits{}, ticks{}, max_wait{}, expired{};
+};
+inline constexpr unsigned LockWaitCells = static_cast<unsigned>(WaitCount) * WaitLockCount;
+inline std::array<LockWaits, LockWaitCells> lock_waits;
+constexpr unsigned lock_wait_cell(Wait wait, WaitLock lock) noexcept {
+  return static_cast<unsigned>(wait) * WaitLockCount + (lock < WaitLockCount ? lock : other_lock);
+}
 
 struct ThreadState {
   ThreadSlot* slot;
@@ -120,7 +152,7 @@ inline bool take_sample(ThreadState& state) noexcept {
   state.random = x;
   return x % SampleRate == 0;
 }
-inline void record_wait(std::uint32_t budget_us, std::uint64_t waited, bool acquired) noexcept {
+inline void record_wait(std::uint32_t budget_us, std::uint64_t waited, bool acquired, WaitLock lock = other_lock) noexcept {
   const auto kind = wait_class(budget_us);
   auto& slot = own_slot();
   add(slot, slot.waits[kind], 1);
@@ -128,6 +160,23 @@ inline void record_wait(std::uint32_t budget_us, std::uint64_t waited, bool acqu
   raise(slot.max_wait[kind], waited);
   if (!acquired)
     add(slot, slot.expired[kind], 1);
+  auto& cell = lock_waits[lock_wait_cell(kind, lock)];
+  cell.waits.fetch_add(1, std::memory_order_relaxed);
+  cell.ticks.fetch_add(waited, std::memory_order_relaxed);
+  raise(cell.max_wait, waited);
+  if (!acquired)
+    cell.expired.fetch_add(1, std::memory_order_relaxed);
+}
+// The outermost Scope's exit when it cannot just count in its own slot: a timed
+// call, the thread's first call (no slot yet) or a thread on the shared slot.
+// Out of line, so the untimed exit inlined into every hook stays short.
+__attribute__((noinline, cold)) inline void finish(ThreadState& state) noexcept {
+  if (!state.timed) {
+    count(state.site);
+    return;
+  }
+  const auto total = ticks() - state.start;
+  record(state.site, total > state.forwarded ? total - state.forwarded : 0);
 }
 
 class Scope {
@@ -144,16 +193,19 @@ class Scope {
       }
     }
   }
-  ~Scope() {
+  // Inlined untimed exit: the same plain load and store add() uses for an owned
+  // slot. own_slot() claimed the slot for this thread alone, so no other thread
+  // writes this counter and the worker's relaxed read sees a whole value.
+  __attribute__((always_inline)) ~Scope() {
     auto& state = current;
     if (--state.depth)
       return;
-    if (!state.timed) {
-      count(state.site);
+    if (!state.timed && state.slot && state.slot != &slots[MaxThreads]) {
+      auto& calls = state.slot->calls[state.site];
+      calls.store(calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
       return;
     }
-    const auto total = ticks() - state.start;
-    record(state.site, total > state.forwarded ? total - state.forwarded : 0);
+    finish(state);
   }
   Scope(const Scope&) = delete;
   Scope& operator=(const Scope&) = delete;
@@ -241,6 +293,9 @@ class Report {
     auto& current_totals = current_;
     for (unsigned i = 0; i <= MaxThreads; ++i)
       read(slots[i], current_totals[i]);
+    std::array<LockTotals, LockWaitCells> locks;
+    for (unsigned c = 0; c < locks.size(); ++c)
+      read(lock_waits[c], locks[c]);
     if (!started_ || us <= us_ || tsc <= tsc_) {
       started_ = true;
       floor_ = measurement_floor();
@@ -248,6 +303,7 @@ class Report {
       us_ = us;
       for (unsigned i = 0; i <= MaxThreads; ++i)
         previous_[i] = current_totals[i];
+      lock_previous_ = locks;
       return false;
     }
     const double per_us = static_cast<double>(tsc - tsc_) / static_cast<double>(us - us_);
@@ -324,6 +380,19 @@ class Report {
     for (unsigned w = 0; w < WaitCount; ++w)
       append(sites, sites_size, used, " %s=%llu/%.0f/%.0f/%llu", wait_name(w), static_cast<unsigned long long>(waits[w]),
              to_us(wait_ticks[w]), to_us(max_wait[w]), static_cast<unsigned long long>(expired[w]));
+    // The same waits split by lock, as <class>_<lock>=count/total_us/max_us/
+    // expired; only the interval's nonzero cells are listed.
+    append(sites, sites_size, used, "%s", " | by_lock");
+    for (unsigned c = 0; c < locks.size(); ++c) {
+      const auto& now = locks[c];
+      const auto& before = lock_previous_[c];
+      if (now.waits == before.waits && !now.max_wait)
+        continue;
+      append(sites, sites_size, used, " %s_%s=%llu/%.0f/%.0f/%llu", wait_name(c / WaitLockCount), wait_lock_name(c % WaitLockCount),
+             static_cast<unsigned long long>(now.waits - before.waits), to_us(now.ticks - before.ticks), to_us(now.max_wait),
+             static_cast<unsigned long long>(now.expired - before.expired));
+    }
+    lock_previous_ = locks;
     if (sites_size)
       sites[sites_size - 1] = 0;
     used = 0;
@@ -380,6 +449,15 @@ class Report {
       out.expired[w] = slot.expired[w].load(std::memory_order_relaxed);
     }
   }
+  struct LockTotals {
+    std::uint64_t waits, ticks, max_wait, expired;
+  };
+  static void read(LockWaits& cell, LockTotals& out) noexcept {
+    out.waits = cell.waits.load(std::memory_order_relaxed);
+    out.ticks = cell.ticks.load(std::memory_order_relaxed);
+    out.max_wait = cell.max_wait.exchange(0, std::memory_order_relaxed);
+    out.expired = cell.expired.load(std::memory_order_relaxed);
+  }
   // Self time a timed call records for an empty hook: the Scope and Forward
   // timestamp reads themselves. Every call's expected recorded time includes
   // it (sampled calls are scaled back to every call), so the report removes
@@ -404,6 +482,7 @@ class Report {
   double floor_ = 0;
   std::uint64_t tsc_ = 0, us_ = 0;
   Totals current_[MaxThreads + 1]{}, previous_[MaxThreads + 1]{};
+  std::array<LockTotals, LockWaitCells> lock_previous_{};
 };
 
 }  // namespace taxi_camera::hook_timing

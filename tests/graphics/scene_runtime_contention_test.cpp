@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <future>
+#include <thread>
 
 namespace {
 using namespace taxi_camera;
@@ -52,7 +53,37 @@ void run(bool warp) {
   if (debug_enabled)
     check(device->QueryInterface(IID_PPV_ARGS(messages.put())), "Contention debug messages");
   constexpr std::uint64_t key = 9201;
-  require(runtime::init_device(key, device.get()) && runtime::prepare(key), "Actual compositor runtime");
+  require(runtime::init_device(key, device.get()), "Actual compositor runtime device");
+  {
+    // prepare compiles every distinct shader once, before it takes the
+    // runtime mutex: with the mutex held here, compilation still completes and
+    // prepare then waits. Initialization under the mutex compiles nothing.
+    using Compositor = CameraCompositorD3D12;
+    const auto compositor_shaders = [] {
+      auto& cache = Compositor::shader_cache();
+      AcquireSRWLockShared(&cache.lock);
+      const auto ready = std::count_if(cache.bytecode.begin(), cache.bytecode.end(), [](ID3DBlob* blob) { return blob != nullptr; });
+      ReleaseSRWLockShared(&cache.lock);
+      return static_cast<std::size_t>(ready);
+    };
+    require(PfdStampD3D12::shader_compiles() == 0 && compositor_shaders() == 0, "Shader caches are empty in a fresh process");
+    std::unique_lock held(runtime::runtime().mutex);
+    auto prepared = std::async(std::launch::async, [] { return runtime::prepare(key); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while ((PfdStampD3D12::shader_compiles() < 4 || compositor_shaders() < Compositor::ShaderCount) &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(PfdStampD3D12::shader_compiles() == 4 && compositor_shaders() == Compositor::ShaderCount,
+            "prepare compiled its shaders only after taking the runtime mutex");
+    require(prepared.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout,
+            "prepare initialized without the runtime mutex");
+    held.unlock();
+    require(prepared.get(), "Actual compositor runtime");
+    const auto& prepared_item = *runtime::find(key);
+    require(PfdStampD3D12::shader_compiles() == 4 && prepared_item.output.compositor_->statistics().shader_compiles == 0 &&
+                prepared_item.waiting_available && prepared_item.waiting_output.compositor_->statistics().shader_compiles == 0,
+            "Initialization under the runtime mutex compiled shaders");
+  }
   require(runtime::set_display_exposure(key, 0), "Unmodified validation colours");
   auto& manager = runtime::manager();
   auto& item = *runtime::find(key);
@@ -256,6 +287,44 @@ void run(bool warp) {
   manager.destroy_command_list(consumer.list.get(), 20);
   handoff.stop_scene();
   runtime::reset_feed(key);
+  {
+    // Later start attempts of an initialized or failed device answer at once
+    // and compile nothing, even with every compositor shader missing from the
+    // cache; one behind a busy mutex still compiles first. The emptied cache
+    // slots are restored afterwards (the recompiled blobs are left unreleased).
+    using Compositor = CameraCompositorD3D12;
+    auto& cache = Compositor::shader_cache();
+    const auto cached = [&] {
+      AcquireSRWLockShared(&cache.lock);
+      const auto ready = std::count_if(cache.bytecode.begin(), cache.bytecode.end(), [](ID3DBlob* blob) { return blob != nullptr; });
+      ReleaseSRWLockShared(&cache.lock);
+      return static_cast<std::size_t>(ready);
+    };
+    AcquireSRWLockExclusive(&cache.lock);
+    const auto saved = cache.bytecode;
+    cache.bytecode = {};
+    ReleaseSRWLockExclusive(&cache.lock);
+    const auto stamp_compiles = PfdStampD3D12::shader_compiles();
+    require(runtime::prepare(key) && cached() == 0, "An initialized device compiled shaders on a later start attempt");
+    {
+      const std::lock_guard lock(runtime::runtime().mutex);
+      item.status.failed = true;
+    }
+    require(!runtime::prepare(key) && cached() == 0 && PfdStampD3D12::shader_compiles() == stamp_compiles,
+            "A failed device compiled its missing shaders on a later start attempt");
+    std::unique_lock held(runtime::runtime().mutex);
+    auto busy = std::async(std::launch::async, [] { return runtime::prepare(key); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (cached() < Compositor::ShaderCount && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const bool compiled_first = cached() == Compositor::ShaderCount;
+    held.unlock();  // Before any require: the future's destructor waits for prepare.
+    require(compiled_first, "A start attempt behind a busy mutex did not compile first");
+    require(!busy.get(), "A failed device reported success");
+    AcquireSRWLockExclusive(&cache.lock);
+    cache.bytecode = saved;
+    ReleaseSRWLockExclusive(&cache.lock);
+  }
   UINT64 errors = 0;
   if (messages.get())
     for (UINT64 index = 0; index < messages->GetNumStoredMessages(); ++index) {
@@ -271,8 +340,8 @@ void run(bool warp) {
     }
   require(errors == 0, "Contention GPU debug validation");
   std::printf(
-      "PASS runtime contention %s: prompt retry, retained leases, flight reset/replay/fenced source retirement, old/new output %u pixels; "
-      "debug=%d errors=%llu.\n",
+      "PASS runtime contention %s: prompt retry, retained leases, flight reset/replay/fenced source retirement, old/new output %u pixels, "
+      "compile-free later starts; debug=%d errors=%llu.\n",
       warp ? "WARP" : "hardware", pixels, debug_enabled, errors);
 }
 }  // namespace

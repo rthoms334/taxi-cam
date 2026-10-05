@@ -30,7 +30,15 @@ struct LocalMemoryMetrics {
   std::uint64_t read_calls = 0;
   std::uint64_t requested_bytes = 0;
   std::uint64_t query_ticks = 0;
+  // query_ticks by kind (allocation, working-set page, region fallback) and
+  // each kind's slowest single call, which names the kernel call that stalls.
+  std::uint64_t query_allocation_ticks = 0, query_page_ticks = 0, query_fallback_ticks = 0;
+  std::uint64_t query_allocation_max_ticks = 0, query_page_max_ticks = 0, query_fallback_max_ticks = 0;
   std::uint64_t read_ticks = 0;
+  // write_local_private stores (guarded copy or WriteProcessMemory), failed
+  // ones included, and their ticks. Their proofs count as queries.
+  std::uint64_t write_calls = 0;
+  std::uint64_t write_ticks = 0;
   std::uint64_t query_cache_hits = 0;
   std::uint64_t query_cache_validation_failures = 0;
 };
@@ -66,12 +74,26 @@ std::string describe_local_memory_query_failure(const LocalMemoryQueryFailure& f
 enum class LocalMemoryQueryMode { full_regions, private_pages };
 enum class LocalImageQueryMode { full_regions, pages };
 
-// Fresh, current-process AA flag helpers. The span is bounded to 16 bytes in
-// one committed private allocation, with exactly PAGE_READWRITE throughout.
-// No proof is retained across writes/native calls. The read copies both words
-// only after an exact RPM; its caller must establish ownership and writability.
+// Fresh, current-process view-field helpers. The span is bounded to
+// kLocalWriteLimit bytes (at most two pages) in one committed private
+// allocation, with exactly PAGE_READWRITE throughout. No proof is retained
+// across writes/native calls. The reads copy only after an exact RPM of at
+// most kLocalBytesReadLimit bytes; their caller must establish ownership and
+// writability.
+inline constexpr std::size_t kLocalWriteLimit = 64;
+inline constexpr std::size_t kLocalBytesReadLimit = 24;
 bool writable_private_span(std::uint64_t address, std::size_t size) noexcept;
 bool read_local_flag_words(std::uint64_t address, std::array<std::uint64_t, 2>& flags) noexcept;
+bool read_local_bytes(std::uint64_t address, void* destination, std::size_t size) noexcept;
+// Stores 1..kLocalWriteLimit bytes after its own fresh writable_private_span
+// proof of exactly that span, with nothing between the proof and the store.
+// The store is one guarded copy: a page decommitted, protected or guarded
+// after the proof faults inside it and the copy reports failure, re-arming a
+// consumed guard page; bytes before a faulting page may already be written,
+// as with a partial WriteProcessMemory. Without the fault handler the store is
+// WriteProcessMemory, never an unguarded copy. False for any refusal or
+// failure; callers keep treating an attempt as a mutation and reread.
+bool write_local_private(std::uint64_t address, const void* data, std::size_t size) noexcept;
 
 #ifdef TAXI_LOCAL_MEMORY_TESTING
 // Compiled only into focused fixtures, never the delivered bridge.
@@ -81,6 +103,11 @@ struct LocalMemoryQueryTestFaults {
   bool pages_nonresident = false;
 };
 void set_local_memory_query_test_faults(LocalMemoryQueryTestFaults faults) noexcept;
+// Runs inside write_local_private on this thread, after its proof and before
+// its store; without_guarded_copy forces the WriteProcessMemory store. A null
+// hook with false restores the delivered path.
+using LocalMemoryWriteTestHook = void (*)(void* context, std::uint64_t address, std::size_t size);
+void set_local_memory_write_test_hook(LocalMemoryWriteTestHook hook, void* context, bool without_guarded_copy = false) noexcept;
 #endif
 
 // One read-only inspection stage only; no private calls may run inside it. The
@@ -103,9 +130,14 @@ class ScopedLocalMemoryQueryCache {
   static constexpr std::size_t kRegionLimit = 64;
   static constexpr std::size_t kPageLimit = 128;
   static constexpr std::size_t kAllocationLimit = 64;
+  // Pages queried alongside a miss: earlier scopes' pages on this thread in
+  // the same allocation. Only their addresses carry over between scopes.
+  static constexpr std::size_t kCandidateLimit = 64;
   // private_pages keeps fresh allocation identity/extent and the protection of
   // every requested private page, rather than the unrelated homogeneous suffix.
-  // Cold/unavailable pages and capacity overflow use the full-region backend.
+  // A cold private page is read with RPM first and then proven. Pages still
+  // out of the working set (including cold image pages), failed page queries
+  // and capacity overflow use the full-region backend.
   // Explicit image-page readers share these bounded proofs with distinct image
   // allocation identity. Direct MBI/default image queries stay exact.
   explicit ScopedLocalMemoryQueryCache(LocalMemoryQueryMode mode = LocalMemoryQueryMode::full_regions) noexcept;
@@ -118,7 +150,11 @@ class ScopedLocalMemoryQueryCache {
   // Reader implementation only. A failed RPM also poisons this stage.
   SIZE_T query(const void* address, MEMORY_BASIC_INFORMATION& region) noexcept;
   bool uses_private_pages() const noexcept { return mode_ == LocalMemoryQueryMode::private_pages; }
-  bool validate_private_range(std::uintptr_t address, std::size_t size) noexcept;
+  // With cold, a page of a proven ordinary private allocation that is outside
+  // the working set sets *cold and returns false without a proof or refusal:
+  // the caller reads it with RPM (which faults it in and never consumes a
+  // guard page) and validates again before using the bytes.
+  bool validate_private_range(std::uintptr_t address, std::size_t size, bool* cold = nullptr) noexcept;
   bool validate_image_range(std::uintptr_t address, std::size_t size, std::uintptr_t module) noexcept;
   void fail(const void* address, SIZE_T requested, SIZE_T copied, DWORD error) noexcept;
   const LocalMemoryQueryFailure& failure() const noexcept { return failure_; }
@@ -136,7 +172,8 @@ class ScopedLocalMemoryQueryCache {
     std::size_t allocation = 0;
   };
   bool finish_pages() noexcept;
-  bool validate_page_range(std::uintptr_t address, std::size_t size, DWORD type, std::uintptr_t allocation) noexcept;
+  bool query_page_batch(std::uintptr_t base, std::size_t allocation, std::uintptr_t& requested_flags) noexcept;
+  bool validate_page_range(std::uintptr_t address, std::size_t size, DWORD type, std::uintptr_t allocation, bool* cold = nullptr) noexcept;
   bool refuse(const char* stage,
               const char* field,
               std::uintptr_t address,
@@ -148,8 +185,12 @@ class ScopedLocalMemoryQueryCache {
   LocalMemoryQueryMode mode_;
   std::array<AllocationProof, kAllocationLimit> allocations_{};
   std::array<PageProof, kPageLimit> pages_{};
+  // Fresh proofs from a batch query, used only once a read requests the page
+  // (then it moves to pages_ and its endpoint is checked by finish()).
+  std::array<PageProof, kCandidateLimit> candidates_{};
   std::size_t allocation_count_ = 0;
   std::size_t page_count_ = 0;
+  std::size_t candidate_count_ = 0;
   std::array<MEMORY_BASIC_INFORMATION, kRegionLimit> regions_{};
   std::size_t count_ = 0;
   LocalMemoryQueryFailure failure_{};

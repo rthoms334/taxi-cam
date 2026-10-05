@@ -48,7 +48,9 @@ class PfdStampD3D12 {
   PfdStampD3D12& operator=(const PfdStampD3D12&) = delete;
   ~PfdStampD3D12() { release(); }
   // Exact typed RTV and optional DSV formats, single sample. Initialize outside
-  // draw callbacks; creates root/PSO and compiles once. RGBA/BGRA8 UNORM/sRGB;
+  // draw callbacks; creates root/PSO. Bytecode and the serialized root are
+  // built once per process (prepare_shaders) and shared by every stamp, so
+  // later stamps create objects only. RGBA/BGRA8 UNORM/sRGB;
   // DSV may be UNKNOWN (absent), D16, D24S8, D32 or D32S8. Depth/stencil testing
   // and writes remain disabled; the bound DSV is never changed by the stamp.
   // Source alpha is a per-pixel encoding flag. Alpha 255 marks a camera pixel
@@ -56,6 +58,13 @@ class PfdStampD3D12 {
   // byte (+-1) as UNORM. Alpha 0 marks an overlay authored like aircraft UI; it
   // passes through, so an sRGB view encodes it. Target alpha is always 1.
   HRESULT initialize(ID3D12Device*, DXGI_FORMAT target_format, DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN) noexcept;
+  // Builds the process-wide root signature and both SRGB_TARGET shader pairs
+  // without a device, so a caller can compile before taking a lock that
+  // initialize runs under. Optional: initialize builds whatever is missing,
+  // and a failure here is retried and reported there. Thread-safe.
+  static HRESULT prepare_shaders() noexcept;
+  // Process-wide D3DCompile calls made for stamps (at most four on success).
+  static std::uint32_t shader_compiles() noexcept;
   // PRIVATE command list only. Caller binds our owned patch RTV, no DSV. This
   // overwrites graphics state without replaying any application bindings.
   bool record_private_patch(ID3D12GraphicsCommandList*,

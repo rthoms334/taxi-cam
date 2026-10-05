@@ -12,7 +12,7 @@ foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activa
     $output = Join-Path $outputDirectory ($component + '-test.exe')
     $testSource = $component + '_test.cpp'
     $componentSources = @((Join-Path $repoRoot ('src/camera/' + $component + '.cpp')))
-    if ($component -eq 'view_aa') { $componentSources += (Join-Path $repoRoot 'src/camera/local_memory.cpp') }
+    if ($component -eq 'view_aa' -or $component -eq 'view_resize') { $componentSources += (Join-Path $repoRoot 'src/camera/local_memory.cpp') }
     & $compiler @common @componentSources `
         (Join-Path $PSScriptRoot $testSource) '-o' $output
     if ($LASTEXITCODE -ne 0) { throw "Native camera component compilation failed: $component" }
@@ -50,6 +50,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Control policy test failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Render schedule test compilation failed.' }
 & $scheduleTest
 if ($LASTEXITCODE -ne 0) { throw 'Render schedule test failed.' }
+$lifecycleTimingTest = Join-Path $outputDirectory 'lifecycle-timing-test.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'lifecycle_timing_test.cpp') '-o' $lifecycleTimingTest
+if ($LASTEXITCODE -ne 0) { throw 'Lifecycle timing test compilation failed.' }
+& $lifecycleTimingTest
+if ($LASTEXITCODE -ne 0) { throw 'Lifecycle timing test failed.' }
 $idleTest = Join-Path $outputDirectory 'probe-inspection-gate-test.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'probe_inspection_gate_test.cpp') '-o' $idleTest
 if ($LASTEXITCODE -ne 0) { throw 'Probe idle inspection gate compilation failed.' }
@@ -102,6 +107,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Aircraft body pose math test compilation faile
 if ($LASTEXITCODE -ne 0) { throw 'Aircraft body pose math test failed.' }
 $runtimeSources = @(
     'src/camera/probe.cpp',
+    'src/camera/view_cascades.cpp',
     'src/camera/body_pose_provider.cpp',
     'src/camera/local_memory.cpp',
     'src/camera/code_contract.cpp',

@@ -30,10 +30,15 @@ inline std::uint64_t bounded_lock_now_us() noexcept {
 
 // Acquires a std::mutex-like lock with try_lock/unlock, never blocking longer
 // than the budget. Failure is a normal result: the caller skips this frame.
+// A wait is reported by budget and by `lock`, the lock it names.
 template <class Mutex>
 class BoundedLock {
  public:
-  BoundedLock(Mutex& mutex, std::uint32_t budget_us, std::atomic<std::uint64_t>* contended = nullptr) noexcept : mutex_(mutex) {
+  BoundedLock(Mutex& mutex,
+              std::uint32_t budget_us,
+              std::atomic<std::uint64_t>* contended = nullptr,
+              hook_timing::WaitLock lock = hook_timing::other_lock) noexcept
+      : mutex_(mutex) {
     if (mutex_.try_lock()) {
       owned_ = true;
       return;
@@ -52,12 +57,12 @@ class BoundedLock {
           YieldProcessor();
         if (mutex_.try_lock()) {
           owned_ = true;
-          hook_timing::record_wait(budget_us, hook_timing::ticks() - waited_from, true);
+          hook_timing::record_wait(budget_us, hook_timing::ticks() - waited_from, true, lock);
           return;
         }
       } while (bounded_lock_now_us() < deadline);
     }
-    hook_timing::record_wait(budget_us, hook_timing::ticks() - waited_from, false);
+    hook_timing::record_wait(budget_us, hook_timing::ticks() - waited_from, false, lock);
     if (contended)
       contended->fetch_add(1, std::memory_order_relaxed);
   }
@@ -108,19 +113,45 @@ class DeferredRing {
   }
   // Consumer only. Returns false when no complete entry is available.
   bool pop(T& value) noexcept {
+    if (!peek(value))
+      return false;
+    commit();
+    return true;
+  }
+  // Consumer only: pop in two steps. The entry stays queued until commit(), so
+  // a reader that sees the ring idle() (acquire on head_) also sees everything
+  // the consumer did before committing it.
+  bool peek(T& value) const noexcept {
     const auto ticket = head_.load(std::memory_order_acquire);
     if (ticket == tail_.load(std::memory_order_acquire))
       return false;
-    auto& slot = slots_[ticket % Capacity];
+    const auto& slot = slots_[ticket % Capacity];
     if (slot.ready.load(std::memory_order_acquire) != ticket + 1)
       return false;  // Producer still writing; drain it on the next pass.
     value = slot.value;
-    slot.ready.store(0, std::memory_order_release);
-    head_.store(ticket + 1, std::memory_order_release);
     return true;
   }
-  bool take_overflow() noexcept { return overflow_.exchange(false, std::memory_order_acq_rel); }
+  // Consumer only, after a successful peek(). Consumers are serialized by the
+  // lock the producers could not take, so the relaxed load sees the last commit.
+  void commit() noexcept {
+    const auto ticket = head_.load(std::memory_order_relaxed);
+    slots_[ticket % Capacity].ready.store(0, std::memory_order_release);
+    head_.store(ticket + 1, std::memory_order_release);
+  }
+  // Read before exchanging: every lock holder drains, and an exchange on an
+  // empty ring would pull this line, which producers and idle() read, across
+  // cores. A flag store that happens before the drain is still seen by the
+  // load; a racing one is taken by the next drain, as before.
+  bool take_overflow() noexcept {
+    return overflow_.load(std::memory_order_acquire) && overflow_.exchange(false, std::memory_order_acq_rel);
+  }
+  // Only a consumer clears the flag, so a consumer that sees it set may finish
+  // work that must precede the clear before calling take_overflow().
+  bool overflowed() const noexcept { return overflow_.load(std::memory_order_acquire); }
   bool empty() const noexcept { return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire); }
+  // Nothing queued, being written or lost: a drain would pop nothing and take
+  // no overflow. An entry still being written keeps tail_ ahead of head_.
+  bool idle() const noexcept { return !overflow_.load(std::memory_order_acquire) && empty(); }
 
  private:
   struct Slot {

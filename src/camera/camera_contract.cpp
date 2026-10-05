@@ -6,6 +6,7 @@
 #include "camera_release_contract.hpp"
 #include "code_contract.hpp"
 #include "rtti_vtables.hpp"
+#include "view_cascades_contract.hpp"
 
 #include <algorithm>
 #include <array>
@@ -359,6 +360,97 @@ CameraContractResolution resolve_model(discovery::ImageReader& source,
   return result;
 }
 
+// The exception-directory entry that begins exactly at rva, extended through
+// the contiguous chained entries (UNW_FLAG_CHAININFO) that MSVC emits for the
+// rest of a split body, must cover at least bytes: the optional ranges are
+// prefixes of longer bodies (the cascade setup's first entry is 85 bytes).
+// Binary search with bounded 12-byte reads, then at most eight chained entries.
+bool function_prefix(discovery::ImageReader& reader, const discovery::Inventory& image, std::uint32_t rva, std::uint32_t bytes) {
+  if (!image.exception_size || image.exception_size % sizeof(RuntimeFunction) || image.exception_size > 8 * 1024 * 1024 ||
+      !section(image, image.exception_rva, image.exception_size, false) || rva > UINT32_MAX - bytes)
+    return false;
+  const auto count = image.exception_size / static_cast<std::uint32_t>(sizeof(RuntimeFunction));
+  const auto entry_at = [&](std::uint32_t index, RuntimeFunction& entry) {
+    return exact(reader, image.exception_rva + index * static_cast<std::uint32_t>(sizeof(RuntimeFunction)), &entry, sizeof(entry)) &&
+           entry.end > entry.begin && section(image, entry.unwind, 4, false);
+  };
+  const auto unwind_flags = [&](const RuntimeFunction& entry, std::uint8_t& flags) {
+    std::uint8_t header = 0;
+    if (!exact(reader, entry.unwind, &header, 1))
+      return false;
+    flags = header >> 3;
+    return true;
+  };
+  constexpr std::uint8_t ChainInfo = 4;
+  std::uint32_t low = 0, high = count;
+  while (low < high) {
+    const auto middle = low + (high - low) / 2;
+    RuntimeFunction entry;
+    if (!entry_at(middle, entry))
+      return false;
+    if (entry.begin < rva) {
+      low = middle + 1;
+      continue;
+    }
+    if (entry.begin > rva) {
+      high = middle;
+      continue;
+    }
+    std::uint8_t flags = 0;
+    if (!unwind_flags(entry, flags) || (flags & ChainInfo))
+      return false;  // The range must begin a function, not a chained part.
+    auto covered = entry.end;
+    for (std::uint32_t index = middle + 1, steps = 0; covered < rva + bytes; ++index, ++steps) {
+      RuntimeFunction next;
+      if (steps == 8 || index >= count || !entry_at(index, next) || next.begin != covered || !unwind_flags(next, flags) ||
+          !(flags & ChainInfo))
+        return false;
+      covered = next.end;
+    }
+    return true;
+  }
+  return false;
+}
+
+// Optional per-view slice-count proof. Runs only after the camera contract has
+// resolved, with a fresh read budget, and never refuses that contract: any
+// failure leaves the cascade control unavailable and returns the reason. The
+// renderer cache is pinned to the camera contract's binding, both ranges must
+// begin their functions, and the scene vtable that dispatches the setup at
+// slot 23 must carry a primary RTTI identity.
+std::string resolve_view_cascades(discovery::ImageReader& source,
+                                  const discovery::Inventory& image,
+                                  std::uint64_t loaded_image_base,
+                                  CameraContract& contract) {
+  namespace cascades = view_cascades_contract;
+  ContractReader reader(source);
+  const auto& model = cascades::model();
+  const std::vector<relocatable::SymbolBinding> roots{{cascades::RendererCache, contract.layout.renderer_global}};
+  const auto resolved = relocatable::resolve_contract(reader, image, model, roots, loaded_image_base);
+  if (!resolved.valid)
+    return "cascades_template: " + resolved.error;
+  const auto setup = resolved.symbols[cascades::CascadeSetup];
+  const auto slices = resolved.symbols[cascades::SliceReader];
+  if (!section(image, setup, cascades::CascadeSetupBytes, true) || !section(image, slices, cascades::SliceReaderBytes, true) ||
+      !function_prefix(reader, image, setup, cascades::CascadeSetupBytes) ||
+      !function_prefix(reader, image, slices, cascades::SliceReaderBytes))
+    return "cascades_function_boundary";
+  const auto relocations =
+      inspect_code_contract(reader, image, {{setup, cascades::CascadeSetupBytes}, {slices, cascades::SliceReaderBytes}});
+  if (!relocations.valid)
+    return "cascades_relocations: " + relocations.error;
+  const auto slot_offset = cascades::SetupSlot * 8;
+  const auto vtables = resolve_rtti_vtables(reader, image, loaded_image_base, {{"", slot_offset + 8, {{slot_offset, setup}}, 0}});
+  if (!vtables.valid || vtables.vtables.size() != 1 || vtables.vtables[0] > UINT32_MAX - slot_offset ||
+      !section(image, vtables.vtables[0] + slot_offset, 8, false))
+    return "cascades_vtable: " + (vtables.error.empty() ? std::string("unresolved") : vtables.error);
+  if (!same_templates(reader, model, resolved.symbols, loaded_image_base))
+    return "cascades_template_changed";
+  contract.view_cascade_setup = setup;
+  contract.view_cascade_slot = vtables.vtables[0] + slot_offset;
+  return {};
+}
+
 }  // namespace
 
 CameraContractResolution resolve_release_camera_contract(discovery::ImageReader& source,
@@ -388,6 +480,7 @@ CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
     result.parent_error = "The parent contract disagrees with the release contract.";
   else
     result.contract.functions = parented.contract.functions;
+  result.cascades_error = resolve_view_cascades(source, image, loaded_image_base, result.contract);
   return result;
 }
 

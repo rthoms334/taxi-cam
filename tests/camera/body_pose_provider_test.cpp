@@ -220,6 +220,9 @@ void session_readiness_regressions(Check check) {
   check(testing::accept_session_packet(flow.data(), flow.size()) && !testing::session_readiness_at(now).ready);
   supply();
   check(testing::session_readiness_at(now).ready);
+  // Without a native notice, the worker's per-wake service changes nothing.
+  testing::service_world_invalidation();
+  check(get_aircraft_session_epoch() == epoch + 2 && testing::session_readiness_at(now).ready);
   // A reader that loses the lock race against the telemetry worker keeps the
   // last complete reading of this epoch instead of reporting "not ready": the
   // bridge gates render demand on this every tick, and a one-tick refusal

@@ -276,7 +276,7 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
   if (!ready) {
     manager().submission_refused(queue, engine_hook::queue_submit::Refusal::invalid_batch);
     // Discovery runs on the application's first submit of this queue.
-    const BoundedLock lock(runtime().mutex, wait_budget::submit_us, &runtime().contended_writes);
+    const BoundedLock lock(runtime().mutex, wait_budget::submit_us, &runtime().contended_writes, hook_timing::runtime_lock);
     if (auto* item = lock ? find(key) : nullptr) {
       item->status.failed = true;
       item->status.message = "Native queue observation failed; scene capture disabled.";
@@ -286,6 +286,19 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
 }
 bool prepare(std::uint64_t key) {
   const standalone::OwnedWork owned_work_guard;
+  // Failed and initialized are sticky and need no shaders, so return their
+  // answer at once. The caches keep only successes: a failed device otherwise
+  // ran every missing D3DCompile again on each start attempt. A busy mutex
+  // is not waited for here; that call builds its shaders first as before.
+  if (const std::unique_lock lock(runtime().mutex, std::try_to_lock); lock.owns_lock())
+    if (const auto* item = find(key); item && (item->status.failed || item->status.initialized))
+      return !item->status.failed;
+  // Shader bytecode needs no device or runtime state. Compile it (once per
+  // process; later calls only find it cached) before taking the mutex that
+  // recording threads and the watchdog snapshot wait on. A failure here is
+  // retried and reported by the initialization below.
+  CameraCompositorD3D12::prepare_shaders();
+  PfdStampD3D12::prepare_shaders();
   const std::lock_guard lock(runtime().mutex);
   auto* item = find(key);
   if (!item || item->status.failed)
@@ -352,7 +365,7 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
                 bool waiting) {
   // Recording-thread entry (barrier callback or Close). service() may hold this
   // mutex across a private compose submit; skip this write rather than wait.
-  const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes);
+  const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes, hook_timing::runtime_lock);
   if (!lock)
     return false;
   auto* item = find(key);
@@ -741,7 +754,7 @@ bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
                             const D3D12_RECT* destination,
                             const D3D12_RECT* content,
                             bool waiting) {
-  const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes);
+  const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes, hook_timing::runtime_lock);
   if (!lock)
     return false;
   auto* item = find(key);

@@ -184,6 +184,15 @@ void run(bool warp) {
     dst.PlacedFootprint = footprints[n];
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
   }
+  // The four formats share one shader pair per SRGB_TARGET value: four
+  // compiles in this process. Later stamps and prepare_shaders compile nothing.
+  require(taxi_camera::PfdStampD3D12::shader_compiles() == 4, "Stamps compiled other than one shader pair per SRGB_TARGET");
+  {
+    taxi_camera::PfdStampD3D12 depth_variant;
+    check(depth_variant.initialize(device.value, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_D32_FLOAT), "depth variant stamp PSO");
+    require(SUCCEEDED(taxi_camera::PfdStampD3D12::prepare_shaders()) && taxi_camera::PfdStampD3D12::shader_compiles() == 4,
+            "A later stamp or prepare_shaders recompiled cached stamp bytecode");
+  }
   check(list->Close(), "close");
   ID3D12CommandList* lists[]{list.value};
   queue->ExecuteCommandLists(1, lists);

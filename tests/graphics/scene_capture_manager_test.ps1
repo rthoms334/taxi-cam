@@ -6,7 +6,7 @@ $managerBuild = Join-Path $managerRoot 'build'
 $managerCompiler = Join-Path (Get-TaxiToolchain $repoRoot) 'clang++.exe'
 $managerFlags = @('-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-DNOMINMAX', '-DTAXI_RENDER_BOUNDARY_STATE_VALIDATION', '-mno-avx', '-mno-avx2', '-mno-avx512f')
 $managerObjects = @()
-foreach ($managerSource in @('scene_capture_manager', 'scene_capture_d3d12', 'scene_handoff', 'scene_source_state')) {
+foreach ($managerSource in @('scene_capture_manager', 'scene_capture_d3d12', 'scene_handoff', 'scene_source_state', 'pfd_submission_pool')) {
   $managerObject = Join-Path $managerBuild "$managerSource-validation.o"
   $managerExceptionFlags = @('-fno-exceptions')
   if ($managerSource -eq 'scene_handoff') { $managerExceptionFlags = @() }
@@ -35,6 +35,9 @@ Write-Output $sourceObservationOutput
 $tailExecutable = Join-Path $managerBuild 'scene-queue-tail-test.exe'
 & $managerCompiler @managerFlags -fno-access-control -static (Join-Path $repoRoot 'tests/graphics/scene_queue_tail_test.cpp') @managerObjects $managerQueueObject -ld3d12 -ld3dcompiler -ldxgi -ldxguid -o $tailExecutable
 if ($LASTEXITCODE -ne 0) { throw 'Queue tail test compile failed.' }
+# CPU-only: submission lock ordering, retirement marks and lock-free clean Resets.
+& $tailExecutable --submission-locks
+if ($LASTEXITCODE -ne 0) { throw 'Submission lock ordering validation failed.' }
 foreach ($tailAdapter in @('hardware', 'warp')) {
   foreach ($tailModel in @('legacy', 'enhanced')) {
    foreach ($tailOrigin in @('transition', 'creation')) {

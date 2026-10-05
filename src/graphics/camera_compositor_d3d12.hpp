@@ -30,7 +30,8 @@ namespace taxi_camera {
 // - output() is borrowed, remains COPY_SOURCE after record, and may only be read
 //   until the next serialized record. The caller owns output-copy synchronization.
 //
-// initialize compiles/allocates once. set_inputs writes descriptors only when
+// initialize allocates once and compiles only shaders no earlier instance (or
+// prepare_shaders) compiled in this process. set_inputs writes descriptors only when
 // resources/formats change, and then (re)allocates each HDR feed's bloom
 // pyramid for its size. record allocates, compiles, uploads and reads back
 // nothing; it restores both input mip-zero states and leaves output COPY_SOURCE.
@@ -68,6 +69,8 @@ class CameraCompositorD3D12 {
   static constexpr float DefaultExposureEv = -8.8f;
 
   struct Statistics {
+    // D3DCompile calls this instance made. Shaders are compiled once per
+    // process, so an instance reusing cached bytecode reports zero.
     std::uint64_t shader_compiles = 0;
     std::uint64_t descriptor_writes = 0;
     std::uint64_t input_changes = 0;
@@ -131,6 +134,21 @@ class CameraCompositorD3D12 {
   }
   void clear_tone_curve() noexcept { tone_exposure_ = 0; }
   bool tone_curve_active() const noexcept { return tone_exposure_ > 0 && (tone_ready_ || tone_pending_); }
+
+  // Compiles the five shaders into the process cache without a device, so a
+  // caller can compile before taking a lock that initialize runs under.
+  // Optional: initialize compiles whatever is missing, and a failure here is
+  // retried and reported there. Thread-safe.
+  static HRESULT prepare_shaders() noexcept {
+    for (std::size_t index = 0; index < ShaderCount; ++index) {
+      ID3DBlob* bytecode = nullptr;
+      bool compiled = false;
+      const HRESULT status = cached_shader(static_cast<ShaderIndex>(index), bytecode, nullptr, compiled);
+      if (FAILED(status))
+        return status;
+    }
+    return S_OK;
+  }
 
   HRESULT initialize(ID3D12Device* device) noexcept {
     if (!device)
@@ -785,14 +803,57 @@ class CameraCompositorD3D12 {
     return status;
   }
 
-  HRESULT compile(const char* entry, const char* profile, ID3DBlob** bytecode, bool bloom = false) noexcept {
+  // Every compositor compiles the same five shaders from the same sources,
+  // entry points, profiles and flags, so each is compiled once per process and
+  // its blob shared, byte for byte what a fresh D3DCompile of those inputs
+  // returns. Only successes are kept, so a failure is retried by the next
+  // caller. Slots are written once under the lock and never released, so a
+  // pointer read under the lock stays valid after the lock is dropped. The
+  // blobs are immutable; readers only call GetBufferPointer/GetBufferSize.
+  enum ShaderIndex : std::size_t { VertexShader, PixelShader, BloomVertexShader, BloomDownShader, BloomUpShader, ShaderCount };
+  struct ShaderCache {
+    SRWLOCK lock = SRWLOCK_INIT;
+    std::array<ID3DBlob*, ShaderCount> bytecode{};
+  };
+  static ShaderCache& shader_cache() noexcept {
+    static ShaderCache cache;  // Constant-initialized; one per module.
+    return cache;
+  }
+  // Borrowed, process-retained bytecode. `compiled` reports whether this call
+  // ran D3DCompile; diagnostics, when requested, describe its failure.
+  static HRESULT cached_shader(ShaderIndex index, ID3DBlob*& bytecode, ID3DBlob** diagnostics, bool& compiled) noexcept {
+    static constexpr std::array<const char*, ShaderCount> Entries{"vs_main", "ps_main", "vs_main", "ps_down", "ps_up"};
+    const bool bloom = index >= BloomVertexShader;
+    auto& cache = shader_cache();
+    AcquireSRWLockExclusive(&cache.lock);
+    HRESULT status = S_OK;
+    compiled = !cache.bytecode[index];
+    if (compiled) {
+      Reference<ID3DBlob> blob;
+      const char* source = bloom ? BloomShader : Shader;
+      const std::size_t size = bloom ? sizeof(BloomShader) - 1 : sizeof(Shader) - 1;
+      status = D3DCompile(source, size, bloom ? "camera_bloom" : "camera_compositor", nullptr, nullptr, Entries[index],
+                          index == VertexShader || index == BloomVertexShader ? "vs_5_0" : "ps_5_0",
+                          D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0, blob.put(),
+                          diagnostics);
+      if (SUCCEEDED(status) && !blob.get())
+        status = E_FAIL;
+      if (SUCCEEDED(status)) {
+        cache.bytecode[index] = blob.get();
+        blob.abandon();  // The cache now owns this reference until process exit.
+      }
+    }
+    bytecode = cache.bytecode[index];
+    ReleaseSRWLockExclusive(&cache.lock);
+    return status;
+  }
+
+  HRESULT compile(ShaderIndex index, ID3DBlob*& bytecode) noexcept {
     Reference<ID3DBlob> diagnostics;
-    const char* source = bloom ? BloomShader : Shader;
-    const std::size_t size = bloom ? sizeof(BloomShader) - 1 : sizeof(Shader) - 1;
-    const HRESULT status = D3DCompile(source, size, bloom ? "camera_bloom" : "camera_compositor", nullptr, nullptr, entry, profile,
-                                      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
-                                      bytecode, diagnostics.put());
-    ++statistics_.shader_compiles;
+    bool compiled = false;
+    const HRESULT status = cached_shader(index, bytecode, diagnostics.put(), compiled);
+    if (compiled)
+      ++statistics_.shader_compiles;
     if (FAILED(status)) {
       if (diagnostics.get()) {
         const auto size = (std::min)(diagnostics->GetBufferSize(), error_.size() - 1);
@@ -846,12 +907,12 @@ class CameraCompositorD3D12 {
         device_->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(root_signature_.put()));
     if (FAILED(status))
       return fail(status, "Creating the compositor root signature failed.");
-    Reference<ID3DBlob> vertex;
-    Reference<ID3DBlob> pixel;
-    status = compile("vs_main", "vs_5_0", vertex.put());
+    ID3DBlob* vertex = nullptr;  // Borrowed from the process shader cache.
+    ID3DBlob* pixel = nullptr;
+    status = compile(VertexShader, vertex);
     if (FAILED(status))
       return status;
-    status = compile("ps_main", "ps_5_0", pixel.put());
+    status = compile(PixelShader, pixel);
     if (FAILED(status))
       return status;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline{};
@@ -920,11 +981,11 @@ class CameraCompositorD3D12 {
         device_->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(bloom_signature_.put()));
     if (FAILED(status))
       return fail(status, "Creating the bloom root signature failed.");
-    Reference<ID3DBlob> vertex;
-    Reference<ID3DBlob> down;
-    Reference<ID3DBlob> up;
-    if (FAILED(status = compile("vs_main", "vs_5_0", vertex.put(), true)) ||
-        FAILED(status = compile("ps_down", "ps_5_0", down.put(), true)) || FAILED(status = compile("ps_up", "ps_5_0", up.put(), true)))
+    ID3DBlob* vertex = nullptr;  // Borrowed from the process shader cache.
+    ID3DBlob* down = nullptr;
+    ID3DBlob* up = nullptr;
+    if (FAILED(status = compile(BloomVertexShader, vertex)) || FAILED(status = compile(BloomDownShader, down)) ||
+        FAILED(status = compile(BloomUpShader, up)))
       return status;
     pipeline.pRootSignature = bloom_signature_.get();
     pipeline.VS = {vertex->GetBufferPointer(), vertex->GetBufferSize()};

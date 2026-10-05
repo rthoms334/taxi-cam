@@ -23,12 +23,15 @@ void cadence(unsigned rate, unsigned feeds, std::uint64_t step) {
   std::array<unsigned, 2> counts{};
   std::array<std::uint64_t, 2> last{};
   bool previous_on = false;
+  unsigned closed_since = RenderSchedule::kIdleUpdatesAfterClose + 1;
   unsigned expected_feed = 0;
   for (std::uint64_t time = 0; time < 10000; time += step) {
     const auto active = schedule.tick(time);
     require(!(active[0] && active[1]), "Both cameras were scheduled in one interval");
     const bool on = active[0] || active[1];
     require(!(on && previous_on), "An active interval was not followed by an off interval");
+    require(!on || closed_since > RenderSchedule::kIdleUpdatesAfterClose, "A closing update was not followed by an idle update");
+    closed_since = on ? 0 : closed_since + 1;
     previous_on = on;
     for (unsigned i = 0; i < 2; ++i) {
       if (!active[i])
@@ -54,6 +57,7 @@ void changes_and_stalls() {
   require(schedule.rate() == 60 && schedule.feeds() == 3, "Upper bounds were not applied");
   require(schedule.tick(100)[0], "Initial pulse missing");
   require(schedule.tick(10000) == std::array<bool, 3>{}, "A long stall left a camera on");
+  require(schedule.tick(10000) == std::array<bool, 3>{}, "A closing update was not followed by an idle update");
   require(schedule.tick(10000)[1], "Stalled schedule did not resume with the other feed");
   require(schedule.tick(10000) == std::array<bool, 3>{}, "Duplicate timestamp did not close pulse");
   require(schedule.tick(10000) == std::array<bool, 3>{}, "Duplicate timestamp caused a catch-up burst");
@@ -124,15 +128,15 @@ std::array<unsigned, 2> opportunities(unsigned rate, unsigned feeds, const std::
 }
 
 void effective_lower_budgets() {
-  // At 50 manager updates/s the old 15 and 30 settings both service a gate
-  // transition on every update. Lower rates must add real closed idle updates.
+  // At 50 manager updates/s 10, 15 and 30 all reach the idle-update cap: a gate
+  // transition on two of every three updates. Lower rates must add more idle.
   const std::array<unsigned, 6> fifty_hz{20, 20, 20, 20, 20, 20};
   const auto five = opportunities(5, 2, fifty_hz);
   const auto ten = opportunities(10, 2, fifty_hz);
   const auto fifteen = opportunities(15, 2, fifty_hz);
   require(five == std::array<unsigned, 2>{50, 50}, "5fps did not reduce the 50Hz manager workload");
   require(ten == std::array<unsigned, 2>{84, 83}, "10fps did not reduce the 50Hz manager workload");
-  require(fifteen == std::array<unsigned, 2>{125, 125}, "Established 15fps cadence changed");
+  require(fifteen == ten, "15fps exceeded the idle-update cap at 50Hz");
   require(opportunities(30, 2, fifty_hz) == fifteen, "50Hz manager saturation example changed");
   for (const auto& intervals : {std::array<unsigned, 6>{10, 10, 10, 10, 10, 10}, fifty_hz, std::array<unsigned, 6>{33, 33, 33, 33, 33, 33},
                                 std::array<unsigned, 6>{8, 12, 17, 23, 10, 30}}) {
@@ -164,6 +168,7 @@ void lower_budget_changes() {
   require(schedule.tick(1399) == std::array<bool, 3>{}, "Lowering rate erased the selected feed deadline");
   require(schedule.tick(1400)[0], "5fps pair did not preserve its pending feed");
   require(schedule.tick(20000) == std::array<bool, 3>{}, "Low-rate long stall did not close the active pulse");
+  require(schedule.tick(20000) == std::array<bool, 3>{}, "Low-rate long stall skipped the idle update");
   require(schedule.tick(20000)[1], "Low-rate stalled pair did not resume fairly");
   require(schedule.tick(20000) == std::array<bool, 3>{}, "Low-rate duplicate timestamp left a gate open");
   require(schedule.tick(20000) == std::array<bool, 3>{}, "Low-rate stall caused a catch-up burst");
@@ -354,17 +359,17 @@ void adaptive_parked_schedule() {
 }
 
 // OMDB with the iniBuilds A380 ran near 18 fps. Every pulse is followed by a
-// closed update, so at that cadence two feeds pulse on every other update at
-// 5 or 10 per second alike; only a parked floor below that lowers the share.
+// closing and an idle update, so at that cadence two feeds pulse on every third
+// update at 5 or 10 per second alike; only a parked floor below that lowers it.
 void low_frame_rate_share() {
   const std::array<unsigned, 6> eighteen_fps{55, 55, 56, 55, 55, 56};
   const auto total = [](const std::array<unsigned, 2>& count) { return count[0] + count[1]; };
   const auto updates = 10000 / 55;
   const auto ten = total(opportunities(10, 2, eighteen_fps));
-  require(total(opportunities(5, 2, eighteen_fps)) == ten && ten >= updates / 2 - 1 && ten <= updates / 2 + 1,
-          "At 18 fps rates 5 and 10 no longer both pulse on every other update");
+  require(total(opportunities(5, 2, eighteen_fps)) == ten && ten >= updates / 3 - 1 && ten <= updates / 3 + 1,
+          "At 18 fps rates 5 and 10 no longer both pulse on every third update");
   const auto parked = total(opportunities(taxi_camera::kDefaultParkedCameraRate, 2, eighteen_fps));
-  require(parked * 100 <= ten * 45 && parked * 100 >= ten * 30, "The parked floor did not cut the 18 fps render share to about 20%");
+  require(parked * 100 <= ten * 65 && parked * 100 >= ten * 55, "The parked floor did not cut the 18 fps render share to about 20%");
 }
 
 // Dynamic tail rate: every other turn of the non-nose feeds is an idle slot.
@@ -391,12 +396,38 @@ std::array<unsigned, 3> priority_counts(unsigned rate, unsigned feeds, std::uint
   return count;
 }
 
+// 2026-10-04 RJTT, PMDG 777, three feeds near 24 fps: rates 5 and 10 both
+// changed a gate on 95-100 % of updates, each change a validated inspection.
+// The idle update caps gate changes at two in three and extra views at one in three.
+void three_feed_frame_budget() {
+  for (unsigned rate : {5u, 10u, 15u}) {
+    RenderSchedule schedule;
+    schedule.configure(rate, 3);
+    unsigned updates = 0, changes = 0, opens = 0;
+    std::array<unsigned, 3> per_feed{};
+    std::array<bool, 3> previous{};
+    for (std::uint64_t now = 0; now < 10000; now += 42, ++updates) {
+      const auto active = schedule.tick(now);
+      changes += active != previous;
+      previous = active;
+      for (unsigned feed = 0; feed < 3; ++feed)
+        if (active[feed]) {
+          ++opens;
+          ++per_feed[feed];
+        }
+    }
+    require(changes * 3 <= updates * 2 + 3, "Three feeds at 24 fps changed a gate on more than two updates in three");
+    require(opens * 3 <= updates + 3 && opens * 3 + 3 >= updates, "Three feeds at 24 fps did not open one update in three");
+    require(per_feed[0] + 1 >= per_feed[2] && per_feed[2] + 1 >= per_feed[0], "Three feeds at 24 fps were not served fairly");
+  }
+}
+
 void nose_priority_schedule() {
-  // 18 fps: nose, tail, nose, idle, each followed by its closed update.
+  // 18 fps: nose, tail, nose, idle, each followed by its closing and idle updates.
   RenderSchedule schedule;
   schedule.configure(10, 2, true);
   require(schedule.nose_priority(), "Nose priority was not configured");
-  const std::array<int, 16> expected{0, -1, 1, -1, 0, -1, -1, -1, 0, -1, 1, -1, 0, -1, -1, -1};
+  const std::array<int, 24> expected{0, -1, -1, 1, -1, -1, 0, -1, -1, -1, -1, -1, 0, -1, -1, 1, -1, -1, 0, -1, -1, -1, -1, -1};
   for (unsigned tick = 0; tick < expected.size(); ++tick) {
     const auto active = schedule.tick(tick * 55);
     const int opened = active[0] ? 0 : active[1] ? 1 : active[2] ? 2 : -1;
@@ -568,12 +599,13 @@ int main() {
     effective_rate_caps();
     adaptive_parked_schedule();
     low_frame_rate_share();
+    three_feed_frame_budget();
     nose_priority_schedule();
     nose_priority_policy();
     adaptive_rate_switch_contract();
     std::printf(
-        "PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off intervals, no catch-up bursts, "
-        "parked floor, nose priority and rate caps.\n",
+        "PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off and idle intervals, "
+        "no catch-up bursts, parked floor, nose priority and rate caps.\n",
         checks);
     return 0;
   } catch (const std::exception& error) {

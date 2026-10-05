@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <new>
+#include <type_traits>
 
 namespace taxi_camera {
 namespace {
@@ -11,7 +13,11 @@ std::uint64_t mask(UINT count) noexcept {
 }  // namespace
 
 void PfdGraphicsState::reset(std::uint64_t generation, bool native_observations) noexcept {
-  *this = PfdGraphicsState{};
+  // The same value-initialized object as assigning PfdGraphicsState{}, built in
+  // place: the assignment built a 2.9 KB stack temporary and copied it on every
+  // native Reset and ClearState.
+  static_assert(std::is_trivially_destructible_v<PfdGraphicsState>);
+  ::new (static_cast<void*>(this)) PfdGraphicsState{};
   generation_ = generation;
   observed_ = native_observations;
 }

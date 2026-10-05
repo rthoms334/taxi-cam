@@ -6,6 +6,7 @@
 #include "../camera/display_panels.hpp"
 #include "../camera/mount_config.hpp"
 #include "../camera/probe.hpp"
+#include "../camera/view_cascades.hpp"
 #include "../graphics/camera_compositor_d3d12.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
@@ -129,16 +130,87 @@ void describe_frame(std::uint64_t address, char* out, std::size_t size) noexcept
   name = name ? name + 1 : path;
   std::snprintf(out, size, "%ls+%#llx", name, static_cast<unsigned long long>(address - reinterpret_cast<std::uint64_t>(module)));
 }
+// %LOCALAPPDATA%\Taxi Cam and its bridge.log. Empty when the variable cannot
+// be read.
+struct BridgeLogPath {
+  std::wstring directory, file;
+};
+BridgeLogPath read_bridge_log_path() {
+  BridgeLogPath result;
+  const DWORD size = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);  // Includes the terminator.
+  if (!size || size > 32700)
+    return result;
+  std::wstring value(size, L'\0');
+  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", value.data(), size);
+  if (!n || n >= size)
+    return result;
+  value.resize(n);
+  result.directory = value + L"\\Taxi Cam";
+  result.file = result.directory + L"\\bridge.log";
+  return result;
+}
+// Appends complete records to bridge.log, recreating its directory if it was
+// deleted. The path is read once; a failed read is retried on every call.
+void write_bridge_log(const std::string_view* records, std::size_t count) noexcept {
+  try {
+    // Immutable after the thread-safe static initialisation, so the worker
+    // and watchdog threads share it without a lock.
+    static const BridgeLogPath cached = read_bridge_log_path();
+    BridgeLogPath retry;
+    const BridgeLogPath* path = &cached;
+    if (cached.file.empty()) {
+      retry = read_bridge_log_path();
+      if (retry.file.empty())
+        return;
+      path = &retry;
+    }
+    CreateDirectoryW(path->directory.c_str(), nullptr);
+    win::append_rotating_log_records(path->file, records, count, win::BridgeLogBytes);
+  } catch (...) {
+    // Diagnostics must not interrupt bridge operation.
+  }
+}
+// The bridge worker's thread id, for log_status's batch gate. Written once at
+// run_impl start, before the watchdog thread exists; release/acquire records
+// that order. A thread compares it with its own id, so only the worker can
+// match: any other thread that reads 0 or the worker's id takes the immediate
+// path, and never touches log_batch.
+std::atomic<DWORD> log_worker_thread{};
+// The worker's log_status records for one report block (see LogBlock).
+// Worker thread only.
+struct LogBatch {
+  win::LogRecordBuffer records;
+  bool active = false;
+};
+LogBatch log_batch;
+// Holds the worker's log_status records from construction to destruction and
+// writes them with one file open and close. Closing the changed log waits for
+// an on-access antivirus scan (~4 ms), which held the worker about 100 ms per
+// report block when every record was appended alone. Used only around blocks
+// that format snapshots and counters already taken, so no simulator memory is
+// read while records wait. Inert on any other thread (the watchdog's records
+// are written at once) or when nested.
+class LogBlock {
+ public:
+  LogBlock() noexcept {
+    if (GetCurrentThreadId() != log_worker_thread.load(std::memory_order_acquire) || log_batch.active || !log_batch.records.reserve())
+      return;
+    log_batch.active = owner_ = true;
+  }
+  ~LogBlock() {
+    if (!owner_)
+      return;
+    log_batch.records.flush(write_bridge_log);
+    log_batch.active = false;
+  }
+  LogBlock(const LogBlock&) = delete;
+  LogBlock& operator=(const LogBlock&) = delete;
+
+ private:
+  bool owner_ = false;
+};
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
-    wchar_t directory[32768]{};
-    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
-    if (!n || n >= 32700)
-      return;
-    std::wstring path(directory);
-    path += L"\\Taxi Cam";
-    CreateDirectoryW(path.c_str(), nullptr);
-    path += L"\\bridge.log";
     char line[2048];
     const auto length = std::snprintf(
         line, sizeof(line),
@@ -149,8 +221,14 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
         static_cast<unsigned long long>(s.lower_id), static_cast<unsigned long long>(s.captures),
         static_cast<unsigned long long>(s.composed), static_cast<unsigned long long>(s.stamps),
         static_cast<unsigned long long>(s.hook_failures), s.message, detail);
-    if (length > 0 && static_cast<size_t>(length) < sizeof(line))
-      win::append_rotating_log(path, std::string_view(line, static_cast<std::size_t>(length)), win::BridgeLogBytes);
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(line))
+      return;
+    const std::string_view record(line, static_cast<std::size_t>(length));
+    // The thread id first: only the worker may touch log_batch.
+    if (GetCurrentThreadId() == log_worker_thread.load(std::memory_order_acquire) && log_batch.active &&
+        log_batch.records.add(record, write_bridge_log))
+      return;
+    write_bridge_log(&record, 1);
   } catch (...) {
     // Diagnostics must not interrupt bridge operation.
   }
@@ -550,25 +628,61 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
     append("", win::contention_site_name(static_cast<win::ContentionSite>(i)), graphics.contention[i]);
   log_status(status, detail);
 }
+// Appended to the lock-hold record: how the interval's command-list Resets
+// were retired. fast: lock-free; locked: the rest; expired: locked ones whose
+// bounded wait expired (deferred). The first call sets the baseline.
+void append_reset_paths(char* detail, std::size_t size) noexcept {
+  static SceneCaptureManager::ResetPaths previous{};
+  static bool baseline = false;
+  const auto now = scene_runtime::manager().reset_paths();
+  const bool first = !baseline;
+  const auto before = previous;
+  previous = now;
+  baseline = true;
+  auto used = std::strlen(detail);
+  if (first)
+    return;
+  // An interval without reportable holds still reports its Resets: lock-free
+  // Resets take no lock, so they are exactly the quiet case.
+  if (!used && size)
+    used = static_cast<std::size_t>(std::snprintf(detail, size, "Lock holds: none")) < size ? std::strlen(detail) : 0;
+  const auto append = [&](auto... values) {
+    if (used >= size)
+      return;
+    const int written = std::snprintf(detail + used, size - used, values...);
+    used = written > 0 && static_cast<std::size_t>(written) < size - used ? used + static_cast<std::size_t>(written) : size;
+  };
+  append("; reset: fast=%llu locked=%llu expired=%llu", static_cast<unsigned long long>(now.fast - before.fast),
+         static_cast<unsigned long long>(now.locked - before.locked), static_cast<unsigned long long>(now.expired - before.expired));
+  detail[size - 1] = 0;
+}
 // Bridge CPU time on simulator threads since the previous periodic log. Worker
 // thread only: the report keeps the previous totals between calls.
 // Which call sites held the registry and capture-manager locks, and for how
-// long, since the previous record. Worker thread only.
+// long, since the previous record, then the interval's Reset paths. Worker
+// thread only.
 void log_lock_holds(const win::Status& status) noexcept {
   char detail[1400];
   win::lock_hold_report(detail, sizeof(detail));
+  append_reset_paths(detail, sizeof(detail));
   if (detail[0])
     log_status(status, detail);
 }
+// Camera-manager stage names as the Observer peak and Lifecycle event lines
+// print them.
+constexpr std::array<const char*, static_cast<std::size_t>(native_camera::ProbeStage::count)> ObserverStageNames{
+    "manager", "pool", "lifecycle", "entries", "view1", "view2", "handoff", "pose", "activation", "publication", "aa", "placement"};
 // Slowest camera-manager update on the simulator main thread since the
 // previous record, with its stage breakdown when it serviced the pair. Idle
-// intervals (under 1 ms) are not logged. Worker thread only.
+// intervals (under 1 ms) are not logged. query_kind_ms and query_kind_max_us
+// are allocation/page/region query time and slowest single call, which shows
+// the kernel call that stalls; write_ms and writes are the proven view-field
+// stores. Worker thread only.
 void log_observer_peak(const win::Status& status) noexcept {
   const auto peak = native_camera::take_observer_peak();
   if (peak.total_ms < 1)
     return;
-  static constexpr std::array<const char*, static_cast<std::size_t>(native_camera::ProbeStage::count)> names{
-      "manager", "pool", "lifecycle", "entries", "view1", "view2", "handoff", "pose", "activation", "publication", "aa"};
+  const auto& names = ObserverStageNames;
   char detail[1024];
   auto used = static_cast<std::size_t>(std::snprintf(detail, sizeof(detail), "Observer peak: total_ms=%.2f pre_ms=%.2f serviced=%u",
                                                      peak.total_ms, peak.pre_ms, peak.serviced ? 1u : 0u));
@@ -582,16 +696,39 @@ void log_observer_peak(const win::Status& status) noexcept {
     }
     const auto& p = peak.performance;
     if (used < sizeof(detail))
-      std::snprintf(
-          detail + used, sizeof(detail) - used, " unstaged=%.2f query_ms=%.2f read_ms=%.2f queries=%llu reads=%llu cache_hits=%llu",
-          std::max(0.0, peak.total_ms - peak.pre_ms - staged), p.query_ms, p.read_ms, static_cast<unsigned long long>(p.query_calls),
-          static_cast<unsigned long long>(p.read_calls), static_cast<unsigned long long>(p.query_cache_hits));
+      std::snprintf(detail + used, sizeof(detail) - used,
+                    " unstaged=%.2f query_ms=%.2f read_ms=%.2f queries=%llu reads=%llu cache_hits=%llu query_kind_ms=%.3f/%.3f/%.3f "
+                    "query_kind_max_us=%.1f/%.1f/%.1f write_ms=%.3f writes=%llu",
+                    std::max(0.0, peak.total_ms - peak.pre_ms - staged), p.query_ms, p.read_ms,
+                    static_cast<unsigned long long>(p.query_calls), static_cast<unsigned long long>(p.read_calls),
+                    static_cast<unsigned long long>(p.query_cache_hits), p.query_allocation_ms, p.query_page_ms, p.query_fallback_ms,
+                    p.query_allocation_max_us, p.query_page_max_us, p.query_fallback_max_us, p.write_ms,
+                    static_cast<unsigned long long>(p.write_calls));
   }
   log_status(status, detail);
 }
+// Every camera-manager update over 2 ms since the previous record, not just
+// the interval's slowest: its stages and the lifecycle sub-timers, each native
+// engine call kind as ms/calls/slowest-call ms, with proofs the rest of the
+// lifecycle stage. The observer copies plain values into a fixed ring; a full
+// ring is reported as dropped. Worker thread only (the ring's one consumer).
+void log_lifecycle_events(const win::Status& status) noexcept {
+  static std::array<native_camera::LifecycleEvent, native_camera::kLifecycleEventCapacity> events;
+  std::uint64_t dropped = 0;
+  const auto count = native_camera::take_lifecycle_events(events, dropped);
+  char detail[1024];
+  for (std::size_t i = 0; i < count; ++i) {
+    native_camera::format_lifecycle_event(detail, sizeof(detail), events[i], ObserverStageNames);
+    log_status(status, detail);
+  }
+  if (dropped) {
+    std::snprintf(detail, sizeof(detail), "Lifecycle event: dropped=%llu (ring full)", static_cast<unsigned long long>(dropped));
+    log_status(status, detail);
+  }
+}
 void log_hook_timing(const win::Status& status) noexcept {
   static hook_timing::Report report;
-  char sites[1024], threads[1400];
+  char sites[1400], threads[1400];
   if (report.sample(sites, sizeof(sites), threads, sizeof(threads))) {
     log_status(status, sites);
     log_status(status, threads);
@@ -684,6 +821,7 @@ DWORD WINAPI watchdog_run(void*) noexcept {
   }
 }
 DWORD run_impl() {
+  log_worker_thread.store(GetCurrentThreadId(), std::memory_order_release);
   lock_holder_priority::mark_worker_thread();
   win::Mailbox mailbox;
   if (!mailbox.open(GetCurrentProcessId(), false))
@@ -1003,6 +1141,7 @@ DWORD run_impl() {
           mailbox.unlock();
         }
         if (now >= next_log) {
+          const LogBlock log_block;
           char detail[512]{};
           std::snprintf(detail, sizeof(detail),
                         "Aircraft transition waiting: token=%llu session=%llu profile=%u failed=%u request_pending=%u "
@@ -1640,6 +1779,7 @@ DWORD run_impl() {
                          status.parked != last_logged.parked;
     loop_max_ms = std::max(loop_max_ms, GetTickCount64() - now);
     if (changed || now >= next_log) {
+      const LogBlock log_block;
       if (!logged || status.active_profile != last_logged.active_profile || status.detected_profile != last_logged.detected_profile ||
           status.aircraft_session_epoch != last_logged.aircraft_session_epoch ||
           std::strcmp(status.aircraft_type, last_logged.aircraft_type) || std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
@@ -1705,11 +1845,14 @@ DWORD run_impl() {
           : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]    ? scene.message.c_str()
                                                                     : "");
       log_status(status, detail);
-      char selection_detail[256];
-      std::snprintf(selection_detail, sizeof(selection_detail),
-                    "PFD selection: automatic=%u candidates=%zu last_result=%s requested=%llu/%llu", settings.auto_detect, inventory.size(),
-                    graphics.target_detection, static_cast<unsigned long long>(settings.left_id),
-                    static_cast<unsigned long long>(settings.right_id));
+      char selection_detail[320];
+      std::snprintf(
+          selection_detail, sizeof(selection_detail),
+          "PFD selection: automatic=%u candidates=%zu last_result=%s requested=%llu/%llu backfill=%u backfill_classify=%llu/%llu/%llu",
+          settings.auto_detect, inventory.size(), graphics.target_detection, static_cast<unsigned long long>(settings.left_id),
+          static_cast<unsigned long long>(settings.right_id), graphics.backfill_open ? 1u : 0u,
+          static_cast<unsigned long long>(graphics.backfill_classifications),
+          static_cast<unsigned long long>(graphics.backfill_unclassified), static_cast<unsigned long long>(graphics.backfill_unremembered));
       log_status(status, selection_detail);
       log_render_target_shapes(status, now);
       char control_detail[256];
@@ -1730,7 +1873,7 @@ DWORD run_impl() {
         candidate_used += static_cast<std::size_t>(written);
       }
       log_status(status, candidate_detail);
-      char pfd_detail[640];
+      char pfd_detail[704];
       std::snprintf(pfd_detail, sizeof(pfd_detail),
                     "PFD copy admission: selected_draws=%llu rt_metadata=%llu rt_callbacks=%llu pending_matches=%llu "
                     "view_resolved=%llu view_rejected=%llu attempts=%llu rejected=%llu state_skips=%llu "
@@ -1745,6 +1888,9 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(output.state_skips), static_cast<unsigned long long>(boundaries.batch_refusals),
                     static_cast<unsigned long long>(boundaries.pass_refusals), static_cast<unsigned long long>(graphics.queue_patch_plans),
                     static_cast<unsigned long long>(output.capture.display_copies), graphics.copy_error);
+      const auto pfd_used = std::strlen(pfd_detail);
+      std::snprintf(pfd_detail + pfd_used, sizeof(pfd_detail) - pfd_used, " queue_record_failures=%llu",
+                    static_cast<unsigned long long>(output.capture.display_record_failures));
       log_status(status, pfd_detail);
       // Fixed-size counters only on submission threads; formatting and bounded
       // rotating-file output stay on this existing five-second control cadence.
@@ -1830,6 +1976,13 @@ DWORD run_impl() {
                     scene.draw_clip[1][0], scene.draw_clip[1][1], scene.draw_clip[1][2], scene.draw_clip[2][0], scene.draw_clip[2][1],
                     scene.draw_clip[2][2]);
       log_status(status, clip_detail);
+      char cascades_detail[256];
+      std::snprintf(cascades_detail, sizeof(cascades_detail),
+                    "Camera shadows: available=%d slices=%u installed=%d hits=%llu lowered=%llu error=%.120s",
+                    scene.cascades_available ? 1 : 0, scene.cascades_requested, scene.cascades_installed ? 1 : 0,
+                    static_cast<unsigned long long>(scene.cascades_hits), static_cast<unsigned long long>(scene.cascades_writes),
+                    scene.cascades_error.empty() ? "none" : scene.cascades_error.c_str());
+      log_status(status, cascades_detail);
       // Camera weather: cloud merges sent into a camera image, and those that
       // could not be (no descriptor heap); cumulative for this bridge.
       const auto clouds = win::cloud_merge_status();
@@ -1942,6 +2095,7 @@ DWORD run_impl() {
       log_hook_timing(status);
       log_lock_holds(status);
       log_observer_peak(status);
+      log_lifecycle_events(status);
       // More accepted captures than activations for a feed means the engine
       // drew its view on closed-gate updates too (issue 71 frame jumps).
       char cadence_detail[384];

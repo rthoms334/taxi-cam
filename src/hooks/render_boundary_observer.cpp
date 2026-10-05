@@ -208,6 +208,9 @@ thread_local unsigned next_cached_identity = 0;
 // so an entry under the argument itself needs no unwrap. Only a miss pays for
 // QueryInterface, which finds the native list behind a proxy argument.
 // changes receives the list's shard count for a direct hit, else 0.
+// The miss path is out of line so a cache hit, on nearly every hook call,
+// needs no callee-saved register spills.
+[[gnu::noinline]] Identity lookup_miss(Shard& shard, ID3D12GraphicsCommandList* list, std::uint64_t& changes) noexcept;
 Identity lookup(ID3D12GraphicsCommandList* list, std::uint64_t& changes) noexcept {
   auto& shard = shard_for(list);
   const auto now = shard.changes.load(std::memory_order_acquire);
@@ -216,6 +219,9 @@ Identity lookup(ID3D12GraphicsCommandList* list, std::uint64_t& changes) noexcep
       changes = now;
       return entry.value;
     }
+  return lookup_miss(shard, list, changes);
+}
+Identity lookup_miss(Shard& shard, ID3D12GraphicsCommandList* list, std::uint64_t& changes) noexcept {
   changes = 0;
   bool found = false;
   Identity direct{};

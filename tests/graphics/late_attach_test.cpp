@@ -1,7 +1,9 @@
 // Exercise production late-attachment metadata without a simulator or GPU.
 // Native addresses below are identity tokens and must never be dereferenced.
+#include <array>
 #include <cstdio>
 #include <memory>
+#include <thread>
 #include "../../src/bridge/d3d12_bridge.cpp"
 
 namespace {
@@ -574,6 +576,236 @@ void recovered_output_encoding_case() {
          static_cast<unsigned>(DXGI_FORMAT_UNKNOWN));
   clear_fixture(r);
 }
+
+// The window's seen set holds a flight load's worth of distinct resources. At
+// 1024 slots it filled early and every later copy repeated the classification.
+void seen_set_capacity_case() {
+  using Seen = win::Registry::SeenResources;
+  const auto seen = std::make_unique<Seen>();
+  const auto pointer = [](std::uintptr_t base, std::uintptr_t stride, unsigned i) {
+    return reinterpret_cast<ID3D12Resource*>(base + stride * i);
+  };
+  // Heap neighbours 64 bytes apart, and objects 64 KiB apart, whose low 16
+  // address bits are equal.
+  unsigned remembered = 0, found = 0, filter_range = 0;
+  for (unsigned i = 0; i < 24576; ++i)
+    remembered += seen->remember(pointer(0x20000000, 0x40, i));
+  for (unsigned i = 0; i < 8192; ++i)
+    remembered += seen->remember(pointer(0x400000000, 0x10000, i));
+  for (unsigned i = 0; i < 24576; ++i)
+    found += seen->contains(pointer(0x20000000, 0x40, i));
+  for (unsigned i = 0; i < 8192; ++i)
+    found += seen->contains(pointer(0x400000000, 0x10000, i));
+  expect("seen set remembers 32768 distinct heap and strided resources", remembered, 32768);
+  expect("seen set finds every remembered resource", found, 32768);
+  expect("seen set does not report an unseen resource", seen->contains(pointer(0x20000000, 0x40, 24576)), false);
+  for (unsigned i = 0; i < 4096; ++i) {
+    auto x = static_cast<std::uintptr_t>(0x20000000 + 0x40 * i);
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    filter_range += Seen::hash(pointer(0x20000000, 0x40, i)) == (static_cast<unsigned>(x) & 1023);
+  }
+  expect("display filter bits keep their 1024-value hash", filter_range, 4096);
+
+  // A full probe run is reported, and that pointer is classified again later.
+  const auto colliding = std::make_unique<Seen>();
+  std::array<ID3D12Resource*, Seen::Probes + 1> run{};
+  unsigned collected = 0;
+  const auto target = Seen::slot(pointer(0x30000000, 0x40, 0));
+  for (unsigned i = 0; collected < run.size() && i < (Seen::Capacity << 6); ++i)
+    if (Seen::slot(pointer(0x30000000, 0x40, i)) == target)
+      run[collected++] = pointer(0x30000000, 0x40, i);
+  expect("fixture found a full probe run", collected, run.size());
+  unsigned accepted = 0;
+  for (unsigned i = 0; i < Seen::Probes; ++i)
+    accepted += colliding->remember(run[i]);
+  expect("one probe run holds Probes resources", accepted, Seen::Probes);
+  expect("a resource past a full probe run is refused", colliding->remember(run[Seen::Probes]), false);
+  expect("a refused resource stays unknown", colliding->contains(run[Seen::Probes]), false);
+  // Forgetting one keeps later members of its run reachable; it can return.
+  colliding->forget(run[0]);
+  expect("forgotten resource is unknown", colliding->contains(run[0]), false);
+  expect("forgetting keeps the rest of the run", colliding->contains(run[Seen::Probes - 1]), true);
+  expect("a forgotten slot is not reused", colliding->remember(run[Seen::Probes]), false);
+  colliding->forget(run[Seen::Probes - 1]);
+  colliding->forget(run[Seen::Probes]);
+  expect("forgetting an absent resource changes nothing", colliding->contains(run[1]), true);
+  const auto other = std::make_unique<Seen>();
+  other->remember(run[0]);
+  other->remember(run[1]);
+  other->forget(run[0]);
+  expect("a forgotten resource can be remembered again", other->remember(run[0]) && other->contains(run[0]), true);
+  expect("its neighbour stays known", other->contains(run[1]), true);
+}
+
+// Registered resources need no classification; anything else still gets the
+// full one, every time until it is described.
+void known_resource_case() {
+  auto& r = win::registry();
+  clear_fixture(r);
+  const bool was_ready = r.ready;
+  r.ready = true;
+  r.profile = &profiles::IniA380;
+  const auto classifications = [&] { return r.backfill_classifications.load(); };
+  const auto registered = display(0);
+  r.resources[registered->native] = registered;
+  r.resource_index.assign(registered->native, registered);
+  win::remember_backfill_display(r, registered->native);
+  auto before = classifications();
+  win::consider_live_copy(registered->native);
+  expect("registered copy source needs no classification", classifications() - before, 0);
+  expect("registered copy source is remembered", r.seen_resources.contains(registered->native), true);
+  const auto second = display(1);
+  r.resources[second->native] = second;
+  r.resource_index.assign(second->native, second);
+  win::remember_backfill_display(r, second->native);
+  const auto list = list_address(0);
+  before = classifications();
+  win::consider_live_resource(list, second->native, taxi_camera::source_state::Model::legacy_rt);
+  expect("registered RT entry needs no classification", classifications() - before, 0);
+  expect("registered display RT entry still provides its bind hint", r.live_bind.take(list) == second->native, true);
+  // An object the pointer checks reject: its first word is no vtable.
+  std::array<void*, 4> object{};
+  auto* unknown = reinterpret_cast<ID3D12Resource*>(object.data());
+  const auto unclassified = r.backfill_unclassified.load();
+  before = classifications();
+  win::consider_live_copy(unknown);
+  win::consider_live_copy(unknown);
+  expect("an undescribed resource is classified on every use", classifications() - before, 2);
+  expect("both classifications report the failure", r.backfill_unclassified.load() - unclassified, 2);
+  expect("an undescribed resource is never remembered", r.seen_resources.contains(unknown), false);
+  // A retired registry entry is not evidence.
+  auto retired = display(2);
+  retired->native = unknown;
+  retired->alive = false;
+  r.resource_index.assign(unknown, retired);
+  before = classifications();
+  win::consider_live_resource(list, unknown, taxi_camera::source_state::Model::legacy_rt);
+  expect("a retired registry entry still takes the full classification", classifications() - before, 1);
+  r.ready = false;
+  const auto third = display(3);
+  r.resources[third->native] = third;
+  r.resource_index.assign(third->native, third);
+  before = classifications();
+  win::consider_live_copy(third->native);
+  expect("before graphics are ready the registry index is not consulted", classifications() - before, 1);
+  expect("and the resource stays unremembered", r.seen_resources.contains(third->native), false);
+  const auto status = win::graphics_status();
+  expect("status reports classifications", status.backfill_classifications, r.backfill_classifications.load());
+  expect("status reports failed classifications", status.backfill_unclassified, r.backfill_unclassified.load());
+  expect("status reports the open window", status.backfill_open, true);
+  for (const auto& item : {registered, second, retired, third})
+    r.resource_index.erase(item->native, item.get());
+  r.ready = was_ready;
+  clear_fixture(r);
+}
+
+// A placed-footprint copy location is a buffer and is never classified.
+void placed_footprint_case() {
+  auto& r = win::registry();
+  clear_fixture(r);
+  const bool was_ready = r.ready;
+  r.ready = true;
+  std::array<void*, 4> first{}, second{};
+  D3D12_TEXTURE_COPY_LOCATION buffer{}, texture{};
+  buffer.pResource = reinterpret_cast<ID3D12Resource*>(first.data());
+  buffer.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  texture.pResource = reinterpret_cast<ID3D12Resource*>(second.data());
+  texture.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  const auto list = list_address(9);
+  auto before = r.backfill_classifications.load();
+  win::copy_texture(nullptr, list, 1, &texture, 0, 0, 0, &buffer, nullptr, false);
+  expect("an upload copy classifies only its texture", r.backfill_classifications.load() - before, 1);
+  before = r.backfill_classifications.load();
+  win::copy_texture(nullptr, list, 1, &buffer, 0, 0, 0, &texture, nullptr, false);
+  expect("a readback copy classifies only its texture", r.backfill_classifications.load() - before, 1);
+  auto other = texture;
+  other.pResource = buffer.pResource;
+  before = r.backfill_classifications.load();
+  win::copy_texture(nullptr, list, 1, &texture, 0, 0, 0, &other, nullptr, false);
+  expect("a texture-to-texture copy classifies both", r.backfill_classifications.load() - before, 2);
+  r.live_backfill = false;
+  before = r.backfill_classifications.load();
+  win::copy_texture(nullptr, list, 1, &texture, 0, 0, 0, &other, nullptr, false);
+  expect("a closed window classifies nothing", r.backfill_classifications.load() - before, 0);
+  r.ready = was_ready;
+  clear_fixture(r);
+}
+
+// A creation that misses the registry is learned on first use, so an earlier
+// object the window remembered at the same address must not hide it.
+struct FakeResource final : ID3D12Resource {
+  D3D12_RESOURCE_DESC desc{};
+  ULONG references = 1;
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+    if (!out)
+      return E_POINTER;
+    *out = nullptr;
+    if (iid != __uuidof(IUnknown) && iid != __uuidof(ID3D12Resource))
+      return E_NOINTERFACE;
+    *out = static_cast<ID3D12Resource*>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+  ULONG STDMETHODCALLTYPE Release() override { return --references; }
+  HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE SetName(const WCHAR*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void** device) override {
+    *device = nullptr;
+    return E_NOINTERFACE;
+  }
+  HRESULT STDMETHODCALLTYPE Map(UINT, const D3D12_RANGE*, void**) override { return E_NOTIMPL; }
+  void STDMETHODCALLTYPE Unmap(UINT, const D3D12_RANGE*) override {}
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+  using ID3D12Resource::GetDesc;
+  D3D12_RESOURCE_DESC* STDMETHODCALLTYPE GetDesc(D3D12_RESOURCE_DESC* result) override {
+    *result = desc;
+    return result;
+  }
+#else
+  D3D12_RESOURCE_DESC STDMETHODCALLTYPE GetDesc() override { return desc; }
+#endif
+  D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE GetGPUVirtualAddress() override { return 0; }
+  HRESULT STDMETHODCALLTYPE WriteToSubresource(UINT, const D3D12_BOX*, const void*, UINT, UINT) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE ReadFromSubresource(void*, UINT, UINT, UINT, const D3D12_BOX*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetHeapProperties(D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS*) override { return E_NOTIMPL; }
+};
+void creation_miss_case() {
+  auto& r = win::registry();
+  clear_fixture(r);
+  const bool was_ready = r.ready;
+  auto* const old_device = r.device;
+  int device_token{};
+  auto* device = reinterpret_cast<ID3D12Device*>(&device_token);  // Compared by address only.
+  r.ready = true;
+  r.device = device;
+  FakeResource created;
+  created.desc = display(0)->desc;
+  r.seen_resources.remember(&created);  // An earlier object the window classified at this address.
+  std::atomic<bool> held{false}, release{false};
+  std::thread holder([&] {
+    const std::lock_guard lock(r.mutex);
+    held = true;
+    while (!release)
+      std::this_thread::yield();
+  });
+  while (!held)
+    std::this_thread::yield();
+  const bool registered = win::observe_resource(device, &created, taxi_camera::source_state::Model::unknown, true);
+  release = true;
+  holder.join();
+  expect("a creation that misses the registry is not registered", registered, false);
+  expect("its address is forgotten for its first use", r.seen_resources.contains(&created), false);
+  expect("the missed creation released its query reference", created.references, 1);
+  expect("no registry entry was made", r.resources.count(&created), 0);
+  r.device = old_device;
+  r.ready = was_ready;
+  clear_fixture(r);
+}
+
 }  // namespace
 
 int main() {
@@ -589,8 +821,13 @@ int main() {
   incomplete_backfill_outlives_admit_budget();
   every_profile_set_keeps_attachment();
   ini_explicit_discovery_case();
+  seen_set_capacity_case();
+  known_resource_case();
+  placed_footprint_case();
+  creation_miss_case();
   std::printf(
-      "%s late-attach metadata: checks=%u failures=%u; profile switch, distinct displays, hint lifetimes, unknown views, RT exits.\n",
+      "%s late-attach metadata: checks=%u failures=%u; profile switch, distinct displays, hint lifetimes, unknown views, RT exits, "
+      "seen set, registered and placed resources, missed creations.\n",
       failures ? "FAIL" : "PASS", checks, failures);
   return failures ? 1 : 0;
 }

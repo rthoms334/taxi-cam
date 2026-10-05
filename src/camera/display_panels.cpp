@@ -18,7 +18,11 @@ Panels read_panels() noexcept {
       result.error = "unsupported_build";
       return result;
     }
-    native_camera::LocalImageReader registry_reader(GetModuleHandleW(nullptr), image.image_size);
+    // One private-page scope for the whole table: pages are proven from
+    // allocation and working-set metadata, not VirtualQuery region scans
+    // (about 1 us per MB of homogeneous region; this runs every 2 s).
+    native_camera::ScopedLocalMemoryQueryCache queries(native_camera::LocalMemoryQueryMode::private_pages);
+    native_camera::LocalImageReader registry_reader(GetModuleHandleW(nullptr), image.image_size, native_camera::LocalImageQueryMode::pages);
     std::array<std::uint64_t, kMaxPanels + 1> registry{};
     if (!registry_reader.read(kPanelRegistryRva, registry.data(), sizeof(registry))) {
       result.error = "registry_unreadable";
@@ -60,6 +64,10 @@ Panels read_panels() noexcept {
         panel.canvas_height = panel.canvas && size[1] > 0 ? static_cast<std::uint32_t>(size[1]) : 0;
       }
       ++result.count;
+    }
+    if (!queries.finish()) {
+      result.error = "panel_changed";
+      return result;
     }
     result.signature = signature;
     result.error = nullptr;

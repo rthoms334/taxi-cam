@@ -166,6 +166,11 @@ struct GraphicsStatus {
   bool armed{};
   std::uint64_t frame_pulse{};
   std::uint64_t queue_calls{}, queue_contended{};
+  // Late-attach learn-on-use window: open now; cumulative full resource
+  // classifications, those that could not describe or admit the pointer, and
+  // classified pointers its fixed seen set had no slot for.
+  bool backfill_open{};
+  std::uint64_t backfill_classifications{}, backfill_unclassified{}, backfill_unremembered{};
 };
 bool initialize_graphics() noexcept;
 // Resolve a reported device's optional COM proxy chain before native hooks or

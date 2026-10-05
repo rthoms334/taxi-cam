@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.1.1",
+      "date": "2026-10-05",
+      "changes": [
+        "Performance: much smoother taxiing with the cameras on. Taxi Cam does far less work on the simulator's threads, the cameras start faster, camera views draw only nearby sun shadows, and an occasionally missing third camera picture on the PMDG 777 is fixed."
+      ]
+    },
+    {
       "version": "1.1.0",
       "date": "2026-10-04",
       "changes": [

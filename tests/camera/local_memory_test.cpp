@@ -165,7 +165,9 @@ void measured_reads() {
   }
   require(reader.read(allocation.address(), output.data(), 8), "post-scope read failed");
   require(outer.query_calls == 4 && outer.read_calls == 3 && inner.query_calls == 1, "expired metrics scope was retained");
-  require(outer.query_ticks > 0 && outer.read_ticks > 0, "successful timed OS calls had no elapsed ticks");
+  // Proven reads are direct copies that can finish inside one QPC tick; the
+  // timed OS queries must still accumulate elapsed ticks.
+  require(outer.query_ticks > 0, "successful timed OS calls had no elapsed ticks");
 }
 
 void cached_queries() {

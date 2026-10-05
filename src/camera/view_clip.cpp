@@ -64,12 +64,10 @@ CameraClipResult apply_camera_far(std::uint64_t camera_address, const CameraClip
   if (!writable_private_span(field, 12))
     return fail("clip_not_writable");
   {
+    // The store takes its own fresh proof of these 8 bytes immediately before it.
     const std::array<float, 2> values{target.far_plane, target.default_far};
-    SIZE_T written = 0;
     result.write_attempted = true;
-    if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(camera_address + kCameraFarOffset), values.data(), sizeof(values),
-                            &written) ||
-        written != sizeof(values))
+    if (!write_local_private(camera_address + kCameraFarOffset, values.data(), sizeof(values)))
       return fail("clip_write_failed");
   }
   if (!read_camera_clip(camera_address, result.after))

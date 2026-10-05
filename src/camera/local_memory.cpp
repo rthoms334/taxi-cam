@@ -22,8 +22,27 @@ constexpr std::uint32_t kHeaderReadBudget = 8192;
 
 thread_local LocalMemoryMetrics* active_metrics = nullptr;
 thread_local ScopedLocalMemoryQueryCache* active_query_cache = nullptr;
+
+// Page addresses (never metadata) recently proven in private-page scopes on
+// this thread. Inspections walk the same objects every update, so the next
+// scope queries them in one batch with its first miss in their allocation.
+struct PageHints {
+  static constexpr std::size_t kCapacity = 128;
+  std::array<std::uintptr_t, kCapacity> pages{};
+  std::size_t next = 0;
+  void remember(std::uintptr_t base) noexcept {
+    if (std::find(pages.begin(), pages.end(), base) != pages.end())
+      return;
+    pages[next] = base;
+    next = (next + 1) % kCapacity;
+  }
+};
+thread_local PageHints page_hints;
 #ifdef TAXI_LOCAL_MEMORY_TESTING
 thread_local LocalMemoryQueryTestFaults query_test_faults;
+thread_local LocalMemoryWriteTestHook write_test_hook = nullptr;
+thread_local void* write_test_context = nullptr;
+thread_local bool write_without_guarded_copy = false;
 #endif
 
 std::uint64_t performance_tick() noexcept {
@@ -36,6 +55,20 @@ std::uint64_t elapsed_ticks(std::uint64_t start) noexcept {
   return start != 0 && end >= start ? end - start : 0;
 }
 
+// One query in the total and in its kind's count, ticks and slowest call.
+void count_query(LocalMemoryMetrics& metrics,
+                 std::uint64_t& calls,
+                 std::uint64_t& ticks,
+                 std::uint64_t& max_ticks,
+                 std::uint64_t start) noexcept {
+  const auto elapsed = elapsed_ticks(start);
+  ++metrics.query_calls;
+  ++calls;
+  metrics.query_ticks += elapsed;
+  ticks += elapsed;
+  max_ticks = std::max(max_ticks, elapsed);
+}
+
 SIZE_T query_memory_uncached(const void* address, MEMORY_BASIC_INFORMATION& region, DWORD* error = nullptr) noexcept {
   auto* const metrics = active_metrics;
   const auto start = metrics ? performance_tick() : 0;
@@ -45,11 +78,8 @@ SIZE_T query_memory_uncached(const void* address, MEMORY_BASIC_INFORMATION& regi
   const auto result = VirtualQueryEx(GetCurrentProcess(), address, &region, sizeof(region));
   if (error)
     *error = result == 0 ? GetLastError() : ERROR_SUCCESS;
-  if (metrics) {
-    ++metrics->query_calls;
-    ++metrics->query_fallback_calls;
-    metrics->query_ticks += elapsed_ticks(start);
-  }
+  if (metrics)
+    count_query(*metrics, metrics->query_fallback_calls, metrics->query_fallback_ticks, metrics->query_fallback_max_ticks, start);
   return result;
 }
 
@@ -72,11 +102,8 @@ bool query_allocation(const void* address, WIN32_MEMORY_REGION_INFORMATION& regi
   SIZE_T returned = 0;
   const auto result = query(GetCurrentProcess(), address, MemoryRegionInfo, &region, sizeof(region), &returned);
   error = !result ? GetLastError() : returned != sizeof(region) ? ERROR_BAD_LENGTH : ERROR_SUCCESS;
-  if (metrics) {
-    ++metrics->query_calls;
-    ++metrics->query_allocation_calls;
-    metrics->query_ticks += elapsed_ticks(start);
-  }
+  if (metrics)
+    count_query(*metrics, metrics->query_allocation_calls, metrics->query_allocation_ticks, metrics->query_allocation_max_ticks, start);
   return result && returned == sizeof(region);
 }
 
@@ -91,11 +118,8 @@ bool query_pages(PSAPI_WORKING_SET_EX_INFORMATION* pages, std::size_t count, DWO
   const auto start = metrics ? performance_tick() : 0;
   const auto result = K32QueryWorkingSetEx(GetCurrentProcess(), pages, static_cast<DWORD>(count * sizeof(*pages)));
   error = !result ? GetLastError() : ERROR_SUCCESS;
-  if (metrics) {
-    ++metrics->query_calls;
-    ++metrics->query_page_calls;
-    metrics->query_ticks += elapsed_ticks(start);
-  }
+  if (metrics)
+    count_query(*metrics, metrics->query_page_calls, metrics->query_page_ticks, metrics->query_page_max_ticks, start);
 #ifdef TAXI_LOCAL_MEMORY_TESTING
   if (result && query_test_faults.pages_nonresident)
     for (std::size_t index = 0; index < count; ++index)
@@ -134,11 +158,90 @@ SIZE_T query_memory(const void* address, MEMORY_BASIC_INFORMATION& region) noexc
   return active_query_cache ? active_query_cache->query(address, region) : query_memory_uncached(address, region);
 }
 
-bool read_memory(const void* address, void* destination, SIZE_T size, SIZE_T& copied) noexcept {
+}  // namespace
+}  // namespace taxi_camera::native_camera
+
+// Copies size bytes from source to destination with one rep movsb. Returns 0,
+// or 1 when that instruction faulted: guarded_copy_fault resumes it at the same
+// address with rcx = 0 (so it completes as a no-op) and r9 = 1. The instruction
+// pointer never changes, so the resume is valid under CET shadow stacks.
+extern "C" unsigned taxi_guarded_copy(void* destination, const void* source, std::size_t size);
+extern "C" char taxi_guarded_copy_fault_ip[];
+asm(R"(
+  .text
+  .p2align 4
+  .globl taxi_guarded_copy
+  .def taxi_guarded_copy; .scl 2; .type 32; .endef
+  .seh_proc taxi_guarded_copy
+taxi_guarded_copy:
+  pushq %rsi
+  .seh_pushreg %rsi
+  pushq %rdi
+  .seh_pushreg %rdi
+  .seh_endprologue
+  movq %rcx, %rdi
+  movq %rdx, %rsi
+  movq %r8, %rcx
+  xorl %r9d, %r9d
+  .globl taxi_guarded_copy_fault_ip
+taxi_guarded_copy_fault_ip:
+  rep movsb
+  movl %r9d, %eax
+  popq %rdi
+  popq %rsi
+  retq
+  .seh_endproc
+)");
+
+namespace taxi_camera::native_camera {
+namespace {
+
+// Only the guarded copy instruction is handled; every other exception, and
+// that instruction's other exception codes, continue to the next handler.
+// A guard page consumed by a copy whose proof went stale is re-armed so the
+// owner still sees its one-shot guard; the copy reports failure.
+LONG CALLBACK guarded_copy_fault(EXCEPTION_POINTERS* info) noexcept {
+  const auto* record = info->ExceptionRecord;
+  auto* context = info->ContextRecord;
+  const auto fault_ip = reinterpret_cast<DWORD64>(taxi_guarded_copy_fault_ip);
+  if (reinterpret_cast<DWORD64>(record->ExceptionAddress) != fault_ip || context->Rip != fault_ip)
+    return EXCEPTION_CONTINUE_SEARCH;
+  if (record->ExceptionCode == STATUS_GUARD_PAGE_VIOLATION && record->NumberParameters >= 2) {
+    const auto address = reinterpret_cast<void*>(record->ExceptionInformation[1]);
+    MEMORY_BASIC_INFORMATION region{};
+    DWORD previous = 0;
+    if (VirtualQuery(address, &region, sizeof(region)) == sizeof(region) && region.State == MEM_COMMIT && !(region.Protect & PAGE_GUARD))
+      VirtualProtect(address, 1, region.Protect | PAGE_GUARD, &previous);
+  } else if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION && record->ExceptionCode != EXCEPTION_IN_PAGE_ERROR) {
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+  context->Rcx = 0;
+  context->R9 = 1;
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+bool guarded_copy_available() noexcept {
+  static const bool installed = AddVectoredExceptionHandler(1, guarded_copy_fault) != nullptr;
+  return installed;
+}
+
+bool read_memory(const void* address, void* destination, SIZE_T size, SIZE_T& copied, bool proven = false) noexcept {
   auto* const metrics = active_metrics;
   const auto start = metrics ? performance_tick() : 0;
-  const bool result = ReadProcessMemory(GetCurrentProcess(), address, destination, size, &copied) != FALSE;
-  const auto error = !result && active_query_cache ? GetLastError() : ERROR_SUCCESS;
+  // A proven read follows a fresh proof that every page is committed, readable
+  // and not a guard page, and copies directly: RPM costs about 3 us per call
+  // inside MSFS. Unproven reads keep RPM, which refuses guard pages unchanged.
+  bool result = false;
+  DWORD failure = ERROR_SUCCESS;
+  if (proven && guarded_copy_available()) {
+    result = taxi_guarded_copy(destination, address, size) == 0;
+    copied = result ? size : 0;
+    failure = result ? ERROR_SUCCESS : ERROR_NOACCESS;
+  } else {
+    result = ReadProcessMemory(GetCurrentProcess(), address, destination, size, &copied) != FALSE;
+    failure = result ? ERROR_SUCCESS : GetLastError();
+  }
+  const auto error = !result && active_query_cache ? failure : ERROR_SUCCESS;
   if (metrics) {
     ++metrics->read_calls;
     metrics->requested_bytes += size;
@@ -166,10 +269,18 @@ bool region_contains(const MEMORY_BASIC_INFORMATION& region, std::uintptr_t addr
 
 bool private_bytes(std::uintptr_t address, std::uint8_t* temporary, std::size_t size) noexcept {
   if (active_query_cache && active_query_cache->uses_private_pages()) {
-    if (!active_query_cache->validate_private_range(address, size))
-      return false;
     SIZE_T copied = 0;
-    return read_memory(reinterpret_cast<const void*>(address), temporary, size, copied) && copied == size;
+    bool cold = false;
+    if (active_query_cache->validate_private_range(address, size, &cold))
+      return read_memory(reinterpret_cast<const void*>(address), temporary, size, copied, true) && copied == size;
+    if (!cold)
+      return false;
+    // A page outside the working set. VirtualQuery's region scan costs about
+    // 1 us per MB of homogeneous suffix, hundreds of us in MSFS heaps. The
+    // exact RPM faults the page back in, then the page proof is taken before
+    // the bytes are used. RPM refuses guard and inaccessible pages unchanged.
+    return read_memory(reinterpret_cast<const void*>(address), temporary, size, copied) && copied == size &&
+           active_query_cache->validate_private_range(address, size);
   }
   std::size_t offset = 0;
   while (offset < size) {
@@ -181,7 +292,7 @@ bool private_bytes(std::uintptr_t address, std::uint8_t* temporary, std::size_t 
     const auto available = region.RegionSize - (current - reinterpret_cast<std::uintptr_t>(region.BaseAddress));
     const auto chunk = std::min(size - offset, available);
     SIZE_T copied = 0;
-    if (!read_memory(reinterpret_cast<const void*>(current), temporary + offset, chunk, copied) || copied != chunk)
+    if (!read_memory(reinterpret_cast<const void*>(current), temporary + offset, chunk, copied, true) || copied != chunk)
       return false;
     offset += chunk;
   }
@@ -256,14 +367,21 @@ bool directory_valid(const discovery::Inventory& image, std::uint32_t rva, std::
 void set_local_memory_query_test_faults(LocalMemoryQueryTestFaults faults) noexcept {
   query_test_faults = faults;
 }
+
+void set_local_memory_write_test_hook(LocalMemoryWriteTestHook hook, void* context, bool without_guarded_copy) noexcept {
+  write_test_hook = hook;
+  write_test_context = context;
+  write_without_guarded_copy = without_guarded_copy;
+}
 #endif
 
 bool writable_private_span(std::uint64_t address, std::size_t size) noexcept {
-  if (!address || !size || size > 16 || address > std::numeric_limits<std::uintptr_t>::max() - size)
+  if (!address || !size || size > kLocalWriteLimit || address > std::numeric_limits<std::uintptr_t>::max() - size)
     return false;
   const auto value = static_cast<std::uintptr_t>(address);
   const auto page_bytes = page_size();
-  if (!page_bytes)
+  // A span of at most one page touches at most two: first and last below.
+  if (!page_bytes || size > page_bytes)
     return false;
   WIN32_MEMORY_REGION_INFORMATION allocation{};
   DWORD error = ERROR_SUCCESS;
@@ -311,15 +429,52 @@ bool writable_private_span(std::uint64_t address, std::size_t size) noexcept {
 }
 
 bool read_local_flag_words(std::uint64_t address, std::array<std::uint64_t, 2>& flags) noexcept {
-  std::array<std::uint64_t, 2> temporary{};
-  if (!address || address > std::numeric_limits<std::uintptr_t>::max() - sizeof(temporary))
+  return read_local_bytes(address, flags.data(), sizeof(flags));
+}
+
+bool read_local_bytes(std::uint64_t address, void* destination, std::size_t size) noexcept {
+  std::array<std::uint8_t, kLocalBytesReadLimit> temporary{};
+  if (!destination || !address || !size || size > temporary.size() || address > std::numeric_limits<std::uintptr_t>::max() - size)
     return false;
   SIZE_T copied = 0;
-  if (!read_memory(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)), temporary.data(), sizeof(temporary), copied) ||
-      copied != sizeof(temporary))
+  if (!read_memory(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)), temporary.data(), size, copied) || copied != size)
     return false;
-  flags = temporary;
+  std::memcpy(destination, temporary.data(), size);
   return true;
+}
+
+bool write_local_private(std::uint64_t address, const void* data, std::size_t size) noexcept {
+  // KernelBase's WriteProcessMemory first takes a basic-information query,
+  // the same homogeneous-region walk as VirtualQuery (0.2-1.8 ms in MSFS
+  // heaps), before it writes; the span proof is O(1) for resident pages.
+#ifdef TAXI_LOCAL_MEMORY_TESTING
+  const bool guarded = !write_without_guarded_copy && guarded_copy_available();
+#else
+  const bool guarded = guarded_copy_available();
+#endif
+  if (!data || !writable_private_span(address, size))
+    return false;
+#ifdef TAXI_LOCAL_MEMORY_TESTING
+  if (write_test_hook)
+    write_test_hook(write_test_context, address, size);
+#endif
+  auto* const destination = reinterpret_cast<void*>(static_cast<std::uintptr_t>(address));
+  auto* const metrics = active_metrics;
+  const auto start = metrics ? performance_tick() : 0;
+  bool result = false;
+  if (guarded) {
+    // A page decommitted, protected or guarded since the proof faults inside
+    // the copy; the handler ends it as a failure and re-arms a guard page.
+    result = taxi_guarded_copy(destination, data, size) == 0;
+  } else {
+    SIZE_T written = 0;
+    result = WriteProcessMemory(GetCurrentProcess(), destination, data, size, &written) != FALSE && written == size;
+  }
+  if (metrics) {
+    ++metrics->write_calls;
+    metrics->write_ticks += elapsed_ticks(start);
+  }
+  return result;
 }
 
 const LocalMemoryMetrics* active_local_memory_metrics() noexcept {
@@ -436,8 +591,8 @@ bool ScopedLocalMemoryQueryCache::refuse(const char* stage,
   return false;
 }
 
-bool ScopedLocalMemoryQueryCache::validate_private_range(std::uintptr_t address, std::size_t size) noexcept {
-  return validate_page_range(address, size, MEM_PRIVATE, 0);
+bool ScopedLocalMemoryQueryCache::validate_private_range(std::uintptr_t address, std::size_t size, bool* cold) noexcept {
+  return validate_page_range(address, size, MEM_PRIVATE, 0, cold);
 }
 
 bool ScopedLocalMemoryQueryCache::validate_image_range(std::uintptr_t address, std::size_t size, std::uintptr_t module) noexcept {
@@ -449,7 +604,8 @@ bool ScopedLocalMemoryQueryCache::validate_image_range(std::uintptr_t address, s
 bool ScopedLocalMemoryQueryCache::validate_page_range(std::uintptr_t address,
                                                       std::size_t size,
                                                       DWORD type,
-                                                      std::uintptr_t allocation) noexcept {
+                                                      std::uintptr_t allocation,
+                                                      bool* cold) noexcept {
   if (!is_current() || !size || size > std::numeric_limits<std::uintptr_t>::max() - address)
     return false;
   const auto page_bytes = page_size();
@@ -493,15 +649,29 @@ bool ScopedLocalMemoryQueryCache::validate_page_range(std::uintptr_t address,
                                                region.AllocationProtect, type};
         }
       }
-      if (a < allocation_count_) {
+      std::size_t c = 0;
+      while (a < allocation_count_ && c < candidate_count_ && candidates_[c].base != base)
+        ++c;
+      if (a < allocation_count_ && c < candidate_count_) {
+        // Proven by this scope's batch query; it becomes a requested page.
+        pages_[page_count_++] = {base, candidates_[c].protection, a};
+        candidates_[c] = candidates_[--candidate_count_];
+        recorded = true;
+        if (active_metrics)
+          ++active_metrics->query_cache_hits;
+      } else if (a < allocation_count_) {
         PSAPI_WORKING_SET_EX_INFORMATION page{};
         page.VirtualAddress = reinterpret_cast<void*>(base);
-        if (query_pages(&page, 1, error) && page.VirtualAttributes.Valid) {
+        const bool queried = query_page_batch(base, a, page.VirtualAttributes.Flags);
+        if (queried && page.VirtualAttributes.Valid) {
           const auto protection = static_cast<DWORD>(page.VirtualAttributes.Win32Protection);
           if (page.VirtualAttributes.Bad || !readable(protection))
             return refuse("page", "protect", base, page_count_, PAGE_READONLY, protection);
           pages_[page_count_++] = {base, protection, a};
           recorded = true;
+        } else if (queried && cold) {
+          *cold = true;
+          return false;
         }
       }
     }
@@ -513,6 +683,40 @@ bool ScopedLocalMemoryQueryCache::validate_page_range(std::uintptr_t address,
         return refuse("page", "allocation_readable", current, page_count_, 1, 0);
     }
     offset += chunk;
+  }
+  return true;
+}
+
+// Queries base together with this thread's hinted pages in the same
+// allocation that this scope has not proven yet. Valid, readable hinted pages
+// become candidates; requested_flags holds base's own working-set flags.
+bool ScopedLocalMemoryQueryCache::query_page_batch(std::uintptr_t base, std::size_t allocation, std::uintptr_t& requested_flags) noexcept {
+  std::array<PSAPI_WORKING_SET_EX_INFORMATION, kCandidateLimit + 1> batch{};
+  batch[0].VirtualAddress = reinterpret_cast<void*>(base);
+  std::size_t count = 1;
+  const auto& owner = allocations_[allocation];
+  const auto page_bytes = page_size();
+  for (const auto hint : page_hints.pages) {
+    if (count == batch.size() || candidate_count_ + count > kCandidateLimit)
+      break;
+    if (!hint || hint == base || !contains(owner.base, owner.size, hint, page_bytes))
+      continue;
+    const auto known = [&](const auto& proofs, std::size_t n) {
+      return std::any_of(proofs.begin(), proofs.begin() + n, [&](const auto& proof) { return proof.base == hint; });
+    };
+    if (known(pages_, page_count_) || known(candidates_, candidate_count_))
+      continue;
+    batch[count++].VirtualAddress = reinterpret_cast<void*>(hint);
+  }
+  DWORD error = ERROR_SUCCESS;
+  if (!query_pages(batch.data(), count, error))
+    return false;
+  requested_flags = batch[0].VirtualAttributes.Flags;
+  for (std::size_t i = 1; i < count && candidate_count_ < candidates_.size(); ++i) {
+    const auto& attributes = batch[i].VirtualAttributes;
+    const auto protection = static_cast<DWORD>(attributes.Win32Protection);
+    if (attributes.Valid && !attributes.Bad && readable(protection))
+      candidates_[candidate_count_++] = {reinterpret_cast<std::uintptr_t>(batch[i].VirtualAddress), protection, allocation};
   }
   return true;
 }
@@ -573,6 +777,8 @@ bool ScopedLocalMemoryQueryCache::finish() noexcept {
     return false;
   if (!failed_)
     finish_pages();
+  for (std::size_t p = 0; p < page_count_; ++p)
+    page_hints.remember(pages_[p].base);
   // Descending graph reads can save overlapping suffixes of one allocation.
   // Query the earliest base first: its fresh MBI also describes the exact
   // suffix that VirtualQueryEx would return at a later saved page. Retain every
@@ -717,7 +923,8 @@ bool LocalImageReader::read(std::uint32_t rva, void* destination, std::size_t si
     if (!window.readable || window.size == 0 || window.size > size - offset)
       return false;
     SIZE_T copied = 0;
-    if (!read_memory(reinterpret_cast<const void*>(base_ + rva + offset), output + offset, window.size, copied) || copied != window.size)
+    if (!read_memory(reinterpret_cast<const void*>(base_ + rva + offset), output + offset, window.size, copied, true) ||
+        copied != window.size)
       return false;
     offset += window.size;
   }

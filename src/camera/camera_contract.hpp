@@ -36,6 +36,11 @@ struct CameraFunctions {
 struct CameraContract {
   CameraFunctions functions;
   CameraImageLayout layout;
+  // Per-view sun-shadow slice count (view_cascades_contract.hpp): the cascade
+  // setup body and the scene vtable slot that dispatches it. Zero unless both
+  // resolve; the camera contract never depends on them.
+  std::uint32_t view_cascade_setup = 0;
+  std::uint32_t view_cascade_slot = 0;
 };
 
 struct CameraContractResolution {
@@ -46,6 +51,8 @@ struct CameraContractResolution {
   std::uint32_t matched_ranges = 0;
   // Why the parenting extension did not resolve (empty when it did).
   std::string parent_error;
+  // Why the per-view slice-count proof did not resolve (empty when it did).
+  std::string cascades_error;
 };
 
 // Read-only discovery and verification. Resolves moved code/data while keeping
