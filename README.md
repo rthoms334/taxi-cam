@@ -99,8 +99,6 @@ Assignments apply immediately and belong to the current flight; texture IDs can 
 
 ## Known issues and limitations
 
-- **Night lighting:** Runway and taxiway lights in the camera views have been checked at night only on the PMDG 777-300ER, where they now look like the main view's. On other aircraft they may still look faint.
-- **DLSS camera movement:** Slight aircraft movement can remain in the A350 lower view while taxiing with DLSS. TAA does not exhibit this movement. If the cameras do not recover after changing graphics settings and Taxi Cam asks for a restart, restart MSFS.
 - **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. The camera views draw as far as the main view at every speed, so taxiing can cost more than with the 1,000 m distance of earlier versions. Try a lower camera frame rate if needed.
 
 Please report unexpected behaviour using **Report a bug**.
