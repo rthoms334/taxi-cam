@@ -191,7 +191,16 @@ void rates_and_targets() {
   require(std::isnan(reachable_camera_rate(30, std::numeric_limits<double>::quiet_NaN())) && reachable_camera_rate(30, 24) == 24 &&
               reachable_camera_rate(10, 60) == 10,
           "Reachable rate is the target or the simulator's rate");
-  require(kMaximumCaptureSourceRate >= 120, "Capture spacing refuses consecutive frames up to 120 fps");
+  // Capture spacing stays under one simulator frame: about two thirds of it.
+  require(capture_source_rate(std::numeric_limits<double>::quiet_NaN()) == kMinimumCaptureSourceRate &&
+              capture_source_rate(0) == kMinimumCaptureSourceRate && capture_source_rate(60) == kMinimumCaptureSourceRate,
+          "Capture spacing below 80 fps or with an unknown rate is 1/120 s");
+  for (double hz : {81.0, 100.0, 144.0, 165.0, 240.0, 330.0}) {
+    const auto source = capture_source_rate(hz);
+    require(1000.0 / source < 1000.0 / hz && source >= hz * 1.5 && source <= kMaximumCaptureSourceRate,
+            "Capture spacing refuses consecutive frames above 120 fps");
+  }
+  require(capture_source_rate(1000) == kMaximumCaptureSourceRate, "Capture spacing has a floor");
 }
 
 void update_rate_meter() {

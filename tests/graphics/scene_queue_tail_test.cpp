@@ -1430,9 +1430,9 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   }
   require(manager->source_rate_ == taxi_camera::kDefaultCameraRate, "Capture rate default remains the shipped default");
   for (const auto setting : std::array<std::array<std::uint32_t, 2>, 9>{
-           {{0, 1}, {1, 1}, {2, 2}, {4, 4}, {14, 14}, {60, 60}, {120, 120}, {121, 120}, {0xffffffffu, 120}}}) {
+           {{0, 1}, {1, 1}, {2, 2}, {14, 14}, {120, 120}, {216, 216}, {500, 500}, {501, 500}, {0xffffffffu, 500}}}) {
     // A camera may render on consecutive simulator frames, so the bridge sets
-    // kMaximumCaptureSourceRate and capture spacing clamps to 1..120.
+    // capture_source_rate from the measured update rate, clamped to 1..500.
     manager->set_source_rate(setting[0]);
     require(manager->source_rate_ == setting[1], "Capture rate clamps to 1..kMaximumCaptureSourceRate");
   }

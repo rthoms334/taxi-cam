@@ -24,9 +24,23 @@ constexpr unsigned auto_cameras_per_frame(unsigned level, unsigned feeds) noexce
   return wanted < available ? wanted : available;
 }
 
-// Capture spacing rate (SceneCaptureManager::set_source_rate). A camera may
-// render on consecutive simulator frames, so the spacing only refuses a second
-// capture within one frame up to this rate; the schedule sets the cadence.
-inline constexpr unsigned kMaximumCaptureSourceRate = 120;
+// Capture spacing rate (SceneCaptureManager::set_source_rate): its spacing
+// refuses a second capture of one camera within one simulator frame. A camera
+// may render on consecutive frames, so the rate follows the measured update
+// rate: spacing about two thirds of a frame, never more than 1/120 s (the rate
+// while the update rate is unknown) and never under 1/kMaximumCaptureSourceRate.
+inline constexpr unsigned kMinimumCaptureSourceRate = 120;
+inline constexpr unsigned kMaximumCaptureSourceRate = 500;
+inline unsigned capture_source_rate(double update_hz) noexcept {
+  if (!(update_hz > 0))
+    return kMinimumCaptureSourceRate;
+  const double wanted = update_hz * 1.5;
+  if (wanted <= kMinimumCaptureSourceRate)
+    return kMinimumCaptureSourceRate;
+  if (wanted >= kMaximumCaptureSourceRate)
+    return kMaximumCaptureSourceRate;
+  // Steps of 10 so a jittering update rate does not reset the spacing often.
+  return (static_cast<unsigned>(wanted) + 9) / 10 * 10;
+}
 
 }  // namespace taxi_camera

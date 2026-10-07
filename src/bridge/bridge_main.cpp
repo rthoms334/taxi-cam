@@ -903,7 +903,7 @@ DWORD run_impl() {
     service_max_ms = std::max(service_max_ms, GetTickCount64() - begin);
   };
   std::vector<PfdTargetObservation> inventory;
-  unsigned rate{}, feeds{}, applied_profile{}, scheduled_per_frame{};
+  unsigned rate{}, feeds{}, applied_profile{}, scheduled_per_frame{}, source_rate{};
   AutoCameraPolicy auto_policy;
   UpdateRateMeter update_meter;
   // Frame-time histogram read at the previous status log line.
@@ -1199,7 +1199,7 @@ DWORD run_impl() {
       win::set_aircraft_profile(pending_profile);
       prewarm = {};
       warmup_startup = {};
-      rate = feeds = 0;
+      rate = feeds = source_rate = 0;
       auto_policy.reset();  // Another aircraft has its own camera cost.
       applied_profile = pending_profile;
       applied_profile_request = pending_profile_request;
@@ -1435,7 +1435,12 @@ DWORD run_impl() {
       feeds = desired_feeds;
       scheduled_per_frame = per_frame;
       native_camera::request_scene_rate(rate, feeds, per_frame);
-      scene_runtime::manager().set_source_rate(kMaximumCaptureSourceRate);
+    }
+    // Capture spacing follows the measured frame time, so a camera rendering
+    // on every frame above 120 fps keeps every image (PR #135 review).
+    if (connected && capture_source_rate(update_hz) != source_rate) {
+      source_rate = capture_source_rate(update_hz);
+      scene_runtime::manager().set_source_rate(source_rate);
     }
     // The page waits on the images the cameras actually get: the rate in force,
     // or fewer when the simulator updates more slowly.
