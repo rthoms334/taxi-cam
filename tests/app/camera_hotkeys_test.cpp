@@ -338,24 +338,27 @@ void ui_checks() {
   build_controls();
   require(GetDlgItem(window, 645) && !GetDlgItem(window, 106),
           "Shortcut editor opens from Flight-deck control without adding another navigation page");
-  // The camera rate field lives on Display (Overview shows the display cards).
+  // The custom camera target lives on Display (Overview shows the display cards).
   page = 2;
   build_controls();
-  const auto rate = GetDlgItem(window, 200);
-  require(rate != nullptr, "Display page has the camera rate field");
+  const auto rate = GetDlgItem(window, 205);
+  require(rate != nullptr, "Display page has the custom camera target");
   for (const auto value : {5u, 10u, 15u, 60u}) {
-    const auto text = std::to_wstring(value);
-    SetWindowTextW(rate, text.c_str());
+    SendMessageW(rate, TBM_SETPOS, TRUE, value);
     auto settings = current;
-    require(read_fields(settings) && settings.camera_rate == value, "Camera settings UI accepts lower and existing rate choices");
+    require(read_fields(settings) && settings.camera_rate == value, "Camera settings UI accepts every custom target");
   }
-  for (const auto text : {L"4", L"61", L"5.5"}) {
-    SetWindowTextW(rate, text);
+  for (const auto value : {4, 61}) {
+    SendMessageW(rate, TBM_SETPOS, TRUE, value);
     auto settings = current;
-    require(!read_fields(settings) && settings.camera_rate == current.camera_rate,
-            "Camera settings UI rejects invalid rates without changing the current budget");
+    require(read_fields(settings) && settings.camera_rate >= taxi_camera::kMinimumCameraRate &&
+                settings.camera_rate <= taxi_camera::kMaximumCameraRate,
+            "Camera settings UI keeps the custom target in range");
   }
-  SetWindowTextW(rate, L"-");
+  // An unfinished brightness edit stands in for unrelated camera edits.
+  const auto brightness = GetDlgItem(window, 201);
+  SetWindowTextW(brightness, L"-");
+  dirty = true;
   const auto original_rate = current.camera_rate;
   const auto editor = shortcut_fixture();
   require(GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622) && GetDlgItem(editor, 623) &&
@@ -370,8 +373,8 @@ void ui_checks() {
   require(win::load_camera_hotkeys(loaded, win::settings_override) && loaded == hotkey_saved,
           "Shortcut UI uses the application preferences file");
   wchar_t rate_text[64]{};
-  GetWindowTextW(rate, rate_text, 64);
-  require(dirty && GetDlgItem(window, 200) == rate && std::wstring(rate_text) == L"-" && current.camera_rate == original_rate,
+  GetWindowTextW(brightness, rate_text, 64);
+  require(dirty && GetDlgItem(window, 201) == brightness && std::wstring(rate_text) == L"-" && current.camera_rate == original_rate,
           "Saving shortcuts preserves unrelated unfinished camera edits");
   SendDlgItemMessageW(editor, 620, HKM_SETHOTKEY, win::hotkey_control_value({'B', MOD_SHIFT | MOD_CONTROL}), 0);
   shortcut_dialog(editor, WM_COMMAND, MAKEWPARAM(620, EN_CHANGE), 0);
@@ -389,7 +392,7 @@ void ui_checks() {
   DestroyWindow(editor);
   require(hotkey_draft == hotkey_saved && hotkey_saved[0].key == 'L' && !shortcut_window,
           "Closing the editor discards unsaved shortcut changes and retains saved bindings");
-  SetWindowTextW(rate, L"15");
+  SetWindowTextW(brightness, L"+0.00");
   command(101);
   auto field = GetDlgItem(window, 302);
   SetWindowTextW(field, L"-");

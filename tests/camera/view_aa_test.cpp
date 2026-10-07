@@ -365,6 +365,17 @@ void restore_after_clear() {
           "A new renderer did not replace the AA ledger");
 }
 }  // namespace
+// A camera held open across frames is checked on every frame it renders: an
+// open gate whose AA bit is already clear is accepted without a write, and
+// one whose bit is set still refuses (case 9 in refusals), closing it first.
+void held_open_gate() {
+  Fixture fixture;
+  fixture.view.flags[0] &= ~(1ull | nc::kViewAaFlag);
+  fixture.save();
+  const auto result = nc::disable_owned_view_aa(fixture.view, fixture.image);
+  require(result.complete && !result.write_attempted && !*result.error, "A held-open gate with AA cleared was refused");
+  fixture.unchanged();
+}
 int main() {
   try {
     success(0);
@@ -375,6 +386,7 @@ int main() {
     refusals();
     resolved_layout();
     restore_after_clear();
+    held_open_gate();
     std::printf("View AA guard tests passed: %u checks\n", checks);
     return 0;
   } catch (const std::exception& error) {

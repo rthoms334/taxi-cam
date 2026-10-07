@@ -58,7 +58,10 @@ void button_sequence(unsigned rate) {
       }
       const auto gates = schedule.tick(time, demand.suspend);
       require(wanted || (!gates[0] && !gates[1]), "OFF left a render gate open");
-      require(!(gates[0] && gates[1]), "Resume opened both cameras in one update");
+      // Cameras are counted per frame: an update carries at most its share,
+      // rate × two cameras × 10 ms rounded up, so a resume never bursts.
+      const unsigned share = std::max(1u, (rate * 2 * 10 + 999) / 1000);
+      require(static_cast<unsigned>(gates[0] + gates[1]) <= share, "Resume opened more cameras than one frame's share");
       for (unsigned i = 0; i < 2; ++i)
         pulses[i] += gates[i];
     }

@@ -5,20 +5,42 @@ namespace taxi_camera {
 inline constexpr unsigned kMinimumCameraRate = 5;
 inline constexpr unsigned kMaximumCameraRate = 60;
 inline constexpr unsigned kDefaultCameraRate = 10;
-// Schedule floor used while the aircraft is parked; 0 in settings disables it.
-// A parked image barely changes, so the floor may go below the moving minimum.
-// It has to: every pulse is followed by a closed tick, so below about 20 fps
-// two feeds already pulse on every other frame at any rate of 5 or more, and
-// only a lower floor reduces the share of frames that render an extra view.
-inline constexpr unsigned kMinimumParkedCameraRate = 1;
-inline constexpr unsigned kDefaultParkedCameraRate = 2;
-// Profiles saved before this revision hold the previous shipped floor of 5,
-// which is loaded as the new default once; a later saved choice is kept.
-inline constexpr unsigned kParkedRateRevision = 1;
-inline constexpr unsigned kPreviousDefaultParkedCameraRate = 5;
-// Live camera-manager cadence was 42–47 updates/s (0.9.35 rate sweep). From
-// this setting on, nearly every manager update is already a gate transition,
-// so a higher request cannot add useful pulses and is reported as capped.
-inline constexpr unsigned kManagerCeilingCameraRate = 15;
+// Camera mode (settings camera_mode). The presets and custom are targets in
+// images per camera per second (custom: the saved camera_rate, the
+// companion's slider). automatic instead renders a whole number of cameras on
+// every frame (1, 2, then all of them), the only way to keep every frame
+// carrying the same camera work, and steps between those to keep the
+// simulator's frame rate close to its rate without camera work
+// (AutoCameraPolicy).
+enum class CameraMode : unsigned { performance = 0, balanced = 1, smooth = 2, custom = 3, automatic = 4 };
+inline constexpr unsigned kCameraModeCount = 5;
+inline constexpr CameraMode kDefaultCameraMode = CameraMode::automatic;
+inline constexpr unsigned kPerformanceCameraRate = 10, kBalancedCameraRate = 15, kSmoothCameraRate = 30;
+inline constexpr unsigned kAutoCameraLevels = 3;
+// Cameras Auto renders on every frame at a level, at most the feeds there are.
+constexpr unsigned auto_cameras_per_frame(unsigned level, unsigned feeds) noexcept {
+  const unsigned wanted = (level < kAutoCameraLevels ? level : kAutoCameraLevels - 1) + 1;
+  const unsigned available = feeds ? feeds : 1u;
+  return wanted < available ? wanted : available;
+}
+
+// Capture spacing rate (SceneCaptureManager::set_source_rate): its spacing
+// refuses a second capture of one camera within one simulator frame. A camera
+// may render on consecutive frames, so the rate follows the measured update
+// rate: spacing about two thirds of a frame, never more than 1/120 s (the rate
+// while the update rate is unknown) and never under 1/kMaximumCaptureSourceRate.
+inline constexpr unsigned kMinimumCaptureSourceRate = 120;
+inline constexpr unsigned kMaximumCaptureSourceRate = 500;
+inline unsigned capture_source_rate(double update_hz) noexcept {
+  if (!(update_hz > 0))
+    return kMinimumCaptureSourceRate;
+  const double wanted = update_hz * 1.5;
+  if (wanted <= kMinimumCaptureSourceRate)
+    return kMinimumCaptureSourceRate;
+  if (wanted >= kMaximumCaptureSourceRate)
+    return kMaximumCaptureSourceRate;
+  // Steps of 10 so a jittering update rate does not reset the spacing often.
+  return (static_cast<unsigned>(wanted) + 9) / 10 * 10;
+}
 
 }  // namespace taxi_camera

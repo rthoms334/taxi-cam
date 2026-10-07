@@ -22,6 +22,7 @@ constexpr std::uint32_t kHeaderReadBudget = 8192;
 
 thread_local LocalMemoryMetrics* active_metrics = nullptr;
 thread_local ScopedLocalMemoryQueryCache* active_query_cache = nullptr;
+thread_local LocalMemoryProofCarry* active_proof_carry = nullptr;
 
 // Page addresses (never metadata) recently proven in private-page scopes on
 // this thread. Inspections walk the same objects every update, so the next
@@ -452,6 +453,9 @@ bool write_local_private(std::uint64_t address, const void* data, std::size_t si
 #else
   const bool guarded = guarded_copy_available();
 #endif
+  // A write may change what earlier frames proved: nothing carries past it.
+  if (active_proof_carry)
+    active_proof_carry->clear();
   if (!data || !writable_private_span(address, size))
     return false;
 #ifdef TAXI_LOCAL_MEMORY_TESTING
@@ -487,6 +491,31 @@ ScopedLocalMemoryMetrics::ScopedLocalMemoryMetrics(LocalMemoryMetrics& metrics) 
 
 ScopedLocalMemoryMetrics::~ScopedLocalMemoryMetrics() {
   active_metrics = previous_;
+}
+
+const LocalMemoryProofCarry::Page* LocalMemoryProofCarry::find(std::uintptr_t base) const noexcept {
+  for (std::size_t i = 0; i < count; ++i)
+    if (pages[i].base == base)
+      return &pages[i];
+  return nullptr;
+}
+
+void LocalMemoryProofCarry::remember(const Page& page) noexcept {
+  for (std::size_t i = 0; i < count; ++i)
+    if (pages[i].base == page.base) {
+      pages[i] = page;
+      return;
+    }
+  if (count < pages.size())
+    pages[count++] = page;
+}
+
+ScopedLocalMemoryProofCarry::ScopedLocalMemoryProofCarry(LocalMemoryProofCarry& carry) noexcept : previous_(active_proof_carry) {
+  active_proof_carry = &carry;
+}
+
+ScopedLocalMemoryProofCarry::~ScopedLocalMemoryProofCarry() {
+  active_proof_carry = previous_;
 }
 
 ScopedLocalMemoryQueryCache::ScopedLocalMemoryQueryCache(LocalMemoryQueryMode mode) noexcept : previous_(active_query_cache), mode_(mode) {
@@ -628,6 +657,32 @@ bool ScopedLocalMemoryQueryCache::validate_page_range(std::uintptr_t address,
       offset += chunk;
       continue;
     }
+    // A page proven on an earlier frame of a held-open camera, while its
+    // owner keeps the carry active (LocalMemoryProofCarry).
+    if (uses_private_pages() && active_proof_carry && page_count_ < pages_.size()) {
+      if (const auto* carried = active_proof_carry->find(base)) {
+        if (carried->type != type || (allocation && carried->allocation_base != allocation))
+          return refuse("page", "allocation_type", base, page_count_, type, carried->type);
+        std::size_t a = 0;
+        while (a < allocation_count_ && allocations_[a].base != carried->allocation_base)
+          ++a;
+        if (a < allocation_count_ && (allocations_[a].size != carried->allocation_size ||
+                                      allocations_[a].protection != carried->allocation_protection || allocations_[a].type != type))
+          return refuse("page", "allocation_carried", base, a, allocations_[a].size, carried->allocation_size);
+        if (a == allocation_count_ && a < allocations_.size()) {
+          allocations_[allocation_count_] = {carried->allocation_base, carried->allocation_size, carried->allocation_protection, type};
+          allocation_carried_[allocation_count_++] = true;
+        }
+        if (a < allocation_count_) {
+          page_carried_[page_count_] = true;
+          pages_[page_count_++] = {base, carried->protection, a};
+          if (active_metrics)
+            ++active_metrics->carried_proofs;
+          offset += chunk;
+          continue;
+        }
+      }
+    }
     // Preserve previous proofs at capacity. Only new pages use the old path;
     // no eviction, early acceptance, or cross-inspection metadata is allowed.
     bool recorded = false;
@@ -645,6 +700,7 @@ bool ScopedLocalMemoryQueryCache::validate_page_range(std::uintptr_t address,
         if (query_allocation(reinterpret_cast<const void*>(base), region, error) && allocation_type(region, type) &&
             (!allocation || reinterpret_cast<std::uintptr_t>(region.AllocationBase) == allocation) &&
             contains(reinterpret_cast<std::uintptr_t>(region.AllocationBase), region.RegionSize, base, page_bytes)) {
+          allocation_carried_[allocation_count_] = false;
           allocations_[allocation_count_++] = {reinterpret_cast<std::uintptr_t>(region.AllocationBase), region.RegionSize,
                                                region.AllocationProtect, type};
         }
@@ -654,6 +710,7 @@ bool ScopedLocalMemoryQueryCache::validate_page_range(std::uintptr_t address,
         ++c;
       if (a < allocation_count_ && c < candidate_count_) {
         // Proven by this scope's batch query; it becomes a requested page.
+        page_carried_[page_count_] = false;
         pages_[page_count_++] = {base, candidates_[c].protection, a};
         candidates_[c] = candidates_[--candidate_count_];
         recorded = true;
@@ -667,6 +724,7 @@ bool ScopedLocalMemoryQueryCache::validate_page_range(std::uintptr_t address,
           const auto protection = static_cast<DWORD>(page.VirtualAttributes.Win32Protection);
           if (page.VirtualAttributes.Bad || !readable(protection))
             return refuse("page", "protect", base, page_count_, PAGE_READONLY, protection);
+          page_carried_[page_count_] = false;
           pages_[page_count_++] = {base, protection, a};
           recorded = true;
         } else if (queried && cold) {
@@ -723,6 +781,8 @@ bool ScopedLocalMemoryQueryCache::query_page_batch(std::uintptr_t base, std::siz
 
 bool ScopedLocalMemoryQueryCache::finish_pages() noexcept {
   for (std::size_t a = 0; a < allocation_count_; ++a) {
+    if (allocation_carried_[a])
+      continue;
     const auto& initial = allocations_[a];
     WIN32_MEMORY_REGION_INFORMATION current{};
     DWORD error = ERROR_SUCCESS;
@@ -738,20 +798,28 @@ bool ScopedLocalMemoryQueryCache::finish_pages() noexcept {
     if (current.AllocationProtect != initial.protection)
       return refuse("allocation_endpoint", "allocation_protect", initial.base, a, initial.protection, current.AllocationProtect);
   }
-  if (!page_count_)
+  // Only this scope's own proofs are checked again; carried ones were checked
+  // at the end of the scope that took them.
+  std::array<std::size_t, kPageLimit> fresh{};
+  std::size_t fresh_count = 0;
+  for (std::size_t p = 0; p < page_count_; ++p)
+    if (!page_carried_[p])
+      fresh[fresh_count++] = p;
+  if (!fresh_count)
     return true;
   std::array<PSAPI_WORKING_SET_EX_INFORMATION, kPageLimit> current{};
-  for (std::size_t p = 0; p < page_count_; ++p)
-    current[p].VirtualAddress = reinterpret_cast<void*>(pages_[p].base);
+  for (std::size_t i = 0; i < fresh_count; ++i)
+    current[i].VirtualAddress = reinterpret_cast<void*>(pages_[fresh[i]].base);
   DWORD error = ERROR_SUCCESS;
-  const auto queried = query_pages(current.data(), page_count_, error);
-  for (std::size_t p = 0; p < page_count_; ++p) {
+  const auto queried = query_pages(current.data(), fresh_count, error);
+  for (std::size_t i = 0; i < fresh_count; ++i) {
+    const auto p = fresh[i];
     const auto& initial = pages_[p];
     DWORD protection = 0;
-    if (queried && current[p].VirtualAttributes.Valid) {
-      if (current[p].VirtualAttributes.Bad)
+    if (queried && current[i].VirtualAttributes.Valid) {
+      if (current[i].VirtualAttributes.Bad)
         return refuse("page_endpoint", "page_bad", initial.base, p, 0, 1);
-      protection = static_cast<DWORD>(current[p].VirtualAttributes.Win32Protection);
+      protection = static_cast<DWORD>(current[i].VirtualAttributes.Win32Protection);
     } else {
       // Residency is not identity. A formerly resident page can be paged out;
       // freshly query its actual access metadata instead of interpreting the
@@ -829,6 +897,16 @@ bool ScopedLocalMemoryQueryCache::finish() noexcept {
   }
   if (failed_ && active_metrics)
     ++active_metrics->query_cache_validation_failures;
+  if (active_proof_carry) {
+    if (failed_) {
+      active_proof_carry->clear();
+    } else {
+      for (std::size_t p = 0; p < page_count_; ++p) {
+        const auto& owner = allocations_[pages_[p].allocation];
+        active_proof_carry->remember({pages_[p].base, owner.base, owner.size, pages_[p].protection, owner.protection, owner.type});
+      }
+    }
+  }
   active_query_cache = previous_;
   active_ = false;
   return !failed_;

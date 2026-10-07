@@ -869,7 +869,7 @@ void SceneCaptureManager::stop_source_tracking() noexcept {
 }
 void SceneCaptureManager::set_source_rate(std::uint32_t rate) noexcept {
   const std::lock_guard lock(mutex_);
-  source_rate_ = rate < kMinimumParkedCameraRate ? kMinimumParkedCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
+  source_rate_ = rate < 1 ? 1 : rate > kMaximumCaptureSourceRate ? kMaximumCaptureSourceRate : rate;
 }
 void SceneCaptureManager::forget_capture_phase() noexcept {
   for (auto& phase : phase_feeds_)

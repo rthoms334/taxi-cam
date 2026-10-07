@@ -9,281 +9,240 @@
 
 namespace taxi_camera {
 
-// Why the schedule runs below the saved camera_rate. The saved value is never
-// rewritten; these only describe the rate actually requested from the schedule.
+// Why the cameras run below the mode's target. The saved camera_rate is never
+// rewritten; these only describe the rate requested or reached.
 enum CameraRateLimit : unsigned {
   kRateLimitNone = 0,
-  kRateLimitParked = 1,      // Ground speed held at zero: parked floor applied.
-  kRateLimitPfdRefresh = 2,  // Aircraft PFD redraw rate cannot show more pairs.
-  kRateLimitManager = 4,     // Camera-manager cadence saturates at this rate.
-  // Rolling straight at a low simulator frame rate: the nose keeps its cadence
-  // and every other turn of the other feeds is skipped (NosePriorityPolicy).
-  kRateLimitNosePriority = 8,
+  kRateLimitPfdRefresh = 2,  // Aircraft PFD redraw rate cannot show more images.
+  kRateLimitSimulator = 4,   // The simulator updates more slowly than the target.
 };
+
+// The target per camera of the fps modes. automatic has no fixed target (it
+// renders auto_cameras_per_frame) and reads as Performance here; unknown modes
+// fall back to Balanced.
+constexpr unsigned camera_mode_target(unsigned mode, unsigned custom_rate) noexcept {
+  switch (static_cast<CameraMode>(mode)) {
+    case CameraMode::performance:
+      return kPerformanceCameraRate;
+    case CameraMode::smooth:
+      return kSmoothCameraRate;
+    case CameraMode::custom:
+      return std::clamp(custom_rate, kMinimumCameraRate, kMaximumCameraRate);
+    case CameraMode::automatic:
+      return kPerformanceCameraRate;
+    default:
+      return kBalancedCameraRate;
+  }
+}
 
 struct EffectiveCameraRate {
   unsigned rate = kDefaultCameraRate;            // Requested from the schedule now.
-  unsigned useful_maximum = kMaximumCameraRate;  // Cap while moving, per aircraft.
+  unsigned useful_maximum = kMaximumCameraRate;  // The aircraft's PFD refresh cap.
   unsigned reasons = kRateLimitNone;             // CameraRateLimit bits.
 };
 
-// Useful maximum for one aircraft: the lower of its PFD refresh (0 = not
-// measured) and the manager ceiling, never below the schedule minimum.
-constexpr unsigned useful_camera_rate(unsigned pfd_refresh_hz) noexcept {
-  const unsigned pfd = pfd_refresh_hz ? pfd_refresh_hz : kMaximumCameraRate;
-  return std::clamp(std::min(pfd, kManagerCeilingCameraRate), kMinimumCameraRate, kMaximumCameraRate);
-}
-
-// parked_rate 0 disables the floor. The floor only lowers the rate; a parked
-// floor above the moving rate leaves the moving rate in place.
-constexpr EffectiveCameraRate effective_camera_rate(unsigned user_rate,
-                                                    unsigned pfd_refresh_hz,
-                                                    bool parked,
-                                                    unsigned parked_rate = kDefaultParkedCameraRate) noexcept {
+// The target, capped at the aircraft's measured PFD refresh (0 = not measured):
+// composing faster than the display redraws cannot reach the screen.
+constexpr EffectiveCameraRate effective_camera_rate(unsigned target, unsigned pfd_refresh_hz) noexcept {
   EffectiveCameraRate result;
-  const unsigned requested = std::clamp(user_rate, kMinimumCameraRate, kMaximumCameraRate);
-  result.useful_maximum = useful_camera_rate(pfd_refresh_hz);
-  result.rate = requested;
-  if (requested > result.useful_maximum) {
+  result.rate = std::clamp(target, kMinimumCameraRate, kMaximumCameraRate);
+  result.useful_maximum = std::clamp(pfd_refresh_hz ? pfd_refresh_hz : kMaximumCameraRate, kMinimumCameraRate, kMaximumCameraRate);
+  if (result.rate > result.useful_maximum) {
     result.rate = result.useful_maximum;
-    const unsigned pfd = pfd_refresh_hz ? pfd_refresh_hz : kMaximumCameraRate;
-    if (pfd < kManagerCeilingCameraRate)
-      result.reasons |= kRateLimitPfdRefresh;
-    else
-      result.reasons |= kRateLimitManager;
-  }
-  if (parked && parked_rate) {
-    const unsigned floor = std::clamp(parked_rate, kMinimumParkedCameraRate, kMaximumCameraRate);
-    if (floor < result.rate) {
-      result.rate = floor;
-      result.reasons |= kRateLimitParked;
-    }
+    result.reasons |= kRateLimitPfdRefresh;
   }
   return result;
 }
 
-constexpr const char* camera_rate_limit_name(unsigned reasons) noexcept {
-  if (reasons & kRateLimitParked)
-    return "parked";
-  if (reasons & kRateLimitNosePriority)
-    return "nose_priority";
-  if (reasons & kRateLimitPfdRefresh)
-    return "pfd_refresh";
-  if (reasons & kRateLimitManager)
-    return "manager_ceiling";
-  return "user";
+// Images per camera per second: every camera renders on every due frame, at
+// most one per simulator update. NaN while the update rate is unknown.
+inline double reachable_camera_rate(unsigned rate, double update_hz) noexcept {
+  return std::isfinite(update_hz) && update_hz > 0 ? std::min<double>(rate, update_hz) : std::numeric_limits<double>::quiet_NaN();
 }
 
-// Companion status suffix for the rate in use; empty when the saved rate runs.
+constexpr const char* camera_rate_limit_name(unsigned reasons) noexcept {
+  if (reasons & kRateLimitPfdRefresh)
+    return "pfd_refresh";
+  if (reasons & kRateLimitSimulator)
+    return "simulator_fps";
+  return "target";
+}
+
+// Companion status suffix for the rate reached; empty when the target runs.
 constexpr const wchar_t* camera_rate_limit_text(unsigned reasons) noexcept {
-  if (reasons & kRateLimitParked)
-    return L" (parked floor)";
-  if (reasons & kRateLimitNosePriority)
-    return L" (nose priority: tail every other update while rolling straight)";
   if (reasons & kRateLimitPfdRefresh)
     return L" (capped at the PFD refresh rate)";
-  if (reasons & kRateLimitManager)
-    return L" (capped at the camera-manager ceiling)";
+  if (reasons & kRateLimitSimulator)
+    return L" (limited by the simulator frame rate)";
   return L"";
 }
 
-// Ground-speed hysteresis for the parked floor. Parked needs the public GROUND
-// VELOCITY below kParkedBelowKnots continuously for kParkedSettleMs (the dwell:
-// a rolling aircraft never accumulates park time, and a band sample restarts
-// it). Any sample at or above kMovingAboveKnots restores the moving rate at
-// once. Between the two thresholds the current state holds: a parked aircraft
-// whose GROUND VELOCITY jitters to 0.20–0.34 kt stays at the floor, a moving one
-// stays at the saved rate. Missing or stale telemetry is treated as moving so a
-// telemetry gap never lowers the rate. A parked live A350 reads 0.00–0.09 kt;
-// 0.4 kt is an aircraft still rolling to a stop, which the earlier 0.5/1.0 kt
-// band parked at 5 fps while it was visibly moving (0.9.42 low-speed report),
-// and the single 0.2 kt edge of 0.9.48–0.9.56 stepped the inset 5<->10 fps
-// twice per creep (0.9.56 flash/jump report). Re-parking after any motion needs
-// the full settle again.
-class ParkedRatePolicy {
- public:
-  static constexpr double kParkedBelowKnots = 0.2;
-  static constexpr double kMovingAboveKnots = 0.35;
-  static constexpr std::uint64_t kParkedSettleMs = 3000;
-
-  bool update(std::uint64_t now_ms, bool speed_valid, double knots) noexcept {
-    if (!speed_valid || !std::isfinite(knots) || knots < 0 || knots >= kMovingAboveKnots) {
-      reset();
-      return parked_;
-    }
-    if (knots >= kParkedBelowKnots) {
-      // Hysteresis band: hold the state; a moving aircraft restarts its settle.
-      still_ = false;
-      still_since_ = 0;
-      return parked_;
-    }
-    if (!still_ || now_ms < still_since_) {
-      still_ = true;
-      still_since_ = now_ms;
-    }
-    if (!parked_ && now_ms - still_since_ >= kParkedSettleMs)
-      parked_ = true;
-    return parked_;
-  }
-
-  bool parked() const noexcept { return parked_; }
-  void reset() noexcept {
-    parked_ = false;
-    still_ = false;
-    still_since_ = 0;
-  }
-
- private:
-  bool parked_ = false;
-  bool still_ = false;
-  std::uint64_t still_since_ = 0;
+// Frame-time spread of one log window from a 1 ms histogram (the last bucket
+// holds every longer interval): the median, the 95th percentile and the
+// slowest bucket, in ms. An even 20, 20, 60 ms rhythm shows as 20/60/60, a
+// steady one as close numbers. Zero counts give zeros.
+struct FrameTimeSpread {
+  unsigned median = 0, p95 = 0, slowest = 0;
+  std::uint64_t frames = 0;
 };
-
-// Signed change of heading, in degrees, from previous_forward to forward about
-// the current up axis. Both forward vectors are projected onto the plane at
-// right angles to up, so pitch changes on the ground do not count as turning.
-// Returns NaN for degenerate input.
-inline double heading_change_degrees(const std::array<double, 3>& previous_forward,
-                                     const std::array<double, 3>& forward,
-                                     const std::array<double, 3>& up) noexcept {
-  const auto dot = [](const std::array<double, 3>& a, const std::array<double, 3>& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
-  const auto flatten = [&](const std::array<double, 3>& v) {
-    const double along = dot(v, up);
-    return std::array<double, 3>{v[0] - along * up[0], v[1] - along * up[1], v[2] - along * up[2]};
-  };
-  const auto a = flatten(previous_forward), b = flatten(forward);
-  const std::array<double, 3> cross{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
-  const double cosine = dot(a, b), sine = dot(cross, up);
-  if (!std::isfinite(cosine) || !std::isfinite(sine) || (cosine == 0 && sine == 0))
-    return std::numeric_limits<double>::quiet_NaN();
-  return std::atan2(sine, cosine) * 57.29577951308232;
+template <std::size_t N>
+FrameTimeSpread frame_time_spread(const std::array<std::uint32_t, N>& counts) noexcept {
+  FrameTimeSpread result;
+  for (const auto count : counts)
+    result.frames += count;
+  if (!result.frames)
+    return result;
+  std::uint64_t seen = 0;
+  bool median = false, p95 = false;
+  for (std::size_t ms = 0; ms < N; ++ms) {
+    if (!counts[ms])
+      continue;
+    seen += counts[ms];
+    if (!median && seen * 2 >= result.frames) {
+      result.median = static_cast<unsigned>(ms);
+      median = true;
+    }
+    if (!p95 && seen * 100 >= result.frames * 95) {
+      result.p95 = static_cast<unsigned>(ms);
+      p95 = true;
+    }
+    result.slowest = static_cast<unsigned>(ms);
+  }
+  return result;
 }
 
-// Dynamic tail rate. While the aircraft rolls straight and the simulator runs
-// slowly, the nose feed keeps its cadence and every other turn of the other
-// feeds becomes an idle slot (nose, tail, nose, idle): about a quarter fewer
-// extra renders with two feeds. Below about 20 fps the one-closed-update rule
-// already caps the pulses, so a lower tail rate alone would change nothing.
-// Turning (wing, tail and main-gear clearance), parked (its own floor), a fast
-// simulator (both feeds already refresh often), a disabled setting and missing
-// or stale telemetry all keep every feed equal. A turn is entered at once and
-// left only after a continuous straight hold; the frame rate uses hysteresis.
-class NosePriorityPolicy {
+// Camera-manager updates per second from the probe's monotonic update count,
+// over windows of kWindowMs. NaN until a window completes, and again after a
+// window below kMinimumHz (paused or stalled: not a slow simulator) or above
+// kMaximumHz (not a frame rate: a counter that jumped).
+class UpdateRateMeter {
  public:
-  static constexpr double kTurnEnterDegreesPerSecond = 3.0;
-  static constexpr double kTurnExitDegreesPerSecond = 1.5;
-  static constexpr std::uint64_t kStraightHoldMs = 2000;
-  // Heading rate is measured between pose samples at least this far apart; a
-  // pose older than kHeadingStaleMs, or a longer gap, restarts the estimate.
-  static constexpr std::uint64_t kHeadingWindowMs = 250;
-  static constexpr std::uint64_t kHeadingStaleMs = 1000;
-  // SIMCONNECT_PERIOD_SIM_FRAME samples per second over each window.
-  static constexpr std::uint64_t kFrameWindowMs = 2000;
-  static constexpr double kPriorityBelowFps = 24;
-  static constexpr double kEqualAboveFps = 27;
-  static constexpr double kMinimumMeasuredFps = 1;
+  static constexpr std::uint64_t kWindowMs = 2000;
+  static constexpr double kMinimumHz = 1, kMaximumHz = 1000;
+
+  double update(std::uint64_t now_ms, std::uint64_t updates) noexcept {
+    if (!window_ms_ || now_ms < window_ms_ || updates < window_updates_) {
+      window_ms_ = now_ms ? now_ms : 1;
+      window_updates_ = updates;
+      return rate();
+    }
+    if (now_ms - window_ms_ < kWindowMs)
+      return rate();
+    const double hz = static_cast<double>(updates - window_updates_) * 1000 / static_cast<double>(now_ms - window_ms_);
+    window_ms_ = now_ms;
+    window_updates_ = updates;
+    known_ = hz >= kMinimumHz && hz <= kMaximumHz;
+    hz_ = hz;
+    ++windows_;
+    return rate();
+  }
+  double rate() const noexcept { return known_ ? hz_ : std::numeric_limits<double>::quiet_NaN(); }
+  // Completed windows so far; a new value means rate() describes a new window.
+  std::uint64_t windows() const noexcept { return windows_; }
+
+ private:
+  bool known_ = false;
+  double hz_ = 0;
+  std::uint64_t window_ms_ = 0, window_updates_ = 0, windows_ = 0;
+};
+
+// Auto camera mode. Steps through 1, 2 and all cameras per frame
+// (auto_cameras_per_frame) to give the smoothest cameras that keep the
+// simulator's update rate within kAllowedLoss of its rate without camera
+// work, and never below kMinimumFps. It never goes below one camera per frame. Each completed rate window is judged once:
+// - Cameras off (no TAXI demand): the window is the camera-off rate, except
+//   the first one, which spans the switch (2026-10-07 live: 11.4 Hz while the
+//   cameras stopped for a mode change). The level holds, so turning the cameras
+//   on resumes the last level that fitted.
+// - The first window after a level change or activation spans both states
+//   and is discarded.
+// - Below the floor: back off one level at once and keep the level just left
+//   off for kCooldownMs, doubling per failure up to kMaximumCooldownMs, so a
+//   level that does not fit is not retried every few seconds.
+// - After kHoldWindows clean windows with kStepUpHeadroom above the floor,
+//   take the next level if it is not cooling down and gives each camera more
+//   images (next_helps: there are more cameras than the level renders).
+// While the cameras run, the camera-off rate is never below a measured rate,
+// and at the first level it follows the measured rate, so a moment of light
+// scenery cannot hold the floor up for long. An unknown update rate holds.
+class AutoCameraPolicy {
+ public:
+  static constexpr unsigned kLevels = kAutoCameraLevels;
+  static constexpr double kAllowedLoss = 0.10;
+  static constexpr double kMinimumFps = 20;
+  static constexpr double kStepUpHeadroom = 1.03;
+  static constexpr unsigned kHoldWindows = 3;
+  static constexpr unsigned kForgiveWindows = 30;  // A level that held this long forgets its failures.
+  static constexpr std::uint64_t kCooldownMs = 60000, kMaximumCooldownMs = 480000;
 
   struct Input {
     std::uint64_t now_ms = 0;
-    bool enabled = false;
-    bool moving = false;  // Fresh ground speed and not held at the parked floor.
-    bool pose_valid = false;
-    std::uint64_t pose_sample_ms = 0;
-    std::array<double, 3> forward{}, up{};
-    std::uint64_t sim_frames = 0;  // Monotonic accepted SIM_FRAME samples.
+    std::uint64_t window = 0;  // UpdateRateMeter::windows()
+    double fps = std::numeric_limits<double>::quiet_NaN();
+    bool cameras_active = false;
+    bool next_helps = true;
   };
 
-  bool update(const Input& in) noexcept {
-    observe_heading(in);
-    observe_frames(in.now_ms, in.sim_frames);
-    priority_ = in.enabled && in.moving && heading_known_ && !turning_ && frames_known_ && slow_;
-    return priority_;
+  unsigned update(const Input& in) noexcept {
+    if (in.window == window_)
+      return level_;
+    window_ = in.window;
+    if (!std::isfinite(in.fps) || in.fps <= 0)
+      return level_;
+    if (!in.cameras_active) {
+      if (off_settled_) {
+        base_ = in.fps;
+        base_known_ = true;
+      }
+      off_settled_ = true;
+      settled_ = false;
+      held_ = 0;
+      return level_;
+    }
+    off_settled_ = false;
+    if (!settled_) {
+      settled_ = true;
+      return level_;
+    }
+    if (!base_known_ || in.fps > base_) {
+      base_ = in.fps;
+      base_known_ = true;
+    } else if (level_ == 0) {
+      base_ = 0.75 * base_ + 0.25 * in.fps;
+    }
+    const double floor = this->floor();
+    if (level_ > 0 && in.fps < floor) {
+      const auto failures = ++failures_[level_];
+      const auto cooldown = std::min<std::uint64_t>(kMaximumCooldownMs, kCooldownMs << std::min(failures - 1, 3u));
+      blocked_until_[level_] = in.now_ms + cooldown;
+      --level_;
+      settled_ = false;
+      held_ = 0;
+      return level_;
+    }
+    if (++held_ >= kForgiveWindows)
+      failures_[level_] = 0;
+    if (held_ >= kHoldWindows && level_ + 1 < kLevels && in.now_ms >= blocked_until_[level_ + 1] && in.next_helps &&
+        in.fps >= floor * kStepUpHeadroom) {
+      ++level_;
+      settled_ = false;
+      held_ = 0;
+    }
+    return level_;
   }
-  bool priority() const noexcept { return priority_; }
-  bool turning() const noexcept { return turning_; }
-  // Last measured magnitudes; NaN until measured.
-  double turn_rate() const noexcept { return heading_known_ ? turn_rate_ : std::numeric_limits<double>::quiet_NaN(); }
-  double frame_rate() const noexcept { return frames_known_ ? frame_rate_ : std::numeric_limits<double>::quiet_NaN(); }
+  unsigned level() const noexcept { return level_; }
+  // Camera-off update rate the floor follows; NaN until measured.
+  double base() const noexcept { return base_known_ ? base_ : std::numeric_limits<double>::quiet_NaN(); }
+  double floor() const noexcept { return std::max(kMinimumFps, base_known_ ? base_ * (1 - kAllowedLoss) : kMinimumFps); }
+  void reset() noexcept { *this = AutoCameraPolicy{}; }
 
  private:
-  void forget_heading() noexcept {
-    heading_known_ = false;
-    have_reference_ = false;
-    turning_ = true;  // Unknown counts as turning: every feed stays equal.
-    straight_since_ = 0;
-  }
-  void observe_heading(const Input& in) noexcept {
-    if (!in.pose_valid || !in.pose_sample_ms || in.pose_sample_ms > in.now_ms || in.now_ms - in.pose_sample_ms > kHeadingStaleMs) {
-      forget_heading();
-      return;
-    }
-    if (have_reference_ && in.pose_sample_ms == reference_ms_)
-      return;
-    if (!have_reference_ || in.pose_sample_ms < reference_ms_ || in.pose_sample_ms - reference_ms_ > kHeadingStaleMs) {
-      if (have_reference_)
-        forget_heading();
-      have_reference_ = true;
-      reference_ms_ = in.pose_sample_ms;
-      reference_forward_ = in.forward;
-      return;
-    }
-    if (in.pose_sample_ms - reference_ms_ < kHeadingWindowMs)
-      return;
-    const double change = heading_change_degrees(reference_forward_, in.forward, in.up);
-    const double seconds = static_cast<double>(in.pose_sample_ms - reference_ms_) / 1000;
-    reference_ms_ = in.pose_sample_ms;
-    reference_forward_ = in.forward;
-    if (!std::isfinite(change)) {
-      forget_heading();
-      return;
-    }
-    turn_rate_ = std::abs(change) / seconds;
-    heading_known_ = true;
-    if (turn_rate_ >= kTurnEnterDegreesPerSecond) {
-      turning_ = true;
-      straight_since_ = 0;
-    } else if (turn_rate_ < kTurnExitDegreesPerSecond) {
-      if (!straight_since_)
-        straight_since_ = in.pose_sample_ms;
-      if (turning_ && in.pose_sample_ms - straight_since_ >= kStraightHoldMs)
-        turning_ = false;
-    } else if (turning_) {
-      straight_since_ = 0;  // Still curving gently: the straight hold restarts.
-    }
-  }
-  void observe_frames(std::uint64_t now_ms, std::uint64_t frames) noexcept {
-    if (!window_ms_ || now_ms < window_ms_ || frames < window_frames_) {
-      window_ms_ = now_ms ? now_ms : 1;
-      window_frames_ = frames;
-      return;
-    }
-    if (now_ms - window_ms_ < kFrameWindowMs)
-      return;
-    const double fps = static_cast<double>(frames - window_frames_) * 1000 / static_cast<double>(now_ms - window_ms_);
-    window_ms_ = now_ms;
-    window_frames_ = frames;
-    if (fps < kMinimumMeasuredFps) {
-      frames_known_ = false;  // Paused or telemetry stalled: not a slow simulator.
-      return;
-    }
-    frame_rate_ = fps;
-    if (!frames_known_)
-      slow_ = fps < kPriorityBelowFps;
-    else if (fps < kPriorityBelowFps)
-      slow_ = true;
-    else if (fps > kEqualAboveFps)
-      slow_ = false;
-    frames_known_ = true;
-  }
-
-  bool priority_ = false;
-  bool heading_known_ = false, have_reference_ = false, turning_ = true;
-  std::uint64_t reference_ms_ = 0, straight_since_ = 0;
-  std::array<double, 3> reference_forward_{};
-  double turn_rate_ = 0;
-  bool frames_known_ = false, slow_ = false;
-  std::uint64_t window_ms_ = 0, window_frames_ = 0;
-  double frame_rate_ = 0;
+  unsigned level_ = 0, held_ = 0;
+  bool settled_ = false, base_known_ = false, off_settled_ = false;
+  double base_ = 0;
+  std::uint64_t window_ = 0;
+  std::array<unsigned, kLevels> failures_{};
+  std::array<std::uint64_t, kLevels> blocked_until_{};
 };
 
 }  // namespace taxi_camera

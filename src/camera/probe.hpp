@@ -47,6 +47,7 @@ struct ProbePerformance {
   std::uint64_t read_calls = 0;
   std::uint64_t requested_bytes = 0;
   std::uint64_t query_cache_hits = 0;
+  std::uint64_t carried_proofs = 0;  // Page proofs reused from a held-open frame.
   std::uint64_t query_cache_validation_failures = 0;
   double query_ms = 0;
   // query_ms by kind (allocation, page, region) and each kind's slowest
@@ -96,7 +97,6 @@ struct ProbeSnapshot {
   std::uint64_t created_total = 0;
   std::uint32_t requested_rate = kDefaultCameraRate;
   std::uint32_t requested_feeds = 2;
-  bool requested_nose_priority = false;
   // Last native activation requests, not a measured rendered-frame rate.
   std::array<bool, kMaxCameraFeeds> gates{};
   std::array<std::uint64_t, kMaxCameraFeeds> activation_counts{};
@@ -189,17 +189,24 @@ std::uint64_t request_scene_session_reset(std::uint32_t id) noexcept;
 void request_scene_stop(bool keep_telemetry = false) noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
-// Limits activation opportunities to 1..60 per second per selected feed (the
-// moving minimum of 5 applies to the saved rate; parked floors go lower).
-// nose_priority skips every other turn of the non-nose feeds.
+// Feeds render round-robin, spread evenly over the simulator's frames: rate
+// 5..60 per camera, or with per_frame > 0 that many cameras on every frame
+// (Auto). A rate at or above the simulator's renders every camera every frame.
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
-void request_scene_rate(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept;
+void request_scene_rate(unsigned rate, unsigned feeds = 2, unsigned per_frame = 0) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;
 bool request_scene_mounts(const MountPair& mounts) noexcept;
 ProbeSnapshot scene_snapshot();
+// Camera-manager updates observed so far, every update, without a lock.
+std::uint64_t scene_update_count() noexcept;
+// Intervals between camera-manager updates (simulator frame times), counted
+// per 1 ms bucket since load without a lock; the last bucket holds every
+// interval of kFrameTimeBuckets - 1 ms or more. Callers difference two reads.
+inline constexpr unsigned kFrameTimeBuckets = 151;
+void scene_frame_times(std::array<std::uint32_t, kFrameTimeBuckets>& counts) noexcept;
 // Diagnostics only; the worker logs one peak per status interval.
 ObserverPeak take_observer_peak() noexcept;
 // Diagnostics only, bridge worker thread only (the ring's single consumer):

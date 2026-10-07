@@ -28,7 +28,10 @@ namespace taxi_camera::standalone {
 // cards; routed textures come first in the candidate list.
 // Protocol 24: Settings day_brightness and night_brightness (EV trims on top
 // of the main view's exposure).
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 24;
+// Protocol 25: camera modes. Settings gains camera_mode and drops parked_rate
+// and dynamic_tail; Status gains update_hz, reachable_rate, auto_level and
+// auto_floor and drops parked. Every camera renders on the same frames.
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 25;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
@@ -53,22 +56,18 @@ struct Settings {
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
   std::array<std::array<double, 6>, 3> mounts = profiles::A380.mounts;
-  // Protocol 11: schedule rate while ground speed stays at zero; 0 disables the floor.
-  std::uint32_t parked_rate = kDefaultParkedCameraRate;
   // Protocol 15: explicit separate side-2 texture, sent with route_request
   // (0 = automatic). Unused when side 2 shares the display texture.
   std::uint64_t lower_id{};
-  // Protocol 16: while rolling straight at a low simulator frame rate, skip
-  // every other turn of the non-nose feeds (NosePriorityPolicy); 0 keeps all
-  // feeds equal. Off by default: live the tail looked like a slide show.
-  // Saved per aircraft profile.
-  std::uint32_t dynamic_tail = 0;
   // Protocol 22, session-only: a new serial asks for one snapshot of the
   // tracked display texture snapshot_id (see display_snapshot.hpp).
   std::uint64_t snapshot_request{}, snapshot_id{};
   // Protocol 24: the user's camera brightness in EV (camera_brightness.hpp),
   // by day and at night, blended by ambient light. Saved per aircraft profile.
   float day_brightness = 0, night_brightness = 0;
+  // Protocol 25: CameraMode. Custom targets camera_rate; Auto and the presets
+  // carry their own targets and keep it for Custom. Saved per aircraft profile.
+  std::uint32_t camera_mode = static_cast<std::uint32_t>(kDefaultCameraMode);
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -97,10 +96,10 @@ struct Status {
   std::array<double, 10> stage_ms{};
   Candidate candidates[16]{};
   char message[384]{};
-  // Protocol 11: rate requested from the schedule now, the aircraft's useful
-  // maximum while moving, CameraRateLimit bits and the parked flag. The saved
-  // camera_rate is never rewritten.
-  std::uint32_t effective_rate{}, useful_rate{}, rate_limits{}, parked{};
+  // Protocol 11: target requested from the schedule now, the aircraft's PFD
+  // refresh cap and CameraRateLimit bits. The saved camera_rate is never
+  // rewritten.
+  std::uint32_t effective_rate{}, useful_rate{}, rate_limits{};
   // Protocol 12: events admitted by the bridge's notification limiter, one
   // self-describing slot each (serial, GetTickCount64 posted_ms, SimEvent).
   // Protocol 13: Settings.mounts grew to three feeds for split-bottom profiles.
@@ -114,6 +113,13 @@ struct Status {
   std::uint32_t snapshot_result{}, snapshot_width{}, snapshot_height{}, snapshot_format{};
   // Protocol 23: display sides routed by panel name (bit per side).
   std::uint32_t named_mask{};
+  // Protocol 25: measured camera-manager updates per second and the images
+  // per camera per second they allow at the target (both 0 while unknown).
+  float update_hz{}, reachable_rate{};
+  // AutoCameraPolicy level (auto_cameras_per_frame: 1, 2 or every camera per
+  // frame) and the update rate it keeps above (0 until a rate is measured).
+  std::uint32_t auto_level{};
+  float auto_floor{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};
@@ -132,7 +138,7 @@ inline bool valid_settings(const Settings& s) noexcept {
         return false;
   const auto* profile = profiles::find(s.profile);
   if (s.auto_profile > 1 || s.notifications > 1 || !profile || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
-      s.scene_test > 1 || s.dynamic_tail > 1 || s.calibration_budget < 64 || s.calibration_budget > 16384)
+      s.scene_test > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 || s.calibration_budget > 16384)
     return false;
   const auto sides = profiles::side_mask(*profile);
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
@@ -149,8 +155,6 @@ inline bool valid_settings(const Settings& s) noexcept {
         m[5] < 0.05 || m[5] > 1.55)
       return false;
   }
-  if (s.parked_rate && (s.parked_rate < kMinimumParkedCameraRate || s.parked_rate > kMaximumCameraRate))
-    return false;
   return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate &&
          valid_camera_brightness(s.day_brightness) && valid_camera_brightness(s.night_brightness);
 }

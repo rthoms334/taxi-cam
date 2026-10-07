@@ -29,7 +29,6 @@ A skip always leaves the bridge in a state that refuses injection rather than gu
 
 Every global source-model wipe (`Tracker::invalidate_all`/`clear`) goes through one helper that records its `WipeSite` (`fail_device`, `deferred_sources` with the publisher origins, `unknown_lists_no_owner`, `unknown_lists`, `invalid_recording`, `lease_overflow`, `refused_transaction`, `observer_disabled`, `session_reset`; `unordered_consumer` remains in the enum for old logs) and, for `deferred_sources`, the per-origin count (`wipe_escape_unordered`, `wipe_refused_completed`, `wipe_refused_contended`, `wipe_deferred_overflow`, `wipe_unordered_consumer`; only `deferred_overflow` should ever move). Scoped retirements are counted apart (`source_retirements`, `retirement_restored`, `retire_<origin>`). With `TAXI_CAM_GRAPHICS_DIAGNOSTICS=1` the worker logs one `Source-state wipe:` line per wipe and one `Source-state retire:` line per retirement with the counters that moved since the previous tick, and `Source-state rearm: restored=` when `CaptureProgress` rearms the retained RT models after a genuine wipe.
 
-The parked rate floor (`ParkedRatePolicy`) is not a lock but shares the rule that a skip or jitter must not step the schedule: parking needs 3 s below 0.2 kt, unparking needs a sample at or above 0.35 kt and happens at once, and the 0.2–0.35 kt band holds the current state (a rolling aircraft never accumulates park time). Live 0.9.56 stepped the inset 5<->10 fps at the single 0.2 kt edge while creeping.
 
 ## Presentation watchdog
 

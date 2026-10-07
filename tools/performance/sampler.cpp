@@ -252,7 +252,7 @@ void array_json(std::ostream& out, const Values& values) {
 std::string settings_json(const ipc::Settings& s) {
   std::ostringstream out;
   out << std::setprecision(17);
-  out << "{\"enabled\":" << s.enabled << ",\"camera_rate\":" << s.camera_rate << ",\"parked_rate\":" << s.parked_rate
+  out << "{\"enabled\":" << s.enabled << ",\"camera_rate\":" << s.camera_rate << ",\"camera_mode\":" << s.camera_mode
       << ",\"profile\":" << s.profile << ",\"auto_profile\":" << s.auto_profile << ",\"follow_taxi\":" << s.follow_taxi
       << ",\"auto_detect\":" << s.auto_detect << ",\"single_camera\":" << s.single_camera << ",\"manual_mask\":" << s.manual_mask
       << ",\"calibration_mask\":" << s.calibration_mask << ",\"calibration_budget\":" << s.calibration_budget
@@ -273,6 +273,7 @@ std::string settings_json(const ipc::Settings& s) {
   array_json(out, s.mounts[0]);
   out << ',';
   array_json(out, s.mounts[1]);
+  out << ',';
   array_json(out, s.mounts[2]);
   out << "]}";
   return out.str();
@@ -283,10 +284,10 @@ std::string status_json(const ipc::Status& s) {
   out << "{\"heartbeat\":" << s.heartbeat << ",\"graphics_ready\":" << s.graphics_ready << ",\"scene_ready\":" << s.scene_ready
       << ",\"taxi_mask\":" << s.taxi_mask << ",\"active_profile\":" << s.active_profile << ",\"detected_profile\":" << s.detected_profile
       << ",\"effective_rate\":" << s.effective_rate << ",\"useful_rate\":" << s.useful_rate << ",\"rate_limits\":" << s.rate_limits
-      << ",\"parked\":" << s.parked << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch
-      << ",\"identity_sample_ms\":" << s.identity_sample_ms << ",\"aircraft_type\":" << json(s.aircraft_type)
-      << ",\"aircraft_path\":" << json(s.aircraft_path) << ",\"captures\":" << s.captures << ",\"composed\":" << s.composed
-      << ",\"stamps\":" << s.stamps << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
+      << ",\"update_hz\":" << s.update_hz << ",\"reachable_rate\":" << s.reachable_rate << ",\"auto_level\":" << s.auto_level
+      << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch << ",\"identity_sample_ms\":" << s.identity_sample_ms
+      << ",\"aircraft_type\":" << json(s.aircraft_type) << ",\"aircraft_path\":" << json(s.aircraft_path) << ",\"captures\":" << s.captures
+      << ",\"composed\":" << s.composed << ",\"stamps\":" << s.stamps << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
       << ",\"hook_failures\":" << s.hook_failures << ",\"speed\":" << s.speed << ",\"exposure\":" << s.exposure
       << ",\"probe_elapsed_ms\":" << s.probe_cpu_ms << ",\"probe_max_elapsed_ms\":" << s.probe_max_ms << ",\"stage_elapsed_ms\":";
   array_json(out, s.stage_ms);

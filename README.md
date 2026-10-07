@@ -77,9 +77,17 @@ Set your camera views first, then open **Reference guides** to position the nose
 
 Choose **Apply live** to preview the positions, then **Save changes** to keep them. To restore the defaults, choose **Reset guide positions** and save. The guides may need realigning if you change the camera view.
 
-### Camera rate and colours
+### Camera frame rate and colours
 
-On **Display**, set the camera frame rate and the ground-speed text colour (when the profile draws GS; the PMDG 777 keeps ground speed off). **Camera frame rate** accepts **5–60** (minimum **5**), with a default of **10**. This version's installer writes **10** into existing settings so a saved 15 becomes 10; later changes you make are kept. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance: the cameras together are drawn on at most one simulator frame in three, so with two cameras each updates at most once every six frames and with three once every nine, whatever the setting. At 24 fps with three cameras that is under 3 updates per second each, so 5 and 10 look the same. While the aircraft is parked the cameras update twice a second to save frame time, and they return to this rate as soon as it moves. **Diagnostics → Dynamic tail rate** (off by default) lets the tail camera skip every other update while rolling straight on a slow simulator (below about 24 fps), so fewer frames carry an extra view; in turns both cameras update equally. Choose **Save changes** when finished.
+On **Display**, choose the camera frame rate and the ground-speed text colour (when the profile draws GS; the PMDG 777 keeps ground speed off). Every choice is a target in frames per second for each camera. The cameras take turns across the simulator's frames so every frame carries the same number of cameras, or at most one more, which keeps the main view smooth: with three cameras at 10 fps on a 30 fps simulator, one camera renders on every frame. A camera can never get more frames than the simulator draws: at a target above the simulator's frame rate, every camera renders every frame.
+
+- **Auto** (default): renders one camera on every frame, two, or all of them, so every frame always carries the same camera work and the main view stays even. Each camera's frame rate follows the simulator (one camera per frame with three cameras at 30 fps is 10 fps each). It goes as high as it can while keeping the simulator within about 10% of its frame rate without the cameras (never below 20 fps), backs off within a few seconds when the frame rate drops, and tries again later. The card shows how many cameras per frame it is running.
+- **Performance**: 10 fps per camera. Lowest cost.
+- **Balanced**: 15 fps per camera.
+- **Smooth**: 30 fps per camera. Costs the most simulator time.
+- **Custom**: set your own target with the slider, 5–60 fps per camera.
+
+Each card shows its target and, once the simulator is running, what each camera gets right now. Below the cards, **Now** shows the frame rate each camera actually gets and why, when it is less than the target. The cameras keep the same frame rate while the aircraft is parked. Profiles saved by earlier versions start on Auto; a camera frame rate you had lowered starts on Performance, and one you had raised starts on Custom at that rate. Choose **Save changes** when finished.
 
 On **Reference guides**, **Marking colour** changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Save changes** to retain the colour for the selected aircraft profile.
 
@@ -99,7 +107,7 @@ Assignments apply immediately and belong to the current flight; texture IDs can 
 
 ## Known issues and limitations
 
-- **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. The camera views draw as far as the main view at every speed, so taxiing can cost more than with the 1,000 m distance of earlier versions. Try a lower camera frame rate if needed.
+- **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. The camera views draw as far as the main view at every speed, so taxiing can cost more than with the 1,000 m distance of earlier versions. Choose **Performance** under Display → Camera frame rate if needed.
 
 Please report unexpected behaviour using **Report a bug**.
 
