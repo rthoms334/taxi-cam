@@ -696,14 +696,15 @@ void log_observer_peak(const win::Status& status) noexcept {
     }
     const auto& p = peak.performance;
     if (used < sizeof(detail))
-      std::snprintf(detail + used, sizeof(detail) - used,
-                    " unstaged=%.2f query_ms=%.2f read_ms=%.2f queries=%llu reads=%llu cache_hits=%llu query_kind_ms=%.3f/%.3f/%.3f "
-                    "query_kind_max_us=%.1f/%.1f/%.1f write_ms=%.3f writes=%llu",
-                    std::max(0.0, peak.total_ms - peak.pre_ms - staged), p.query_ms, p.read_ms,
-                    static_cast<unsigned long long>(p.query_calls), static_cast<unsigned long long>(p.read_calls),
-                    static_cast<unsigned long long>(p.query_cache_hits), p.query_allocation_ms, p.query_page_ms, p.query_fallback_ms,
-                    p.query_allocation_max_us, p.query_page_max_us, p.query_fallback_max_us, p.write_ms,
-                    static_cast<unsigned long long>(p.write_calls));
+      std::snprintf(
+          detail + used, sizeof(detail) - used,
+          " unstaged=%.2f query_ms=%.2f read_ms=%.2f queries=%llu reads=%llu cache_hits=%llu carried=%llu query_kind_ms=%.3f/%.3f/%.3f "
+          "query_kind_max_us=%.1f/%.1f/%.1f write_ms=%.3f writes=%llu",
+          std::max(0.0, peak.total_ms - peak.pre_ms - staged), p.query_ms, p.read_ms, static_cast<unsigned long long>(p.query_calls),
+          static_cast<unsigned long long>(p.read_calls), static_cast<unsigned long long>(p.query_cache_hits),
+          static_cast<unsigned long long>(p.carried_proofs), p.query_allocation_ms, p.query_page_ms, p.query_fallback_ms,
+          p.query_allocation_max_us, p.query_page_max_us, p.query_fallback_max_us, p.write_ms,
+          static_cast<unsigned long long>(p.write_calls));
   }
   log_status(status, detail);
 }
@@ -902,10 +903,17 @@ DWORD run_impl() {
     service_max_ms = std::max(service_max_ms, GetTickCount64() - begin);
   };
   std::vector<PfdTargetObservation> inventory;
-  unsigned rate{}, feeds{}, applied_profile{};
-  bool nose_priority{};
-  ParkedRatePolicy parked_policy;
-  NosePriorityPolicy nose_policy;
+  unsigned rate{}, feeds{}, applied_profile{}, scheduled_per_frame{};
+  AutoCameraPolicy auto_policy;
+  UpdateRateMeter update_meter;
+  // Frame-time histogram read at the previous status log line.
+  std::array<std::uint32_t, native_camera::kFrameTimeBuckets> logged_frame_times{};
+  // Last update rate measured with the cameras off, for the view_ms estimate.
+  // The first window after the cameras stop spans the switch and is skipped.
+  double camera_off_hz = std::numeric_limits<double>::quiet_NaN();
+  std::uint64_t camera_off_window{};
+  bool camera_off_settled = false;
+  std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
@@ -1192,7 +1200,7 @@ DWORD run_impl() {
       prewarm = {};
       warmup_startup = {};
       rate = feeds = 0;
-      nose_priority = false;
+      auto_policy.reset();  // Another aircraft has its own camera cost.
       applied_profile = pending_profile;
       applied_profile_request = pending_profile_request;
       applied_session_epoch = pending_session_epoch;
@@ -1380,34 +1388,61 @@ DWORD run_impl() {
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
     // Only the schedule rate changes here. The pair, its gates and the saved
-    // camera_rate are untouched; configure() on a live pair retains deadlines.
-    const bool parked = parked_policy.update(now, speed.valid, speed.knots);
+    // camera_rate are untouched; configure() on a live pair retains its grid.
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
-    effective_rate =
-        effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
     const unsigned desired_feeds =
         settings.single_camera ? 1u : (rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u);
-    // Dynamic tail rate: cached telemetry only, no simulator or engine reads.
-    const auto heading_pose = native_camera::sample_body_pose(now);
-    NosePriorityPolicy::Input nose_input;
-    nose_input.now_ms = now;
-    nose_input.enabled = settings.dynamic_tail != 0 && desired_feeds >= 2;
-    nose_input.moving = speed.valid && !parked;
-    nose_input.pose_valid = heading_pose.valid;
-    nose_input.pose_sample_ms = heading_pose.sample_ms;
-    nose_input.forward = heading_pose.pose.forward;
-    nose_input.up = heading_pose.pose.up;
-    nose_input.sim_frames = native_camera::get_body_telemetry_timing().accepted_samples;
-    const bool desired_priority = nose_policy.update(nose_input);
-    if (desired_priority)
-      effective_rate.reasons |= kRateLimitNosePriority;
-    if (connected && (rate != effective_rate.rate || feeds != desired_feeds || nose_priority != desired_priority)) {
+    const unsigned pfd_refresh_hz = rate_profile ? rate_profile->pfd_refresh_hz : 0;
+    const double update_hz = update_meter.update(now, native_camera::scene_update_count());
+    if (!demand.suspend) {
+      camera_off_settled = false;
+    } else if (std::isfinite(update_hz) && update_meter.windows() != camera_off_window) {
+      camera_off_window = update_meter.windows();
+      if (camera_off_settled)
+        camera_off_hz = update_hz;
+      camera_off_settled = true;
+    }
+    // Auto steps through 1, 2 and all cameras per frame while the cameras run;
+    // a step up needs a camera the current level does not render.
+    const bool automatic = settings.camera_mode == static_cast<std::uint32_t>(CameraMode::automatic);
+    if (automatic) {
+      AutoCameraPolicy::Input auto_input;
+      auto_input.now_ms = now;
+      auto_input.window = update_meter.windows();
+      auto_input.fps = update_hz;
+      auto_input.cameras_active = !demand.suspend;
+      auto_input.next_helps = auto_cameras_per_frame(auto_policy.level(), desired_feeds) < desired_feeds;
+      auto_policy.update(auto_input);
+    }
+    const unsigned per_frame = automatic ? auto_cameras_per_frame(auto_policy.level(), desired_feeds) : 0;
+    // Auto's rate per camera follows the simulator: per_frame of the feeds on
+    // every frame. The other modes run their target, capped at the PFD refresh.
+    if (automatic) {
+      effective_rate = {};
+      effective_rate.useful_maximum = effective_camera_rate(kMaximumCameraRate, pfd_refresh_hz).useful_maximum;
+      effective_rate.rate = std::isfinite(update_hz) ? std::clamp(static_cast<unsigned>(std::lround(update_hz * per_frame / desired_feeds)),
+                                                                  kMinimumCameraRate, kMaximumCameraRate)
+                                                     : kPerformanceCameraRate;
+    } else {
+      effective_rate = effective_camera_rate(camera_mode_target(settings.camera_mode, settings.camera_rate), pfd_refresh_hz);
+    }
+    const double reachable = automatic && std::isfinite(update_hz) ? update_hz * per_frame / desired_feeds
+                                                                   : reachable_camera_rate(effective_rate.rate, update_hz);
+    if (!automatic && std::isfinite(reachable) && reachable + 0.5 < effective_rate.rate)
+      effective_rate.reasons |= kRateLimitSimulator;
+    if (connected && (rate != effective_rate.rate || feeds != desired_feeds || scheduled_per_frame != per_frame)) {
       rate = effective_rate.rate;
       feeds = desired_feeds;
-      nose_priority = desired_priority;
-      native_camera::request_scene_rate(rate, feeds, nose_priority);
-      scene_runtime::manager().set_source_rate(rate);
-      scene_runtime::set_waiting_stale_ms(win::waiting_stale_ms(rate, nose_priority));
+      scheduled_per_frame = per_frame;
+      native_camera::request_scene_rate(rate, feeds, per_frame);
+      scene_runtime::manager().set_source_rate(kMaximumCaptureSourceRate);
+    }
+    // The page waits on the images the cameras actually get: the rate in force,
+    // or fewer when the simulator updates more slowly.
+    const auto expected_rate = std::isfinite(reachable) ? std::max(1u, static_cast<unsigned>(reachable)) : rate;
+    if (connected && rate && win::waiting_stale_ms(expected_rate) != stale_ms) {
+      stale_ms = win::waiting_stale_ms(expected_rate);
+      scene_runtime::set_waiting_stale_ms(stale_ms);
     }
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
@@ -1583,7 +1618,19 @@ DWORD run_impl() {
     status.effective_rate = rate ? rate : effective_rate.rate;
     status.useful_rate = effective_rate.useful_maximum;
     status.rate_limits = effective_rate.reasons;
-    status.parked = parked;
+    status.update_hz = std::isfinite(update_meter.rate()) ? static_cast<float>(update_meter.rate()) : 0.f;
+    const double reached = scheduled_per_frame && feeds && std::isfinite(update_meter.rate())
+                               ? update_meter.rate() * scheduled_per_frame / feeds
+                               : reachable_camera_rate(effective_rate.rate, update_meter.rate());
+    status.reachable_rate = std::isfinite(reached) ? static_cast<float>(reached) : 0.f;
+    // Frame time each rendered camera image costs, from the frames the
+    // simulator lost against its rate with the cameras off; includes Taxi
+    // Cam's own work. Only while the cameras run and both rates are known.
+    double view_ms = std::numeric_limits<double>::quiet_NaN();
+    if (!demand.suspend && std::isfinite(camera_off_hz) && std::isfinite(reached) && reached > 0 && feeds)
+      view_ms = (1000.0 - update_meter.rate() * 1000.0 / camera_off_hz) / (reached * feeds);
+    status.auto_level = auto_policy.level();
+    status.auto_floor = std::isfinite(auto_policy.base()) ? static_cast<float>(auto_policy.floor()) : 0.f;
     status.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
     status.aircraft_session_epoch = session_epoch;
     // Read acknowledgement first: a retired command must never be paired with
@@ -1775,11 +1822,18 @@ DWORD run_impl() {
                          status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
                          status.right_id != last_logged.right_id || status.lower_id != last_logged.lower_id ||
                          scene.stop_sequence != last_stop_sequence || output.output != last_output ||
-                         scene.view_wait_count != last_view_wait_count || status.effective_rate != last_logged.effective_rate ||
-                         status.parked != last_logged.parked;
+                         scene.view_wait_count != last_view_wait_count || status.effective_rate != last_logged.effective_rate;
     loop_max_ms = std::max(loop_max_ms, GetTickCount64() - now);
     if (changed || now >= next_log) {
       const LogBlock log_block;
+      // Frame-time spread since the previous status line.
+      std::array<std::uint32_t, native_camera::kFrameTimeBuckets> frame_times{};
+      native_camera::scene_frame_times(frame_times);
+      auto window_frames = frame_times;
+      for (unsigned i = 0; i < window_frames.size(); ++i)
+        window_frames[i] = frame_times[i] >= logged_frame_times[i] ? frame_times[i] - logged_frame_times[i] : 0;
+      logged_frame_times = frame_times;
+      const auto spread = frame_time_spread(window_frames);
       if (!logged || status.active_profile != last_logged.active_profile || status.detected_profile != last_logged.detected_profile ||
           status.aircraft_session_epoch != last_logged.aircraft_session_epoch ||
           std::strcmp(status.aircraft_type, last_logged.aircraft_type) || std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
@@ -1798,7 +1852,9 @@ DWORD run_impl() {
           "stop_seq=%llu stop=%s "
           "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
           "entries=%llu/%llu suspended=%u "
-          "rate=%u saved_rate=%u useful_rate=%u rate_limit=%s parked=%u speed_knots=%.2f nose_priority=%u turn_dps=%.1f sim_fps=%.1f "
+          "rate=%u saved_rate=%u mode=%u auto_level=%u auto_floor=%.1f update_hz=%.1f frame_ms=%u/%u/%u off_hz=%.1f reachable=%.1f "
+          "view_ms=%.1f "
+          "useful_rate=%u rate_limit=%s speed_knots=%.2f "
           "gates=%u/%u tail=%s "
           "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu ignored_recordings=%llu "
           "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
@@ -1813,11 +1869,11 @@ DWORD run_impl() {
           scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0], scene.ready[1], scene.output_ready[0],
           scene.output_ready[1], scene.output_waits, scene.inspection_status[0], scene.inspection_status[1],
           static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
-          demand.suspend, status.effective_rate, settings.camera_rate, status.useful_rate, camera_rate_limit_name(status.rate_limits),
-          status.parked, speed.valid ? speed.knots : -1.0, nose_policy.priority(),
-          std::isfinite(nose_policy.turn_rate()) ? nose_policy.turn_rate() : -1.0,
-          std::isfinite(nose_policy.frame_rate()) ? nose_policy.frame_rate() : -1.0, scene.gates[0], scene.gates[1],
-          output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
+          demand.suspend, status.effective_rate, settings.camera_rate, settings.camera_mode, status.auto_level, status.auto_floor,
+          status.update_hz, spread.median, spread.p95, spread.slowest, std::isfinite(camera_off_hz) ? camera_off_hz : -1.0,
+          status.reachable_rate, std::isfinite(view_ms) ? view_ms : -1.0, status.useful_rate, camera_rate_limit_name(status.rate_limits),
+          speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1], output.capture.tail_status,
+          static_cast<unsigned long long>(output.capture.source_draws),
           static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
           static_cast<unsigned long long>(output.capture.invalid_source_recordings),
           static_cast<unsigned long long>(output.capture.scoped_source_invalidations),

@@ -342,6 +342,111 @@ bool single_display_profile(const win::Settings& s) noexcept {
   const auto* profile = profiles::find(s.profile);
   return profile && profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
 }
+// Indexed by CameraMode; CameraModeOrder is the left-to-right card order.
+constexpr const wchar_t* CameraModeNames[]{L"Performance", L"Balanced", L"Smooth", L"Custom", L"Auto"};
+constexpr const wchar_t* CameraModeHints[]{L"Lowest cost", L"Medium cost", L"Highest cost", L"Your target", L"Adapts to fps"};
+constexpr CameraMode CameraModeOrder[]{CameraMode::automatic, CameraMode::performance, CameraMode::balanced, CameraMode::smooth,
+                                       CameraMode::custom};
+static_assert(std::size(CameraModeNames) == kCameraModeCount && std::size(CameraModeHints) == kCameraModeCount &&
+              std::size(CameraModeOrder) == kCameraModeCount);
+// Display page mode cards (270 + CameraMode) and the custom target slider
+// (205). The chosen card is unsaved until Save changes, like the other fields.
+constexpr int CameraModeCardId = 270, CameraTargetId = 205;
+unsigned pending_camera_mode = static_cast<unsigned>(kDefaultCameraMode);
+unsigned selected_camera_mode() {
+  if (GetDlgItem(window, CameraModeCardId))
+    return pending_camera_mode;
+  const auto mode = draft().camera_mode;
+  return mode < kCameraModeCount ? mode : static_cast<unsigned>(kDefaultCameraMode);
+}
+unsigned selected_camera_target() {
+  if (const auto target = GetDlgItem(window, CameraTargetId))
+    return static_cast<unsigned>(SendMessageW(target, TBM_GETPOS, 0, 0));
+  return draft().camera_rate;
+}
+void invalidate_camera_mode_cards() {
+  for (unsigned mode = 0; mode < kCameraModeCount; ++mode)
+    if (const auto card = GetDlgItem(window, CameraModeCardId + static_cast<int>(mode)))
+      InvalidateRect(card, nullptr, FALSE);
+}
+// Name, target fps, what each camera gets on this flight right now, and a
+// three-step frame-cost meter that follows the target.
+void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto s = draft();
+  const auto* profile = profiles::find(s.profile);
+  const double update_hz = sample.heartbeat && sample.update_hz > 0 ? sample.update_hz : std::numeric_limits<double>::quiet_NaN();
+  const bool automatic = mode == static_cast<unsigned>(CameraMode::automatic);
+  // Auto reports the cameras per frame it runs; the other modes their target.
+  const bool auto_live = automatic && sample.heartbeat && s.camera_mode == mode && std::isfinite(update_hz);
+  const unsigned feeds = s.single_camera ? 1u : (profile && profile->composition.split_bottom != 0 ? 3u : 2u);
+  const unsigned per_frame = auto_cameras_per_frame(auto_live ? sample.auto_level : 0, feeds);
+  const unsigned target =
+      automatic ? 0 : effective_camera_rate(camera_mode_target(mode, selected_camera_target()), profile ? profile->pfd_refresh_hz : 0).rate;
+  const double reached = automatic ? (auto_live ? update_hz * per_frame / feeds : std::numeric_limits<double>::quiet_NaN())
+                                   : reachable_camera_rate(target, update_hz);
+  const bool chosen = mode == selected_camera_mode();
+  const bool down = (item.itemState & ODS_SELECTED) != 0;
+  const auto dc = item.hDC;
+  HBRUSH surround = CreateSolidBrush(Card);
+  FillRect(dc, &item.rcItem, surround);
+  DeleteObject(surround);
+  HBRUSH brush = CreateSolidBrush(chosen ? RGB(30, 64, 63) : down ? Border : Background);
+  HPEN pen = CreatePen(PS_SOLID, scale(chosen ? 2 : 1), chosen ? Accent : Border);
+  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
+  RoundRect(dc, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, scale(12), scale(12));
+  SelectObject(dc, oldb);
+  SelectObject(dc, oldp);
+  DeleteObject(brush);
+  DeleteObject(pen);
+  SetBkMode(dc, TRANSPARENT);
+  const auto line = [&](const wchar_t* value, int top, int height, HFONT font, COLORREF color) {
+    RECT r{item.rcItem.left + scale(10), item.rcItem.top + scale(top), item.rcItem.right - scale(4), item.rcItem.top + scale(top + height)};
+    SelectObject(dc, font);
+    SetTextColor(dc, color);
+    DrawTextW(dc, value, -1, &r, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  };
+  line(CameraModeNames[mode], 9, 26, heading, chosen ? Accent : Text);
+  wchar_t label[48];
+  if (auto_live)
+    std::swprintf(label, 48, per_frame >= feeds ? L"Every camera, every frame" : L"%u camera%ls per frame", per_frame,
+                  per_frame == 1 ? L"" : L"s");
+  else if (automatic)
+    std::swprintf(label, 48, L"Even frames");
+  else
+    std::swprintf(label, 48, L"%u fps", target);
+  line(label, 36, 20, small, Muted);
+  wchar_t now[48];
+  if (std::isfinite(reached))
+    std::swprintf(now, 48, reached < 9.95 ? L"≈ %.1f fps now" : L"≈ %.0f fps now", reached);
+  const bool show_now = std::isfinite(reached) && (!automatic || auto_live);
+  line(show_now ? now : CameraModeHints[mode], 57, 22, normal, show_now ? Text : Muted);
+  // Frame cost follows the images rendered per second (Auto: per frame).
+  const int bars = automatic                          ? static_cast<int>(auto_live ? std::min(per_frame, 3u) : 1u)
+                   : target <= kPerformanceCameraRate ? 1
+                   : target <= 20                     ? 2
+                                                      : 3;
+  for (int i = 0; i < 3; ++i) {
+    RECT bar{item.rcItem.right - scale(12 + (3 - i) * 16) + scale(4), item.rcItem.bottom - scale(15),
+             item.rcItem.right - scale(12 + (2 - i) * 16), item.rcItem.bottom - scale(10)};
+    HBRUSH fill = CreateSolidBrush(i < bars ? (chosen ? Accent : Muted) : Border);
+    FillRect(dc, &bar, fill);
+    DeleteObject(fill);
+  }
+  RECT cost{item.rcItem.left + scale(10), item.rcItem.bottom - scale(22), item.rcItem.right - scale(64), item.rcItem.bottom - scale(4)};
+  SelectObject(dc, small);
+  SetTextColor(dc, Muted);
+  DrawTextW(dc, L"Cost", -1, &cost, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  if (item.itemState & ODS_FOCUS) {
+    RECT focus = item.rcItem;
+    InflateRect(&focus, -scale(4), -scale(4));
+    DrawFocusRect(dc, &focus);
+  }
+}
 bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
   if (error)
     *error = nullptr;
@@ -351,6 +456,11 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
     ok = false;
   if (ok)
     settings.camera_rate = static_cast<UINT>(rate);
+  if (GetDlgItem(window, CameraModeCardId))
+    settings.camera_mode = pending_camera_mode;
+  if (const auto target = GetDlgItem(window, CameraTargetId))
+    settings.camera_rate =
+        static_cast<UINT>(std::clamp<LRESULT>(SendMessageW(target, TBM_GETPOS, 0, 0), kMinimumCameraRate, kMaximumCameraRate));
   const double budget = number(203, settings.calibration_budget, ok);
   if (budget < 64 || budget > 16384 || std::floor(budget) != budget)
     ok = false;
@@ -1401,7 +1511,7 @@ bool apply(bool save = true) {
   if (!read_fields(settings, &field_error)) {
     notice = field_error ? field_error
              : page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
-                         : L"Check the values: rate 5–60 (min 5), brightness −4 to +2 EV in 0.25 steps, lens 0.05–1.55.";
+                         : L"Check the values: brightness −4 to +2 EV in 0.25 steps, lens 0.05–1.55.";
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
@@ -1594,9 +1704,18 @@ void build_controls() {
     }
     button(L"Reset camera mounts", 359, 260, 594, 240);
   } else if (page == 2) {
-    edit(s.camera_rate, 200, 840, 151, 120);
-    edit(s.day_brightness, 201, 840, 247, 120);
-    edit(s.night_brightness, 202, 840, 343, 120);
+    pending_camera_mode = s.camera_mode < kCameraModeCount ? s.camera_mode : static_cast<unsigned>(kDefaultCameraMode);
+    for (unsigned slot = 0; slot < kCameraModeCount; ++slot) {
+      const auto mode = static_cast<unsigned>(CameraModeOrder[slot]);
+      button(CameraModeNames[mode], CameraModeCardId + static_cast<int>(mode), 264 + static_cast<int>(slot) * 149, 186, 138, 102);
+    }
+    HWND target = child(TRACKBAR_CLASSW, L"", CameraTargetId, 420, 300, 470, 32, TBS_HORZ | TBS_NOTICKS);
+    SendMessageW(target, TBM_SETRANGE, FALSE, MAKELPARAM(kMinimumCameraRate, kMaximumCameraRate));
+    SendMessageW(target, TBM_SETPAGESIZE, 0, 5);
+    SendMessageW(target, TBM_SETPOS, TRUE, std::clamp(s.camera_rate, kMinimumCameraRate, kMaximumCameraRate));
+    EnableWindow(target, pending_camera_mode == static_cast<unsigned>(CameraMode::custom));
+    edit(s.day_brightness, 201, 840, 420, 120);
+    edit(s.night_brightness, 202, 840, 518, 120);
     button(L"Ground-speed colour", 231, 740, 630, 235);
     const auto* display_profile = profiles::find(s.profile);
     EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
@@ -1630,7 +1749,6 @@ void build_controls() {
     edit(s.calibration_budget, 203, 840, 548, 120);
     button(L"Open log folder", 510, 260, 591, 210);
     button(L"Stop camera tests", 511, 500, 591, 210);
-    toggle(L"Dynamic tail rate", 235, s.dynamic_tail, 740, 591, 250);
   } else if (page == 5) {
     const auto* guide_profile = profiles::find(s.profile);
     const bool draw_guides = !guide_profile || guide_profile->reference_guides;
@@ -1844,21 +1962,42 @@ void draw_page(HDC dc) {
   } else if (page == 2) {
     // The camera images take the main view's lighting; brightness is the
     // user's offset on top of it.
-    const int ys[]{122, 218, 314};
-    const wchar_t* names[]{L"Camera frame rate", L"Daytime brightness", L"Night brightness"};
-    const wchar_t* descriptions[]{L"Per camera, 5–60; default 10. Parked aircraft refresh twice a second; higher rates are capped.",
-                                  L"EV added to the main view's exposure in daylight, −4 to +2 in 0.25 steps. 0 matches the main view.",
+    const bool custom = selected_camera_mode() == static_cast<unsigned>(CameraMode::custom);
+    panel(dc, 244, 119, 766, 262);
+    text(dc, L"Camera frame rate", 264, 127, 400, 29, heading);
+    text(dc, L"Frames per second for each taxi camera, parked or moving. Auto keeps the simulator within 10% of its frame rate.", 264, 157,
+         734, 24, small, Muted, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text(dc, L"Custom target", 264, 305, 150, 24, normal, custom ? Text : Muted);
+    wchar_t target_label[32];
+    std::swprintf(target_label, 32, L"%u fps", selected_camera_target());
+    text(dc, target_label, 900, 305, 98, 24, normal, custom ? Text : Muted);
+    if (sample.heartbeat) {
+      wchar_t rate_line[256];
+      if (sample.reachable_rate > 0)
+        std::swprintf(rate_line, 256, L"Now: each camera about %.1f fps (target %u fps%ls), simulator %.0f fps.", sample.reachable_rate,
+                      sample.effective_rate, camera_rate_limit_text(sample.rate_limits), sample.update_hz);
+      else
+        std::swprintf(rate_line, 256, L"Now: target %u fps per camera%ls. Measuring the simulator's frame rate.", sample.effective_rate,
+                      camera_rate_limit_text(sample.rate_limits));
+      std::wstring line = rate_line;
+      // Saved Auto: the update rate it keeps the simulator above.
+      if (draft().camera_mode == static_cast<std::uint32_t>(CameraMode::automatic) && sample.auto_floor > 0) {
+        wchar_t auto_line[96];
+        std::swprintf(auto_line, 96, L" Auto keeps the simulator above %.0f fps.", sample.auto_floor);
+        line += auto_line;
+      }
+      text(dc, line.c_str(), 264, 341, 734, 36, small, Muted, DT_LEFT | DT_WORDBREAK);
+    }
+    // The camera images take the main view's lighting; brightness is the
+    // user's offset on top of it.
+    const int ys[]{391, 489};
+    const wchar_t* names[]{L"Daytime brightness", L"Night brightness"};
+    const wchar_t* descriptions[]{L"EV added to the main view's exposure in daylight, −4 to +2 in 0.25 steps. 0 matches the main view.",
                                   L"EV added at night, −4 to +2 in 0.25 steps. Dusk blends the two with the ambient light."};
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
       panel(dc, 244, ys[i], 766, 88);
       text(dc, names[i], 264, ys[i] + 8, 515, 29, heading);
       text(dc, descriptions[i], 264, ys[i] + 40, 525, 41, small, Muted, DT_LEFT | DT_WORDBREAK);
-    }
-    if (sample.heartbeat) {
-      wchar_t rate_line[192];
-      std::swprintf(rate_line, 192, L"Camera rate in use: %u fps%ls. Useful maximum on this aircraft: %u fps.", sample.effective_rate,
-                    camera_rate_limit_text(sample.rate_limits), sample.useful_rate);
-      text(dc, rate_line, 251, 630, 480, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
     }
   } else if (page == 3) {
     panel(dc, 244, 119, 766, 190);
@@ -2312,8 +2451,6 @@ bool is_on(int id, const win::Settings& s) {
       return s.calibration_mask & 4;
     case 228:
       return s.single_camera;
-    case 235:
-      return s.dynamic_tail;
     case 229:
       return s.scene_test;
     default:
@@ -2440,6 +2577,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       EndPaint(hwnd, &ps);
       return 0;
     }
+    case WM_HSCROLL:
+      if (l && reinterpret_cast<HWND>(l) == GetDlgItem(hwnd, CameraTargetId)) {
+        InvalidateRect(GetDlgItem(hwnd, CameraModeCardId + static_cast<int>(CameraMode::custom)), nullptr, FALSE);
+        dirty_notice();
+        return 0;
+      }
+      break;
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX: {
@@ -2453,6 +2597,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (item->CtlType != ODT_BUTTON)
         break;
       const int id = static_cast<int>(item->CtlID);
+      if (id >= CameraModeCardId && id < CameraModeCardId + static_cast<int>(kCameraModeCount)) {
+        draw_camera_mode_card(*item, static_cast<unsigned>(id - CameraModeCardId));
+        return TRUE;
+      }
       const bool disabled = (item->itemState & ODS_DISABLED) != 0;
       const bool selected = !disabled && ((id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft()) ||
                                           (id >= 420 && id < 428 && gallery_button_routed(id)));
@@ -2516,8 +2664,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       show_notifications();
       update_gallery_buttons();
       service_thumbnails();
-      if (IsWindowVisible(hwnd) && !IsIconic(hwnd))
+      if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
         InvalidateRect(hwnd, nullptr, FALSE);
+        invalidate_camera_mode_cards();
+      }
       return 0;
     case WhatsNewMessage:
       show_whats_new();
@@ -2605,6 +2755,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         thumbnails.fresh_after = GetTickCount64();
         service_thumbnails();
         InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (id >= CameraModeCardId && id < CameraModeCardId + static_cast<int>(kCameraModeCount)) {
+        pending_camera_mode = static_cast<unsigned>(id - CameraModeCardId);
+        EnableWindow(GetDlgItem(hwnd, CameraTargetId), pending_camera_mode == static_cast<unsigned>(CameraMode::custom));
+        invalidate_camera_mode_cards();
+        dirty_notice();
         return 0;
       }
       if (HIWORD(w) == EN_CHANGE || (HIWORD(w) == CBN_SELCHANGE && id != 210)) {
@@ -2730,7 +2887,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         toggle_connection();
         return 0;
       }
-      if (id == 221 || (id >= 223 && id <= 229) || id == 232 || id == 233 || id == 235) {
+      if (id == 221 || (id >= 223 && id <= 229) || id == 232 || id == 233) {
         if (!apply(false))
           return 0;
         auto s = draft();
@@ -2761,8 +2918,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         if (id == 228)
           s.single_camera = !s.single_camera;
-        if (id == 235)
-          s.dynamic_tail = !s.dynamic_tail;
         if (id == 229)
           s.scene_test = !s.scene_test;
         publish(s);
@@ -2955,7 +3110,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   if (!win::load_camera_buttons(button_saved, win::settings_directory()))
     notice = L"Saved controller buttons were invalid and disabled. Configure them in Overview > Flight-deck control.";
   button_draft = button_saved;
-  INITCOMMONCONTROLSEX common{sizeof(common), ICC_STANDARD_CLASSES | ICC_HOTKEY_CLASS};
+  INITCOMMONCONTROLSEX common{sizeof(common), ICC_STANDARD_CLASSES | ICC_HOTKEY_CLASS | ICC_BAR_CLASSES};
   InitCommonControlsEx(&common);
   WNDCLASSEXW type{};
   type.cbSize = sizeof(type);

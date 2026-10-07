@@ -19,7 +19,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Performance sampler self-test compilation fail
 if ($LASTEXITCODE -ne 0) { throw 'Performance sampler self-test failed.' }
 $fixture = Get-Content -Raw -LiteralPath (Join-Path $output 'ipc-fixture.json') | ConvertFrom-Json
 if ($fixture.settings.camera_rate -ne 10 -or $fixture.status.active_profile -ne 4 -or $fixture.status.aircraft_path -ne 'fixture-aircraft' -or
-    $fixture.settings.mounts.Count -ne 2 -or $fixture.status.stage_elapsed_ms.Count -ne 10) { throw 'Structured IPC JSON output did not round-trip.' }
+    $fixture.settings.mounts.Count -ne 3 -or $fixture.status.stage_elapsed_ms.Count -ne 10) { throw 'Structured IPC JSON output did not round-trip.' }
 foreach ($script in @('tools/performance/build.ps1', 'tools/performance/capture.ps1', 'tests/performance/test.ps1')) {
     $tokens = $null; $errors = $null
     [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $repository $script), [ref]$tokens, [ref]$errors)

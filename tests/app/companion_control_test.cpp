@@ -62,19 +62,11 @@ int main() {
     settings.tail_inner = {0.375f, 0.875f};
     settings.guide_color = {0.125f, 0.5f, 0.875f};
     settings.speed_color = {0.25f, 0.75f, 0.375f};
-    settings.parked_rate = 8;
-    require(valid_settings(settings), "Adjusted parked floor is valid");
-    settings.parked_rate = 1;
-    require(valid_settings(settings), "A parked floor below the moving minimum is valid");
-    settings.parked_rate = 61;
-    require(!valid_settings(settings), "Parked floor above the schedule maximum is rejected");
-    settings.parked_rate = 0;
-    require(valid_settings(settings), "Parked floor 0 disables the floor and stays valid");
-    require(settings.dynamic_tail == 0, "Dynamic tail rate defaults off");
-    settings.dynamic_tail = 2;
-    require(!valid_settings(settings), "Dynamic tail rate accepts only 0 or 1");
-    settings.dynamic_tail = 1;
-    require(valid_settings(settings), "Dynamic tail rate can be turned on");
+    require(settings.camera_mode == static_cast<std::uint32_t>(taxi_camera::kDefaultCameraMode), "Auto is the default mode");
+    settings.camera_mode = taxi_camera::kCameraModeCount;
+    require(!valid_settings(settings), "An unknown camera mode is rejected");
+    settings.camera_mode = static_cast<std::uint32_t>(taxi_camera::CameraMode::custom);
+    require(valid_settings(settings), "Custom is a valid camera mode");
     {
       // Bit 2 is the lower ECAM: valid only for a profile with that side.
       auto sd = settings;
@@ -89,7 +81,6 @@ int main() {
       sd.taxi_selected_mask = sd.taxi_desired_mask = 4;
       require(valid_settings(sd), "An SD cockpit request is valid on the A340-600");
     }
-    settings.parked_rate = 8;
     settings.notifications = 0;
     require(valid_settings(settings), "Notifications off is valid");
     settings.notifications = 2;
@@ -122,12 +113,12 @@ int main() {
     require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
     change = setup.observe(true, false, control.owner_pid() + 1, 2);
     require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
-    require(ProtocolVersion == 24 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 25 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol11 guide coordinates roundtrip");
-    require(control.settings().parked_rate == settings.parked_rate, "Protocol11 parked floor roundtrip");
-    require(control.settings().dynamic_tail == 1, "Protocol16 dynamic tail roundtrip");
+    require(control.settings().camera_mode == static_cast<std::uint32_t>(taxi_camera::CameraMode::custom),
+            "Protocol25 camera mode roundtrip");
     require(control.settings().notifications == 0, "Protocol12 notification preference roundtrip");
     {
       // Protocol 12 status: the bridge's notification log travels in Status

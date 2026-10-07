@@ -59,11 +59,11 @@ void select_fixture(const std::wstring& name) {
 }
 
 bool same_preferences(const Settings& a, const Settings& b) {
-  return a.camera_rate == b.camera_rate && a.parked_rate == b.parked_rate && a.auto_profile == b.auto_profile &&
+  return a.camera_rate == b.camera_rate && a.camera_mode == b.camera_mode && a.auto_profile == b.auto_profile &&
          a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper && a.tail_corner == b.tail_corner &&
          a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi && a.auto_detect == b.auto_detect &&
-         a.single_camera == b.single_camera && a.dynamic_tail == b.dynamic_tail && a.calibration_budget == b.calibration_budget &&
-         a.mounts == b.mounts && a.day_brightness == b.day_brightness && a.night_brightness == b.night_brightness;
+         a.single_camera == b.single_camera && a.calibration_budget == b.calibration_budget && a.mounts == b.mounts &&
+         a.day_brightness == b.day_brightness && a.night_brightness == b.night_brightness;
 }
 
 Settings customized(const profiles::AircraftProfile& profile) {
@@ -74,7 +74,7 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.follow_taxi = 0;
   value.auto_detect = 0;
   value.camera_rate = 10;
-  value.parked_rate = 8;
+  value.camera_mode = static_cast<UINT>(taxi_camera::CameraMode::smooth);
   value.single_camera = 1;
   value.calibration_budget = 2048;
   value.day_brightness = -1.25f;
@@ -120,54 +120,42 @@ void missing_rate_uses_shipped_default_without_rewriting_saved_fifteen() {
   require(!contains_utf16(contents(path), L"camera_rate="), "Loading a missing rate must not write a rate key");
 }
 
-void parked_rate_persists_and_defaults() {
-  select_fixture(L"parked-rate");
+void camera_mode_persists_and_migrates() {
+  select_fixture(L"camera-mode");
   auto saved = customized(profiles::A380);
-  saved.parked_rate = 0;
-  require(save_settings(saved), "Save a profile with the parked floor disabled");
+  require(save_settings(saved), "Save a profile for camera modes");
   Settings loaded;
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 0 && loaded.camera_rate == 10,
-          "A disabled parked floor (0) persists without touching camera_rate");
   const auto path = settings_path(saved);
-  patch(path, L"display", L"parked_rate", nullptr);
-  require(ini(path, L"display", L"parked_rate") == L"<missing>", "parked_rate key removed from isolated profile");
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == taxi_camera::kDefaultParkedCameraRate,
-          "A profile with no parked_rate key uses the shipped floor of 2");
-  require(!contains_utf16(contents(path), L"parked_rate="), "Loading a missing floor must not write a floor key");
-  patch(path, L"display", L"parked_rate", L"3");
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 3,
-          "A floor below the moving minimum loads");
-  patch(path, L"display", L"parked_rate", L"90");
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == taxi_camera::kMaximumCameraRate &&
-              loaded.mounts == saved.mounts,
-          "An out-of-range floor is clamped instead of rejecting the calibration file");
-  patch(path, L"display", L"parked_rate", L"8");
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 8, "An adjusted floor loads");
-  saved.parked_rate = 8;
-  require(save_settings(saved) && ini(path, L"display", L"parked_rate") == L"8" && ini(path, L"display", L"parked_rate_revision") == L"1",
-          "Save writes the parked floor and its revision next to camera_rate");
-  // A profile saved before the revision holds the previous shipped floor of 5:
-  // it loads as the new default until saved again, then a saved 5 is kept.
-  patch(path, L"display", L"parked_rate", L"5");
-  patch(path, L"display", L"parked_rate_revision", nullptr);
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == taxi_camera::kDefaultParkedCameraRate &&
-              loaded.mounts == saved.mounts,
-          "The previous shipped floor of 5 migrates to the new default");
-  require(ini(path, L"display", L"parked_rate") == L"5", "Loading must not rewrite the saved floor");
-  patch(path, L"display", L"parked_rate", L"8");
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 8,
-          "A pre-revision floor other than the old default is the user's choice");
-  saved.parked_rate = 5;
-  require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 5,
-          "A floor of 5 saved with the revision is kept");
-  // Dynamic tail rate: off when missing, and a saved on is kept.
-  require(loaded.dynamic_tail == 0 && ini(path, L"display", L"dynamic_tail") == L"0", "Dynamic tail rate saves off by default");
-  saved.dynamic_tail = 1;
-  require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 1,
-          "A saved dynamic tail on is kept");
-  patch(path, L"display", L"dynamic_tail", nullptr);
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.dynamic_tail == 0,
-          "A profile without dynamic_tail loads with it off");
+  // Keys of the removed parked floor and dynamic tail rate are ignored and
+  // dropped by the next save.
+  patch(path, L"display", L"parked_rate", L"2");
+  patch(path, L"display", L"parked_rate_revision", L"1");
+  patch(path, L"display", L"dynamic_tail", L"1");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) && save_settings(saved) &&
+              ini(path, L"display", L"parked_rate") == L"<missing>" && ini(path, L"display", L"parked_rate_revision") == L"<missing>" &&
+              ini(path, L"display", L"dynamic_tail") == L"<missing>",
+          "Removed parked floor and dynamic tail keys were not ignored and dropped");
+  // Camera mode: saved per profile; profiles from before modes map their rate.
+  using taxi_camera::CameraMode;
+  const auto mode = [](CameraMode value) { return static_cast<UINT>(value); };
+  require(ini(path, L"display", L"camera_mode") == std::to_wstring(saved.camera_mode), "Camera mode saved");
+  saved.camera_mode = mode(CameraMode::smooth);
+  require(save_settings(saved) && load_settings(loaded, L"missing-installation", saved.profile) &&
+              loaded.camera_mode == mode(CameraMode::smooth),
+          "A saved camera mode is kept");
+  patch(path, L"display", L"camera_mode", nullptr);
+  const std::pair<const wchar_t*, CameraMode> legacy[]{
+      {L"5", CameraMode::performance}, {L"10", CameraMode::automatic}, {L"15", CameraMode::custom}, {L"30", CameraMode::custom}};
+  for (const auto& [rate, expected] : legacy) {
+    patch(path, L"display", L"camera_rate", rate);
+    require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_mode == mode(expected) &&
+                loaded.camera_rate == static_cast<UINT>(std::wcstoul(rate, nullptr, 10)),
+            "A profile from before camera modes did not map its saved rate");
+  }
+  patch(path, L"display", L"camera_mode", L"7");
+  patch(path, L"display", L"camera_rate", L"10");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_mode == mode(CameraMode::automatic),
+          "An unknown camera mode did not fall back like a missing key");
   // Camera weather is always on: a camera_weather key saved by a build that
   // had the setting is ignored and dropped by the next save.
   patch(path, L"display", L"camera_weather", L"0");
@@ -324,11 +312,11 @@ int main() {
     fixture_root = std::wstring(repository) + L"\\build\\settings-store-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
                    std::to_wstring(GetTickCount64());
     require(std::filesystem::create_directories(fixture_root), "Create ignored test root");
-    require(Settings{}.camera_rate == taxi_camera::kDefaultCameraRate && Settings{}.parked_rate == taxi_camera::kDefaultParkedCameraRate &&
-                valid_settings(Settings{}),
-            "The shipped camera rate is ten and the parked floor is two");
+    require(Settings{}.camera_rate == taxi_camera::kDefaultCameraRate &&
+                Settings{}.camera_mode == static_cast<UINT>(taxi_camera::kDefaultCameraMode) && valid_settings(Settings{}),
+            "The shipped camera rate is ten and the default mode is Auto");
     missing_rate_uses_shipped_default_without_rewriting_saved_fifteen();
-    parked_rate_persists_and_defaults();
+    camera_mode_persists_and_migrates();
     camera_brightness_persists_and_snaps();
     retired_lighting_keys_are_ignored();
     saved_enabled_key_is_ignored();

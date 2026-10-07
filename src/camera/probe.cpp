@@ -87,6 +87,17 @@ struct Runtime {
   CameraContract contract;
   // Observer-thread fields. No borrowed camera/output pointers cross into UI.
   std::uint64_t updates = 0;
+  // Page proofs carried across the scheduled frames of the pair, refreshed
+  // every kProofCarryMs (LocalMemoryProofCarry).
+  LocalMemoryProofCarry proof_carry;
+  std::uint64_t proof_carry_ms = 0;
+  // Every camera-manager update, readable without the runtime mutex. The
+  // published report's count only moves on serviced inspections, so it froze
+  // while the cameras were off and then jumped by thousands on resume.
+  std::atomic<std::uint64_t> update_count{0};
+  // Frame-time histogram of the intervals between updates (scene_frame_times).
+  std::array<std::atomic<std::uint32_t>, kFrameTimeBuckets> frame_times{};
+  std::int64_t last_update_counter = 0;
   std::uint64_t inspection_count = 0;
   std::uint64_t created_total = 0;
   LARGE_INTEGER counter_frequency{};
@@ -2192,6 +2203,17 @@ void record_lifecycle_event(Runtime& runtime, double total_ms, double pre_ms, bo
   runtime.lifecycle_events.push(event);
 }
 
+// Render-schedule clock in milliseconds from the performance counter.
+// GetTickCount64 advances in about 15.6 ms steps, which held a feed below
+// about 21 images per second whatever the simulator frame rate.
+std::uint64_t schedule_clock_ms() noexcept {
+  LARGE_INTEGER frequency{}, counter{};
+  if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 || !QueryPerformanceCounter(&counter) || counter.QuadPart < 0)
+    return GetTickCount64();
+  const auto ticks = static_cast<std::uint64_t>(counter.QuadPart), rate = static_cast<std::uint64_t>(frequency.QuadPart);
+  return ticks / rate * 1000 + ticks % rate * 1000 / rate;
+}
+
 // Observer thread. Measures the whole update after its own work, including
 // throttled and idle returns, and keeps the interval's slowest one.
 void record_observer_peak(Runtime& runtime, LARGE_INTEGER entered, LARGE_INTEGER started, bool serviced) noexcept {
@@ -2245,6 +2267,17 @@ void observer(void* manager) noexcept {
   ScopedLocalMemoryMetrics memory_scope(memory_metrics);
   try {
     ++runtime.updates;
+    runtime.update_count.fetch_add(1, std::memory_order_relaxed);
+    static const auto counter_frequency = [] {
+      LARGE_INTEGER frequency{};
+      return QueryPerformanceFrequency(&frequency) ? frequency.QuadPart : 0;
+    }();
+    if (counter_frequency > 0 && runtime.last_update_counter > 0 && entered.QuadPart > runtime.last_update_counter) {
+      const auto ms = (entered.QuadPart - runtime.last_update_counter) * 1000 / counter_frequency;
+      runtime.frame_times[static_cast<std::size_t>(std::min<std::int64_t>(ms, kFrameTimeBuckets - 1))].fetch_add(1,
+                                                                                                                 std::memory_order_relaxed);
+    }
+    runtime.last_update_counter = entered.QuadPart;
     runtime.lifecycle_timers = {};
     // Mounts come off the aircraft while paused or not in a ready flight, every
     // update, so quitting or ending a flight never unloads an aircraft that
@@ -2292,12 +2325,12 @@ void observer(void* manager) noexcept {
       }
     }
     auto next_schedule = runtime.schedule;
-    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
+    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u);
     std::array<bool, kMaxCameraFeeds> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
     if (scheduled_pair)
-      desired = next_schedule.tick(now, suspended);
+      desired = next_schedule.tick(schedule_clock_ms(), suspended);
     const bool gate_change = scheduled_pair && desired != runtime.gates;
     const ProbeInspectionState inspection_state{scheduled_pair && before.owner.valid() && before.owned_ids[0] && before.owned_ids[1] &&
                                                     before.owned_ids[0] != before.owned_ids[1] &&
@@ -2328,8 +2361,12 @@ void observer(void* manager) noexcept {
     // per-update closure attempt.
     const bool recovery_gates_closed = (runtime.resize_recovery.pending() || runtime.resize_recovery.failed()) && !runtime.gates[0] &&
                                        !runtime.gates[1] && !runtime.gates[2];
+    // A camera held open across frames is placed again on every update it
+    // renders: its aim is a world point set at placement, so the view would
+    // otherwise lag the aircraft in a turn until the next inspection.
+    const bool rendering = desired[0] || desired[1] || desired[2];
     if (inspection != ProbeInspectionDecision::required && !session_hold && !before.request_pending &&
-        (!gate_change || recovery_gates_closed) && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
+        (!gate_change || recovery_gates_closed) && !rendering && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
       runtime.schedule = next_schedule;
       return;
     }
@@ -2348,16 +2385,30 @@ void observer(void* manager) noexcept {
     report.accepting_requests = true;
     report.updates = runtime.updates;
     report.thread_id = GetCurrentThreadId();
-    const bool close_only = inspection_state.established_pair && pair_ready && gate_change && !desired[0] && !desired[1] &&
-                            (runtime.gates[0] || runtime.gates[1] || runtime.gates[2]) && !before.request_pending && !before.creation_pending &&
-                            !requested_start && !runtime.resize_warmup.pending() && !runtime.resize_recovery.pending() &&
-                            !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed;
+    const bool close_only = inspection_state.established_pair && pair_ready && gate_change && !desired[0] && !desired[1] && !desired[2] &&
+                            (runtime.gates[0] || runtime.gates[1] || runtime.gates[2]) && !before.request_pending &&
+                            !before.creation_pending && !requested_start && !runtime.resize_warmup.pending() &&
+                            !runtime.resize_recovery.pending() && !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed;
     // Only an established pair can combine these adjacent read-only stages.
     // No lifecycle callback, publication or private call runs inside the cache.
     // A callback requested meanwhile invalidates the prepared view result below.
     const bool fuse_pair = inspection_state.established_pair && pair_ready && !before.request_pending && !before.creation_pending &&
                            !requested_start && !runtime.resize_warmup.pending() && !runtime.resize_recovery.pending() &&
                            !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed && !profile_hold && !session_hold;
+    // The scheduled frames of an established pair (pulses opening, held open
+    // or closing) reuse the page proofs of the pair's earlier frames, across
+    // the gate changes between them. Any other serviced update (lifecycle,
+    // recovery, a required or periodic inspection) and every kProofCarryMs
+    // prove every page afresh.
+    constexpr std::uint64_t kProofCarryMs = 250;
+    const bool scheduled_frame = fuse_pair && (rendering || gate_change) && inspection != ProbeInspectionDecision::required;
+    if (!scheduled_frame || now < runtime.proof_carry_ms || now - runtime.proof_carry_ms >= kProofCarryMs) {
+      runtime.proof_carry.clear();
+      runtime.proof_carry_ms = now;
+    }
+    std::optional<ScopedLocalMemoryProofCarry> proof_carry;
+    if (scheduled_frame)
+      proof_carry.emplace(runtime.proof_carry);
     bool prepared_pair = false;
     std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds> prepared_views{};
     SceneCaptureTicket prepared_ticket{};
@@ -2737,13 +2788,13 @@ void observer(void* manager) noexcept {
           // The early tick only decides whether validation is necessary. Anchor
           // the committed pulse near its call after potentially slow reads.
           next_schedule = runtime.schedule;
-          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, ((settings >> 16) & 1u) != 0);
+          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u);
           if (new_pair) {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
             next_schedule.reset();
           }
-          desired = next_schedule.tick(GetTickCount64(), runtime.suspended.load() || !session_work_allowed(runtime));
+          desired = next_schedule.tick(schedule_clock_ms(), runtime.suspended.load() || !session_work_allowed(runtime));
           // Output admission. A pooled view reused after native release keeps
           // the previous entry's material state; camera readiness does not show
           // that its requested output exists. The renderer binds that output
@@ -2941,7 +2992,7 @@ void observer(void* manager) noexcept {
       else if (pair.state == ec::State::active && runtime.resize_warmup.pending())
         report.message = "New scene views are closed for their initial engine update; final resizing is pending.";
       else if (pair.state == ec::State::active)
-        report.message = "Nose and tail scene views use separate aircraft mounts and refresh before alternating activation pulses.";
+        report.message = "Nose and tail scene views use separate aircraft mounts and refresh before each activation pulse.";
       else if (pair.state == ec::State::cleanup_pending)
         report.message = "Removal waits for freshly validated, closed views; owned IDs remain retained until confirmed absent.";
       else if (pair.state == ec::State::disabled)
@@ -3007,6 +3058,7 @@ void observer(void* manager) noexcept {
     runtime.performance.write_calls = memory_metrics.write_calls;
     runtime.performance.requested_bytes = memory_metrics.requested_bytes;
     runtime.performance.query_cache_hits = memory_metrics.query_cache_hits;
+    runtime.performance.carried_proofs = memory_metrics.carried_proofs;
     runtime.performance.query_cache_validation_failures = memory_metrics.query_cache_validation_failures;
     if (runtime.counter_frequency.QuadPart > 0) {
       const auto milliseconds_per_tick = 1000.0 / static_cast<double>(runtime.counter_frequency.QuadPart);
@@ -3297,9 +3349,9 @@ void suspend_scene_rendering(bool suspended) noexcept {
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
 }
 
-void request_scene_rate(unsigned rate, unsigned feeds, bool nose_priority) noexcept {
-  const auto settings = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
-                        (nose_priority ? 1u << 16 : 0u);
+void request_scene_rate(unsigned rate, unsigned feeds, unsigned per_frame) noexcept {
+  const auto settings = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
+                        (std::min(per_frame, kMaxCameraFeeds) << 16);
   state().requested_settings.store(settings, std::memory_order_release);
 }
 
@@ -3331,6 +3383,16 @@ bool request_scene_mounts(const MountPair& mounts) noexcept {
   }
 }
 
+std::uint64_t scene_update_count() noexcept {
+  return state().update_count.load(std::memory_order_relaxed);
+}
+
+void scene_frame_times(std::array<std::uint32_t, kFrameTimeBuckets>& counts) noexcept {
+  auto& runtime = state();
+  for (unsigned i = 0; i < kFrameTimeBuckets; ++i)
+    counts[i] = runtime.frame_times[i].load(std::memory_order_relaxed);
+}
+
 ProbeSnapshot scene_snapshot() {
   auto& runtime = state();
   const std::lock_guard lock(runtime.mutex);
@@ -3346,7 +3408,6 @@ ProbeSnapshot scene_snapshot() {
   const auto settings = runtime.requested_settings.load(std::memory_order_acquire);
   result.requested_rate = settings & 0xffu;
   result.requested_feeds = (settings >> 8) & 0xffu;
-  result.requested_nose_priority = ((settings >> 16) & 1u) != 0;
   result.mounts = runtime.requested_mounts;
   return result;
 }

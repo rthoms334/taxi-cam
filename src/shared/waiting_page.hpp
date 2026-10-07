@@ -13,13 +13,12 @@ inline constexpr std::uint64_t WaitingPageResumeMs = 3000;
 
 // Camera-image age that brings the page back while a side stays on. A composed
 // image needs a new frame from every feed, so one skipped frame delays it by a
-// whole feed interval; at the 2 Hz parked floor that already passes a second
-// (live PMDG 777, 2026-10-03: a third of requested frames not drawn near 60 fps
-// and the page flashed at random). Six intervals of the slowest feed (tails at
-// half rate under nose priority), never under WaitingPageStaleMs.
-inline constexpr std::uint64_t waiting_stale_ms(unsigned rate, bool nose_priority) noexcept {
+// whole feed interval (live PMDG 777, 2026-10-03: a third of requested frames
+// not drawn near 60 fps and the page flashed at random). Six intervals at the
+// rate the cameras actually get, never under WaitingPageStaleMs.
+inline constexpr std::uint64_t waiting_stale_ms(unsigned rate) noexcept {
   const std::uint64_t per_second = std::max(rate, 1u);
-  const std::uint64_t interval = (1000 + per_second - 1) / per_second * (nose_priority ? 2 : 1);
+  const std::uint64_t interval = (1000 + per_second - 1) / per_second;
   return std::max<std::uint64_t>(profiles::WaitingPageStaleMs, 6 * interval);
 }
 

@@ -2,133 +2,99 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include "../shared/camera_rate.hpp"
 #include "aircraft_mounts.hpp"
 
 namespace taxi_camera::native_camera {
 
-// Requests one enabled observer interval at a time, alternating feeds. These
-// are activation opportunities, not measured rendered frames. The caller must
+// Opens cameras on the simulator's frames by count, not by clock. These are
+// activation opportunities, not measured rendered frames. The caller must
 // apply every returned state through freshly validated owned engine entries.
+//
+// Each frame carries rate × feeds × frame time cameras (the target per camera
+// spread over the measured frame rate), or a fixed per_frame count (Auto).
+// Fractions carry to the next frame, never more than one camera's worth, so
+// the per-frame count only ever takes two neighbouring values: 10 per camera
+// with three cameras at 30 fps renders exactly one camera on every frame, 15
+// renders one and two in turn. Timing each camera on its own clock instead let
+// a long frame owe two cameras and a short one none, and the 2026-10-07 live
+// frames swung between about 25 and 50 ms. Cameras are taken round-robin, so
+// each gets the same share; a count of every camera renders all of them on
+// every frame and holds their gates open. A frame-time estimate ignores
+// stalls, and a stall never opens more than one frame's count. Suspension
+// closes every gate.
 class RenderSchedule {
  public:
-  // Closed updates after each pulse's closing update. Opening and closing a
-  // gate each cost a validated inspection on the simulator's main thread. With
-  // no idle update a frame-limited schedule changes a gate on every update: the
-  // 2026-10-04 RJTT log showed an inspection on 95-100 % of updates while
-  // taxiing, at rate 5 and 10 alike. One idle update caps gate changes at two
-  // of every three updates and an extra view at one frame in three.
-  static constexpr unsigned kIdleUpdatesAfterClose = 1;
+  static constexpr double kSnap = 0.05;
 
-  // Parked floors go below the moving minimum; see kMinimumParkedCameraRate.
-  // nose_priority turns every other turn of feeds 1 and 2 into an idle slot
-  // (NosePriorityPolicy); feed 0 keeps its cadence.
-  void configure(unsigned rate, unsigned feeds = 2, bool nose_priority = false) noexcept {
-    rate_ = std::clamp(rate, kMinimumParkedCameraRate, kMaximumCameraRate);
+  void configure(unsigned rate, unsigned feeds = 2, unsigned per_frame = 0) noexcept {
+    rate_ = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate);
     feeds_ = std::clamp(feeds, 1u, kMaxCameraFeeds);
-    if (next_feed_ >= feeds_)
-      next_feed_ = 0;
-    if (!nose_priority)
-      skip_turn_ = {};
-    nose_priority_ = nose_priority;
+    per_frame_ = std::min(per_frame, feeds_);
+    if (next_ >= feeds_)
+      next_ = 0;
   }
 
-  // Only reset after the previous owned entries have been removed. Configuration
-  // changes on a live pair retain deadlines, so editing the UI cannot burst.
+  // Only reset after the previous owned entries have been removed. Rate
+  // changes on a live pair keep the frame-time estimate and the rotation.
   void reset() noexcept {
-    active_ = {};
-    seen_ = {};
-    last_ = {};
     have_time_ = false;
     previous_time_ = 0;
-    last_any_ = 0;
-    next_feed_ = 0;
-    skip_turn_ = {};
-    skipped_ = false;
-    idle_updates_ = 0;
+    frame_ms_ = 0;
+    credit_ = 0;
+    next_ = 0;
   }
 
   std::array<bool, kMaxCameraFeeds> tick(std::uint64_t now_ms, bool suspended = false) noexcept {
-    // A skipped turn is followed by a closed update exactly like a pulse, so
-    // the idle slot removes a whole render opportunity, not just its opening.
-    bool was_active = skipped_;
-    skipped_ = false;
-    for (bool on : active_)
-      was_active = was_active || on;
-    active_ = {};
+    std::array<bool, kMaxCameraFeeds> active{};
     if (have_time_ && now_ms < previous_time_) {
-      // A clock reversal closes both gates and restarts the cooldown without
-      // erasing whether either feed has already received an opportunity.
-      for (unsigned i = 0; i < feeds_; ++i)
-        last_[i] = now_ms;
-      last_any_ = now_ms;
       previous_time_ = now_ms;
-      if (was_active)
-        idle_updates_ = kIdleUpdatesAfterClose;
-      return active_;
+      credit_ = 0;
+      return active;
+    }
+    if (have_time_ && now_ms > previous_time_) {
+      const double gap = static_cast<double>(now_ms - previous_time_);
+      if (frame_ms_ <= 0)
+        frame_ms_ = gap;
+      else if (gap <= 4 * frame_ms_)
+        frame_ms_ = 0.9 * frame_ms_ + 0.1 * gap;
     }
     have_time_ = true;
     previous_time_ = now_ms;
-    // Even after a long stall, close the last pulse for an entire observer
-    // interval. Never leave a gate continuously on while trying to catch up.
-    if (was_active) {
-      idle_updates_ = kIdleUpdatesAfterClose;
-      return active_;
-    }
-    // A suspended update is closed too, so it counts as idle.
-    if (idle_updates_) {
-      --idle_updates_;
-      return active_;
-    }
     if (suspended)
-      return active_;
-    const auto per_feed_ms = (1000u + rate_ - 1) / rate_;
-    const auto total_rate = rate_ * feeds_;
-    const auto between_ms = (1000u + total_rate - 1) / total_rate;
-    bool any_seen = false;
-    for (unsigned i = 0; i < feeds_; ++i)
-      any_seen = any_seen || seen_[i];
-    if ((any_seen && now_ms - last_any_ < between_ms) || (seen_[next_feed_] && now_ms - last_[next_feed_] < per_feed_ms))
-      return active_;
-    if (nose_priority_ && next_feed_ != 0) {
-      // Each non-nose feed alternates served and skipped turns, starting with
-      // a served one. A skipped turn consumes the aggregate interval like a
-      // pulse and leaves that feed's own deadline untouched.
-      skip_turn_[next_feed_] = !skip_turn_[next_feed_];
-      if (!skip_turn_[next_feed_]) {
-        skipped_ = true;
-        last_any_ = now_ms;
-        next_feed_ = (next_feed_ + 1) % feeds_;
-        return active_;
-      }
-    }
-    active_[next_feed_] = true;
-    seen_[next_feed_] = true;
-    last_[next_feed_] = now_ms;
-    last_any_ = now_ms;
-    next_feed_ = (next_feed_ + 1) % feeds_;
-    return active_;
+      return active;
+    double count = per_frame_ ? per_frame_ : frame_ms_ > 0 ? rate_ * feeds_ * frame_ms_ / 1000.0 : 1.0;
+    // A count within kSnap of a whole number of cameras is that number, so
+    // frame-time noise around 10 per camera at 30 fps cannot add or drop a
+    // camera on an occasional frame; the rate per camera stays within kSnap.
+    const double whole = std::round(count);
+    if (whole >= 1 && std::abs(count - whole) <= kSnap * whole)
+      count = whole;
+    credit_ += count;
+    const auto opened = std::min(static_cast<unsigned>(std::floor(credit_ + 1e-9)), feeds_);
+    credit_ = std::clamp(credit_ - opened, 0.0, 1.0);
+    for (unsigned k = 0; k < opened; ++k)
+      active[(next_ + k) % feeds_] = true;
+    if (opened < feeds_)
+      next_ = (next_ + opened) % feeds_;
+    return active;
   }
 
   unsigned rate() const noexcept { return rate_; }
   unsigned feeds() const noexcept { return feeds_; }
-  bool nose_priority() const noexcept { return nose_priority_; }
+  unsigned per_frame() const noexcept { return per_frame_; }
 
  private:
   unsigned rate_ = kDefaultCameraRate;
   unsigned feeds_ = 2;
-  unsigned next_feed_ = 0;
-  bool nose_priority_ = false;
-  bool skipped_ = false;
-  unsigned idle_updates_ = 0;
-  std::array<bool, kMaxCameraFeeds> skip_turn_{};
+  unsigned per_frame_ = 0;  // Fixed cameras per frame (Auto); 0 paces by rate.
+  unsigned next_ = 0;       // First camera of the next frame's round-robin.
   bool have_time_ = false;
   std::uint64_t previous_time_ = 0;
-  std::uint64_t last_any_ = 0;
-  std::array<bool, kMaxCameraFeeds> active_{};
-  std::array<bool, kMaxCameraFeeds> seen_{};
-  std::array<std::uint64_t, kMaxCameraFeeds> last_{};
+  double frame_ms_ = 0;  // Usual interval between updates.
+  double credit_ = 0;    // Fraction of a camera carried to the next frame.
 };
 
 }  // namespace taxi_camera::native_camera

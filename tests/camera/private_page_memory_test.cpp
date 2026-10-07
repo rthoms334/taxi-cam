@@ -654,8 +654,65 @@ void nested_thread_and_legacy_isolation() {
 }
 }  // namespace
 
+// A camera held open across frames reuses the page proofs of earlier frames
+// while its owner keeps a LocalMemoryProofCarry active: no kernel query, no
+// endpoint check, but every read is still an exact RPM. A freed page fails the
+// read, a failed scope or a write clears the carry, and without an active
+// carry nothing is reused.
+void proof_carry_across_frames() {
+  const auto page = page_size();
+  Allocation allocation(page * 3);
+  LockedPages locked(allocation.data, allocation.size);
+  LocalMemoryMetrics metrics;
+  ScopedLocalMemoryMetrics measured(metrics);
+  LocalMemoryReader reader(256);
+  LocalMemoryProofCarry carry;
+  std::uint64_t value = 0;
+  const auto frame = [&](bool expect_success = true) {
+    ScopedLocalMemoryQueryCache cache(LocalMemoryQueryMode::private_pages);
+    const bool read =
+        reader.read(allocation.address(17), &value, sizeof(value)) && reader.read(allocation.address(page + 9), &value, sizeof(value));
+    const bool finished = cache.finish();
+    require((read && finished) == expect_success, "A held-open frame did not end as expected");
+  };
+  {
+    ScopedLocalMemoryProofCarry active(carry);
+    frame();
+    require(carry.count == 2, "The first held-open frame did not carry its page proofs");
+    const auto queries = metrics.query_calls, reads = metrics.read_calls;
+    frame();
+    frame();
+    require(metrics.query_calls == queries && metrics.read_calls == reads + 4 && metrics.carried_proofs == 4,
+            "Later held-open frames queried the kernel or skipped their exact reads");
+    // A write clears the carry: the next frame proves every page afresh.
+    const std::uint8_t byte = 0x39;
+    require(write_local_private(allocation.address(40), &byte, 1) && carry.count == 0, "A write did not clear the carry");
+    const auto after_write = metrics.query_calls;
+    frame();
+    require(metrics.query_calls > after_write && carry.count == 2, "The frame after a write reused proofs or did not carry new ones");
+    // A page made inaccessible fails its read even with a carried proof, and
+    // the failed scope clears the carry.
+    protect(allocation, page, page, PAGE_NOACCESS);
+    frame(false);
+    require(carry.count == 0, "A failed held-open frame kept its carried proofs");
+    protect(allocation, page, page, PAGE_READWRITE);
+    // PAGE_NOACCESS unpinned the page; pin it again for the fixture's unlock.
+    require(VirtualLock(allocation.data + page, page) != FALSE, "Could not pin the restored fixture page");
+    frame();
+    require(carry.count == 2, "The carry did not recover after a failure");
+  }
+  // Outside an active carry the proofs stay put and nothing is reused.
+  const auto before = metrics.query_calls;
+  frame();
+  require(metrics.query_calls > before && carry.count == 2, "A scope without an active carry reused or changed carried proofs");
+  carry.clear();
+  require(carry.count == 0 && !carry.find(allocation.address()), "Clearing the carry kept a proof");
+  accounting(metrics);
+}
+
 int main() {
   hot_fields_and_scope_boundaries();
+  proof_carry_across_frames();
   access_types_and_cold_fallback();
   rejected_allocation_types();
   fields_cross_pages_and_failure_output();

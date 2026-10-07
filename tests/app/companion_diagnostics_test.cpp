@@ -235,25 +235,48 @@ int main() {
     require(current.single_camera == 1 && is_on(228, current), "First-camera control remains functional");
     command(228);
     require(!current.single_camera, "First-camera control can be disabled");
-    require(GetDlgItem(window, 235) && current.dynamic_tail == 0 && !is_on(235, current), "Dynamic tail rate starts off");
-    command(235);
-    require(current.dynamic_tail == 1 && is_on(235, current), "Dynamic tail rate can be turned on for comparison");
-    GetDlgItemTextW(window, 235, label, 96);
-    require(std::wstring(label) == L"Dynamic tail rate: On", "Dynamic tail label reflects its state");
-    command(235);
-    require(current.dynamic_tail == 0, "Dynamic tail rate can be turned back off");
+    require(!GetDlgItem(window, 235), "Dynamic tail rate has no control");
     // Camera weather is always on: no control on the Camera views page.
     page = 1;
     build_controls();
     require(!GetDlgItem(window, 236), "Camera weather has no control");
     // The camera views always take the main view's lighting: the Display page
-    // has no lighting toggle or automatic exposure, only the camera rate, the
-    // day and night camera brightness and the ground-speed colour.
+    // has no lighting toggle or automatic exposure, only the camera mode cards
+    // and custom target, the day and night camera brightness and the
+    // ground-speed colour.
     page = 2;
     build_controls();
-    require(!GetDlgItem(window, 237) && !GetDlgItem(window, 222) && GetDlgItem(window, 200) && GetDlgItem(window, 201) &&
-                GetDlgItem(window, 202) && GetDlgItem(window, 231),
-            "Display has the rate and brightness fields but no lighting or automatic exposure controls");
+    require(!GetDlgItem(window, 237) && !GetDlgItem(window, 222) && !GetDlgItem(window, 200) && GetDlgItem(window, 201) &&
+                GetDlgItem(window, 202) && GetDlgItem(window, 231) && GetDlgItem(window, 205) && GetDlgItem(window, 270) &&
+                GetDlgItem(window, 274) && !GetDlgItem(window, 210),
+            "Display has the mode, target and brightness controls but no lighting or automatic exposure controls");
+    {
+      using taxi_camera::CameraMode;
+      const auto target = GetDlgItem(window, 205);
+      require(current.camera_mode == static_cast<std::uint32_t>(taxi_camera::kDefaultCameraMode) && !IsWindowEnabled(target) &&
+                  selected_camera_mode() == static_cast<unsigned>(CameraMode::automatic),
+              "Auto is chosen by default and the custom target is off");
+      for (unsigned mode = 0; mode < taxi_camera::kCameraModeCount; ++mode)
+        require(GetDlgItem(window, 270 + static_cast<int>(mode)) != nullptr, "Every camera mode has a card");
+      RECT first{}, second{};
+      GetWindowRect(GetDlgItem(window, 270 + static_cast<int>(CameraMode::automatic)), &first);
+      GetWindowRect(GetDlgItem(window, 270 + static_cast<int>(CameraMode::performance)), &second);
+      require(first.left < second.left, "The Auto card comes first");
+      command(270 + static_cast<int>(CameraMode::custom));
+      require(IsWindowEnabled(target) && dirty, "The Custom card enables the target slider and marks the page unsaved");
+      SendMessageW(target, TBM_SETPOS, TRUE, 30);
+      auto edited = current;
+      require(read_fields(edited) && edited.camera_mode == static_cast<std::uint32_t>(CameraMode::custom) && edited.camera_rate == 30,
+              "The Custom card and its target are read with the page");
+      command(270 + static_cast<int>(CameraMode::smooth));
+      edited = current;
+      require(!IsWindowEnabled(target) && read_fields(edited) && edited.camera_mode == static_cast<std::uint32_t>(CameraMode::smooth) &&
+                  edited.camera_rate == 30,
+              "A preset card disables the target but keeps it for Custom");
+      dirty = false;
+      build_controls();
+      require(selected_camera_mode() == current.camera_mode, "Rebuilding the page restores the saved mode");
+    }
     GetDlgItemTextW(window, 201, label, 96);
     require(std::wstring(label) == L"+0.00", "Daytime brightness starts at 0 EV");
     {

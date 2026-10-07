@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.1.2",
+      "date": "2026-10-06",
+      "changes": [
+        "Display: the camera frame rate is now Auto (new default: 1, 2 or every camera on each frame), Performance (10 fps), Balanced (15), Smooth (30) or Custom (5–60), and each camera gets that rate when the simulator can draw it. The cameras take turns so every frame carries the same camera work, keeping the main view smooth. Parked cameras keep the rate. Dynamic tail rate is gone."
+      ]
+    },
+    {
       "version": "1.1.1",
       "date": "2026-10-05",
       "changes": [

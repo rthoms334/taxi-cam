@@ -162,10 +162,10 @@ void wrong_host_public_flow() {
   // This API is a pure atomic settings mailbox even on the wrong host. Editing
   // it cannot bypass the executable guard, install a hook or queue creation.
   // Columns: rate, feeds, expected clamped rate, expected clamped feeds.
-  // Rates share the schedule's 1..60 range, which admits parked floors below
-  // the moving minimum. Feeds share 1..kMaxCameraFeeds (including the third).
-  const std::array<std::array<unsigned, 4>, 12> settings{{{0, 0, 1, 1},
-                                                          {2, 1, 2, 1},
+  // Rates share the schedule's 5..60 range. Feeds share 1..kMaxCameraFeeds
+  // (including the third).
+  const std::array<std::array<unsigned, 4>, 12> settings{{{0, 0, 5, 1},
+                                                          {2, 1, 5, 1},
                                                           {5, 1, 5, 1},
                                                           {10, 2, 10, 2},
                                                           {14, 1, 14, 1},

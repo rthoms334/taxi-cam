@@ -41,6 +41,8 @@ struct LocalMemoryMetrics {
   std::uint64_t write_ticks = 0;
   std::uint64_t query_cache_hits = 0;
   std::uint64_t query_cache_validation_failures = 0;
+  // Page proofs taken from an active LocalMemoryProofCarry instead of a query.
+  std::uint64_t carried_proofs = 0;
 };
 
 // The innermost active scope on this thread, or null. Read-only view for
@@ -109,6 +111,40 @@ void set_local_memory_query_test_faults(LocalMemoryQueryTestFaults faults) noexc
 using LocalMemoryWriteTestHook = void (*)(void* context, std::uint64_t address, std::size_t size);
 void set_local_memory_write_test_hook(LocalMemoryWriteTestHook hook, void* context, bool without_guarded_copy = false) noexcept;
 #endif
+
+// Page and allocation proofs carried between private-page scopes on one
+// thread, only while a ScopedLocalMemoryProofCarry is active. The probe uses it
+// for the scheduled frames of an established camera pair (pulses opening, held
+// open or closing): the first frame proves every page as usual and the
+// following frames take those proofs instead of querying the kernel again,
+// until the owner clears it (at most every 250 ms, and on lifecycle work). A carried proof skips both the initial query and the endpoint
+// check; reads still go through ReadProcessMemory, which refuses a page that
+// was freed or protected since. A failed scope or any write clears it.
+struct LocalMemoryProofCarry {
+  static constexpr std::size_t kPageLimit = 256;
+  struct Page {
+    std::uintptr_t base = 0, allocation_base = 0;
+    std::size_t allocation_size = 0;
+    DWORD protection = 0, allocation_protection = 0, type = 0;
+  };
+  std::array<Page, kPageLimit> pages{};
+  std::size_t count = 0;
+  void clear() noexcept { count = 0; }
+  const Page* find(std::uintptr_t base) const noexcept;
+  void remember(const Page& page) noexcept;
+};
+
+// Makes carry the active proof carry on this thread for its lifetime.
+class ScopedLocalMemoryProofCarry {
+ public:
+  explicit ScopedLocalMemoryProofCarry(LocalMemoryProofCarry& carry) noexcept;
+  ~ScopedLocalMemoryProofCarry();
+  ScopedLocalMemoryProofCarry(const ScopedLocalMemoryProofCarry&) = delete;
+  ScopedLocalMemoryProofCarry& operator=(const ScopedLocalMemoryProofCarry&) = delete;
+
+ private:
+  LocalMemoryProofCarry* previous_ = nullptr;
+};
 
 // One read-only inspection stage only; no private calls may run inside it. The
 // full_regions mode caches region metadata, never contents. An earlier-page
@@ -185,6 +221,10 @@ class ScopedLocalMemoryQueryCache {
   LocalMemoryQueryMode mode_;
   std::array<AllocationProof, kAllocationLimit> allocations_{};
   std::array<PageProof, kPageLimit> pages_{};
+  // Proofs taken from the active LocalMemoryProofCarry: finish() does not
+  // query them again. A freshly proven allocation clears its flag.
+  std::array<bool, kAllocationLimit> allocation_carried_{};
+  std::array<bool, kPageLimit> page_carried_{};
   // Fresh proofs from a batch query, used only once a read requests the page
   // (then it moves to pages_ and its endpoint is checked by finish()).
   std::array<PageProof, kCandidateLimit> candidates_{};
