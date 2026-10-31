@@ -39,6 +39,9 @@ struct Device {
   profiles::Composition composition{};
   Snapshot status;
   std::uint32_t patch_profile = 1;
+  // The profile patch_profile named when it was set: a set-up aircraft keeps
+  // its id when its layout (and with it the patch size) changes.
+  const profiles::AircraftProfile* patch_layout{};
   // Latest simulator tone-curve table, until the composition accepts it.
   std::vector<std::uint32_t> tone_table;
   bool tone_table_pending = false;
@@ -333,7 +336,8 @@ bool prepare(std::uint64_t key) {
   return true;
 }
 bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
-  if (!profiles::find(profile))
+  const auto* layout = profiles::find(profile);
+  if (!layout)
     return false;
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
@@ -344,11 +348,12 @@ bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
       item->waiting_available = item->waiting_ready = false;
     if (item->waiting_available && !item->waiting_output.set_patch_profile(profile))
       item->waiting_available = item->waiting_ready = false;
-    if (item->patch_profile != profile)
+    if (item->patch_profile != profile || item->patch_layout != layout)
       item->status.output = false;
     item->queue_snapshot = {};
     item->queue_config = {};
     item->patch_profile = profile;
+    item->patch_layout = layout;
     return true;
   }
   return false;

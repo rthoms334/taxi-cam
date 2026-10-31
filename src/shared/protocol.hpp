@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
-#include "../profiles/catalog.hpp"
+#include "../profiles/discovered.hpp"
 #include "camera_brightness.hpp"
 #include "camera_rate.hpp"
 #include "sim_messages.hpp"
@@ -32,7 +32,8 @@ namespace taxi_camera::standalone {
 // and dynamic_tail; Status gains update_hz, reachable_rate, auto_level and
 // auto_floor and drops parked. Every camera renders on the same frames.
 // Protocol 26: aircraft discovery. Status gains panel_discovery and the panel
-// map (each textured cockpit panel with its paired texture).
+// map (each textured cockpit panel with its paired texture); Settings gains
+// the discovered layout of an aircraft the user set up.
 constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 26;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
@@ -70,6 +71,9 @@ struct Settings {
   // Protocol 25: CameraMode. Custom targets camera_rate; Auto and the presets
   // carry their own targets and keep it for Custom. Saved per aircraft profile.
   std::uint32_t camera_mode = static_cast<std::uint32_t>(kDefaultCameraMode);
+  // Protocol 26: with profile == profiles::DiscoveredProfileId, the set-up
+  // aircraft's display layout (discovered.hpp). Ignored for other profiles.
+  profiles::DiscoveredLayout discovered{};
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -163,14 +167,26 @@ inline bool valid_settings(const Settings& s) noexcept {
     for (const float c : color)
       if (!std::isfinite(c) || c < 0 || c > 1)
         return false;
-  const auto* profile = profiles::find(s.profile);
-  if (s.auto_profile > 1 || s.notifications > 1 || !profile || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
-      s.scene_test > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 || s.calibration_budget > 16384)
+  // A set-up aircraft is checked against the layout in this message, not
+  // against a profile this process may not have published yet.
+  unsigned sides = 0;
+  bool separate_lower = false;
+  if (s.profile == profiles::DiscoveredProfileId) {
+    if (!profiles::valid_layout(s.discovered))
+      return false;
+    sides = (1u << s.discovered.sides) - 1;
+  } else if (const auto* profile = profiles::find(s.profile)) {
+    sides = profiles::side_mask(*profile);
+    separate_lower = profiles::separate_lower_texture(*profile);
+  } else {
     return false;
-  const auto sides = profiles::side_mask(*profile);
+  }
+  if (s.auto_profile > 1 || s.notifications > 1 || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 || s.scene_test > 1 ||
+      s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 || s.calibration_budget > 16384)
+    return false;
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
     return false;
-  if (s.lower_id && (!profiles::separate_lower_texture(*profile) || s.lower_id == s.left_id || s.lower_id == s.right_id))
+  if (s.lower_id && (!separate_lower || s.lower_id == s.left_id || s.lower_id == s.right_id))
     return false;
   if ((s.taxi_selected_mask & ~sides) || (s.taxi_desired_mask & ~s.taxi_selected_mask) || (!s.taxi_request && s.taxi_selected_mask))
     return false;

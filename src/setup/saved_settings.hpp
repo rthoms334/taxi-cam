@@ -18,7 +18,8 @@ struct SettingsEntry {
 // in place of settings files.
 void assert_settings_path(const std::wstring& path, const std::wstring& root);
 // settings.ini, hotkeys.ini, startup-state and every catalog profile in the
-// current and former settings folders; optionally the installation's mounts.
+// current and former settings folders, every set-up aircraft's variant.ini and
+// layout.ini in the current one; optionally the installation's mounts.
 std::vector<SettingsTarget> settings_targets(const std::wstring& installation, bool include_mount);
 // Copies each existing target into backup_directory and verifies the copy.
 std::vector<SettingsEntry> snapshot_settings(const std::vector<SettingsTarget>& targets, const std::wstring& backup_directory);

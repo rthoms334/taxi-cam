@@ -172,15 +172,17 @@ inline bool next_panel_discovery(bool current, const AircraftIdentitySample& ide
 }
 // Two distinct metadata samples must agree; repeated UI refreshes cannot count
 // as repeated simulator observations. Missing data never selects a fallback.
+// variant tells set-up aircraft apart (they share DiscoveredProfileId).
 class AutoProfileSelection {
  public:
-  std::uint32_t observe(std::uint32_t id, std::uint64_t sample_ms) noexcept {
+  std::uint32_t observe(std::uint32_t id, std::uint64_t sample_ms, std::uint64_t variant = 0) noexcept {
     if (!id || !sample_ms) {
       candidate_ = 0;
       return 0;
     }
-    if (id != candidate_ || sample_ms < first_) {
+    if (id != candidate_ || variant != variant_ || sample_ms < first_) {
       candidate_ = id;
+      variant_ = variant;
       first_ = sample_ms;
       return 0;
     }
@@ -189,6 +191,6 @@ class AutoProfileSelection {
 
  private:
   std::uint32_t candidate_ = 0;
-  std::uint64_t first_ = 0;
+  std::uint64_t variant_ = 0, first_ = 0;
 };
 }  // namespace taxi_camera::native_camera

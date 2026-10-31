@@ -321,6 +321,7 @@ if ($Validate) {
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
         @{Name='connection-recoverability'; Sources=@('tests/app/connection_recoverability_test.cpp')},
         @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp','src/camera/local_memory.cpp')},
+        @{Name='discovered-aircraft'; Sources=@('tests/app/discovered_aircraft_test.cpp')},
         @{Name='profile-selection'; Sources=@('tests/app/profile_selection_test.cpp')},
         @{Name='waiting-page'; Sources=@('tests/app/waiting_page_test.cpp')},
         @{Name='settings-store'; Sources=@('tests/app/settings_store_test.cpp')},

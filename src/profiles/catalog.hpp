@@ -1,8 +1,10 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string_view>
 #include "../shared/display_sides.hpp"
+#include "aircraft_variant.hpp"
 namespace taxi_camera::profiles {
 struct DisplayRect {
   unsigned left, top, right, bottom;
@@ -36,7 +38,9 @@ struct Composition {
 static_assert(sizeof(Composition) == 29 * sizeof(float));
 // pmdg_dsp_cam reads the glareshield Display Select Panel. Nothing is written.
 enum class TaxiControl { push_event, lvar_off, manual_only, pmdg_dsp_cam };
-enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group, single_display };
+// named routes only by panel name (aircraft set up by the user): a side whose
+// name does not resolve waits instead of guessing among same-sized displays.
+enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group, single_display, named };
 inline constexpr Composition A350Etacs = [] {
   Composition c;
   // A350-900 image-space guide defaults; live adjustments remain per profile.
@@ -113,7 +117,7 @@ struct AircraftProfile {
     const char* name;
     unsigned width, height;
   };
-  std::array<PanelShape, 6> panel_shapes{};
+  std::array<PanelShape, 8> panel_shapes{};
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -539,7 +543,15 @@ inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) no
       return true;
   return false;
 }
+// An aircraft the user set up (discovered.hpp). Its profile is built at run
+// time from the saved layout; each layout gets a new immutable profile that
+// is never freed, so a reader holding an older one stays valid. find()
+// returns the newest, or nullptr before any is published in this process.
+inline constexpr std::uint32_t DiscoveredProfileId = 100;
+inline std::atomic<const AircraftProfile*> discovered_profile{};
 inline const AircraftProfile* find(std::uint32_t id) noexcept {
+  if (id == DiscoveredProfileId)
+    return discovered_profile.load(std::memory_order_acquire);
   for (auto* p : Catalog)
     if (p->id == id)
       return p;
@@ -597,6 +609,9 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
       match = p->id;
     }
   }
+  // A set-up aircraft is its exact variant only (aircraft_variant.hpp).
+  if (const auto* discovered = discovered_profile.load(std::memory_order_acquire); !match && discovered)
+    return same_variant(path, discovered->key) ? DiscoveredProfileId : 0;
   return match;
 }
 // Legacy adapter default. Native sessions choose their explicit profile through

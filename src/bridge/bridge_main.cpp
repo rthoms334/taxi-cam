@@ -249,7 +249,8 @@ struct PanelIdentityLog {
   std::uint64_t next_analysis_ms{};
   std::string proposal_text;
   std::array<std::uint64_t, MaxDisplaySides> named{};
-  std::uint32_t named_profile{};
+  // Pointer, not id: a set-up aircraft keeps its id across layouts.
+  const profiles::AircraftProfile* named_profile{};
   // First complete mapping of this flight, frozen: the creation log scrolls,
   // so re-deriving it later could shift names onto other textures.
   bool locked{};
@@ -395,7 +396,7 @@ void service_panel_identity(PanelIdentityLog& state,
   const bool first = !state.burst_logged;
   state.burst_logged = true;
   const auto profile_id = profile ? profile->id : 0u;
-  if (state.locked && profile_id == state.named_profile) {
+  if (state.locked && profile == state.named_profile) {
     // Keep the frozen mapping. A destroyed named texture (the 777 recreates
     // displays) takes the newest live texture of the same shape created later.
     try {
@@ -520,6 +521,7 @@ void service_panel_identity(PanelIdentityLog& state,
     const bool resolved = shift >= 0;
     bool complete = resolved;
     if (!resolved) {
+      display_identity::trim_trailing_ui(burst);
       if (burst.size() > textured)
         burst.erase(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(textured));
       paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
@@ -570,9 +572,9 @@ void service_panel_identity(PanelIdentityLog& state,
                                          proposal[i].creation.mips, proposal[i].creation.format};
     }
     win::set_named_targets(named);
-    if (named != state.named || profile_id != state.named_profile) {
+    if (named != state.named || profile != state.named_profile) {
       state.named = named;
-      state.named_profile = profile_id;
+      state.named_profile = profile;
       char detail[192];
       std::snprintf(detail, sizeof(detail), "Display named routing: profile=%u resolved=%d ids=%llu,%llu,%llu", profile_id,
                     resolved ? 1 : 0, static_cast<unsigned long long>(named[0]), static_cast<unsigned long long>(named[1]),
@@ -595,7 +597,7 @@ void publish_panel_map(const PanelIdentityLog& state, win::Status& status) noexc
 const char* panel_texture_name(const PanelIdentityLog& state, std::uint64_t id, const profiles::AircraftProfile* profile) noexcept {
   if (!id)
     return "";
-  if (profile && state.named_profile == profile->id)
+  if (profile && state.named_profile == profile)
     for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
       if (state.named[side] == id && profile->panel_textures[side][0])
         return profile->panel_textures[side];
@@ -1118,17 +1120,33 @@ DWORD run_impl() {
       const unsigned have = (owned[0] ? 1u : 0u) + (owned[1] ? 1u : 0u) + (owned[2] ? 1u : 0u);
       return have >= (next->composition.split_bottom != 0 ? 3u : 2u);
     };
+    // A set-up aircraft keeps its profile id when its layout changes (another
+    // variant, or set up again), so a new layout is another aircraft profile.
+    const bool layout_changed = settings.profile == profiles::DiscoveredProfileId && !profiles::discovered_current(settings.discovered);
     if (connected && settings.enabled &&
         (changing_profile || connection.started || connection.generation != applied_connection || settings.profile != applied_profile ||
-         settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch)) {
+         settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch || layout_changed)) {
       if (!changing_profile || settings.profile != pending_profile || settings.profile_request != pending_profile_request ||
-          session_epoch != pending_session_epoch || connection.generation != pending_connection) {
+          session_epoch != pending_session_epoch || connection.generation != pending_connection || layout_changed) {
         const bool full_reset =
-            pending_full_reset || (applied_profile && (settings.profile != applied_profile || session_epoch != applied_session_epoch));
+            pending_full_reset ||
+            (applied_profile && (settings.profile != applied_profile || layout_changed || session_epoch != applied_session_epoch));
         win::set_target_mask(0);
         win::set_calibration(0, settings.calibration_budget);
         win::set_graphics_observation_demand(false);
         native_camera::suspend_scene_rendering(true);
+        if (layout_changed) {
+          // Published with rendering suspended; detection, texture admission
+          // and every later find() use it from here.
+          const auto* layout = profiles::publish_discovered(settings.discovered);
+          const auto& d = settings.discovered;
+          char detail[384];
+          std::snprintf(detail, sizeof(detail),
+                        "Discovered aircraft layout: %s key=%.199s generation=%llu sides=%u shape=%ux%u m%u names=%s,%s,%s",
+                        layout ? "published" : "refused", d.key, static_cast<unsigned long long>(profiles::discovered_generation()),
+                        d.sides, d.width, d.height, d.mips, d.textures[0], d.textures[1], d.textures[2]);
+          log_status(status, detail);
+        }
         scene_runtime::manager().stop_source_tracking();
         scene_handoff().stop_scene();
         scene_runtime::reset_feed(key);
@@ -1539,6 +1557,8 @@ DWORD run_impl() {
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
     const auto* drawing = profiles::find(applied_profile ? applied_profile : settings.profile);
+    if (!drawing)  // A set-up aircraft is published before its transition starts.
+      drawing = &profiles::A380;
     auto composition = drawing->composition;
     composition.speed_color = settings.speed_color;
     composition.guide_color = settings.guide_color;

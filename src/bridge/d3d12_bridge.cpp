@@ -345,7 +345,8 @@ struct Registry {
   std::atomic<std::uint64_t> queue_patch_generation{1};
   std::array<std::uint64_t, MaxDisplaySides> queue_patch_targets{};
   unsigned queue_patch_camera{}, queue_patch_calibration{}, queue_patch_waiting{};
-  std::uint32_t queue_patch_profile{};
+  // Pointer, not id: a set-up aircraft keeps its id across layouts.
+  const profiles::AircraftProfile* queue_patch_profile{};
   std::atomic<std::uint64_t> queue_patch_plans{};
   // Display snapshot (PFD routing). Guarded by mutex; the submission planner
   // reads it under its try-lock. The pool raises snapshot_completed to the
@@ -752,12 +753,12 @@ void refresh_selected(Registry& r) {
   r.selected_mask.store(r.active_mask | r.calibration_mask, std::memory_order_relaxed);
   const std::array<std::uint64_t, MaxDisplaySides> selected{r.selected_ids[0].load(), r.selected_ids[1].load(), r.selected_ids[2].load()};
   if (selected != r.queue_patch_targets || r.queue_patch_camera != r.active_mask || r.queue_patch_calibration != r.calibration_mask ||
-      r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_profile != r.profile->id) {
+      r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_profile != r.profile) {
     r.queue_patch_targets = selected;
     r.queue_patch_camera = r.active_mask;
     r.queue_patch_calibration = r.calibration_mask;
     r.queue_patch_waiting = r.waiting_mask & r.active_mask;
-    r.queue_patch_profile = r.profile->id;
+    r.queue_patch_profile = r.profile;
     r.queue_patch_generation.fetch_add(1, std::memory_order_release);
   }
 }
@@ -853,15 +854,20 @@ bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
   bool dimensions = profiles::camera_candidate(static_cast<UINT>(d.Width), d.Height);
   for (const auto* profile : profiles::Catalog)
     dimensions |= d.Width == profile->width && d.Height == profile->height;
+  if (const auto* discovered = profiles::discovered_profile.load(std::memory_order_acquire))
+    dimensions |= d.Width == discovered->width && d.Height == discovered->height;
   return (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
           (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0) ||
          discovery_panel(d);
 }
+// A display shape of a catalog profile or of the aircraft the user set up.
 bool catalog_display(const D3D12_RESOURCE_DESC& d) noexcept {
   for (const auto* profile : profiles::Catalog)
     if (profiles::matches_display(*profile, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format)))
       return true;
-  return false;
+  const auto* discovered = profiles::discovered_profile.load(std::memory_order_acquire);
+  return discovered &&
+         profiles::matches_display(*discovered, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format));
 }
 // Decided once at admission (Resource::display_shape): a discovery texture
 // stays a display candidate for its lifetime, so its barrier history has no
@@ -950,6 +956,23 @@ bool display_set_ready(const Registry& r, unsigned need, DXGI_FORMAT format, UIN
   }
   return false;
 }
+// Every side's named texture is tracked as a live display of the profile.
+bool named_set_ready(const Registry& r) noexcept {
+  for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {
+    const auto id = r.named_targets[side];
+    bool live = false;
+    for (const auto& [native, item] : r.resources) {
+      (void)native;
+      if (id && item->id == id) {
+        live = item->alive && display_item(r, *item);
+        break;
+      }
+    }
+    if (!live)
+      return false;
+  }
+  return true;
+}
 // The detector can assign only this set. A generic pair, or another mip/format
 // that still matches the profile size, must not end discovery.
 bool backfill_resources_ready(const Registry& r) noexcept {
@@ -964,6 +987,8 @@ bool backfill_resources_ready(const Registry& r) noexcept {
     return display_set_ready(r, 2, static_cast<DXGI_FORMAT>(r.profile->formats[0]), r.profile->mips);
   if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display)
     return live_display_resources(r) >= 1;
+  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::named)
+    return named_set_ready(r);
   return false;
 }
 unsigned live_display_rtvs(const Registry& r) noexcept {
@@ -5075,10 +5100,13 @@ void discover_pfds(std::uint64_t now) noexcept {
     }
     const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
     const bool single_display = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    // A set-up aircraft is routed by name only: its displays share one shape
+    // with other panels, so activity cannot tell them apart.
+    const bool named_only = r.profile->pfd_detection == profiles::PfdDetectionPolicy::named;
     const bool separate_lower = profiles::separate_lower_texture(*r.profile);
     const bool missing =
         single_display ? !r.routes.targets[0] || (separate_lower && !r.routes.targets[2]) : (!r.routes.targets[0] || !r.routes.targets[1]);
-    if (now && (ranked_group || missing)) {
+    if (now && !named_only && (ranked_group || missing)) {
       // Take the full inventory after retirement cleanup, under the same
       // registry lock used for detector configuration and target assignment.
       // The detector sorts by incarnation itself. Avoid the unrelated UI

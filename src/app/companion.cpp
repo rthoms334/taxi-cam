@@ -187,6 +187,9 @@ win::Settings draft() {
   return current;
 }
 void publish(const win::Settings& value) {
+  // find(DiscoveredProfileId) then answers for the set-up aircraft in use.
+  if (value.profile == profiles::DiscoveredProfileId)
+    profiles::publish_discovered(value.discovered);
   const std::lock_guard lock(app_mutex);
   const auto enabled = current.enabled;
   const auto profile_request = std::max(current.profile_request, value.profile_request);
@@ -1589,6 +1592,29 @@ void toggle_camera_from_hotkey(unsigned action) {
   SetDlgItemTextW(window, 229, L"Scene test: Off");
   InvalidateRect(window, nullptr, FALSE);
 }
+// Whether a layout is saved for this variant, checked again every 5 s so one
+// saved while the flight runs is found.
+struct SavedVariant {
+  profiles::VariantKey key{};
+  bool saved{};
+  std::uint64_t checked_ms{};
+} saved_variant;
+bool saved_layout(const profiles::VariantKey& key, std::uint64_t now) {
+  if (key != saved_variant.key || now - saved_variant.checked_ms >= 5000) {
+    profiles::DiscoveredLayout layout;
+    saved_variant = {key, win::load_discovered_layout(key.data(), layout), now};
+  }
+  return saved_variant.saved;
+}
+std::uint64_t variant_hash(const profiles::VariantKey& key) noexcept {
+  std::uint64_t hash = 14695981039346656037ull;
+  for (const char c : key) {
+    if (!c)
+      break;
+    hash = (hash ^ static_cast<unsigned char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c)) * 1099511628211ull;
+  }
+  return hash;
+}
 void auto_profile() {
   const auto s = draft();
   if (!s.auto_profile) {
@@ -1603,21 +1629,33 @@ void auto_profile() {
   const auto now = GetTickCount64();
   if (!sample.heartbeat || now < sample.heartbeat || now - sample.heartbeat > 3000)
     return;
-  const auto detected = profile_selection.observe(sample.detected_profile, sample.identity_sample_ms);
-  if (!detected || detected == s.profile)
+  // An aircraft no catalog profile matches is selected by its variant when a
+  // layout is saved for it. The bridge reports it as the set-up aircraft only
+  // once that layout is in use.
+  profiles::VariantKey variant{};
+  auto candidate = sample.detected_profile;
+  if (!candidate || candidate == profiles::DiscoveredProfileId) {
+    const std::string_view path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
+    candidate =
+        sample.identity_sample_ms && profiles::variant_key(path, variant) && saved_layout(variant, now) ? profiles::DiscoveredProfileId : 0;
+  }
+  const bool set_up = candidate == profiles::DiscoveredProfileId;
+  const auto detected = profile_selection.observe(candidate, sample.identity_sample_ms, set_up ? variant_hash(variant) : 0);
+  if (!detected || (detected == s.profile && (!set_up || profiles::same_variant(variant.data(), s.discovered.key))))
     return;
   // Preserve edits on the departing profile; invalid unfinished fields delay
   // switching instead of silently discarding the user's calibration.
   if (!apply())
     return;
   win::Settings next;
-  if (!win::load_settings(next, installation, detected))
+  if (!win::load_settings(next, installation, detected, set_up ? std::string_view(variant.data()) : std::string_view{}))
     return;
   next.enabled = s.enabled;
   if (!win::prepare_profile_selection(next, s, true) || !win::save_settings(next))
     return;
   publish(next);
-  notice = L"Aircraft detected. Its saved calibration is active.";
+  notice = set_up ? L"Set-up aircraft detected. Its saved displays and calibration are active."
+                  : L"Aircraft detected. Its saved calibration is active.";
   build_controls();
 }
 void build_controls() {
@@ -1680,6 +1718,12 @@ void build_controls() {
     for (size_t i = 0; i < profiles::Catalog.size(); ++i)
       if (profiles::Catalog[i]->id == s.profile)
         SendMessageW(combo, CB_SETCURSEL, i, 0);
+    // The set-up aircraft in use follows the catalog.
+    if (const auto* set_up = s.profile == profiles::DiscoveredProfileId ? profiles::find(s.profile) : nullptr) {
+      const auto label = std::wstring(set_up->name) + L" (set up)";
+      SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+      SendMessageW(combo, CB_SETCURSEL, profiles::Catalog.size(), 0);
+    }
     toggle(L"Auto aircraft", 230, s.auto_profile, 707, 318, 140);
     toggle(L"Auto-connect", 240, auto_connect.load(std::memory_order_acquire), 707, 236, 155);
     button(win::connection_button_label(connection_requested.load(std::memory_order_acquire)), 241, 260, 236, 155, 34);
@@ -2811,12 +2855,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 210 && HIWORD(w) == CBN_SELENDOK) {
         const auto index = SendDlgItemMessageW(hwnd, 210, CB_GETCURSEL, 0, 0);
-        if (index < 0 || static_cast<size_t>(index) >= profiles::Catalog.size())
+        const auto selected = draft();
+        const bool set_up = static_cast<size_t>(index) == profiles::Catalog.size() && selected.profile == profiles::DiscoveredProfileId;
+        if (index < 0 || (static_cast<size_t>(index) >= profiles::Catalog.size() && !set_up))
           return 0;
         if (!apply())
           return 0;
         win::Settings next;
-        if (!win::load_settings(next, installation, profiles::Catalog[index]->id)) {
+        if (!win::load_settings(next, installation, set_up ? profiles::DiscoveredProfileId : profiles::Catalog[index]->id,
+                                set_up ? std::string_view(selected.discovered.key) : std::string_view{})) {
           notice = L"Could not load that aircraft profile.";
           return 0;
         }
@@ -2948,7 +2995,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 359) {
         auto s = draft();
-        s.mounts = profiles::find(s.profile)->mounts;
+        if (const auto* profile = profiles::find(s.profile))
+          s.mounts = profile->mounts;
         publish(s);
         dirty_notice();
         build_controls();
@@ -3099,6 +3147,8 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   win::migrate_saved_camera_rate();
   if (!win::load_settings(current, installation))
     notice = L"Saved settings were invalid; profile defaults loaded.";
+  if (current.profile == profiles::DiscoveredProfileId)
+    profiles::publish_discovered(current.discovered);
   whats_new = win::whats_new_pending(win::settings_directory(), InstalledVersion);
   // enabled is runtime connection state, not saved: it starts off until
   // Connect or Auto-connect enables it.

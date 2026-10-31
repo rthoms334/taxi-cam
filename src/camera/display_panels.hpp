@@ -142,6 +142,19 @@ int resolve_names(const Panels& panels,
     ids[k] = 0;
   return -1;
 }
+// Pairing with no profile names (aircraft discovery). Every cockpit panel
+// texture logged so far has 5 mips; UI textures (EFB, toolbar: 10-12 mips)
+// sometimes follow the cockpit's burst, as on a live PMDG 777 load that
+// needed shift 4. Dropping only such trailing creations before pairing the
+// last ones was right on all 9 clean loads replayed on 2026-10-31. Keeping
+// only 5-mip creations was not: the iniBuilds A380 and FlyByWire A380 have
+// 10-11 mip EFB panel textures among the cockpit's.
+inline constexpr std::uint32_t kCockpitPanelMips = 5;
+template <class Creations>
+void trim_trailing_ui(Creations& burst) noexcept {
+  while (!burst.empty() && burst.back().mips != kCockpitPanelMips)
+    burst.pop_back();
+}
 inline std::size_t textured_count(const Panels& panels) noexcept {
   std::size_t n = 0;
   for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
