@@ -1,6 +1,7 @@
 #include "../../src/camera/camera_contract.hpp"
 #include "../../src/camera/camera_contract_model.hpp"
 #include "../../src/camera/camera_release_contract.hpp"
+#include "../../src/camera/panel_registry_contract.hpp"
 
 #include <algorithm>
 #include <array>
@@ -462,6 +463,96 @@ void renderer_retirement_contract() {
           "Changing renderer consumer endpoint survived its reread");
 }
 
+// The panel table alone: its release function in .text with one runtime
+// function record, the table in .data, the destructor and sized delete as
+// other code. No build identity is involved.
+struct PanelFixture : discovery::ImageReader {
+  static constexpr std::uint32_t Code = 0x10000, Writable = 0x400000, Pdata = 0x800000, Extent = 0x900000;
+  std::uint32_t release, table;
+  std::map<std::uint32_t, std::uint8_t> memory;
+  discovery::Inventory image;
+  explicit PanelFixture(std::uint32_t shift, bool record = true) : release(Code + shift + 0x3000), table(Writable + shift + 0x1230) {
+    namespace pr = panel_registry_contract;
+    const auto& code = pr::model().code[0];
+    const std::array<std::uint32_t, 4> symbols{release, table, Code + shift + 0x100, Code + shift + 0x200};
+    auto bytes = code.bytes;
+    for (const auto& operand : code.operands) {
+      const auto value = std::int64_t(symbols[operand.target_symbol]) + operand.addend - (std::int64_t(release) + operand.pc_offset);
+      for (unsigned byte = 0; byte < 4; ++byte)
+        bytes[operand.offset + byte] = static_cast<std::uint8_t>(static_cast<std::uint64_t>(value) >> (8 * byte));
+    }
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+      memory[release + static_cast<std::uint32_t>(i)] = bytes[i];
+    if (record) {
+      const std::array<std::uint32_t, 3> function{release, release + pr::PanelReleaseBytes + 11, Pdata + shift + 0x100};
+      for (std::size_t i = 0; i < 12; ++i)
+        memory[Pdata + shift + static_cast<std::uint32_t>(i)] = reinterpret_cast<const std::uint8_t*>(function.data())[i];
+      memory[Pdata + shift + 0x100] = 1;  // UNWIND_INFO version 1, no chain.
+    }
+    image.valid_image = true;
+    image.machine = 0x8664;
+    image.image_size = Extent + shift;
+    image.section_count = 3;
+    image.exception_rva = Pdata + shift;
+    image.exception_size = record ? 12 : 0;
+    image.sections = {{".text", Code + shift, Writable - Code, 0x60000020},
+                      {".data", Writable + shift, 0x10000, 0xc0000040},
+                      {".pdata", Pdata + shift, 0x1000, 0x40000040}};
+    // The same minimal PE32+ headers as Fixture::headers.
+    const auto integer = [&](std::uint32_t at, std::uint64_t value, unsigned size = 4) {
+      for (unsigned i = 0; i < size; ++i)
+        memory[at + i] = static_cast<std::uint8_t>(value >> (i * 8));
+    };
+    integer(0, 0x5a4d, 2);
+    integer(60, 0x80);
+    integer(0x80, 0x4550);
+    integer(0x84, image.machine, 2);
+    integer(0x86, image.section_count, 2);
+    integer(0x94, 0xf0, 2);
+    integer(0x98, 0x20b, 2);
+    integer(0xd0, image.image_size);
+    integer(0xd4, 0x1000);
+    integer(0x104, 16);
+    integer(0x120, image.exception_rva);
+    integer(0x124, image.exception_size);
+    for (std::size_t i = 0; i < image.sections.size(); ++i) {
+      const auto& s = image.sections[i];
+      const auto at = 0x188 + static_cast<std::uint32_t>(i) * 40;
+      for (std::size_t c = 0; c < s.name.size(); ++c)
+        memory[at + static_cast<std::uint32_t>(c)] = static_cast<std::uint8_t>(s.name[c]);
+      integer(at + 8, s.size);
+      integer(at + 12, s.rva);
+      integer(at + 36, s.flags);
+    }
+  }
+  discovery::ReadWindow query(std::uint32_t at, std::uint32_t maximum) override {
+    return at < image.image_size ? discovery::ReadWindow{std::min(maximum, image.image_size - at), true} : discovery::ReadWindow{};
+  }
+  bool read(std::uint32_t at, void* destination, std::size_t size) override {
+    if (!size || std::uint64_t(at) + size > image.image_size)
+      return false;
+    std::memset(destination, 0, size);
+    for (auto it = memory.lower_bound(at); it != memory.end() && std::uint64_t(it->first) < std::uint64_t(at) + size; ++it)
+      static_cast<std::uint8_t*>(destination)[it->first - at] = it->second;
+    return true;
+  }
+  PanelTableResolution run() { return resolve_panel_table(*this, image, 0x178000000); }
+};
+void panel_table() {
+  for (const auto shift : {0u, 0x2a0000u}) {
+    PanelFixture fixture(shift);
+    const auto resolved = fixture.run();
+    require(resolved.table == fixture.table && resolved.error.empty(), "The panel table did not resolve from its release function");
+  }
+  PanelFixture resized(0);
+  resized.memory[resized.release + 65] = 0x98;  // delete(panel, 0x698): another panel layout
+  require(!resized.run().table, "A different panel size published the panel table");
+  PanelFixture unbounded(0, false);
+  const auto boundary = unbounded.run();
+  require(!boundary.table && boundary.error == "panel_table_function_boundary",
+          "A release without its function record published the table");
+}
+
 int main() {
   try {
     renderer_retirement_contract();
@@ -470,6 +561,7 @@ int main() {
     evidence_rechecks();
     constructor_pointer_relations();
     shipped_build_shapes();
+    panel_table();
     std::printf("Camera contract wrapper: PASS %u checks; sparse synthetic PE images only.\n", checks);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL camera contract wrapper after %u checks: %s\n", checks, error.what());

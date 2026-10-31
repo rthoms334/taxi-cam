@@ -1,8 +1,12 @@
 #include "display_panels.hpp"
 
+#include "camera_contract.hpp"
 #include "local_memory.hpp"
+#include "panel_registry_contract.hpp"
 
 namespace taxi_camera::display_identity {
+static_assert(kPanelCountOffset == native_camera::panel_registry_contract::CountOffset);
+static_assert(kMaxPanels * 8 <= kPanelCountOffset);
 Panels read_panels() noexcept {
   Panels result;
   try {
@@ -14,8 +18,15 @@ Panels read_panels() noexcept {
       result.error = "image_unverified";
       return result;
     }
-    if (image.timestamp != kTestedTimestamp || image.image_size != kTestedImageSize) {
-      result.error = "unsupported_build";
+    // Resolved once per process: a full scan of the image's code for the
+    // table's release function, with the default full-region reader.
+    static const auto table = [] {
+      const auto module = GetModuleHandleW(nullptr);
+      native_camera::LocalImageReader scan(module, image.image_size);
+      return native_camera::resolve_panel_table(scan, image, reinterpret_cast<std::uintptr_t>(module));
+    }();
+    if (!table.table) {
+      result.error = table.error.c_str();
       return result;
     }
     // One private-page scope for the whole table: pages are proven from
@@ -24,7 +35,7 @@ Panels read_panels() noexcept {
     native_camera::ScopedLocalMemoryQueryCache queries(native_camera::LocalMemoryQueryMode::private_pages);
     native_camera::LocalImageReader registry_reader(GetModuleHandleW(nullptr), image.image_size, native_camera::LocalImageQueryMode::pages);
     std::array<std::uint64_t, kMaxPanels + 1> registry{};
-    if (!registry_reader.read(kPanelRegistryRva, registry.data(), sizeof(registry))) {
+    if (!registry_reader.read(table.table, registry.data(), sizeof(registry))) {
       result.error = "registry_unreadable";
       return result;
     }
@@ -49,6 +60,10 @@ Panels read_panels() noexcept {
         return result;
       }
       copy_name(section, sizeof(section), panel.section);
+      if (!section_name(panel.section.data())) {
+        result.error = "panel_layout";
+        return result;
+      }
       std::uint32_t heap = 0;
       std::memcpy(&heap, texture + (kTextureHeapFlag - kTextureOffset), 4);
       std::uint64_t text = 0;

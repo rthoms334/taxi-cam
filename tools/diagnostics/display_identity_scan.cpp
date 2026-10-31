@@ -26,6 +26,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../../src/camera/camera_contract.hpp"
+#include "../../src/camera/panel_registry_contract.hpp"
+
 namespace {
 struct Region {
   std::uint64_t base, size;
@@ -212,38 +215,55 @@ void dump(std::uint64_t center, int before, int after, const char* indent) {
                 printable && v ? (std::string("'") + inline_text + "' ").c_str() : "", note.c_str());
   }
 }
-// Store 1.8.16.0 static decode (panel.cfg reader 0x30f5e00, factory
-// 0x30f6470, registry getter 0x30f41f0): a function-local static registry of
-// up to 64 VCockpit panel pointers, count (u32) at +0x200. Each 0x690-byte
-// panel holds its texture= name inline at +0x88, the section name string at
-// +0x528, its index at +0x598 and kind at +0x680. Other builds are refused.
-constexpr std::uint32_t kTestedTimestamp = 1787653788, kTestedImageSize = 235963904;
-constexpr std::uint64_t kPanelRegistry = 0xa50b160, kPanelSize = 0x690;
+bool read_target(std::uint64_t address, void* out, std::size_t size) {
+  return read(address, out, size);
+}
+// The main image read through this process handle: committed, readable
+// MEM_IMAGE pages only, for the bridge's own panel-table resolution.
+class TargetImage final : public taxi_camera::discovery::ImageReader {
+ public:
+  taxi_camera::discovery::ReadWindow query(std::uint32_t rva, std::uint32_t maximum) override {
+    MEMORY_BASIC_INFORMATION m{};
+    if (!maximum || rva >= image_size || VirtualQueryEx(process, reinterpret_cast<void*>(image_base + rva), &m, sizeof(m)) != sizeof(m))
+      return {};
+    const auto end = std::min<std::uint64_t>(reinterpret_cast<std::uint64_t>(m.BaseAddress) + m.RegionSize, image_base + image_size);
+    const auto extent = std::min<std::uint64_t>(end - (image_base + rva), maximum);
+    return {static_cast<std::uint32_t>(extent), m.State == MEM_COMMIT && m.Type == MEM_IMAGE && readable(m.Protect)};
+  }
+  bool read(std::uint32_t rva, void* out, std::size_t size) override {
+    return rva < image_size && size <= image_size - rva && read_target(image_base + rva, out, size);
+  }
+};
+// The panel.cfg reader keeps up to 64 VCockpit panel pointers in a static
+// table, count (u32) at +0x200, found in any build from the table's release
+// function (panel_registry_contract.hpp), as the bridge does. Each 0x690-byte
+// panel holds its section name inline at +0x88, its texture= name at +0x528
+// (inline, or a pointer when the u32 at +0x534 is set), its index at +0x598
+// and kind at +0x680.
+constexpr std::uint64_t kPanelSize = taxi_camera::native_camera::panel_registry_contract::PanelBytes;
 int panel_depth = 3;
 std::size_t panel_objects = 6000;
 void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
-  unsigned char header[0x400]{};
-  if (!image_base || !read(image_base, header, sizeof(header)) || header[0] != 'M' || header[1] != 'Z') {
+  if (!image_base || !image_size) {
     std::printf("\n=== panels: skipped (main image unreadable)\n");
     return;
   }
-  std::uint32_t pe = 0, timestamp = 0, size = 0;
-  std::memcpy(&pe, header + 0x3c, 4);
-  if (pe + 24 + 60 <= sizeof(header)) {
-    std::memcpy(&timestamp, header + pe + 8, 4);
-    std::memcpy(&size, header + pe + 24 + 56, 4);
-  }
-  if (timestamp != kTestedTimestamp || size != kTestedImageSize) {
-    std::printf("\n=== panels: skipped (untested build timestamp=%u size=%#x)\n", timestamp, size);
+  TargetImage reader;
+  const auto image = taxi_camera::discovery::inspect_image(reader);
+  const auto table = image.valid_image ? taxi_camera::native_camera::resolve_panel_table(reader, image, image_base)
+                                       : taxi_camera::native_camera::PanelTableResolution{0, "image: " + image.error};
+  if (!table.table) {
+    std::printf("\n=== panels: skipped (panel table unresolved: %s)\n", table.error.c_str());
     return;
   }
   std::uint64_t registry[65]{};
-  if (!read(image_base + kPanelRegistry, registry, sizeof(registry))) {
+  if (!read(image_base + table.table, registry, sizeof(registry))) {
     std::printf("\n=== panels: registry unreadable\n");
     return;
   }
   const auto count = static_cast<std::uint32_t>(registry[64]);
-  std::printf("\n=== panels (registry exe+%#llx count=%u)\n", static_cast<unsigned long long>(kPanelRegistry), count);
+  std::printf("\n=== panels (registry exe+%#llx count=%u timestamp=%u)\n", static_cast<unsigned long long>(table.table), count,
+              image.timestamp);
   for (std::uint32_t i = 0; i < count && i < 64; ++i) {
     const auto panel = registry[i];
     std::vector<unsigned char> bytes(kPanelSize);
@@ -251,19 +271,21 @@ void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
       std::printf("panel[%u] %llx unreadable\n", i, static_cast<unsigned long long>(panel));
       continue;
     }
-    std::string name;
+    std::string section;
     for (std::size_t k = 0x88; k < 0x188 && bytes[k] >= 32 && bytes[k] <= 126; ++k)
-      name += char(bytes[k]);
-    std::uint64_t section_word = 0;
-    std::memcpy(&section_word, bytes.data() + 0x528, 8);
-    std::string section = text_at(section_word);
-    if (section.empty())
-      for (std::size_t k = 0x528; k < 0x548 && bytes[k] >= 32 && bytes[k] <= 126; ++k)
-        section += char(bytes[k]);
+      section += char(bytes[k]);
+    std::uint32_t heap = 0;
+    std::memcpy(&heap, bytes.data() + 0x534, 4);
+    std::uint64_t texture_word = 0;
+    std::memcpy(&texture_word, bytes.data() + 0x528, 8);
+    std::string texture = heap ? text_at(texture_word) : std::string();
+    if (!heap)
+      for (std::size_t k = 0x528; k < 0x534 && bytes[k] >= 32 && bytes[k] <= 126; ++k)
+        texture += char(bytes[k]);
     std::uint32_t index = 0, kind = 0;
     std::memcpy(&index, bytes.data() + 0x598, 4);
     std::memcpy(&kind, bytes.data() + 0x680, 4);
-    std::printf("panel[%u] %llx texture='%s' section='%s' index=%u kind=%u\n", i, static_cast<unsigned long long>(panel), name.c_str(),
+    std::printf("panel[%u] %llx texture='%s' section='%s' index=%u kind=%u\n", i, static_cast<unsigned long long>(panel), texture.c_str(),
                 section.c_str(), index, kind);
     // Breadth-first search of heap pointers out of the panel, depth 3, for
     // any bridge-tracked native texture address.

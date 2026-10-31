@@ -71,6 +71,18 @@ CameraContractResolution resolve_release_camera_contract(discovery::ImageReader&
                                                          const discovery::Inventory& image,
                                                          std::uint64_t loaded_image_base);
 
+// The VCockpit panel table (panel_registry_contract.hpp), independent of the
+// camera contract: display naming reads it before or without any camera. The
+// release template proves the table address, its count offset and the panel
+// size; table is 0 and error says why when anything does not resolve.
+struct PanelTableResolution {
+  std::uint32_t table = 0;
+  std::string error;
+};
+PanelTableResolution resolve_panel_table(discovery::ImageReader& reader,
+                                         const discovery::Inventory& image,
+                                         std::uint64_t loaded_image_base);
+
 // Bounded runtime edge check only; full method bodies are already part of the
 // startup contract. The caller freshly captures/rechecks the renderer vptr.
 bool verify_renderer_release_methods(discovery::ImageReader& reader,

@@ -199,6 +199,9 @@ int main() {
     single.select_lower(240);
     require(!single.adopt_named({233, 233, 232}, 3) && single.targets[2] == 240, "An explicit lower choice is kept");
   }
+  require(
+      section_name("VCockpit01") && section_name("VPainting02") && !section_name("Window01") && !section_name("") && !section_name("VCock"),
+      "Only VCockpit and VPainting sections pass the layout check");
   std::printf("PASS: %u display identity checks.\n", checks);
   return 0;
 }
