@@ -60,7 +60,8 @@ foreach ($source in @($graphics + $engine)) {
     $objects += $object
 }
 if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/bridge/bridge_main.cpp')) {
-    & $compiler @common '-shared' (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') @objects @libs '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-camera-bridge.dll')
+    & $compiler @common '-shared' (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') @objects @libs '-Wl,--no-insert-timestamp' ('-Wl,-Map=' + (Join-Path $out 'taxi-camera-bridge.map')) '-o' (Join-Path $out 'taxi-camera-bridge.dll')
+    # The link map stays in ignored build/ so a crash offset (WER) can be resolved against this exact DLL.
     if ($LASTEXITCODE -ne 0) { throw 'Native bridge link failed.' }
 }
 if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')) {
@@ -346,6 +347,7 @@ if ($Validate) {
         @{Name='aircraft-layout'; Sources=@('src/camera/aircraft_inventory.cpp','tests/camera/aircraft_inventory_test.cpp')},
         @{Name='native-slots'; Sources=@('tests/graphics/native_slots_test.cpp')},
         @{Name='crash-evidence'; Sources=@('tests/graphics/crash_evidence_test.cpp')},
+        @{Name='native-slot-guard'; Sources=@('tests/graphics/native_slot_guard_test.cpp')},
         @{Name='native-root-state'; Sources=@('tests/graphics/root_state_test.cpp','src/graphics/pfd_stamp_state.cpp')},
         @{Name='dynamic-state-abi'; Sources=@('tests/graphics/dynamic_state_abi_test.cpp')},
         @{Name='sample-positions-abi'; Sources=@('tests/graphics/sample_positions_abi_test.cpp')},

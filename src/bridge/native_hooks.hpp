@@ -49,6 +49,11 @@ struct NativeSlot {
     if (address)
       return slot == address && *slot == wrapper;
     void* prior = *slot;
+    // A slot that already holds this wrapper would make the wrapper forward to
+    // itself: unbounded recursion on its first call. Refuse before publishing
+    // any forward pointer.
+    if (prior == wrapper)
+      return false;
     if (!pin_image(slot, false) || !pin_image(prior, true) || !pin_image(wrapper, true))
       return false;
     original.store(prior, std::memory_order_release);

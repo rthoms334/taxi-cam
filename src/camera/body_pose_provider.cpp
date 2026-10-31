@@ -10,6 +10,7 @@
 #include <utility>
 #include "../profiles/catalog.hpp"
 #include "body_pose_math.hpp"
+#include "../shared/wide_path_buffer.hpp"
 #include "pmdg_display_select.hpp"
 
 namespace taxi_camera::native_camera {
@@ -412,14 +413,19 @@ bool accept_lighting_packet(const void* raw, DWORD bytes, std::uint64_t sample_m
 }
 DWORD WINAPI worker(void*) noexcept {
   const auto& profile = *profiles::find(profile_id.load());
-  wchar_t path[32768]{};
-  const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
-  if (!length || length >= 32768) {
+  taxi_camera::WidePathBuffer path_buffer;  // 64 KiB: heap, not the worker's stack.
+  if (!path_buffer) {
+    failure("main_image_path");
+    return 0;
+  }
+  wchar_t* const path = path_buffer.get();
+  const DWORD length = GetModuleFileNameW(nullptr, path, taxi_camera::WidePathBuffer::size());
+  if (!length || length >= taxi_camera::WidePathBuffer::size()) {
     failure("main_image_path");
     return 0;
   }
   wchar_t* slash = std::wcsrchr(path, L'\\');
-  if (!slash || static_cast<std::size_t>(slash - path) + 25 >= 32768) {
+  if (!slash || static_cast<std::size_t>(slash - path) + 25 >= taxi_camera::WidePathBuffer::size()) {
     failure("main_image_path");
     return 0;
   }

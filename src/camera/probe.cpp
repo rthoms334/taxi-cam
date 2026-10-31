@@ -4,6 +4,7 @@
 #include "../hooks/observer_hook.hpp"
 #include "../shared/camera_rate.hpp"
 #include "../shared/hook_timing.hpp"
+#include "../shared/wide_path_buffer.hpp"
 #include "activation_mask.hpp"
 #include "aircraft_inventory.hpp"
 #include "aircraft_scene_pose.hpp"
@@ -3142,10 +3143,11 @@ void request_scene_test(bool reuse_calibration) noexcept {
   }
   try {
     if (!runtime.hooked.load(std::memory_order_acquire)) {
-      wchar_t path[32768]{};
-      const auto length = GetModuleFileNameW(nullptr, path, 32768);
-      const auto* basename = std::wcsrchr(path, L'\\');
-      if (!length || length >= 32768 || _wcsicmp(basename ? basename + 1 : path, L"FlightSimulator2024.exe") != 0) {
+      taxi_camera::WidePathBuffer path_buffer;  // 64 KiB: heap, not this thread's stack.
+      wchar_t* const path = path_buffer.get();
+      const auto length = path_buffer ? GetModuleFileNameW(nullptr, path, taxi_camera::WidePathBuffer::size()) : 0;
+      const auto* basename = path_buffer ? std::wcsrchr(path, L'\\') : nullptr;
+      if (!length || length >= taxi_camera::WidePathBuffer::size() || _wcsicmp(basename ? basename + 1 : path, L"FlightSimulator2024.exe") != 0) {
         const std::lock_guard lock(runtime.mutex);
         runtime.published.message = "Native camera access requires the FlightSimulator2024.exe process.";
         return;

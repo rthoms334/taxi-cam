@@ -8,6 +8,8 @@
 #include <limits>
 #include <new>
 
+#include "../shared/wide_path_buffer.hpp"
+
 namespace taxi_camera::standalone::crash_evidence {
 // Small local diagnostic record for the renderer instruction seen in the A350
 // reports. Version 2 adds two bounded copies taken at the fault: the render
@@ -134,7 +136,10 @@ inline bool inspect_record(HANDLE file, Candidate& candidate) noexcept {
 inline bool make_room(const wchar_t* directory) noexcept {
   Candidate cursor{};
   bool after_cursor = false;
-  wchar_t path[32768]{};
+  taxi_camera::WidePathBuffer path_buffer;  // 64 KiB: heap, not this thread's stack.
+  if (!path_buffer)
+    return false;
+  wchar_t* const path = path_buffer.get();
   const auto started = GetTickCount64();
   unsigned inspected = 0;
   for (unsigned pass = 0; pass < maintenance_passes; ++pass) {
@@ -143,7 +148,7 @@ inline bool make_room(const wchar_t* directory) noexcept {
     std::array<Candidate, retained_records> candidates{};
     unsigned selected = 0;
     std::uint64_t count = 0;
-    if (std::swprintf(path, std::size(path), L"%ls\\renderer-fault-*.bin", directory) < 0)
+    if (std::swprintf(path, taxi_camera::WidePathBuffer::size(), L"%ls\\renderer-fault-*.bin", directory) < 0)
       return false;
     WIN32_FIND_DATAW entry{};
     const auto search = FindFirstFileW(path, &entry);
@@ -159,7 +164,7 @@ inline bool make_room(const wchar_t* directory) noexcept {
       ++count;
       Candidate candidate;
       std::wcscpy(candidate.name, entry.cFileName);  // Canonical numeric name is at most 50 characters.
-      if (std::swprintf(path, std::size(path), L"%ls\\%ls", directory, candidate.name) < 0) {
+      if (std::swprintf(path, taxi_camera::WidePathBuffer::size(), L"%ls\\%ls", directory, candidate.name) < 0) {
         FindClose(search);
         return false;
       }
@@ -196,7 +201,7 @@ inline bool make_room(const wchar_t* directory) noexcept {
       if (GetTickCount64() - started >= maintenance_milliseconds)
         return false;
       const auto& candidate = candidates[i];
-      if (std::swprintf(path, std::size(path), L"%ls\\%ls", directory, candidate.name) < 0)
+      if (std::swprintf(path, taxi_camera::WidePathBuffer::size(), L"%ls\\%ls", directory, candidate.name) < 0)
         return false;
       const auto file = CreateFileW(path, DELETE | GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
       if (file == INVALID_HANDLE_VALUE)
@@ -226,8 +231,11 @@ inline bool create_record(const wchar_t* directory,
                           Mapping& destination) noexcept {
   if (!directory || !process || destination.memory || destination.file != INVALID_HANDLE_VALUE)
     return false;
-  wchar_t path[32768]{};
-  if (std::swprintf(path, std::size(path), L"%ls\\renderer-fault-retention.lock", directory) < 0)
+  taxi_camera::WidePathBuffer path_buffer;
+  if (!path_buffer)
+    return false;
+  wchar_t* const path = path_buffer.get();
+  if (std::swprintf(path, taxi_camera::WidePathBuffer::size(), L"%ls\\renderer-fault-retention.lock", directory) < 0)
     return false;
   const auto retention_lock = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
                                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -240,7 +248,7 @@ inline bool create_record(const wchar_t* directory,
   BY_HANDLE_FILE_INFORMATION lock_information{};
   if (!GetFileInformationByHandle(retention_lock, &lock_information) ||
       (lock_information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || !make_room(directory) ||
-      std::swprintf(path, std::size(path), L"%ls\\renderer-fault-%lu-%llu.bin", directory, process,
+      std::swprintf(path, taxi_camera::WidePathBuffer::size(), L"%ls\\renderer-fault-%lu-%llu.bin", directory, process,
                     static_cast<unsigned long long>(ticks)) < 0)
     return false;
   const auto file =
@@ -360,6 +368,13 @@ inline CodeCaptureResult capture_fault_site_code(const wchar_t* directory, HMODU
     result.error = "code_capture_arguments";
     return result;
   }
+  taxi_camera::WidePathBuffer path_buffer, old_path_buffer;  // 128 KiB total: heap.
+  if (!path_buffer || !old_path_buffer) {
+    result.error = "code_capture_allocation";
+    return result;
+  }
+  wchar_t* const path = path_buffer.get();
+  wchar_t* const old_path = old_path_buffer.get();
   const auto base = reinterpret_cast<const std::uint8_t*>(module);
   const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
   if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 4096) {
@@ -397,23 +412,21 @@ inline CodeCaptureResult capture_fault_site_code(const wchar_t* directory, HMODU
         const auto match = static_cast<std::uint32_t>(hit - base);
         const auto window_begin = match > begin + code_window_before ? match - code_window_before : begin;
         const auto window_end = end - match > code_window_after ? match + code_window_after : end;
-        wchar_t path[32768]{};
         // One capture is retained: the current session replaces earlier files.
-        if (std::swprintf(path, std::size(path), L"%ls\\renderer-fault-code-*.bin", directory) >= 0) {
+        if (std::swprintf(path, taxi_camera::WidePathBuffer::size(), L"%ls\\renderer-fault-code-*.bin", directory) >= 0) {
           WIN32_FIND_DATAW entry{};
           const auto search = FindFirstFileW(path, &entry);
           if (search != INVALID_HANDLE_VALUE) {
             do {
               if (entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
                 continue;
-              wchar_t old_path[32768]{};
-              if (std::swprintf(old_path, std::size(old_path), L"%ls\\%ls", directory, entry.cFileName) >= 0)
+              if (std::swprintf(old_path, taxi_camera::WidePathBuffer::size(), L"%ls\\%ls", directory, entry.cFileName) >= 0)
                 DeleteFileW(old_path);
             } while (FindNextFileW(search, &entry));
             FindClose(search);
           }
         }
-        if (std::swprintf(path, std::size(path), L"%ls\\renderer-fault-code-%lu.bin", directory, process) < 0) {
+        if (std::swprintf(path, taxi_camera::WidePathBuffer::size(), L"%ls\\renderer-fault-code-%lu.bin", directory, process) < 0) {
           result.error = "code_capture_path";
           return result;
         }
@@ -455,12 +468,15 @@ inline CodeCaptureResult capture_fault_site_code(const wchar_t* directory, HMODU
 inline bool initialize() noexcept {
   if (record)
     return true;
-  wchar_t directory[32768]{};
-  const auto length = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
+  taxi_camera::WidePathBuffer directory_buffer, folder_buffer;  // Heap, not stack.
+  if (!directory_buffer || !folder_buffer)
+    return false;
+  wchar_t* const directory = directory_buffer.get();
+  const auto length = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, taxi_camera::WidePathBuffer::size());
   if (!length || length > 32000)
     return false;
-  wchar_t folder[32768]{};
-  std::swprintf(folder, 32768, L"%ls\\Taxi Cam", directory);
+  wchar_t* const folder = folder_buffer.get();
+  std::swprintf(folder, taxi_camera::WidePathBuffer::size(), L"%ls\\Taxi Cam", directory);
   CreateDirectoryW(folder, nullptr);
   Mapping mapping;
   if (!create_record(folder, GetCurrentProcessId(), GetTickCount64(), reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr)), mapping))

@@ -23,6 +23,7 @@
 #include "../shared/waiting_page.hpp"
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
+#include "../shared/wide_path_buffer.hpp"
 #include "d3d12_bridge.hpp"
 #include "freeze_watchdog.hpp"
 #include "native_hooks.hpp"
@@ -2202,10 +2203,14 @@ DWORD WINAPI run(void*) noexcept {
 }
 }  // namespace
 extern "C" __declspec(dllexport) DWORD WINAPI TaxiCameraStart(void*) {
-  wchar_t path[32768]{};
-  const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
+  // The caller's thread and stack are the host's; keep the 64 KiB path on the heap.
+  taxi_camera::WidePathBuffer path_buffer;
+  if (!path_buffer)
+    return ERROR_NOT_ENOUGH_MEMORY;
+  wchar_t* const path = path_buffer.get();
+  const DWORD length = GetModuleFileNameW(nullptr, path, taxi_camera::WidePathBuffer::size());
   const wchar_t* name = std::wcsrchr(path, L'\\');
-  if (!length || length >= 32768 || _wcsicmp(name ? name + 1 : path, L"FlightSimulator2024.exe"))
+  if (!length || length >= taxi_camera::WidePathBuffer::size() || _wcsicmp(name ? name + 1 : path, L"FlightSimulator2024.exe"))
     return ERROR_BAD_ENVIRONMENT;
   if (GetModuleHandleW(L"taxi-camera-native.addon64"))
     return ERROR_ALREADY_EXISTS;
