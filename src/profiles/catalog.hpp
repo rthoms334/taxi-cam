@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 #include "../shared/display_sides.hpp"
@@ -114,7 +115,28 @@ struct AircraftProfile {
     unsigned width, height;
   };
   std::array<PanelShape, 6> panel_shapes{};
+  // panel.cfg texture= name prefixes of cockpit panels that are never a camera
+  // display, although their texture has the display's shape. Detection by shape
+  // alone (single_display) cannot tell them apart, so a texture the panel table
+  // names this way is withheld from automatic selection. Empty entries unused.
+  std::array<const char*, 2> excluded_textures{};
 };
+// True when a panel.cfg texture name starts with one of the profile's excluded
+// prefixes. An empty name or empty prefix never matches.
+inline bool excluded_texture(const AircraftProfile& p, const char* name) noexcept {
+  if (!name || !name[0])
+    return false;
+  for (const char* prefix : p.excluded_textures) {
+    if (!prefix || !prefix[0])
+      continue;
+    std::size_t n = 0;
+    while (prefix[n] && name[n] == prefix[n])
+      ++n;
+    if (!prefix[n])
+      return true;
+  }
+  return false;
+}
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
 }
@@ -269,6 +291,7 @@ inline constexpr unsigned Pmdg777NdHeight = 971;
 // EICASCDU texture at 1058, 21, 958, 971 (same on all three variants). The
 // upper EICAS and the three CDU screens share that texture.
 inline constexpr const char* Pmdg777LowerTexture = "EICASCDU";
+inline constexpr const char* Pmdg777EfbTexturePrefix = "VCTABLET";
 inline constexpr unsigned Pmdg777LowerX = 1058;
 inline constexpr unsigned Pmdg777LowerY = 21;
 // Mip count and DXGI format were not in the scan.
@@ -364,6 +387,11 @@ inline constexpr auto make_pmdg_777 =
       // are black. L/R stay 0.
       p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
       p.panel_textures = {Pmdg777Texture, Pmdg777Texture, Pmdg777LowerTexture};
+      // The captain and first-officer EFB tablets (VCTABLETCA, VCTABLETFO in the
+      // 2026-10-04 777-300ER panel table) draw 2048 x 2048 five-mip textures,
+      // the same shape as DUS, EICASCDU and EICASUP. The names of the 200ER, 200LR
+      // and 777F tablets have not been read; they are assumed to share the prefix.
+      p.excluded_textures = {Pmdg777EfbTexturePrefix, ""};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 = make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);

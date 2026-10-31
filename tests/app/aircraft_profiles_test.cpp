@@ -325,6 +325,16 @@ int main() {
          profiles::Pmdg777300ER.mounts[0][4] == 0 && profiles::Pmdg777300ER.mounts[0][5] == 1);
   assert(profiles::Pmdg777300ER.mounts[0] != profiles::Pmdg777.mounts[0]);
   assert(profiles::Pmdg777F.mounts[0] == profiles::Pmdg777.mounts[0]);
+  // The EFB tablets share the display shape and are withheld by panel name on
+  // every PMDG 777 profile (and only those); the displays themselves are not.
+  for (const auto* profile : profiles::Catalog) {
+    const bool pmdg_777 = std::strcmp(profile->display_texture, profiles::Pmdg777Texture) == 0;
+    assert(profiles::excluded_texture(*profile, "VCTABLETCA") == pmdg_777);
+    assert(profiles::excluded_texture(*profile, "VCTABLETFO") == pmdg_777);
+    assert(!profiles::excluded_texture(*profile, "DUS") && !profiles::excluded_texture(*profile, "EICASCDU"));
+    assert(!profiles::excluded_texture(*profile, "") && !profiles::excluded_texture(*profile, nullptr));
+    assert(!profiles::excluded_texture(*profile, "VCTABLE") && !profiles::excluded_texture(*profile, "XVCTABLETCA"));
+  }
   assert(profiles::Pmdg777300ER.key != profiles::Pmdg777.key && profiles::Pmdg777F.key != profiles::Pmdg777.key &&
          profiles::Pmdg777200LR.key != profiles::Pmdg777.key);
   assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text", "Community/pmdg-aircraft-77er/aircraft.cfg"));

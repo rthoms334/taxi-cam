@@ -103,6 +103,21 @@ Published mount defaults: 777-200ER, 777-200LR and 777F nose **0 / -2 / 16 m, pi
 
 The display list only offers GPU resources that match the selected profile's size. Until this profile is selected, the bridge keeps the previous profile's filter. The default is the FBW A380 at 768 x 1024, five mips, format 28. A 2048 x 2048 `DUS` texture is not a candidate for that filter, so the list stays empty and detection reports `no_candidates`. The log does not print gauge names. After this profile is selected, a 2048 x 2048 resource with any non-zero format and 1–12 mips is a candidate. Mip count and DXGI format were not in the scan. The texture list and the display-routing dropdown use resource-id order, not draw count. When more than one candidate matches, automatic selection takes the last entry, which is the highest resource id, and assigns that one texture to both inboard rectangles. It does not take the first entry, and it does not use a texture name. Display routing can still assign a texture by hand. GPU targeting cannot read gauge or material names; `DU_LeftInboard` and `DU_RightInboard` are the rectangles above on the shared `DUS` texture.
 
+#### EFB tablets and display candidates (issues 140, 141)
+
+The shape filter cannot tell the EFB from the navigation display. The 2026-10-04 777-300ER panel table paired `VCTABLETCA` and `VCTABLETFO` (the captain and first-officer EFB tablets, `canvas` 1024) with 2048 x 2048 five-mip format 28 creations, the same shape as `DUS`, `EICASCDU` and `EICASUP` (creations 230 and 231 beside `DUS` 233 and `EICASCDU` 232). Those five are the candidates; the snapshot's `candidates=5` or `6` counts every 2048 x 2048 texture, so it includes the tablets. In the report snapshots `PFDs=a/b/c` are the resource ids routed to the left ND, right ND and lower DU. Both NDs share one id, so `671/671/669` (issue 140) and `609/609/459` (issue 141) are one `DUS` id and one lower id.
+
+Two automatic rules use no name and so can land on a tablet: the highest candidate id becomes the display, and the next-highest becomes the lower-DU guess. A tablet that the simulator creates or recreates after `DUS` has the highest id. Named routing (`DUS`, `EICASCDU`) is checked against the display shape only, which every candidate satisfies, so it cannot reject a tablet either.
+
+For the PMDG 777 profiles the panel table now withholds textures whose `texture=` name starts with `VCTABLET` (`excluded_textures`). The bridge pairs panel names with creations as it already does for named routing and, only when every textured panel is paired, drops the tablets' ids from the inventory that automatic detection ranks. It logs `Display excluded from automatic selection (non-display panels): <ids>`. The routing dropdown still lists every candidate and an explicit choice is never restricted.
+
+Not established:
+
+- **Issue 140 may not be this mechanism.** Its snapshot shows build 86, which already routes by name, and the reporter's cameras are correct on both NDs and the lower DU, so the EFB duplicate is not explained by the display ids alone. A tablet that mirrors or copies `DUS`, or EFB+ adding its own 2048 x 2048 texture after `DUS` (which would move the name pairing back), are both possible. Neither was checked. The attached bridge log and zip could not be read for this change.
+- The `VCTABLET` prefix is read only from the 777-300ER table. The 200ER, 200LR and 777F tablet names have not been read; the 200ER report (issue 141) used build 0.9.50, whose log was not read either.
+- A tablet recreated after the pairing gets an id that is not in the excluded set until the panel table is paired again.
+- None of this has been run in MSFS with a PMDG 777 or with EFB+.
+
 #### CAM button and display selection
 
 The glareshield Display Select Panel (DSP) chooses the display. Select **L INBD**, **R INBD** or **LWR CTR**, then press **CAM**. That display shows the camera page until **CAM** is pressed again while the same display is selected. Displays are independent, so any combination of the two navigation displays and the lower DU can show the camera. The CAM button carries an INOP label in the cockpit, but PMDG still draws its own placeholder camera page when it is pressed; Taxi Cam stamps the live camera over that page.

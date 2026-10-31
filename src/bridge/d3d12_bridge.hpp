@@ -261,6 +261,12 @@ void discover_pfds(std::uint64_t now) noexcept;
 // discover_pfds routes them first; explicit choices and dead textures are
 // never overridden or kept.
 void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) noexcept;
+// Texture IDs the panel table names as non-display panels of the profile (its
+// excluded_textures: PMDG 777 EFB tablets). They are left out of the inventory
+// automatic detection ranks, so neither the display nor a lower-DU guess can
+// land on them. An explicit user choice is not restricted. Replaces the set.
+inline constexpr std::size_t ExcludedTargetCapacity = 4;
+void set_excluded_targets(const std::uint64_t* ids, std::size_t count) noexcept;
 // Display texture snapshot for PFD routing. Control thread only. Replaces any
 // earlier request, then copies the tracked display texture's base mip into a
 // private READBACK buffer at the next proven submission boundary, the same

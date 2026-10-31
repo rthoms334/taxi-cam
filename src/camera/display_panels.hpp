@@ -142,6 +142,32 @@ int resolve_names(const Panels& panels,
     ids[k] = 0;
   return -1;
 }
+// IDs of the paired creations whose panel texture name is_excluded() rejects
+// (the PMDG 777 EFB tablets), for withholding from automatic display selection.
+// Only a complete pairing is trusted: with a partial one the reverse-index rule
+// may have shifted names onto the wrong textures, and a wrongly excluded display
+// would leave the aircraft without a camera. Writes at most `capacity` ids and
+// returns how many were written.
+template <class Excluded>
+std::size_t excluded_ids(const std::array<Assignment, kMaxPanels>& pairs,
+                         std::size_t paired,
+                         bool complete,
+                         Excluded is_excluded,
+                         std::uint64_t* ids,
+                         std::size_t capacity) noexcept {
+  std::size_t n = 0;
+  for (std::size_t i = 0; complete && i < paired && n < capacity; ++i) {
+    const auto& pair = pairs[i];
+    if (!pair.panel || !pair.creation.id || !is_excluded(pair.panel->texture.data()))
+      continue;
+    bool seen = false;
+    for (std::size_t j = 0; j < n; ++j)
+      seen = seen || ids[j] == pair.creation.id;
+    if (!seen)
+      ids[n++] = pair.creation.id;
+  }
+  return n;
+}
 // Live read of the current process. Refuses any other build.
 Panels read_panels() noexcept;
 }  // namespace taxi_camera::display_identity

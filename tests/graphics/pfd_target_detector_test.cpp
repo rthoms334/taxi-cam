@@ -818,6 +818,36 @@ int main() {
   reversed[0].id = 96;
   assert(!inboard.observe(reversed.data(), reversed.size(), 5000).valid);
 
+  // EFB tablets (issues 140, 141): same 2048 x 2048 shape as DUS, so the
+  // single-display rule takes the highest id, and a tablet created or recreated
+  // after DUS wins. Withheld by panel name, the display and the lower-DU guess
+  // stay on DUS (233) and EICASCDU (232), the recorded 777-300ER ids.
+  {
+    static PfdTargetDetector efb;
+    efb.configure(taxi_camera::profiles::Pmdg777300ER);
+    std::array<PfdTargetObservation, 6> cockpit{};
+    const std::array<std::uint64_t, 6> cockpit_ids{229, 230, 231, 232, 233, 240};  // 240: recreated tablet.
+    for (std::size_t i = 0; i < cockpit.size(); ++i)
+      cockpit[i] = {cockpit_ids[i], 10, pmdg.width, pmdg.height, 5, 28};
+    auto unfiltered = cockpit;
+    for (std::uint64_t now = 0; now <= 3000; now += 1000)
+      efb.observe(unfiltered.data(), unfiltered.size(), now);
+    assert(efb.snapshot().valid && efb.snapshot().targets[0] == 240);  // The failure the exclusion prevents.
+    const std::array<std::uint64_t, 4> excluded{230, 231, 240, 0};
+    auto filtered = cockpit;
+    const auto kept = taxi_camera::withhold_excluded(filtered.data(), filtered.size(), excluded.data(), excluded.size());
+    assert(kept == 3 && filtered[0].id == 229 && filtered[1].id == 232 && filtered[2].id == 233);
+    efb.reset();
+    for (std::uint64_t now = 0; now <= 3000; now += 1000)
+      efb.observe(filtered.data(), kept, now);
+    assert(efb.snapshot().valid && efb.snapshot().targets[0] == 233 && efb.snapshot().targets[1] == 232);
+    // A zero entry is unused and never matches an observation; nothing excluded keeps all.
+    auto untouched = cockpit;
+    const std::array<std::uint64_t, 2> none{0, 0};
+    assert(taxi_camera::withhold_excluded(untouched.data(), untouched.size(), none.data(), none.size()) == untouched.size());
+    assert(taxi_camera::withhold_excluded(untouched.data(), 0, excluded.data(), excluded.size()) == 0);
+  }
+
   // Aerosoft A346: both NDs are rectangles on one 4096 $GAUGES_UNIFIED texture.
   // A 2048 PMDG-sized texture is not a candidate for this profile.
   static PfdTargetDetector unified;

@@ -4,6 +4,7 @@
 #include <vector>
 #include "../../src/camera/display_panels.hpp"
 #include "../../src/graphics/taxi_button_routes.hpp"
+#include "../../src/profiles/catalog.hpp"
 
 namespace {
 using namespace taxi_camera::display_identity;
@@ -118,6 +119,38 @@ int main() {
     require(resolve_names(panels, multimip.data(), multimip.size(), names, 3, fit, any, ids, out, pairs) == 0 && ids[0] == 233 &&
                 ids[1] == 233 && ids[2] == 232,
             "777 names resolve without a shift");
+  }
+
+  // The EFB tablets (VCTABLETCA, VCTABLETFO) have the display's 2048 x 2048
+  // five-mip shape in the recorded burst (230, 231), so shape alone cannot keep
+  // them from automatic selection; the panel name does. Only a complete pairing
+  // is trusted for it.
+  {
+    namespace profiles = taxi_camera::profiles;
+    const std::vector<Creation> multimip{{229, 1, 2048, 2048, 5, 28},  {230, 3, 2048, 2048, 5, 28}, {231, 4, 2048, 2048, 5, 28},
+                                         {0, 5, 1024, 512, 5, 28},     {0, 6, 1024, 1024, 5, 28},   {0, 7, 1024, 1024, 5, 28},
+                                         {0, 8, 1024, 1024, 5, 28},    {0, 9, 512, 512, 5, 28},     {0, 10, 512, 512, 5, 28},
+                                         {232, 12, 2048, 2048, 5, 28}, {233, 13, 2048, 2048, 5, 28}};
+    const char* names[]{"DUS", "DUS", "EICASCDU"};
+    const auto fit = [](const Creation& c) { return c.width == 2048; };
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    require(resolve_names(panels, multimip.data(), multimip.size(), names, 3, fit, any, ids, out, pairs) == 0 && ids[0] == 233,
+            "Recorded 777 burst resolves before exclusion");
+    const auto& profile = profiles::Pmdg777300ER;
+    const auto excluded = [&](const char* texture) { return profiles::excluded_texture(profile, texture); };
+    std::array<std::uint64_t, 4> skip{};
+    const auto count = excluded_ids(out, pairs, true, excluded, skip.data(), skip.size());
+    require(count == 2 && skip[0] != skip[1] && (skip[0] == 230 || skip[0] == 231) && (skip[1] == 230 || skip[1] == 231),
+            "Both EFB tablet textures (230, 231) are excluded");
+    for (std::size_t i = 0; i < count; ++i)
+      require(skip[i] != 233 && skip[i] != 232 && skip[i] != 229, "DUS, EICASCDU and EICASUP are never excluded");
+    require(excluded_ids(out, pairs, false, excluded, skip.data(), skip.size()) == 0, "An incomplete pairing excludes nothing");
+    std::array<std::uint64_t, 1> small{};
+    require(excluded_ids(out, pairs, true, excluded, small.data(), small.size()) == 1, "Exclusion respects its capacity");
+    const auto other = [&](const char* texture) { return profiles::excluded_texture(profiles::A359, texture); };
+    require(excluded_ids(out, pairs, true, other, skip.data(), skip.size()) == 0, "Profiles without exclusions exclude nothing");
+    require(excluded_ids(out, 0, true, excluded, skip.data(), skip.size()) == 0, "No pairs, nothing excluded");
   }
 
   // FlyByWire A380 after an aircraft switch, 2026-10-04: six 768 x 1024

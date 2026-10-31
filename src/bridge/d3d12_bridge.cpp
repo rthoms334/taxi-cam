@@ -369,6 +369,9 @@ struct Registry {
   std::array<std::atomic<std::uint64_t>, 64> display_feeds{};
   std::atomic<std::uint64_t> display_feed_next{};
   std::array<std::uint64_t, MaxDisplaySides> named_targets{};  // Guarded by mutex.
+  // Textures the panel table names as non-display panels (PMDG 777 EFB tablets)
+  // that share the display shape. Withheld from automatic selection; guarded by mutex.
+  std::array<std::uint64_t, ExcludedTargetCapacity> excluded_targets{};
   // Last snapshot failure step and HRESULT/Win32 code, for bridge.log.
   std::atomic<const char*> snapshot_failure{""};
   std::atomic<long> snapshot_failure_code{};
@@ -4773,6 +4776,13 @@ void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) no
   const WorkerRegistryLock lock(r);
   r.named_targets = ids;
 }
+void set_excluded_targets(const std::uint64_t* ids, std::size_t count) noexcept {
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  r.excluded_targets = {};
+  for (std::size_t i = 0; ids && i < count && i < r.excluded_targets.size(); ++i)
+    r.excluded_targets[i] = ids[i];
+}
 bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();
   const WorkerRegistryLock lock(r);
@@ -4887,6 +4897,7 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
     const WorkerRegistryLock lock(r);
     r.active_mask = r.calibration_mask = 0;
     r.named_targets = {};
+    r.excluded_targets = {};
     // This entry point starts an explicit aircraft/profile session, including a
     // reload of the same adapter. Ordinary texture replacement uses forget().
     r.routes.reset();
@@ -5030,6 +5041,9 @@ void discover_pfds(std::uint64_t now) noexcept {
       // The detector sorts by incarnation itself. Avoid the unrelated UI
       // draw-count sort while holding the registry lock.
       auto inventory = pfd_inventory_locked(r);
+      // Panel-table non-display textures (EFB tablets) are the display's shape
+      // but never the display. The routing dropdown (pfd_inventory) keeps them.
+      inventory.resize(withhold_excluded(inventory.data(), inventory.size(), r.excluded_targets.data(), r.excluded_targets.size()));
       const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now, r.pfd_inventory_complete.load());
       if (detection.valid) {
         if (single_display) {

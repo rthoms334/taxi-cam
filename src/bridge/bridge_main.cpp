@@ -250,6 +250,9 @@ struct PanelIdentityLog {
   std::string proposal_text;
   std::array<std::uint64_t, MaxDisplaySides> named{};
   std::uint32_t named_profile{};
+  // Panel-table textures of this flight that the profile never uses as a display
+  // (PMDG 777 EFB tablets); republished with the named targets.
+  std::vector<std::uint64_t> excluded;
   // First complete mapping of this flight, frozen: the creation log scrolls,
   // so re-deriving it later could shift names onto other textures.
   bool locked{};
@@ -423,6 +426,7 @@ void service_panel_identity(PanelIdentityLog& state,
       // Republished every check: a profile (re)application clears the
       // bridge's named targets.
       win::set_named_targets(named);
+      win::set_excluded_targets(state.excluded.data(), state.excluded.size());
       if (named != state.named) {
         state.named = named;
         char detail[160];
@@ -527,6 +531,24 @@ void service_panel_identity(PanelIdentityLog& state,
                                          proposal[i].creation.mips, proposal[i].creation.format};
     }
     win::set_named_targets(named);
+    // Withhold the profile's non-display panels (EFB tablets) from automatic
+    // selection, from a complete pairing only.
+    std::array<std::uint64_t, win::ExcludedTargetCapacity> excluded{};
+    const auto excluded_count =
+        profile ? display_identity::excluded_ids(
+                      proposal, paired, complete, [&](const char* texture) { return profiles::excluded_texture(*profile, texture); },
+                      excluded.data(), excluded.size())
+                : 0;
+    const std::vector<std::uint64_t> next_excluded(excluded.begin(), excluded.begin() + static_cast<std::ptrdiff_t>(excluded_count));
+    const bool excluded_changed = next_excluded != state.excluded;
+    state.excluded = next_excluded;
+    win::set_excluded_targets(state.excluded.data(), state.excluded.size());
+    if (excluded_changed && excluded_count) {
+      std::string ids;
+      for (const auto id : state.excluded)
+        ids += " " + std::to_string(id);
+      log_status(status, ("Display excluded from automatic selection (non-display panels):" + ids).c_str());
+    }
     if (named != state.named || profile_id != state.named_profile) {
       state.named = named;
       state.named_profile = profile_id;

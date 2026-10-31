@@ -35,6 +35,26 @@ struct PfdTargetDetection {
   const char* status = "warming_up";
 };
 
+// Removes every observation whose id is in `excluded` (zero entries are unused),
+// keeping the order of the rest, and returns the new count. Used to withhold
+// textures the panel table names as non-display panels (PMDG 777 EFB tablets)
+// from detection: they share the display's shape, so the detector cannot tell
+// them apart, and a recreated one has the highest id.
+inline std::size_t withhold_excluded(PfdTargetObservation* observations,
+                                     std::size_t count,
+                                     const std::uint64_t* excluded,
+                                     std::size_t excluded_count) noexcept {
+  std::size_t kept = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    bool drop = false;
+    for (std::size_t j = 0; j < excluded_count && !drop; ++j)
+      drop = excluded[j] && excluded[j] == observations[i].id;
+    if (!drop)
+      observations[kept++] = observations[i];
+  }
+  return kept;
+}
+
 // Empirical profile-specific heuristics, not material-name or aircraft identity
 // proof. IDs must identify resource incarnations and must not be reused. Supply
 // the complete current inventory on each call; reset on device/session changes.
