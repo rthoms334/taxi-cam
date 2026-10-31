@@ -1807,9 +1807,10 @@ DWORD run_impl() {
       halted_logged = true;
       char halt_detail[384];
       std::snprintf(halt_detail, sizeof(halt_detail),
-                    "Hook admission halted: registration failures reached %llu in one second (total %llu). Cameras disarmed and "
-                    "admission stopped for this simulator process.",
-                    static_cast<unsigned long long>(graphics.failure_rate_peak), static_cast<unsigned long long>(graphics.hook_failures));
+                    "Hook admission halted: registration failures reached %llu in one second (total %llu, last error %s). Cameras "
+                    "disarmed and admission stopped for this simulator process.",
+                    static_cast<unsigned long long>(graphics.failure_rate_peak), static_cast<unsigned long long>(graphics.hook_failures),
+                    graphics.error ? graphics.error : "unknown");
       log_status(status, halt_detail);
       log_contention(status, graphics, output);
     }

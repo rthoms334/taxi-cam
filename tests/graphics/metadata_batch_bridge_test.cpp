@@ -1019,6 +1019,19 @@ void contended_admission_checks() {
   require(win::ensure_list(native) == item && r.lists.size() == lists_before && r.failures == failures_before,
           "ensure_list did not return the live list once the lookup succeeded");
 
+  // A full list map is a capacity fault only while it holds live lists. Dead
+  // entries awaiting the worker's sweep are a bounded skip, never a failure.
+  {
+    using Capacity = win::ListCapacity;
+    const auto cap = win::Registry::MaxLists;
+    require(win::list_capacity(cap - 1, 0, 0) == Capacity::available, "A map below the bound refused admission");
+    require(win::list_capacity(cap, 0, 0) == Capacity::full, "A full map with no retirements was not a capacity fault");
+    require(win::list_capacity(cap, 50, 50) == Capacity::full, "Retirements already swept still counted as dead entries");
+    require(win::list_capacity(cap, 51, 50) == Capacity::awaiting_sweep, "A retirement since the sweep did not free a slot");
+    require(win::list_capacity(cap, 4096, 0) == Capacity::awaiting_sweep, "A map of retired lists counted as a capacity fault");
+    require(win::list_capacity(cap, 1, 5) == Capacity::full, "A swept counter ahead of retirements was treated as pending");
+  }
+
   // Failure storm: sustained error() calls halt admission and disarm once.
   require(win::graphics_armed(), "Registry not armed before the storm check");
   const auto peak_before = r.failure_rate_peak.load();

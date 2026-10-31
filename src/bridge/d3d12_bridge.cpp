@@ -294,6 +294,8 @@ struct Registry {
   // rate means a hook is retrying the same failure on every command. Halt
   // admission and disarm for the rest of the process instead of spinning.
   static constexpr std::uint64_t FailureStormPerSecond = 100;
+  // Bridge-side command-list map bound (the capture manager has its own).
+  static constexpr std::size_t MaxLists = 4096;
   std::atomic<std::uint64_t> failure_window_ms{}, failure_window_count{}, failure_rate_peak{};
   std::atomic<bool> admission_halted{};
   // Watchdog gate. False makes every hook idle and every PFD plan not_ready.
@@ -2607,6 +2609,20 @@ const boundary::Callbacks Boundaries{nullptr,
                                      submission_pass_began,
                                      submission_enhanced,
                                      before_legacy_uav};
+enum class ListCapacity { available, awaiting_sweep, full };
+// Retired lists stay in the map until the worker's next sweep (about one
+// second). Retirements since that sweep bound how many entries are dead, so a
+// full map is a real capacity fault only while it is full of live lists. Churn
+// that merely outpaces the sweep must be a bounded skip, not a hook failure:
+// counted once per hook call it reaches the storm rate and disarms the bridge
+// for the rest of the process. The sweep clears the retirements, so the list is
+// admitted on a later hook.
+ListCapacity list_capacity(std::size_t size, std::uint64_t retired, std::uint64_t swept) noexcept {
+  if (size < Registry::MaxLists)
+    return ListCapacity::available;
+  const std::uint64_t pending = retired >= swept ? retired - swept : 0;
+  return pending && size - std::min<std::uint64_t>(pending, size) < Registry::MaxLists ? ListCapacity::awaiting_sweep : ListCapacity::full;
+}
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -2641,7 +2657,17 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
       r.list_index.erase(native, found->second.get());
       r.lists.erase(found);
     }
-    if (r.lists.size() >= 4096 || r.next_id == UINT64_MAX) {
+    if (r.next_id == UINT64_MAX) {
+      error("command_list_capacity");
+      return {};
+    }
+    const auto capacity = list_capacity(r.lists.size(), r.retired[static_cast<unsigned>(Retired::lists)].load(std::memory_order_acquire),
+                                        r.swept[static_cast<unsigned>(Retired::lists)]);
+    if (capacity == ListCapacity::awaiting_sweep) {
+      count_contention(ContentionSite::registry_lifecycle);  // Bounded skip, not a hook failure.
+      return {};
+    }
+    if (capacity == ListCapacity::full) {
       error("command_list_capacity");
       return {};
     }
