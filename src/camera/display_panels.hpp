@@ -142,6 +142,28 @@ int resolve_names(const Panels& panels,
     ids[k] = 0;
   return -1;
 }
+inline std::size_t textured_count(const Panels& panels) noexcept {
+  std::size_t n = 0;
+  for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
+    n += textured(panels.panels[i]);
+  return n;
+}
+// Cockpit tables seen in this simulator process, by textured signature. A
+// table is clean when it is the process's first or the same aircraft again.
+// After a switch to another aircraft, leftover textures can sit among the new
+// cockpit's creations (replayed loads, 2026-10-31: an A350 after a 777 needed
+// shift 2 with neighbours paired wrongly), so such a pairing is not learned.
+class ProcessTables {
+ public:
+  bool observe(std::uint64_t signature) noexcept {
+    const bool clean = !last_ || last_ == signature;
+    last_ = signature;
+    return clean;
+  }
+
+ private:
+  std::uint64_t last_{};
+};
 // Live read of the current process. Refuses any other build.
 Panels read_panels() noexcept;
 }  // namespace taxi_camera::display_identity

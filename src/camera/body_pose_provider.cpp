@@ -179,6 +179,8 @@ AircraftSessionReadiness readiness_locked(std::uint64_t now) noexcept {
   out.loading = state.aircraft_session.loading() || pending != 0;
   const auto identity = state.identity.sample(now);
   const bool telemetry = identity.fresh && identity.detected_profile && fresh(state.aircraft_ms, now) && fresh(state.camera_ms, now);
+  out.flight_loaded = !state.aircraft_session.loading() && state.aircraft_session.running() && !(pending & 1u) && identity.fresh &&
+                      fresh(state.aircraft_ms, now) && fresh(state.camera_ms, now);
   out.ready = !state.aircraft_session.loading() && state.aircraft_session.running() && !(pending & 1u) && telemetry;
   if (out.ready && pending == 2) {
     unsigned serviced = 2;
@@ -976,7 +978,7 @@ AircraftSessionReadiness nonblocking_readiness(std::uint64_t now) noexcept {
   out = cached;
   out.cached = true;
   if (pending & 1u) {
-    out.ready = false;
+    out.ready = out.flight_loaded = false;
     out.loading = true;
     out.error = "camera_world_revalidation";
   }

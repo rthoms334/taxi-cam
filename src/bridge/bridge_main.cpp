@@ -254,6 +254,12 @@ struct PanelIdentityLog {
   // so re-deriving it later could shift names onto other textures.
   bool locked{};
   std::array<RenderTargetSequence::Entry, MaxDisplaySides> locked_shapes{};
+  // Panel map published in Status (protocol 26), from the latest proposal.
+  std::vector<win::PanelTexture> map;
+  win::PanelMapState map_state = win::PanelMapState::waiting;
+  int map_shift = -1;
+  display_identity::ProcessTables tables;  // Not reset per flight.
+  bool clean{};
 };
 // Joins items into "prefix [part/total]: ..." lines of bounded length.
 void log_chunks(const win::Status& status, const char* prefix, const std::vector<std::string>& items) noexcept {
@@ -325,9 +331,16 @@ void service_panel_identity(PanelIdentityLog& state,
     state.locked = false;
     state.burst_logged = false;
     state.names.clear();
+    state.map.clear();
+    state.map_state = win::PanelMapState::waiting;
+    state.map_shift = -1;
   }
   const auto panels = display_identity::read_panels();
   if (panels.error) {
+    // A table changing under the read keeps this flight's pairing.
+    if (state.map.empty())
+      state.map_state =
+          std::strncmp(panels.error, "panel_table", 11) == 0 ? win::PanelMapState::unresolved : win::PanelMapState::unavailable;
     if (!state.refusal_logged) {
       state.refusal_logged = true;
       char detail[160];
@@ -338,12 +351,21 @@ void service_panel_identity(PanelIdentityLog& state,
     return;
   }
   const auto signature = textured_signature(panels);
+  if (state.map_state == win::PanelMapState::unavailable || state.map_state == win::PanelMapState::unresolved)
+    state.map_state = win::PanelMapState::waiting;
   if (signature != state.signature) {
     state.signature = signature;
     state.seen_ms = now;
     state.burst_logged = false;
     state.locked = false;
     state.panels = panels;
+    state.map.clear();
+    state.map_state = win::PanelMapState::waiting;
+    state.map_shift = -1;
+    // A table without textured panels (before the cockpit loads) says nothing
+    // about which aircraft this process has shown.
+    if (display_identity::textured_count(panels))
+      state.clean = state.tables.observe(signature);
     try {
       std::vector<std::string> items;
       char count[48];
@@ -437,6 +459,13 @@ void service_panel_identity(PanelIdentityLog& state,
   try {
     static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
     const auto n = win::panel_texture_creation_sequence().snapshot(0, entries);
+    // Textures tracked only after their creation (aircraft discovery, or a
+    // contended creation hook) get their IDs from the recorded address. Only
+    // the newest creations can pair (textured panels + shift + late ones), so
+    // the registry lock covers a bounded tail.
+    constexpr std::size_t kResolvedTail = 256;
+    const auto tail = std::min(n, kResolvedTail);
+    win::resolve_creation_ids(entries.data() + (n - tail), tail);
 
     std::vector<display_identity::Creation> burst;
     std::vector<std::string> items;
@@ -510,6 +539,20 @@ void service_panel_identity(PanelIdentityLog& state,
                     a.creation.width, a.creation.height, a.creation.mips);
       pairs.push_back(item);
     }
+    state.map.clear();
+    for (std::size_t i = 0; i < paired; ++i) {
+      const auto& a = proposal[i];
+      win::PanelTexture entry;
+      std::strncpy(entry.name, a.panel->texture.data(), sizeof(entry.name) - 1);
+      entry.id = a.creation.id;
+      entry.index = a.panel->index;
+      entry.width = a.creation.width;
+      entry.height = a.creation.height;
+      entry.mips = a.creation.mips;
+      state.map.push_back(entry);
+    }
+    state.map_state = complete ? win::PanelMapState::paired : win::PanelMapState::incomplete;
+    state.map_shift = shift;
     std::string text;
     for (const auto& item : pairs)
       text += item;
@@ -538,6 +581,14 @@ void service_panel_identity(PanelIdentityLog& state,
     }
   } catch (...) {
   }
+}
+void publish_panel_map(const PanelIdentityLog& state, win::Status& status) noexcept {
+  status.panel_state = static_cast<std::uint32_t>(state.map_state);
+  status.panel_count = static_cast<std::uint32_t>(state.map.size());
+  status.panel_clean = state.clean;
+  status.panel_shift = state.map_shift;
+  for (std::size_t i = 0; i < state.map.size() && i < win::MaxPanelTextures; ++i)
+    status.panels[i] = state.map[i];
 }
 // Panel name of a display texture in this flight for the PFD routing cards,
 // or empty. A named texture the simulator recreated keeps its side's name.
@@ -1138,6 +1189,16 @@ DWORD run_impl() {
         pending.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
         std::memcpy(pending.aircraft_type, identity.type.data(), sizeof(pending.aircraft_type));
         std::memcpy(pending.aircraft_path, identity.path.data(), sizeof(pending.aircraft_path));
+        // An aircraft no profile matches never leaves this wait (readiness
+        // needs a supported aircraft), so aircraft discovery runs here. The
+        // panel table is first observed once the flight has loaded, as on a
+        // ready flight, so the late-creation rule keeps the same meaning.
+        win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity));
+        pending.panel_discovery = win::panel_discovery();
+        if (pending.panel_discovery && transition_session.flight_loaded)
+          service_panel_identity(panel_identity, pending, now, native_camera::get_aircraft_session_epoch(), true,
+                                 profiles::find(pending_profile));
+        publish_panel_map(panel_identity, pending);
         std::snprintf(pending.message, sizeof(pending.message), "%s",
                       !ready             ? camera_transition_message(transition)
                       : !telemetry_ready ? "Waiting for aircraft telemetry to stop."
@@ -1154,14 +1215,16 @@ DWORD run_impl() {
           std::snprintf(detail, sizeof(detail),
                         "Aircraft transition waiting: token=%llu session=%llu profile=%u failed=%u request_pending=%u "
                         "creation_pending=%u telemetry_pending=%u entries=%llu/%llu created_total=%llu "
-                        "full_reset=%u gpu_generation=%llu public_ready=%u loading=%u flow_subscribed=%u flow=%u reason=%s",
+                        "full_reset=%u gpu_generation=%llu public_ready=%u loading=%u flow_subscribed=%u flow=%u reason=%s "
+                        "flight_loaded=%u discovery=%u",
                         static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(session_epoch), pending_profile,
                         transition.profile_transition_failed, transition.pair.request_pending, transition.pair.creation_pending,
                         ready && !telemetry_ready, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
                         static_cast<unsigned long long>(transition.pair.owned_ids[1]),
                         static_cast<unsigned long long>(transition.created_total), pending_full_reset,
                         static_cast<unsigned long long>(pending_gpu_generation), public_ready, transition_session.loading,
-                        transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error);
+                        transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error,
+                        transition_session.flight_loaded, pending.panel_discovery);
           log_status(pending, detail);
           // An unsupported aircraft stays here: record what it is and which
           // render targets it creates. Log once per session, then on any type
@@ -1659,6 +1722,9 @@ DWORD run_impl() {
     status.right_id = targets[1];
     status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
     status.named_mask = win::named_target_mask();
+    win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity));
+    status.panel_discovery = win::panel_discovery();
+    publish_panel_map(panel_identity, status);
     status.snapshot_serial = snapshot.serial;
     status.snapshot_id = snapshot.id;
     status.snapshot_result = static_cast<std::uint32_t>(snapshot.result);

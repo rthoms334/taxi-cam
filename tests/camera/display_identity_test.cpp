@@ -202,6 +202,15 @@ int main() {
   require(
       section_name("VCockpit01") && section_name("VPainting02") && !section_name("Window01") && !section_name("") && !section_name("VCock"),
       "Only VCockpit and VPainting sections pass the layout check");
+  {
+    require(textured_count(panels) == 11, "The 777 table has eleven textured panels");
+    ProcessTables tables;
+    require(tables.observe(0x777), "The process's first cockpit table is clean");
+    require(tables.observe(0x777), "The same aircraft again is clean");
+    require(!tables.observe(0xa350), "A switch to another aircraft is not clean");
+    require(tables.observe(0xa350), "Reloading that aircraft is clean again");
+    require(!tables.observe(0x777), "Switching back is not clean");
+  }
   std::printf("PASS: %u display identity checks.\n", checks);
   return 0;
 }

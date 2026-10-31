@@ -69,6 +69,10 @@ struct AircraftSessionReadiness {
   bool cached = false;
   std::uint32_t last_flow_event = 0;
   const char* error = "not_initialized";
+  // The flight has loaded and is running with fresh identity and telemetry,
+  // whatever the aircraft. ready also needs a supported aircraft, so an
+  // aircraft no profile matches is only ever flight_loaded (aircraft discovery).
+  bool flight_loaded = false;
 };
 // Cache-only and nonblocking. Readiness needs fresh supported aircraft identity,
 // body telemetry and public WORLD camera data; it is independent of the selected

@@ -55,9 +55,10 @@ struct Resource : Metadata {
   ID3D12Resource* native{};
   std::uint64_t key{};
   D3D12_RESOURCE_DESC desc{};
-  // Matches some catalog profile's display. Only these feed PFD inventory, so
-  // only these count draws: shared scene targets would otherwise have every
-  // recording thread increment the same counter on every draw.
+  // Matches some catalog profile's display, or is a panel texture admitted for
+  // aircraft discovery. Only these feed PFD inventory, so only these count
+  // draws: shared scene targets would otherwise have every recording thread
+  // increment the same counter on every draw.
   bool display_shape{};
   std::atomic<std::uint64_t> draws{};
   std::atomic<std::uint64_t> submission_activity{};
@@ -834,20 +835,39 @@ void observe_safely(F&& action) noexcept {
       r.active_mask = r.calibration_mask = 0;
   }
 }
+// Aircraft discovery: while no profile matches the loaded aircraft, every panel
+// texture is tracked like a display so the panel table can name it and PFD
+// routing can take its picture. Profile aircraft keep catalog shapes only.
+std::atomic<bool> panel_discovery_on{};
+// Every VCockpit panel texture logged so far is a multi-mip R8G8B8A8_UNORM
+// render target; camera and scene buffers use other formats or one mip.
+bool panel_texture_desc(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
+         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 && d.MipLevels > 1 && d.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
+         d.Width <= RenderTargetShapes::MaximumEdge && d.Height <= RenderTargetShapes::MaximumEdge;
+}
+bool discovery_panel(const D3D12_RESOURCE_DESC& d) noexcept {
+  return panel_discovery_on.load(std::memory_order_relaxed) && panel_texture_desc(d);
+}
 bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
   bool dimensions = profiles::camera_candidate(static_cast<UINT>(d.Width), d.Height);
   for (const auto* profile : profiles::Catalog)
     dimensions |= d.Width == profile->width && d.Height == profile->height;
-  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
-         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+  return (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
+          (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0) ||
+         discovery_panel(d);
 }
-bool display_candidate_desc(const D3D12_RESOURCE_DESC& d) noexcept {
-  if (!relevant(d))
-    return false;
+bool catalog_display(const D3D12_RESOURCE_DESC& d) noexcept {
   for (const auto* profile : profiles::Catalog)
     if (profiles::matches_display(*profile, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format)))
       return true;
   return false;
+}
+// Decided once at admission (Resource::display_shape): a discovery texture
+// stays a display candidate for its lifetime, so its barrier history has no
+// gap if discovery is switched off and on again.
+bool display_shaped(const D3D12_RESOURCE_DESC& d) noexcept {
+  return catalog_display(d) || discovery_panel(d);
 }
 bool same_device(ID3D12Device* device) noexcept {
   IUnknown *a{}, *b{};
@@ -933,7 +953,8 @@ bool display_set_ready(const Registry& r, unsigned need, DXGI_FORMAT format, UIN
 // The detector can assign only this set. A generic pair, or another mip/format
 // that still matches the profile size, must not end discovery.
 bool backfill_resources_ready(const Registry& r) noexcept {
-  if (!r.profile)
+  // Discovery has no display set: panel textures first drawn later still join.
+  if (!r.profile || panel_discovery_on.load(std::memory_order_relaxed))
     return false;
   if (r.profile->id == profiles::A359.id || r.profile->id == profiles::A35K.id)
     return display_set_ready(r, 3, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
@@ -1138,13 +1159,14 @@ RenderTargetSequence& panel_texture_sequence() noexcept {
   static RenderTargetSequence sequence;
   return sequence;
 }
-void record_creation(const D3D12_RESOURCE_DESC& desc, std::uint64_t id) noexcept {
+void record_creation(const D3D12_RESOURCE_DESC& desc, std::uint64_t id, ID3D12Resource* native) noexcept {
   const auto now = GetTickCount64();
-  render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels, static_cast<std::uint32_t>(desc.Format),
-                                  id, now);
-  if (desc.MipLevels > 1 && desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+  const auto address = reinterpret_cast<std::uint64_t>(native);
+  render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
+                                  static_cast<std::uint32_t>(desc.Format), id, now, address);
+  if (panel_texture_desc(desc))
     panel_texture_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
-                                    static_cast<std::uint32_t>(desc.Format), id, now);
+                                    static_cast<std::uint32_t>(desc.Format), id, now, address);
 }
 bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial, bool created, bool* settled) {
   auto& r = registry();
@@ -1181,7 +1203,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
       const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
       if (!lock) {
         if (sequenced)  // Keep the creation order complete; the ID is unknown here.
-          record_creation(desc, 0);
+          record_creation(desc, 0, native);
         // The window's seen set may still hold an earlier object at this
         // address; it must not hide this one from its first barrier or copy.
         if (created)
@@ -1200,9 +1222,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         item->key = r.key;
         item->desc = desc;
         item->id = ++r.next_id;
-        for (const auto* profile : profiles::Catalog)
-          item->display_shape = item->display_shape || profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height,
-                                                                                 desc.MipLevels, static_cast<UINT>(desc.Format));
+        item->display_shape = display_shaped(desc);
         r.resources[native] = item;
         r.resource_index.assign(native, item);
         sequenced_id = item->id;
@@ -1216,14 +1236,14 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
           creation.serial = ++r.display_creation_count;
           r.display_creations[(creation.serial - 1) % r.display_creations.size()] = creation;
         }
-        for (const auto* profile : profiles::Catalog)
-          if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels,
-                                        static_cast<UINT>(desc.Format))) {
+        if (item->display_shape) {
+          // Live binding associates profile displays' RTVs; a discovery
+          // texture is never stamped, so its RT entries skip the lock.
+          if (catalog_display(desc))
             remember_backfill_display(r, native);
-            const auto hash = Registry::SeenResources::hash(native);
-            r.display_filter[hash / 64].fetch_or(1ull << (hash % 64), std::memory_order_release);
-            break;
-          }
+          const auto hash = Registry::SeenResources::hash(native);
+          r.display_filter[hash / 64].fetch_or(1ull << (hash % 64), std::memory_order_release);
+        }
         maybe_stop_live_backfill(r);
       } else {
         r.pfd_inventory_complete = false;
@@ -1252,7 +1272,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
     }
   }
   if (sequenced)
-    record_creation(desc, sequenced_id);
+    record_creation(desc, sequenced_id, native);
   native->Release();
   return true;
 }
@@ -1934,7 +1954,7 @@ void observe_legacy(void*,
     if (auto* item = metadata_list(list, id)) {
       if (invalid_submission)
         item->submission_proof.invalidate(PfdSubmissionProof::Refusal::barrier_uncertainty);
-      else if (const auto target = resource(b.Transition.pResource); target && target->alive && display_candidate_desc(target->desc)) {
+      else if (const auto target = resource(b.Transition.pResource); target && target->alive && target->display_shape) {
         const auto subresource = b.Transition.Subresource;
         // Exact admitted 8-bit color displays have one layer/plane. A complete
         // transition of another valid mip cannot change the copied base mip.
@@ -4647,7 +4667,7 @@ DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t n
     device = r.ready && id ? r.device : nullptr;
     for (const auto& [native, item] : r.resources) {
       (void)native;
-      if (device && item->alive && item->id == id && display_candidate_desc(item->desc)) {
+      if (device && item->alive && item->id == id && item->display_shape) {
         target = item;
         break;
       }
@@ -4772,6 +4792,40 @@ void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) no
   auto& r = registry();
   const WorkerRegistryLock lock(r);
   r.named_targets = ids;
+}
+void set_panel_discovery(bool on) noexcept {
+  if (panel_discovery_on.exchange(on, std::memory_order_relaxed) == on || !on)
+    return;
+  // Panel textures that already exist join on their next render-target
+  // transition: forget what the live scan has seen and reopen it.
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  rearm_live_backfill(r);
+}
+bool panel_discovery() noexcept {
+  return panel_discovery_on.load(std::memory_order_relaxed);
+}
+std::size_t resolve_creation_ids(RenderTargetSequence::Entry* entries, std::size_t count) noexcept {
+  std::size_t resolved = 0;
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  for (std::size_t i = 0; i < count; ++i) {
+    auto& entry = entries[i];
+    if (entry.id || !entry.native)
+      continue;
+    // The address is only a map key here. A later texture at a reused address
+    // must also have the recorded shape.
+    const auto found = r.resources.find(reinterpret_cast<ID3D12Resource*>(entry.native));
+    if (found == r.resources.end() || !found->second->alive)
+      continue;
+    const auto& desc = found->second->desc;
+    if (desc.Width == entry.width && desc.Height == entry.height && desc.MipLevels == entry.mips &&
+        static_cast<std::uint32_t>(desc.Format) == entry.format) {
+      entry.id = found->second->id;
+      ++resolved;
+    }
+  }
+  return resolved;
 }
 bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();

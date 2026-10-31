@@ -18,13 +18,17 @@ class RenderTargetSequence {
   struct Entry {
     std::uint64_t sequence{}, id{}, tick{};
     std::uint32_t width{}, height{}, mips{}, format{};
+    // Resource address at creation, never dereferenced: lets a texture the
+    // bridge tracked only later (id 0 here) be matched to its tracked ID.
+    std::uint64_t native{};
   };
   void record(std::uint32_t width,
               std::uint32_t height,
               std::uint32_t mips,
               std::uint32_t format,
               std::uint64_t id,
-              std::uint64_t tick) noexcept {
+              std::uint64_t tick,
+              std::uint64_t native = 0) noexcept {
     if (width < MinimumEdge || height < MinimumEdge)
       return;
     const auto sequence = next_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -32,6 +36,7 @@ class RenderTargetSequence {
     slot.published.store(0, std::memory_order_release);
     slot.id.store(id, std::memory_order_relaxed);
     slot.tick.store(tick, std::memory_order_relaxed);
+    slot.native.store(native, std::memory_order_relaxed);
     slot.shape.store(std::uint64_t{width} << 40 | std::uint64_t{height} << 24 | std::uint64_t{mips & 0xff} << 16 | (format & 0xffff),
                      std::memory_order_relaxed);
     slot.published.store(sequence, std::memory_order_release);
@@ -49,6 +54,7 @@ class RenderTargetSequence {
       if (slot.published.load(std::memory_order_acquire) != sequence)
         continue;
       Entry entry{sequence, slot.id.load(std::memory_order_relaxed), slot.tick.load(std::memory_order_relaxed)};
+      entry.native = slot.native.load(std::memory_order_relaxed);
       const auto shape = slot.shape.load(std::memory_order_relaxed);
       if (slot.published.load(std::memory_order_acquire) != sequence)
         continue;
@@ -64,7 +70,7 @@ class RenderTargetSequence {
 
  private:
   struct Slot {
-    std::atomic<std::uint64_t> published{}, id{}, tick{}, shape{};
+    std::atomic<std::uint64_t> published{}, id{}, tick{}, shape{}, native{};
   };
   std::array<Slot, Capacity> slots_{};
   std::atomic<std::uint64_t> next_{};

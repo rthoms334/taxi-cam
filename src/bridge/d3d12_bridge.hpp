@@ -261,6 +261,16 @@ void discover_pfds(std::uint64_t now) noexcept;
 // discover_pfds routes them first; explicit choices and dead textures are
 // never overridden or kept.
 void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) noexcept;
+// Control thread. On while the loaded aircraft matches no profile: every panel
+// texture (multi-mip R8G8B8A8_UNORM render target) is then tracked like a
+// display, named by the panel table and available to snapshots. Textures that
+// already exist join through the live scan. Never routed or stamped.
+void set_panel_discovery(bool on) noexcept;
+bool panel_discovery() noexcept;
+// Fills the ID of creation entries recorded before the bridge tracked them
+// (id 0) from the live texture at the recorded address with the same shape.
+// Returns how many were filled.
+std::size_t resolve_creation_ids(RenderTargetSequence::Entry* entries, std::size_t count) noexcept;
 // Display texture snapshot for PFD routing. Control thread only. Replaces any
 // earlier request, then copies the tracked display texture's base mip into a
 // private READBACK buffer at the next proven submission boundary, the same
