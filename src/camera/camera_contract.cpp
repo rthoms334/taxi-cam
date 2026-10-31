@@ -5,6 +5,7 @@
 #include "camera_parent_contract.hpp"
 #include "camera_release_contract.hpp"
 #include "code_contract.hpp"
+#include "panel_registry_contract.hpp"
 #include "rtti_vtables.hpp"
 #include "view_cascades_contract.hpp"
 
@@ -452,6 +453,34 @@ std::string resolve_view_cascades(discovery::ImageReader& source,
 }
 
 }  // namespace
+
+PanelTableResolution resolve_panel_table(discovery::ImageReader& source,
+                                         const discovery::Inventory& image,
+                                         std::uint64_t loaded_image_base) {
+  namespace panels = panel_registry_contract;
+  ContractReader reader(source);
+  const auto& model = panels::model();
+  const auto resolved = relocatable::resolve_contract(reader, image, model, {}, loaded_image_base);
+  if (!resolved.valid)
+    return {0, "panel_table_template: " + resolved.error};
+  const auto release = resolved.symbols[panels::PanelRelease];
+  const auto table = resolved.symbols[panels::PanelTable];
+  if (!section(image, release, panels::PanelReleaseBytes, true) || !function_prefix(reader, image, release, panels::PanelReleaseBytes))
+    return {0, "panel_table_function_boundary"};
+  // The table is static writable data: readable and writable, never code.
+  const bool storage = std::any_of(image.sections.begin(), image.sections.end(), [&](const auto& item) {
+    return (item.flags & 0xc0000000u) == 0xc0000000u && !(item.flags & 0x22000000u) && table >= item.rva &&
+           std::uint64_t(table) + panels::PanelTableBytes <= std::uint64_t(item.rva) + item.size;
+  });
+  if (!storage)
+    return {0, "panel_table_storage"};
+  const auto relocations = inspect_code_contract(reader, image, {{release, panels::PanelReleaseBytes}});
+  if (!relocations.valid)
+    return {0, "panel_table_relocations: " + relocations.error};
+  if (!same_templates(reader, model, resolved.symbols, loaded_image_base))
+    return {0, "panel_table_template_changed"};
+  return {table, {}};
+}
 
 CameraContractResolution resolve_release_camera_contract(discovery::ImageReader& source,
                                                          const discovery::Inventory& image,

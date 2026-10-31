@@ -6,9 +6,13 @@ $compiler = Join-Path (Get-TaxiToolchain $repoRoot) 'clang++.exe'
 $output = Join-Path $repoRoot 'build/tools/diagnostics'
 $standIn = Join-Path $output 'display-identity-fake'
 New-Item -ItemType Directory -Force -Path $standIn | Out-Null
-$flags = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-mno-avx','-mno-avx2','-D_WIN32_WINNT=0x0A00','-static')
+$flags = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-mno-avx','-mno-avx2','-D_WIN32_WINNT=0x0A00','-DNOMINMAX','-static')
 $scanner = Join-Path $output 'display-identity-scan.exe'
-& $compiler @flags (Join-Path $PSScriptRoot 'display_identity_scan.cpp') '-lpsapi' '-ladvapi32' '-o' $scanner
+# The panel table is resolved with the bridge's own contract code, never a fixed address.
+$contract = @('src/camera/camera_contract.cpp','src/camera/camera_contract_model.cpp','src/camera/relocatable_contract.cpp',
+    'src/camera/rtti_vtables.cpp','src/camera/code_contract.cpp','src/camera/activation_mask.cpp','tools/diagnostics/image_inventory.cpp') |
+    ForEach-Object { Join-Path $repoRoot $_ }
+& $compiler @flags (Join-Path $PSScriptRoot 'display_identity_scan.cpp') @contract '-lpsapi' '-ladvapi32' '-o' $scanner
 if ($LASTEXITCODE -ne 0) { throw 'Display identity scanner compile failed.' }
 # The stand-in must carry the simulator's basename to pass the scanner's process check.
 $fake = Join-Path $standIn 'FlightSimulator2024.exe'
@@ -37,7 +41,7 @@ try {
 }
 $nameRef = '{0:x}' -f ($material + 8)
 $text = $report -join "`n"
-if ($text -notmatch '=== panels: skipped \(untested build') { throw 'The build-specific panel walk ran on an untested image.' }
+if ($text -notmatch '=== panels: skipped \(panel table unresolved: ') { throw 'The panel walk ran without a resolved panel table.' }
 if ($text -notmatch "(?m)^name ref $nameRef heap -> name DUS\+0\r?\n\s+\+80: [0-9a-f]+ -> holder [0-9a-f]+ base-48") {
   throw "Scanner did not tie the planted name to its texture chain (material $('{0:x}' -f $material))."
 }

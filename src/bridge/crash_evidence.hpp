@@ -43,7 +43,6 @@ struct CodeCaptureResult {
   const char* error = "";
 };
 inline CodeCaptureResult* code_capture = nullptr;
-inline constexpr std::uint64_t renderer_fault_rva = 64028644;
 inline constexpr unsigned retained_records = 16;
 inline constexpr unsigned maintenance_entries = 4096, maintenance_passes = 32;
 inline constexpr std::uint64_t maintenance_milliseconds = 250;
@@ -294,11 +293,11 @@ inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) no
   const auto address = reinterpret_cast<std::uint64_t>(e.ExceptionAddress);
   if (e.ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !destination->module || address < destination->module)
     return EXCEPTION_CONTINUE_SEARCH;
-  // The observed 1.8.16.0 site, or the same instruction sequence located in
-  // the current image at arm time (1.9.12.0: +0x3E5C054). Nothing else.
+  // Only the renderer instruction sequence located in the current image at arm
+  // time (capture_fault_site_code; 1.9.12.0: +0x3E5C054). No fixed site.
   const auto rva = address - destination->module;
   const bool located = code_capture && code_capture->match_rva && rva == code_capture->match_rva;
-  if ((rva != renderer_fault_rva && !located) || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS ||
+  if (!located || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS ||
       InterlockedCompareExchange(&destination->state, 1, 0) != 0)
     return EXCEPTION_CONTINUE_SEARCH;
   // Only bounded copies into an already mapped, initialized record. No file

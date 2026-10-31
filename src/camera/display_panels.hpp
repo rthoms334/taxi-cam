@@ -5,15 +5,16 @@
 #include <cstring>
 
 namespace taxi_camera::display_identity {
-// Display identity research (diagnostics only; nothing routes by it yet).
-// Store 1.8.16.0 static decode: the panel.cfg reader (0x30F5E00) creates one
-// 0x690-byte panel per [VCockpitNN]/[VPaintingNN] section and keeps up to 64
-// in a static registry (getter 0x30F41F0) with the count at +0x200.
-inline constexpr std::uint32_t kTestedTimestamp = 1787653788, kTestedImageSize = 0xE108600;
-inline constexpr std::uint32_t kPanelRegistryRva = 0xA50B160, kPanelCountOffset = 0x200, kMaxPanels = 64;
-// Panel fields: canvas object (i16 format, i32 width at +4, height at +8),
+// The panel.cfg reader creates one 0x690-byte panel per [VCockpitNN]/
+// [VPaintingNN] section and keeps up to 64 in a static table with the count at
+// +0x200. The table's address is resolved per process from its release
+// function (panel_registry_contract.hpp), not tied to a simulator build.
+inline constexpr std::uint32_t kPanelCountOffset = 0x200, kMaxPanels = 64;
+// Panel fields, decoded on Store 1.8.16.0 and unchanged on the 2026-10-31
+// Store build: canvas object (i16 format, i32 width at +4, height at +8),
 // inline section name, texture= name (small string: pointer when the u32 at
 // +0xC is nonzero, else inline), index and kind (4 VCockpit, 8 VPainting).
+// Every read checks the section name, so a layout change refuses the table.
 inline constexpr std::uint32_t kCanvasOffset = 0x18, kSectionOffset = 0x88, kTextureOffset = 0x528, kTextureHeapFlag = 0x534,
                                kIndexOffset = 0x598, kKindOffset = 0x680;
 inline constexpr std::uint32_t kKindVCockpit = 4;
@@ -36,6 +37,11 @@ inline void copy_name(const unsigned char* bytes, std::size_t size, std::array<c
   for (; n < size && n + 1 < N && bytes[n] >= 32 && bytes[n] <= 126; ++n)
     out[n] = static_cast<char>(bytes[n]);
   out[n] = 0;
+}
+// The section names the reader creates panels for. Any other text at the
+// section offset means the panel layout moved.
+inline bool section_name(const char* name) noexcept {
+  return std::strncmp(name, "VCockpit", 8) == 0 || std::strncmp(name, "VPainting", 9) == 0;
 }
 // A panel the simulator draws into a texture of its own: a VCockpit panel
 // with a canvas and a real texture= name. NO_TEXTURE panels get none.

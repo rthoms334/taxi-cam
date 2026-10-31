@@ -229,8 +229,12 @@ int main() {
   EXCEPTION_RECORD exception{};
   EXCEPTION_POINTERS pointers{&exception, &context};
   assert(ce::capture(&record, nullptr) == EXCEPTION_CONTINUE_SEARCH && record.state == 0);
+  // The site the arm-time locator found in the loaded image.
+  ce::CodeCaptureResult site;
+  site.match_rva = 0x3E64BC4;
+  ce::code_capture = &site;
   exception.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
-  exception.ExceptionAddress = reinterpret_cast<void*>(record.module + ce::renderer_fault_rva);
+  exception.ExceptionAddress = reinterpret_cast<void*>(record.module + site.match_rva);
   context.Rip = reinterpret_cast<std::uint64_t>(exception.ExceptionAddress);
   exception.NumberParameters = 2;
   exception.ExceptionInformation[0] = 0;   // Read access violation.
@@ -316,8 +320,14 @@ int main() {
     assert(!write(5, ce::legacy_record_file_bytes, 1, 4097));
   }
   assert(ce::capture(nullptr, &pointers) == EXCEPTION_CONTINUE_SEARCH);
-  // The arm-time locator admits the same instruction at the current image's
-  // RVA; without a located site only the observed 1.8.16.0 RVA is accepted.
+  // The arm-time locator admits the instruction at the current image's RVA;
+  // without a located site no fault is accepted, at any RVA.
+  ce::code_capture = nullptr;
+  ce::Record unlocated;
+  unlocated.module = 0x10000000;
+  exception.ExceptionAddress = reinterpret_cast<void*>(unlocated.module + 64028644);  // The 1.8.16.0 site.
+  context.Rip = reinterpret_cast<std::uint64_t>(exception.ExceptionAddress);
+  assert(ce::capture(&unlocated, &pointers) == EXCEPTION_CONTINUE_SEARCH && unlocated.state == 0);
   ce::Record located;
   located.module = 0x10000000;
   exception.ExceptionAddress = reinterpret_cast<void*>(located.module + 0x3E5C054);
