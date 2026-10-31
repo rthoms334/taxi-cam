@@ -87,6 +87,51 @@ int main() {
       expect(!amd64_image(client), "truncated PE image refused");
     }
     write(client, image());
+    // Each failure mode is named and carries the exact path checked.
+    delete_file(client);
+    auto check = inspect_image(client);
+    expect(check.status == ImageStatus::missing, "absent client classified missing");
+    auto text = describe_image_issue(L"SimConnect_internal.dll", client, check);
+    expect(text.find(L"is missing") != std::wstring::npos && text.find(client) != std::wstring::npos, "missing text names path");
+    write(client, image(true, 0x14C));
+    check = inspect_image(client);
+    text = describe_image_issue(L"SimConnect_internal.dll", client, check);
+    expect(check.status == ImageStatus::not_x64 && text.find(L"0x14C") != std::wstring::npos && text.find(client) != std::wstring::npos,
+           "x86 client classified not x64 with machine type and path");
+    write(client, image(true, 0xAA64));
+    expect(inspect_image(client).detail.find(L"ARM64") != std::wstring::npos, "ARM64 client named");
+    write(client, std::string("not a PE file at all, just text padding to exceed sixty four bytes of length......"));
+    expect(inspect_image(client).status == ImageStatus::not_x64, "non-PE content classified not x64");
+    write(client, image());
+    expect(inspect_image(client).status == ImageStatus::ok, "valid client classified ok");
+    // A folder named like the DLL is not a readable image.
+    delete_file(client);
+    create_directories(client);
+    check = inspect_image(client);
+    expect(check.status == ImageStatus::missing && !check.detail.empty(), "folder in place of client reported");
+    remove_directory_tree(client);
+    write(client, image());
+    // Case differences are irrelevant on NTFS.
+    delete_file(client);
+    write(join(sim, L"SIMCONNECT_INTERNAL.DLL"), image());
+    expect(!mentions(issues(), L"SimConnect_internal.dll"), "upper-case client file name accepted");
+    delete_file(join(sim, L"SIMCONNECT_INTERNAL.DLL"));
+    write(client, image());
+    // Access denied on a Store package file is tolerated only when the file exists but cannot be read.
+    ImageCheck denied{ImageStatus::unreadable, ERROR_ACCESS_DENIED, L""};
+    expect(content_unreadable_but_present(denied), "access denied treated as present");
+    expect(!content_unreadable_but_present({ImageStatus::unreadable, ERROR_BAD_FORMAT, L""}), "other read errors still refused");
+    expect(!content_unreadable_but_present({ImageStatus::missing, ERROR_ACCESS_DENIED, L""}), "missing never tolerated");
+    expect(!content_unreadable_but_present({ImageStatus::not_x64, 0, L"x"}), "wrong architecture never tolerated");
+    expect(describe_image_issue(L"X.dll", L"C:\p\X.dll", denied).find(L"could not be read, Windows error 5") != std::wstring::npos,
+           "unreadable text includes Windows error");
+    // Wrong folder level: the selected folder is the package root above Content.
+    const auto package = join(root, L"package");
+    write(join(join(package, L"Content"), L"FlightSimulator2024.exe"), image(false));
+    write(join(join(package, L"Content"), L"SimConnect_internal.dll"), image());
+    const auto wrong = prerequisite_issues(package, system);
+    expect(mentions(wrong, join(join(package, L"Content"), L"SimConnect_internal.dll")), "package-root selection points at Content");
+    expect(mentions(wrong, L"select " + join(package, L"Content")), "package-root selection suggests the Content folder");
     // Respect app-local DLL precedence: a wrong-architecture local copy shadows a valid system copy.
     const auto local = join(sim, L"msvcp140.dll");
     write(local, image(true, 0x14C));

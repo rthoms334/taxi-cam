@@ -159,7 +159,8 @@ void check(const Options& options) {
     return;
   const auto simulator = trim_separators(full_path(options.simulator));
   if (!is_file(join(simulator, L"FlightSimulator2024.exe")))
-    fail(L"Select the MSFS 2024 Content directory containing FlightSimulator2024.exe.");
+    fail(L"FlightSimulator2024.exe was not found in the selected folder " + simulator +
+         L". Select the MSFS 2024 Content directory containing it.");
   if (equal_insensitive(options.destination, trim_separators(path_root(options.destination))) ||
       equal_insensitive(options.destination, simulator))
     fail(L"Use a dedicated companion installation directory.");

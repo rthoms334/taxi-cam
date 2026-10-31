@@ -61,7 +61,7 @@ try {
     $result = Invoke-Setup check $app @('--simulator', $sim, '--settings-closed') 'taxi-cam|C:\Other Installation\taxi-cam.exe'
     Assert-That ($result.Code -ne 0 -and $result.Error -like 'Exit every Taxi Cam*') 'Settings reset accepted another running companion.'
     $result = Invoke-Setup check $app @('--simulator', (Join-Path $fixture 'missing-sim'))
-    Assert-That ($result.Code -ne 0 -and $result.Error -like 'Select the MSFS 2024 Content directory*') 'Missing simulator accepted.'
+    Assert-That ($result.Code -ne 0 -and $result.Error -like 'FlightSimulator2024.exe was not found in the selected folder*') 'Missing simulator accepted.'
     $result = Invoke-Setup check $sim @('--simulator', $sim)
     Assert-That ($result.Code -ne 0 -and $result.Error -like 'Use a dedicated companion installation directory*') 'Simulator folder accepted as installation.'
     $result = Invoke-Setup check $app @('--simulator', $sim, '--exe-xml', (Join-Path $fixture 'config/other.xml'))
