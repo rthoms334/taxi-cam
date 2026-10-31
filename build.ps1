@@ -319,6 +319,7 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Runtime log rotation regression failed.' }
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
+        @{Name='simulator-exit'; Sources=@('tests/app/simulator_exit_test.cpp')},
         @{Name='connection-recoverability'; Sources=@('tests/app/connection_recoverability_test.cpp')},
         @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp','src/camera/local_memory.cpp')},
         @{Name='profile-selection'; Sources=@('tests/app/profile_selection_test.cpp')},

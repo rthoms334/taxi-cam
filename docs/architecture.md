@@ -66,7 +66,7 @@ Preparation compiles each compositor and PFD-stamp shader once per process: the 
 
 The first normal launch shows Settings even when MSFS starts the companion with `--background`. After Settings has been shown successfully, later background starts remain in the tray; explicit manual launches still show the window. First-use state belongs to the Windows user and survives updates. UI previews do not consume it. When MSFS closes, the companion stays in the tray so a later session can reconnect without depending on automatic startup.
 
-Closing the settings window hides it. Exiting the companion clears camera delivery. The bridge and its installed hooks stay loaded until MSFS exits because recorded GPU commands may still refer to their resources.
+When the simulator exits, a companion that the simulator started (it is on the parent chain of the attached `FlightSimulator2024.exe`) closes itself after a 3 s grace unless the tray option "Exit when the simulator closes" is off, so Steam does not see a surviving child of the game. Unsaved edits in a visible settings window keep it open. Closing the settings window hides it. Exiting the companion clears camera delivery. The bridge and its installed hooks stay loaded until MSFS exits because recorded GPU commands may still refer to their resources.
 
 Source: [launcher](../src/app/launcher.hpp), [connection recoverability](../src/app/connection_recoverability.hpp), [bridge startup and control loop](../src/bridge/bridge_main.cpp).
 

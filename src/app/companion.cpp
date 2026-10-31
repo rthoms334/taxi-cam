@@ -34,7 +34,7 @@
 namespace {
 using namespace taxi_camera;
 namespace win = standalone;
-constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3;
+constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, SimulatorExitMessage = WM_APP + 4;
 constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CAM_VERSION_MINOR, TAXI_CAM_VERSION_PATCH};
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
@@ -67,6 +67,7 @@ std::atomic<DWORD> simulator_pid{};
 HANDLE worker{}, show_event{}, singleton{};
 bool dirty = false, refreshing = false, background_start = false, preview_ui = false;
 std::atomic<bool> auto_connect{true};
+std::atomic<bool> exit_with_simulator{true};
 std::atomic<bool> connection_requested{}, connection_disconnected{};
 win::ConnectCommandQueue connect_commands;
 win::CameraHotkeys hotkey_draft = win::DefaultCameraHotkeys, hotkey_saved = win::DefaultCameraHotkeys;
@@ -2121,6 +2122,11 @@ DWORD WINAPI connection_worker(void*) {
   constexpr std::uint64_t kDetachedRescanMs = 1000;
   win::SimulatorAttach attach;
   std::uint64_t last_scan_ms = 0;
+  // MSFS starts this process from exe.xml, which makes it a child that Steam
+  // counts as the game still running. Decided once per attach, while the
+  // parent still exists.
+  bool started_by_simulator = false;
+  win::SimulatorExitGate exit_gate;
   while (running.load()) {
     if (preview_ui) {
       Sleep(100);
@@ -2180,6 +2186,9 @@ DWORD WINAPI connection_worker(void*) {
       ignore_heartbeat_through = 0;
       startup_retry.reset();
       simulator_pid = 0;
+      if (win::exit_after_simulator(exit_with_simulator.load(std::memory_order_acquire), started_by_simulator))
+        exit_gate.simulator_closed(GetTickCount64());
+      started_by_simulator = false;
       {
         const std::lock_guard lock(app_mutex);
         status = {};
@@ -2201,6 +2210,8 @@ DWORD WINAPI connection_worker(void*) {
         notification_reader.reset();
       }
       simulator_pid = pid;
+      exit_gate.simulator_attached();
+      started_by_simulator = win::started_by_process(pid);
       attempted = false;
       load_started_this_session = false;
       bridge_ok = false;
@@ -2216,6 +2227,9 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       }
     }
+    // The handles above are closed by now; leave so no child of the simulator remains.
+    if (!attached && exit_gate.due(GetTickCount64()))
+      PostMessageW(window, SimulatorExitMessage, 0, 0);
     const bool want_connect =
         win::should_attempt_connect(auto_on, attempted, command, manual_armed, connection_disconnected.load(std::memory_order_acquire));
     if (attached && want_connect && startup_retry.ready(GetTickCount64())) {
@@ -2669,6 +2683,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         invalidate_camera_mode_cards();
       }
       return 0;
+    case SimulatorExitMessage:
+      if (!win::may_exit_now(IsWindowVisible(hwnd) != FALSE, dirty)) {
+        notice = L"The simulator closed. Save or discard your changes, then choose Exit to close Taxi Cam.";
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      stop_service();
+      DestroyWindow(hwnd);
+      return 0;
     case WhatsNewMessage:
       show_whats_new();
       return 0;
@@ -2684,6 +2707,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
         AppendMenuW(menu, MF_STRING | (draft().notifications ? MF_CHECKED : MF_UNCHECKED), 605, L"Show notifications");
+        AppendMenuW(menu, MF_STRING | (exit_with_simulator.load(std::memory_order_acquire) ? MF_CHECKED : MF_UNCHECKED), 606,
+                    L"Exit when the simulator closes");
         AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 601, L"Exit");
@@ -2710,6 +2735,16 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         if (selected == 512)
           report_bug();
+        if (selected == 606) {
+          const bool next = !exit_with_simulator.load(std::memory_order_acquire);
+          exit_with_simulator.store(next, std::memory_order_release);
+          if (!win::save_exit_with_simulator(win::settings_directory(), next))
+            notice = L"Could not save the exit preference.";
+          else
+            notice = next ? L"Taxi Cam will close when the simulator that started it closes."
+                          : L"Taxi Cam will stay in the tray after the simulator closes.";
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (selected == 601) {
           stop_service();
           DestroyWindow(hwnd);
@@ -3104,6 +3139,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   // Connect or Auto-connect enables it.
   current.enabled = 0;
   auto_connect.store(win::load_auto_connect(win::settings_directory()), std::memory_order_release);
+  exit_with_simulator.store(win::load_exit_with_simulator(win::settings_directory()), std::memory_order_release);
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
     notice = L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.";
   hotkey_draft = hotkey_saved;

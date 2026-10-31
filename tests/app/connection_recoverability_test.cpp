@@ -32,6 +32,12 @@ int main() {
     require(load_auto_connect(L""), "Empty directory fails open to the default");
     require(!save_auto_connect(L"", false), "Empty directory cannot write preference");
 
+    require(load_exit_with_simulator(directory), "Missing preference defaults to exit-with-simulator on");
+    require(save_exit_with_simulator(directory, false) && !load_exit_with_simulator(directory), "Persist exit-with-simulator off");
+    require(load_auto_connect(directory), "Exit preference left Auto-connect untouched");
+    require(save_exit_with_simulator(directory, true) && load_exit_with_simulator(directory), "Persist exit-with-simulator on");
+    require(!save_exit_with_simulator(L"", false) && load_exit_with_simulator(L""), "Empty directory uses the default");
+
     require(should_attempt_connect(true, false, ConnectCommand::none), "Auto-connect attempts on first sighting");
     require(!should_attempt_connect(true, true, ConnectCommand::none), "Auto-connect does not hammer after an attempt");
     require(!should_attempt_connect(false, false, ConnectCommand::none), "Manual mode waits for Connect");

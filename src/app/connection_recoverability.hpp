@@ -25,6 +25,24 @@ inline bool save_auto_connect(const std::wstring& directory, bool enabled) {
   return WritePrivateProfileStringW(L"companion", L"auto_connect", enabled ? L"1" : L"0", path.c_str()) != FALSE;
 }
 
+// Close the companion when the simulator that started it exits. On by default;
+// the companion only applies it when the simulator is its parent process.
+inline constexpr UINT kDefaultExitWithSimulator = 1;
+
+inline bool load_exit_with_simulator(const std::wstring& directory) {
+  if (directory.empty())
+    return kDefaultExitWithSimulator != 0;
+  const auto path = directory + L"\\settings.ini";
+  return GetPrivateProfileIntW(L"companion", L"exit_with_simulator", kDefaultExitWithSimulator, path.c_str()) != 0;
+}
+
+inline bool save_exit_with_simulator(const std::wstring& directory, bool enabled) {
+  if (directory.empty())
+    return false;
+  const auto path = directory + L"\\settings.ini";
+  return WritePrivateProfileStringW(L"companion", L"exit_with_simulator", enabled ? L"1" : L"0", path.c_str()) != FALSE;
+}
+
 enum class ConnectCommand : std::uint32_t { none = 0, connect = 1, reset = 2, disconnect = 3 };
 
 inline const wchar_t* connection_button_label(bool requested) noexcept {

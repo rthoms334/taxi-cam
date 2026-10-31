@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include "module_inventory.hpp"
+#include "simulator_exit.hpp"
 
 namespace taxi_camera::standalone {
 inline bool same_path(const std::wstring& a, const std::wstring& b) {
@@ -311,6 +312,38 @@ inline SimulatorAttach find_simulator_attach(const std::wstring& expected) {
       break;
     }
   return result;
+}
+// One-shot process table read for ancestry checks.
+inline bool started_by_process(DWORD simulator_pid) {
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE)
+    return false;
+  std::vector<std::pair<DWORD, DWORD>> parents;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot, &entry))
+    do
+      parents.emplace_back(entry.th32ProcessID, entry.th32ParentProcessID);
+    while (Process32NextW(snapshot, &entry));
+  CloseHandle(snapshot);
+  const auto lookup = [&](std::uint32_t pid) {
+    ProcessRecord record;
+    for (const auto& [id, parent] : parents)
+      if (id == pid) {
+        record = {id, parent, 0, true};
+        break;
+      }
+    if (!record.found)
+      return record;
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+      FILETIME created{}, exited{}, kernel{}, user{};
+      if (GetProcessTimes(process, &created, &exited, &kernel, &user))
+        record.created = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+      CloseHandle(process);
+    }
+    return record;
+  };
+  return descends_from(GetCurrentProcessId(), simulator_pid, lookup);
 }
 inline DWORD find_simulator(const std::wstring& expected) {
   return find_simulator_attach(expected).pid;
