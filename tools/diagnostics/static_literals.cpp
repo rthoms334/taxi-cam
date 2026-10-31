@@ -7,11 +7,10 @@ namespace {
 
 constexpr std::uint32_t kReadable = 0x40000000;
 constexpr std::uint32_t kWritable = 0x80000000;
-constexpr std::uint32_t kExcluded = 0x20000000 | 0x02000000;
+constexpr std::uint32_t kExcluded = kWritable | 0x20000000 | 0x02000000;
 constexpr std::uint32_t kMaximumRequests = 8;
 constexpr std::uint32_t kMaximumBytes = 128;
 
-enum class LiteralScope { read_only, fixed_pose_type_name };
 
 bool valid_sections(const Inventory& image) {
   if (image.sections.empty() || image.sections.size() > 96) {
@@ -33,24 +32,18 @@ bool valid_sections(const Inventory& image) {
   return true;
 }
 
-StaticLiteral read_literal(ImageReader& reader,
-                           const Inventory& image,
-                           std::uint32_t rva,
-                           StaticLiteralInventory& result,
-                           LiteralScope scope) {
+StaticLiteral read_literal(ImageReader& reader, const Inventory& image, std::uint32_t rva, StaticLiteralInventory& result) {
   StaticLiteral record;
   record.rva = rva;
   const ImageSection* storage = nullptr;
-  const auto excluded = kExcluded | (scope == LiteralScope::read_only ? kWritable : 0);
   for (const auto& section : image.sections) {
-    if ((section.flags & kReadable) != 0 && (section.flags & excluded) == 0 && rva >= section.rva && rva - section.rva < section.size) {
+    if ((section.flags & kReadable) != 0 && (section.flags & kExcluded) == 0 && rva >= section.rva && rva - section.rva < section.size) {
       storage = &section;
       break;
     }
   }
   if (!storage) {
-    record.error = scope == LiteralScope::read_only ? "The literal RVA is not in readable, non-writable static data."
-                                                    : "The fixed type name is not in readable, non-executable image data.";
+    record.error = "The literal RVA is not in readable, non-writable static data.";
     return record;
   }
 
@@ -107,34 +100,11 @@ StaticLiteralInventory inspect_static_literals(ImageReader& reader, const Invent
   result.valid = true;
   result.records.reserve(rvas.size());
   for (const auto rva : rvas) {
-    result.records.push_back(read_literal(reader, image, rva, result, LiteralScope::read_only));
+    result.records.push_back(read_literal(reader, image, rva, result));
     if (!result.records.back().error.empty()) {
       result.valid = false;
       result.error = "One or more requested static literals could not be verified.";
     }
-  }
-  return result;
-}
-
-StaticLiteralInventory inspect_known_pose_type_names(ImageReader& reader, const Inventory& image) {
-  StaticLiteralInventory result;
-  if (!image.valid_image || image.machine != 0x8664 || image.timestamp != 1787653788 || image.image_size != 235963904 ||
-      image.section_count != 14 || !valid_sections(image)) {
-    result.error = "The fixed pose type names require the exact validated AMD64 build and section metadata.";
-    return result;
-  }
-  result.valid = true;
-  result.records.reserve(2);
-  for (const auto rva : {165937400u, 166129720u}) {
-    auto record = read_literal(reader, image, rva, result, LiteralScope::fixed_pose_type_name);
-    if (record.error.empty() && !record.text.starts_with(".?AV") && !record.text.starts_with(".?AU")) {
-      record.error = "Unverified diagnostic text: the fixed name lacks the expected MSVC class or struct TypeDescriptor prefix.";
-    }
-    if (!record.error.empty()) {
-      result.valid = false;
-      result.error = "One or more fixed pose type names could not be verified.";
-    }
-    result.records.push_back(std::move(record));
   }
   return result;
 }

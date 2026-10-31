@@ -47,4 +47,4 @@ Regeneration requires explicit paths to all reviewed inputs; a normal build uses
   -Receipt 'build/validation/generated-camera-contract-receipt.json'
 ```
 
-Review the generated changes and receipt before replacing `src/camera/camera_contract_model.cpp`. The legacy `profile.hpp` and `verified_profile.cpp` remain evidence for the separate read-only diagnostic tools; the production bridge does not link the old fingerprint list.
+Review the generated changes and receipt before replacing `src/camera/camera_contract_model.cpp`. The archived captures are the evidence; no fingerprint list or fixed address from one build is kept in the source.
