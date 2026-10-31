@@ -110,6 +110,7 @@ body:
         Copy these files from the affected session into a ZIP and attach it below:
 
         - `bridge.log` — the main runtime log. Include the full log around the problem, not only the last line.
+        - `launcher.log` — the companion's attach and bridge-load record. Always include it when the app stays on Waiting for the simulator or the bridge is not connected.
         - `profiles/fbw-a380x.ini` — saved aircraft settings and camera calibration, if present.
 
         Note the incident's date, local time and time zone so we can match your description to the evidence.

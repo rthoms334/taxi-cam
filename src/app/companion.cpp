@@ -56,6 +56,7 @@ std::mutex app_mutex;
 win::Settings current;
 win::Status status;
 bool received_bridge_status{};  // Guarded by app_mutex; retained across simulator sessions.
+win::BridgeLinkReport bridge_link;  // Guarded by app_mutex; the bug report's attach and load facts.
 // Guarded by app_mutex. The connection worker takes unseen bridge events from
 // every status sample; the UI thread shows them (Shell_NotifyIcon from the
 // window thread only) and clears the queue.
@@ -290,6 +291,10 @@ void report_bug() {
     context.status = status;
     context.bridge_seen = received_bridge_status;
     context.simulator_running = simulator_pid.load() != 0;
+    context.link = bridge_link;
+    context.link.auto_connect = auto_connect.load(std::memory_order_acquire);
+    context.link.connection_requested = connection_requested.load(std::memory_order_acquire);
+    context.link.connection_disconnected = connection_disconnected.load(std::memory_order_acquire);
   }
   context.now = GetTickCount64();
   context.ui_preview = preview_ui;
@@ -2183,6 +2188,7 @@ DWORD WINAPI connection_worker(void*) {
       {
         const std::lock_guard lock(app_mutex);
         status = {};
+        bridge_link = {};
         current.enabled = 0;
         connection_requested.store(false, std::memory_order_release);
         connection = connection_disconnected.load(std::memory_order_acquire) ? L"Disconnected. Choose Connect to enable the cameras again."
@@ -2201,6 +2207,11 @@ DWORD WINAPI connection_worker(void*) {
         notification_reader.reset();
       }
       simulator_pid = pid;
+      {
+        const std::lock_guard lock(app_mutex);
+        bridge_link = {};
+        bridge_link.install = win::simulator_install_kind(attach.path);
+      }
       attempted = false;
       load_started_this_session = false;
       bridge_ok = false;
@@ -2252,6 +2263,10 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       } else {
         exchange_control(mailbox);
+        {
+          const std::lock_guard lock(app_mutex);
+          bridge_link.mailbox_open = true;
+        }
         win::LaunchDiagnostics launch_diagnostics;
         const bool allow_load = win::fresh_load_allowed(load_started_this_session);
         const auto loaded = win::load_bridge(attached, attach.path.empty() ? expected_simulator : attach.path,
@@ -2259,6 +2274,13 @@ DWORD WINAPI connection_worker(void*) {
         if (launch_diagnostics.load_started)
           load_started_this_session = true;
         win::log_launch(win::settings_directory(), attached, loaded, launch_diagnostics);
+        {
+          const std::lock_guard lock(app_mutex);
+          bridge_link.load_attempted = launch_diagnostics.load_started;
+          bridge_link.load_ok = loaded.ok;
+          bridge_link.load_error = loaded.error;
+          bridge_link.load_phase = win::load_phase_name(launch_diagnostics.phase);
+        }
         bool retrying = startup_retry.schedule(loaded, GetTickCount64());
         if (!retrying && !loaded.ok && loaded.retry_before_load)
           retrying = startup_retry.schedule_recovery(GetTickCount64());

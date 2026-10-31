@@ -47,6 +47,28 @@ int main() {
   assert(snapshot.find("Profile=1/fbw-a380x") != std::string::npos);
   assert(snapshot.find("fps=30") != std::string::npos && snapshot.find("preview_mask=1") != std::string::npos);
   assert(snapshot.find("Brightness_EV day/night=-1.5/0.25") != std::string::npos);
+  // The link line separates never-attached, load-failed and loaded-but-silent.
+  assert(snapshot.find("Bridge link: sim_attached=1; install=unknown; auto_connect=0; connect_requested=0; disconnected_by_user=0; "
+                       "mailbox_open=0; load_attempted=0; load_ok=0; load_error=0; load_phase=none") != std::string::npos);
+  context.link.auto_connect = context.link.connection_requested = context.link.mailbox_open = true;
+  context.link.load_attempted = context.link.load_ok = true;
+  context.link.load_phase = load_phase_name(L"complete");
+  context.link.install = simulator_install_kind(L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\MSFS2024\\FlightSimulator2024.exe");
+  snapshot = bug_report_snapshot(context);
+  assert(snapshot.find("install=steam; auto_connect=1; connect_requested=1; disconnected_by_user=0; mailbox_open=1; "
+                       "load_attempted=1; load_ok=1; load_error=0; load_phase=complete") != std::string::npos);
+  context.link.load_ok = false;
+  context.link.load_error = 5;
+  context.link.load_phase = load_phase_name(L"windows_loader");
+  assert(bug_report_snapshot(context).find("load_ok=0; load_error=5; load_phase=windows_loader") != std::string::npos);
+  assert(std::string(simulator_install_kind(L"D:\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\FlightSimulator2024.exe")) ==
+         "store");
+  assert(std::string(simulator_install_kind(L"C:\\Program Files\\WindowsApps\\Microsoft.Limitless_1.0_x64__8wekyb3d8bbwe\\FlightSimulator2024.exe")) ==
+         "store");
+  assert(std::string(simulator_install_kind(L"E:\\Games\\FlightSimulator2024.exe")) == "other");
+  assert(std::string(simulator_install_kind(L"")) == "unknown");
+  assert(std::string(load_phase_name(nullptr)) == "none" && std::string(load_phase_name(L"C:\\Users\\private")) == "other");
+  context.link = {};
   context.bridge_seen = true;
   assert(bug_report_snapshot(context).find("disconnected; previous status unavailable") != std::string::npos);
 

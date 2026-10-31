@@ -1,4 +1,5 @@
 #pragma once
+#include <cwchar>
 #include <iomanip>
 #include <locale>
 #include <sstream>
@@ -6,17 +7,62 @@
 #include <string_view>
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/protocol.hpp"
+#include "launcher.hpp"
 
 namespace taxi_camera::standalone {
 inline constexpr std::string_view BugReportPage = "https://github.com/rthoms334/taxi-cam/issues/new?template=bug_report.yml";
 inline constexpr size_t BugReportSnapshotLimit = 2200, BugReportUrlLimit = 7500;
 inline constexpr std::uint64_t BugReportFreshMs = 3000;
 
+// Why the bridge has not reported: the companion-side facts that separate
+// "never attached", "attached but the load failed" and "loaded but silent".
+// Fixed vocabulary and numbers only; no paths, names or message text.
+struct BridgeLinkReport {
+  bool auto_connect{}, connection_requested{}, connection_disconnected{}, mailbox_open{};
+  bool load_attempted{}, load_ok{};
+  unsigned long load_error{};
+  const char* load_phase = "none";   // Static string from this file's vocabulary.
+  const char* install = "unknown";   // store, steam, other or unknown.
+};
+// The install family of the attached simulator image, from its path alone.
+inline const char* simulator_install_kind(const std::wstring& path) {
+  if (path.empty())
+    return "unknown";
+  const auto normalized = normalize_path_separators(path);
+  if (contains_ci(normalized, L"\\steamapps\\"))
+    return "steam";
+  if (contains_ci(normalized, L"\\XboxGames\\") || contains_ci(normalized, L"\\WindowsApps\\"))
+    return "store";
+  return "other";
+}
+// Launch phases are wide literals in the launcher; report only those names so
+// arbitrary text never reaches the report.
+inline const char* load_phase_name(const wchar_t* phase) {
+  struct Phase {
+    const wchar_t* wide;
+    const char* narrow;
+  };
+  static constexpr Phase phases[] = {{L"preflight", "preflight"},
+                                     {L"windows_loader_create", "windows_loader_create"},
+                                     {L"windows_loader", "windows_loader"},
+                                     {L"after_load_module_scan", "after_load_module_scan"},
+                                     {L"bridge_export", "bridge_export"},
+                                     {L"bridge_start_create", "bridge_start_create"},
+                                     {L"bridge_start", "bridge_start"},
+                                     {L"complete", "complete"}};
+  if (!phase)
+    return "none";
+  for (const auto& known : phases)
+    if (std::wcscmp(phase, known.wide) == 0)
+      return known.narrow;
+  return "other";
+}
 struct BugReportContext {
   Settings settings;
   Status status;
   std::uint64_t now{};
   bool simulator_running{}, bridge_seen{}, ui_preview{}, unsaved_edits{};
+  BridgeLinkReport link;
 };
 
 // Encode bytes (including UTF-8) as a single query value; '+' is not a space.
@@ -51,7 +97,12 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
   else
     out << (context.now - sample.heartbeat <= BugReportFreshMs ? "connected" : "stale; last known values below")
         << "; age_ms=" << context.now - sample.heartbeat;
-  out << "\nCurrent companion settings (unapplied text edits excluded); unsaved_edits=" << context.unsaved_edits << '\n';
+  out << "\nBridge link: sim_attached=" << context.simulator_running << "; install=" << context.link.install
+      << "; auto_connect=" << context.link.auto_connect << "; connect_requested=" << context.link.connection_requested
+      << "; disconnected_by_user=" << context.link.connection_disconnected << "; mailbox_open=" << context.link.mailbox_open
+      << "; load_attempted=" << context.link.load_attempted << "; load_ok=" << context.link.load_ok
+      << "; load_error=" << context.link.load_error << "; load_phase=" << context.link.load_phase
+      << "\nCurrent companion settings (unapplied text edits excluded); unsaved_edits=" << context.unsaved_edits << '\n';
   const auto profile = [&](std::uint32_t id) {
     const auto* selected = profiles::find(id);
     out << id << '/' << (selected ? selected->key : "unknown");
