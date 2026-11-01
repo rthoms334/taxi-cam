@@ -96,7 +96,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("artifact: ai-review-", hunt)
 
     def test_reviewer_cannot_read_or_publish_credentials(self):
-        for name in ("pr-review.yml", "review-evals.yml"):
+        for name in ("pr-review.yml",):
             text = read(name)
             claude = step(text, "Review with Claude")
             allowed = re.search(r"--allowedTools (.*)", claude).group(1)
@@ -115,18 +115,6 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn("EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}", save, name)
             for secret in ("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}", "CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", "GITHUB_TOKEN: ${{ github.token }}"):
                 self.assertIn(secret, save, name)
-
-    def test_live_review_and_evals_run_the_same_reviewer(self):
-        live = step(read("pr-review.yml"), "Review with Claude")
-        evals = step(read("review-evals.yml"), "Review with Claude")
-        self.assertEqual(live, evals)
-
-    def test_evals_run_when_the_reviewer_changes(self):
-        evals = read("review-evals.yml")
-        for path in ("REVIEW.md", ".github/review/prompt.md", ".github/review/findings.schema.json", ".github/review/*.py",
-                     ".github/review/evals/**", ".github/workflows/pr-review.yml", ".github/workflows/review-evals.yml"):
-            self.assertIn(f"      - {path}\n", evals)
-        self.assertNotIn("write", permissions(job(evals, "replay")))
 
     def test_required_check_names_have_one_owner(self):
         # Required checks match by name, so another job with the same name could satisfy one.

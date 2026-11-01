@@ -1,13 +1,12 @@
 # Pull requests: review, risk and approval
 
-Every pull request to `main` goes through the same path. Automated checks run first. An AI reviewer hunts for defects, verifiers vote on each finding, and the survivors are ranked. Every finding gets an answer. The change's risk then decides which human approvals it needs. When a merged change still breaks something, it becomes an eval case that every later change to the reviewer is scored against.
+Every pull request to `main` goes through the same path. Automated checks run first. An AI reviewer hunts for defects, verifiers vote on each finding, and the survivors are ranked. Every finding gets an answer. The change's risk then decides which human approvals it needs.
 
 ```text
 pull request ─► PR test build ─► AI review ─────────────► findings answered ─► risk gate ─► merge
                 (build, validate,  hunt ► vote ► rank      fixed, or resolved     low: none
                  smoke test)       (reviewer from main)    with a reason          medium: owner approval
                                                                                   high: owner approval + live check
-merged change breaks something ─► eval case ─► reviewer evals score every reviewer change ─► keep it only if the score holds
 ```
 
 | Check | Workflow | Runs on |
@@ -15,7 +14,6 @@ merged change breaks something ─► eval case ─► reviewer evals score ever
 | **PR test build** | [pr-test-build.yml](../.github/workflows/pr-test-build.yml) | Every pull request ([details](releases.md#pull-request-test-builds)) |
 | **AI review** | [pr-review.yml](../.github/workflows/pr-review.yml) | Every pull request that is not a draft, and every push to it |
 | **Risk gate** | [pr-risk-gate.yml](../.github/workflows/pr-risk-gate.yml) | Every pull request, and every push to it |
-| **Score reviewer** | [review-evals.yml](../.github/workflows/review-evals.yml) | Pull requests that change the reviewer, and on demand |
 
 ## AI review
 
@@ -74,50 +72,6 @@ GitHub records your Claude sessions' pushes, comments and labels under your own 
 
 Required checks are matched by name and source app, not by workflow file. A pull request that adds a workflow with a job named **Risk gate** or **AI review** could therefore satisfy that check. `REVIEW.md` treats such a job as Important, `test_workflows.py` fails when one appears outside its own workflow, and any change under `.github/` needs your approval. Still read every workflow change before approving it.
 
-## Reviewer evals
-
-[`.github/review/evals/cases/`](../.github/review/evals/cases) holds past incidents. Each case is the commit that introduced a real defect and the lines where it sits. The [reviewer evals](../.github/workflows/review-evals.yml) workflow replays the review on each such commit. A case counts as caught when an Important finding lands within five lines of an expected location. The total caught is compared with `caught` in [`baseline.json`](../.github/review/evals/baseline.json).
-
-The workflow runs on any pull request that changes `REVIEW.md`, the prompt, the findings schema, the cases or either review workflow. The candidate reviewer is scored before it can reach `main`, and **Score reviewer** fails if it catches fewer cases than the baseline. When it catches more, raise `caught` in the same pull request. Run it from the Actions tab at any time to check for drift, for example after updating `claude-code-action` or changing `REVIEW_MODEL`.
-
-The baseline starts empty (`null`). After the first run whose result you accept, set `caught` to that number.
-
-The first six cases come from this repository's history:
-
-| Case | Defect |
-| --- | --- |
-| `snapshot-replan-shared-readback` | Display snapshots replanned copies into one readback buffer and completed on the first copy's fence |
-| `tone-table-unfenced-readback` | The tone table was read back with no GPU completion proof |
-| `keep-install-exposure-rollback` | A failed install did not roll back the exposure migration, leaving forced settings |
-| `named-routing-held-blocks-swap` | A guard stopped panel names from correcting a swapped automatic display pair |
-| `named-routing-overrides-user-choice` | Named routing overrode a user's single-display choice and ignored Auto detect off |
-| `ini-a380-mips-unrestricted` | Unrestricting the iniBuilds A380's mip count broke its fallback detection |
-
-### Adding a case
-
-When a merged change turns out to have broken something:
-
-1. Find the commit that introduced the defect (`change`), its parent (`base`) and the commit that fixed it (`fix`).
-2. Confirm the defect is visible in `git diff base change` and record its lines in the `change` version of each file.
-3. Add `.github/review/evals/cases/<id>.json`. The `id` uses lowercase letters, digits and hyphens and matches the file name:
-
-   ```json
-   {
-     "id": "short-kebab-id",
-     "title": "One line",
-     "source": "Issue, pull request or commit references",
-     "base": "<40-character SHA>",
-     "change": "<40-character SHA>",
-     "fix": "<40-character SHA>",
-     "expected": [{"path": "src/...", "start_line": 10, "end_line": 14, "what": "The defect and its consequence"}],
-     "evidence": "Why it is a defect and what the fix changed"
-   }
-   ```
-
-4. Open a pull request. Adding a case is medium risk, so your approval is the expert check that the case is a real defect. The evals run on that pull request; adjust the baseline if the score changes.
-
-Use defects that can be found by reading the change. Leave out tuning changes, experiments and behaviour that only a live simulator can reveal.
-
 ## One-time setup
 
 The repository owner does these steps in GitHub's settings. They are not stored in the repository.
@@ -131,7 +85,7 @@ The repository owner does these steps in GitHub's settings. They are not stored 
    Until an environment exists with a required reviewer, the gate refuses the tiers that need it rather than letting the approval pass with no one.
 3. **Branch ruleset for `main`.** Under **Settings → Rules → Rulesets**:
    - Require a pull request before merging.
-   - Require status checks: **PR test build**, **AI review** and **Risk gate**, each with **GitHub Actions** as its source so that no other app can set it. Do not require **Owner approval** or **Live check**: a job skipped by its condition reports success, so those would pass on low-risk changes. **Risk gate** is the check that enforces them. Do not require **Score reviewer** either: it only runs on pull requests that change the reviewer, and a required check that never runs stays pending. Read its result on those pull requests instead.
+   - Require status checks: **PR test build**, **AI review** and **Risk gate**, each with **GitHub Actions** as its source so that no other app can set it. Do not require **Owner approval** or **Live check**: a job skipped by its condition reports success, so those would pass on low-risk changes. **Risk gate** is the check that enforces them.
    - GitHub lists a check here only after it has run in the repository. **AI review** appears after its first run on any pull request. **Risk gate** runs from `main`, so it appears only after this workflow is merged and a later pull request has run it. Add it then: requiring it earlier blocks the pull request that adds it, because the gate cannot run there.
    - Require branches to be up to date before merging. GitHub's merge queue is only available to organization-owned repositories, so this setting is what makes the checks run again on the latest `main`.
    - Require conversation resolution before merging.

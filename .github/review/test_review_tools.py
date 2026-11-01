@@ -264,46 +264,6 @@ class PreviousTest(unittest.TestCase):
         self.assertEqual(previous[0]["replies"], [{"author": "owner", "body": "Intended: the worker owns it."}])
 
 
-CASE = {"id": "lock-budget", "title": "Lock without budget", "base": "a" * 40, "change": "b" * 40, "fix": "c" * 40,
-        "expected": [{"path": "src/a.cpp", "start_line": 20, "end_line": 22}]}
-
-
-class EvalTest(unittest.TestCase):
-    def test_validate_case(self):
-        rt.validate_case(dict(CASE), "lock-budget")
-        for change in ({"id": "other"}, {"change": "abc"}, {"expected": []}, {"expected": [{"path": "x", "start_line": 5, "end_line": 4}]}):
-            with self.assertRaises(rt.FindingsError):
-                rt.validate_case({**CASE, **change}, "lock-budget")
-
-    def test_score_case(self):
-        def score(*findings):
-            return rt.score_case(CASE, rt.validate_review(review_output(list(findings))))["status"]
-        self.assertEqual(score(finding(line=25)), "caught")
-        self.assertEqual(score(finding(line=15)), "caught")
-        self.assertEqual(score(finding(line=28)), "missed")
-        self.assertEqual(score(finding(line=0)), "missed")
-        self.assertEqual(score(finding("nit", line=21)), "lower-severity")
-        self.assertEqual(score(finding(path="src/b.cpp", line=21)), "missed")
-        self.assertEqual(rt.score_case(CASE, None)["status"], "error")
-
-    def test_score_run_against_baseline(self):
-        results = [{"id": "a", "title": "A", "status": "caught", "findings": 1}, {"id": "b", "title": "B", "status": "missed", "findings": 0}]
-        self.assertTrue(rt.score_run(results, {"caught": None})[0])
-        self.assertTrue(rt.score_run(results, {"caught": 1})[0])
-        passed, text = rt.score_run(results, {"caught": 2})
-        self.assertFalse(passed)
-        self.assertIn("Lower than the baseline of 2", text)
-        self.assertIn("Raise `caught`", rt.score_run(results, {"caught": 0})[1])
-        self.assertFalse(rt.score_run(results + [{"id": "c", "title": "C", "status": "error", "findings": 0}], {"caught": 0})[0])
-
-    def test_repository_cases_are_valid(self):
-        folder = HERE / "evals" / "cases"
-        cases = review.load_cases(folder)
-        self.assertEqual(len(cases), len(list(folder.glob("*.json"))))
-        baseline = json.loads((HERE / "evals" / "baseline.json").read_text(encoding="utf-8"))
-        self.assertIn("caught", baseline)
-        self.assertTrue(baseline["caught"] is None or 0 <= baseline["caught"] <= len(cases))
-
 
 class CliTest(unittest.TestCase):
     def setUp(self):
@@ -365,7 +325,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(outputs["head"], head)
         self.assertEqual(json.loads(outputs["schema"])["required"], ["summary", "findings", "stats", "complete"])
 
-    def test_stage_bootstrap_and_eval_case(self):
+    def test_stage_bootstrap(self):
         base, head = self.make_repo(False)
         out = self.root / "staged"
         code, _ = self.run_cli("stage", "--out", str(out), "--base", base, "--head", head, "--reviewer-from", base, "--bootstrap-fallback", cwd=self.repo)
@@ -374,12 +334,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual((out / "REVIEW.md").read_text(encoding="utf-8"), "rules head\n")
         with self.assertRaises(SystemExit):
             self.run_cli("stage", "--out", str(out), "--base", base, "--head", head, "--reviewer-from", base, cwd=self.repo)
-
-        case = self.root / "lock-budget.json"
-        case.write_text(json.dumps({**CASE, "base": base, "change": head, "fix": head}), encoding="utf-8")
-        code, _ = self.run_cli("stage", "--out", str(out), "--case", str(case), "--reviewer-from", "worktree", cwd=self.repo)
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads((out / "context.json").read_text(encoding="utf-8"))["head"], head)
 
     def test_save(self):
         out = self.root / "findings.json"
@@ -402,18 +356,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(gh_out.read_text(encoding="utf-8"), "tier=high\n")
         self.assertIn("pr-live-check", summary.read_text(encoding="utf-8"))
-
-    def test_score(self):
-        cases, results = self.root / "cases", self.root / "results"
-        cases.mkdir()
-        (cases / "lock-budget.json").write_text(json.dumps(CASE), encoding="utf-8")
-        (results / "eval-lock-budget").mkdir(parents=True)
-        (results / "eval-lock-budget" / "findings.json").write_text(json.dumps(review_output([finding(line=21)])), encoding="utf-8")
-        baseline = self.root / "baseline.json"
-        baseline.write_text('{"caught": 1}', encoding="utf-8")
-        self.assertEqual(self.run_cli("score", "--cases", str(cases), "--results", str(results), "--baseline", str(baseline))[0], 0)
-        baseline.write_text('{"caught": 2}', encoding="utf-8")
-        self.assertEqual(self.run_cli("score", "--cases", str(cases), "--results", str(results), "--baseline", str(baseline))[0], 1)
 
 
 class CredentialTest(unittest.TestCase):

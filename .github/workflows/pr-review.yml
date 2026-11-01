@@ -31,7 +31,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
-      - name: Test the risk classifier, poster and eval scorer
+      - name: Test the risk classifier and poster
         run: python3 -m unittest discover -s .github/review -p 'test_*.py' -v
 
   hunt:
@@ -90,7 +90,6 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # Keep this step identical in review-evals.yml (checked by test_workflows.py).
       - name: Review with Claude
         id: claude
         uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250

@@ -1,7 +1,7 @@
 """Pure helpers for the pull-request review pipeline.
 
 Everything here is deterministic and offline: risk classification, diff
-parsing, findings validation, comment rendering and eval scoring. Network
+parsing, findings validation and comment rendering. Network
 calls live in review.py. Standard library only, Python 3.10 or newer.
 """
 
@@ -472,75 +472,3 @@ def render_summary(review: dict, placements: list[Placement], repeats: list[dict
     lines.append("Answer every inline finding before merging: fix it, or reply with the reason and resolve the conversation. Pre-existing findings need no answer here.")
     return "\n".join(lines) + "\n"
 
-
-# --------------------------------------------------------------------------
-# Reviewer evals
-# --------------------------------------------------------------------------
-
-LINE_TOLERANCE = 5
-_CASE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_SHA = re.compile(r"^[0-9a-f]{40}$")
-
-
-def validate_case(case: object, case_id: str) -> dict:
-    _require(isinstance(case, dict), f"{case_id}: case must be an object")
-    _require(case.get("id") == case_id and _CASE_ID.match(case_id) is not None, f"{case_id}: id must match the file name and use a-z, 0-9 and -")
-    for key in ("base", "change", "fix"):
-        _require(isinstance(case.get(key), str) and _SHA.match(case[key]) is not None, f"{case_id}: {key} must be a full 40-character commit SHA")
-    _require(isinstance(case.get("title"), str) and case["title"].strip(), f"{case_id}: title is required")
-    expected = case.get("expected")
-    _require(isinstance(expected, list) and expected, f"{case_id}: expected must list at least one location")
-    for index, item in enumerate(expected):
-        _require(isinstance(item, dict), f"{case_id}: expected[{index}] must be an object")
-        _require(isinstance(item.get("path"), str) and item["path"], f"{case_id}: expected[{index}].path is required")
-        start, end = item.get("start_line"), item.get("end_line")
-        _require(isinstance(start, int) and isinstance(end, int) and 1 <= start <= end, f"{case_id}: expected[{index}] needs 1 <= start_line <= end_line")
-    return case
-
-
-def score_case(case: dict, review: dict | None) -> dict:
-    """A case is caught when an Important finding lands on an expected location."""
-    result = {"id": case["id"], "title": case["title"], "status": "missed", "findings": 0}
-    if review is None:
-        result["status"] = "error"
-        return result
-    result["findings"] = len(review["findings"])
-    lower = False
-    for finding in review["findings"]:
-        for expected in case["expected"]:
-            if finding["path"] != expected["path"] or finding["line"] == 0:
-                continue
-            if expected["start_line"] - LINE_TOLERANCE <= finding["line"] <= expected["end_line"] + LINE_TOLERANCE:
-                if finding["severity"] == "important":
-                    result["status"] = "caught"
-                    return result
-                lower = True
-    if lower:
-        result["status"] = "lower-severity"
-    return result
-
-
-def score_run(results: list[dict], baseline: dict) -> tuple[bool, str]:
-    caught = sum(1 for r in results if r["status"] == "caught")
-    errors = [r for r in results if r["status"] == "error"]
-    floor = baseline.get("caught")
-    lines = ["## Reviewer evals", ""]
-    lines += ["| Case | Result | Findings |", "| --- | --- | --- |"]
-    for r in sorted(results, key=lambda r: r["id"]):
-        lines.append(f"| `{r['id']}`: {_escape_cell(r['title'])} | {r['status']} | {r['findings']} |")
-    lines.append("")
-    lines.append(f"Caught {caught} of {len(results)}.")
-    passed = True
-    if errors:
-        passed = False
-        lines.append(f"{len(errors)} case(s) produced no review output, so this run cannot be scored.")
-    if floor is None:
-        lines.append("No baseline is recorded yet. Record this score in `.github/review/evals/baseline.json` once you accept it.")
-    elif caught < floor:
-        passed = False
-        lines.append(f"Lower than the baseline of {floor}: keep the current reviewer, or rerun if this looks like noise.")
-    elif caught > floor:
-        lines.append(f"Higher than the baseline of {floor}. Raise `caught` in `.github/review/evals/baseline.json` to {caught} in this pull request.")
-    else:
-        lines.append(f"Equal to the baseline of {floor}.")
-    return passed, "\n".join(lines) + "\n"

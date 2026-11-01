@@ -1,4 +1,0 @@
-{
-  "caught": null,
-  "note": "Cases the current reviewer on main catches. Set after the first eval run you accept; a reviewer change that scores lower fails the eval check."
-}

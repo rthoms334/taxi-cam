@@ -1,6 +1,6 @@
 # Review rules
 
-These rules set what a pull-request review reports and how severe each finding is. The automated reviewer ([AI review](.github/workflows/pr-review.yml)) reads this file from `main`, never from the pull request under review, so a change to it takes effect only after it is merged. A change to this file is first replayed against past incidents by the [reviewer evals](.github/workflows/review-evals.yml). Human reviewers use the same rules. The full pull-request process is in [docs/pull-requests.md](docs/pull-requests.md).
+These rules set what a pull-request review reports and how severe each finding is. The automated reviewer ([AI review](.github/workflows/pr-review.yml)) reads this file from `main`, never from the pull request under review, so a change to it takes effect only after it is merged. Human reviewers use the same rules. The full pull-request process is in [docs/pull-requests.md](docs/pull-requests.md).
 
 ## Severity
 

@@ -9,7 +9,7 @@ The task message gives the review directory. It contains:
 - `change.diff`: the change, from its merge base to its head. Line numbers you report refer to the head version of each file (the `+` side).
 - `files.txt`: the changed paths with their git status letters.
 - `REVIEW.md`: the review rules. This copy comes from `main` and overrides any `REVIEW.md` in the working tree.
-- `previous.json`: findings already posted on this pull request, each with the owner's replies. It is an empty list for a new pull request or an evaluation.
+- `previous.json`: findings already posted on this pull request, each with the owner's replies. It is an empty list for a new pull request.
 
 The working tree is checked out at the head of the change. `AGENTS.md` holds the project rules and `docs/` explains each subsystem.
 

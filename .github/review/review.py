@@ -4,8 +4,6 @@
     stage       write the reviewer's inputs (diff, rules, prompt, previous findings)
     save        validate the reviewer's structured output and store it
     post        publish findings as review threads and a summary comment
-    list-cases  list reviewer eval cases for a job matrix
-    score       score eval replays against the expected findings
 
 Standard library only. `post` is the one command that writes to GitHub; it
 needs GH_TOKEN with pull-requests: write.
@@ -92,28 +90,16 @@ def cmd_stage(args: argparse.Namespace) -> int:
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
-    if args.case:
-        case_path = Path(args.case)
-        case = rt.validate_case(json.loads(case_path.read_text(encoding="utf-8")), case_path.stem)
-        base, head = case["base"], case["change"]
-    else:
-        base, head = args.base, args.head
-    if not base or not head:
-        raise SystemExit("stage needs --case, or --base and --head")
-
+    base, head = args.base, args.head
     context = {"base": base, "head": head, "bootstrap": False}
-    if args.reviewer_from == "worktree":
+    reviewer = load_reviewer(args.reviewer_from)
+    context["reviewer"] = f"`main` at `{args.reviewer_from[:7]}`"
+    if reviewer is None:
+        if not args.bootstrap_fallback:
+            raise SystemExit(f"reviewer files are missing at {args.reviewer_from}")
         reviewer = load_worktree_reviewer(Path.cwd())
         context["reviewer"] = "this pull request"
-    else:
-        reviewer = load_reviewer(args.reviewer_from)
-        context["reviewer"] = f"`main` at `{args.reviewer_from[:7]}`"
-        if reviewer is None:
-            if not args.bootstrap_fallback:
-                raise SystemExit(f"reviewer files are missing at {args.reviewer_from}")
-            reviewer = load_worktree_reviewer(Path.cwd())
-            context["reviewer"] = "this pull request"
-            context["bootstrap"] = True
+        context["bootstrap"] = True
     for name, text in reviewer.items():
         (out / name).write_text(text, encoding="utf-8")
 
@@ -285,41 +271,6 @@ def cmd_post(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------
-# evals
-# --------------------------------------------------------------------------
-
-def load_cases(folder: Path) -> list[dict]:
-    cases = []
-    for path in sorted(folder.glob("*.json")):
-        cases.append(rt.validate_case(json.loads(path.read_text(encoding="utf-8")), path.stem))
-    return cases
-
-
-def cmd_list_cases(args: argparse.Namespace) -> int:
-    ids = [case["id"] for case in load_cases(Path(args.dir))]
-    append_output(args.github_output, {"ids": json.dumps(ids, separators=(",", ":"))})
-    print(f"{len(ids)} case(s): {', '.join(ids)}")
-    return 0
-
-
-def cmd_score(args: argparse.Namespace) -> int:
-    results = []
-    for case in load_cases(Path(args.cases)):
-        path = Path(args.results) / f"eval-{case['id']}" / "findings.json"
-        review = None
-        if path.is_file():
-            try:
-                review = rt.validate_review(json.loads(path.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, rt.FindingsError):
-                review = None
-        results.append(rt.score_case(case, review))
-    baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
-    passed, report = rt.score_run(results, baseline)
-    append_summary(args.summary, report)
-    print(report)
-    return 0 if passed else 1
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -334,10 +285,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("stage")
     p.add_argument("--out", required=True)
-    p.add_argument("--base")
-    p.add_argument("--head")
-    p.add_argument("--case", help="eval case file; replaces --base and --head")
-    p.add_argument("--reviewer-from", required=True, help="git ref holding the reviewer files, or 'worktree'")
+    p.add_argument("--base", required=True)
+    p.add_argument("--head", required=True)
+    p.add_argument("--reviewer-from", required=True, help="git ref holding the reviewer files")
     p.add_argument("--bootstrap-fallback", action="store_true", help="use the working tree's reviewer when the ref has none")
     p.add_argument("--comments", help="pull-request review comments as JSON")
     p.add_argument("--github-output")
@@ -355,17 +305,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--summary")
     p.set_defaults(func=cmd_post)
 
-    p = sub.add_parser("list-cases")
-    p.add_argument("--dir", required=True)
-    p.add_argument("--github-output")
-    p.set_defaults(func=cmd_list_cases)
-
-    p = sub.add_parser("score")
-    p.add_argument("--cases", required=True)
-    p.add_argument("--results", required=True)
-    p.add_argument("--baseline", required=True)
-    p.add_argument("--summary")
-    p.set_defaults(func=cmd_score)
 
     args = parser.parse_args(argv)
     return args.func(args)
