@@ -419,6 +419,30 @@ class CredentialTest(unittest.TestCase):
         self.assertEqual(rt.find_credentials("A lock held across ExecuteCommandLists.", ["s3cr3t-value-123"]), [])
 
 
+class ExecutionErrorTest(unittest.TestCase):
+    def test_reports_the_final_result_message(self):
+        log = [{"type": "system", "subtype": "init"},
+               {"type": "result", "subtype": "success", "is_error": True, "result": "Invalid API key ·\n Please run /login"}]
+        self.assertEqual(rt.execution_error(log, []), "Invalid API key · Please run /login")
+        self.assertEqual(rt.execution_error([{"type": "result", "subtype": "error_max_turns"}], []), "error_max_turns")
+        self.assertIsNone(rt.execution_error({"not": "a list"}, []))
+        self.assertIsNone(rt.execution_error([{"type": "assistant"}], []))
+
+    def test_withholds_credentials(self):
+        log = [{"type": "result", "result": "bad token s3cr3t-value-123"}]
+        self.assertIn("withheld", rt.execution_error(log, ["s3cr3t-value-123"]))
+        self.assertIn("withheld", rt.execution_error([{"type": "result", "result": "sk-ant-oat01-abcdefghijklmnop"}], []))
+
+    def test_save_prints_the_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp, "claude-execution-output.json")
+            log.write_text(json.dumps([{"type": "result", "is_error": True, "result": "OAuth token has expired"}]), encoding="utf-8")
+            env = {"STRUCTURED_OUTPUT": "", "EXECUTION_FILE": str(log)}
+            with mock.patch.dict(os.environ, env), redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(review.main(["save", "--out", str(Path(tmp, "f.json"))]), 1)
+        self.assertIn("Claude Code's last message: OAuth token has expired", printed.getvalue())
+
+
 class FakeGitHub:
     """Records requests; refuses inline comments on lines listed in `refuse`."""
 

@@ -111,6 +111,8 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn("apparmor_restrict_unprivileged_userns=0", install, name)
             self.assertLess(text.index("Install subprocess isolation"), text.index("- name: Review with Claude"), name)
             save = step(text, "Validate the ranked findings and refuse any credential")
+            self.assertIn("if: ${{ !cancelled() && steps.stage.outcome == 'success' }}", save, name)
+            self.assertIn("EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}", save, name)
             for secret in ("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}", "CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", "GITHUB_TOKEN: ${{ github.token }}"):
                 self.assertIn(secret, save, name)
 

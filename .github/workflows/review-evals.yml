@@ -117,8 +117,11 @@ jobs:
             --disallowedTools "Read(//proc/**)" "Read(//sys/**)" "Read(./.git/config)"
 
       - name: Validate the ranked findings and refuse any credential
+        # Also runs when the Claude step fails, to print Claude Code's last message.
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         env:
           STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}

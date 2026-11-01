@@ -312,6 +312,30 @@ def find_credentials(text: str, secrets: list[str]) -> list[str]:
     return found
 
 
+def execution_error(messages: object, secrets: list[str]) -> str | None:
+    """Claude Code's final message from claude-code-action's execution log.
+
+    The action hides Claude's output, so a run that ends without structured
+    output (an authentication error, an unavailable model, a turn limit)
+    would otherwise fail with no reason. The text is shortened and withheld
+    if it contains anything that looks like a credential.
+    """
+    if not isinstance(messages, list):
+        return None
+    text = None
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("type") == "result":
+            value = message.get("result") or message.get("error") or message.get("subtype")
+            text = value if isinstance(value, str) else None
+            break
+    if not text:
+        return None
+    text = " ".join(text.split())[:400]
+    if find_credentials(text, secrets):
+        return "(withheld: the message contains something shaped like a credential)"
+    return text
+
+
 TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 
 

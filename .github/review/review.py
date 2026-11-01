@@ -141,10 +141,16 @@ def cmd_stage(args: argparse.Namespace) -> int:
 
 def cmd_save(args: argparse.Namespace) -> int:
     raw = os.environ.get("STRUCTURED_OUTPUT", "")
-    if not raw.strip():
-        print("::error::The reviewer returned no structured output.")
-        return 1
     secrets = [os.environ.get(name, "") for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN")]
+    if not raw.strip():
+        reason = None
+        log = os.environ.get("EXECUTION_FILE") or os.path.join(os.environ.get("RUNNER_TEMP", ""), "claude-execution-output.json")
+        try:
+            reason = rt.execution_error(json.loads(Path(log).read_text(encoding="utf-8")), secrets)
+        except (OSError, ValueError):
+            pass
+        print(f"::error::The reviewer returned no structured output. Claude Code's last message: {reason or 'not available'}")
+        return 1
     leaked = rt.find_credentials(raw, secrets)
     if leaked:
         print(f"::error::The reviewer's output contains a credential ({', '.join(sorted(set(leaked)))}); it was not saved or posted. Rotate the credential if it may have been exposed elsewhere.")
