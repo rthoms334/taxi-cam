@@ -1,0 +1,17 @@
+{
+  "id": "named-routing-held-blocks-swap",
+  "title": "The adopt_named held guard stops panel names from correcting a swapped automatic display pair",
+  "source": "Introduced by aca2f26 (PR #125); fixed in f877ee3 with tests for a swapped automatic pair.",
+  "base": "21c8e5ab656e593346891303ef2c8aa1268eb05f",
+  "change": "aca2f263ec695375684e94bbb89ed7140ad096e5",
+  "fix": "f877ee302755fc30f334f8bb3083167747322f4b",
+  "expected": [
+    {
+      "path": "src/graphics/taxi_button_routes.hpp",
+      "start_line": 209,
+      "end_line": 214,
+      "what": "The held check treats a texture as blocked whenever another side holds it, even when that side holds it only as an automatic guess. A detected pair {6,5} with names {5,6} leaves both sides held, so names never fix swapped captain and first-officer displays."
+    }
+  ],
+  "evidence": "Before the change adopt_named reassigned every side the user had not chosen. The held loop meant to protect a texture the user moved does not check whether the holder's assignment is the user's. The fix counts a texture as held only when a user-chosen side holds it."
+}

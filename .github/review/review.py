@@ -1,0 +1,342 @@
+"""Command-line steps for the review workflows.
+
+    classify    risk tier from the pull request's changed paths
+    stage       write the reviewer's inputs (diff, rules, prompt, previous findings)
+    save        validate the reviewer's structured output and store it
+    post        publish findings as review threads and a summary comment
+    list-cases  list reviewer eval cases for a job matrix
+    score       score eval replays against the expected findings
+
+Standard library only. `post` is the one command that writes to GitHub; it
+needs GH_TOKEN with pull-requests: write.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import review_tools as rt  # noqa: E402
+
+REVIEWER_FILES = {
+    "REVIEW.md": "REVIEW.md",
+    ".github/review/prompt.md": "prompt.md",
+    ".github/review/findings.schema.json": "findings.schema.json",
+}
+BOT_LOGIN = "github-actions[bot]"
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", "-c", "core.quotePath=false", *args], check=True, capture_output=True, text=True, encoding="utf-8").stdout
+
+
+def append_output(path: str | None, values: dict[str, str]) -> None:
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        for key, value in values.items():
+            if "\n" in value:
+                raise ValueError(f"output {key} must be a single line")
+            handle.write(f"{key}={value}\n")
+
+
+def append_summary(path: str | None, text: str) -> None:
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+
+
+# --------------------------------------------------------------------------
+# classify
+# --------------------------------------------------------------------------
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    paths = Path(args.files).read_text(encoding="utf-8").splitlines()
+    result = rt.classify(paths, args.expected)
+    append_output(args.github_output, {"tier": result["tier"]})
+    append_summary(args.summary, rt.render_classification(result))
+    print(f"risk tier: {result['tier']}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# stage
+# --------------------------------------------------------------------------
+
+def load_reviewer(ref: str) -> dict[str, str] | None:
+    """Read the reviewer files at a git ref, or None if any is missing."""
+    files = {}
+    for source, name in REVIEWER_FILES.items():
+        try:
+            files[name] = git("show", f"{ref}:{source}")
+        except subprocess.CalledProcessError:
+            return None
+    return files
+
+
+def load_worktree_reviewer(root: Path) -> dict[str, str]:
+    return {name: (root / source).read_text(encoding="utf-8") for source, name in REVIEWER_FILES.items()}
+
+
+def cmd_stage(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+    if args.case:
+        case_path = Path(args.case)
+        case = rt.validate_case(json.loads(case_path.read_text(encoding="utf-8")), case_path.stem)
+        base, head = case["base"], case["change"]
+    else:
+        base, head = args.base, args.head
+    if not base or not head:
+        raise SystemExit("stage needs --case, or --base and --head")
+
+    context = {"base": base, "head": head, "bootstrap": False}
+    if args.reviewer_from == "worktree":
+        reviewer = load_worktree_reviewer(Path.cwd())
+        context["reviewer"] = "this pull request"
+    else:
+        reviewer = load_reviewer(args.reviewer_from)
+        context["reviewer"] = f"`main` at `{args.reviewer_from[:7]}`"
+        if reviewer is None:
+            if not args.bootstrap_fallback:
+                raise SystemExit(f"reviewer files are missing at {args.reviewer_from}")
+            reviewer = load_worktree_reviewer(Path.cwd())
+            context["reviewer"] = "this pull request"
+            context["bootstrap"] = True
+    for name, text in reviewer.items():
+        (out / name).write_text(text, encoding="utf-8")
+
+    merge_base = git("merge-base", base, head).strip()
+    (out / "change.diff").write_text(git("diff", "--no-color", "--no-ext-diff", "-M", merge_base, head), encoding="utf-8")
+    (out / "files.txt").write_text(git("diff", "--name-status", "-M", merge_base, head), encoding="utf-8")
+
+    previous: list[dict] = []
+    if args.comments:
+        previous = rt.previous_findings(json.loads(Path(args.comments).read_text(encoding="utf-8")), BOT_LOGIN)
+    (out / "previous.json").write_text(json.dumps(previous, indent=2), encoding="utf-8")
+    (out / "context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
+
+    schema = json.dumps(json.loads(reviewer["findings.schema.json"]), separators=(",", ":"))
+    if "'" in schema:
+        raise SystemExit("findings.schema.json must not contain single quotes; it is passed to Claude in single quotes")
+    append_output(args.github_output, {"schema": schema, "head": head})
+    print(f"staged {head[:7]} against {merge_base[:7]} with the reviewer from {context['reviewer']}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# save
+# --------------------------------------------------------------------------
+
+def cmd_save(args: argparse.Namespace) -> int:
+    raw = os.environ.get("STRUCTURED_OUTPUT", "")
+    if not raw.strip():
+        print("::error::The reviewer returned no structured output.")
+        return 1
+    try:
+        review = rt.validate_review(json.loads(raw))
+    except (json.JSONDecodeError, rt.FindingsError) as error:
+        print(f"::error::The reviewer's output is invalid: {error}")
+        return 1
+    Path(args.out).write_text(json.dumps(review, indent=2), encoding="utf-8")
+    counts = {s: sum(1 for f in review["findings"] if f["severity"] == s) for s in rt.SEVERITIES}
+    print(f"saved {len(review['findings'])} findings: {counts}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# post
+# --------------------------------------------------------------------------
+
+class GitHub:
+    def __init__(self, token: str, repo: str) -> None:
+        self.token = token
+        self.repo = repo
+        self.api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+
+    def request(self, method: str, path: str, body: dict | None = None) -> tuple[object, dict]:
+        url = path if path.startswith("http") else f"{self.api}{path}"
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(url, data=data, method=method)
+        request.add_header("Authorization", f"Bearer {self.token}")
+        request.add_header("Accept", "application/vnd.github+json")
+        request.add_header("X-GitHub-Api-Version", "2022-11-28")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = response.read()
+            return (json.loads(payload) if payload else None), dict(response.headers)
+
+    def paginate(self, path: str) -> list:
+        items: list = []
+        url: str | None = f"{path}{'&' if '?' in path else '?'}per_page=100"
+        while url:
+            page, headers = self.request("GET", url)
+            items.extend(page or [])
+            url = None
+            for part in (headers.get("Link") or headers.get("link") or "").split(","):
+                if 'rel="next"' in part:
+                    url = part.split(";")[0].strip().strip("<>")
+        return items
+
+
+def _http_status(error: Exception) -> int | None:
+    return error.code if isinstance(error, urllib.error.HTTPError) else None
+
+
+def cmd_post(args: argparse.Namespace) -> int:
+    folder = Path(args.dir)
+    review = rt.validate_review(json.loads((folder / "findings.json").read_text(encoding="utf-8")))
+    context = json.loads((folder / "context.json").read_text(encoding="utf-8"))
+    lines = rt.commentable_lines((folder / "change.diff").read_text(encoding="utf-8"))
+    head = context["head"]
+    gh = GitHub(os.environ["GH_TOKEN"], args.repo)
+    pr = f"/repos/{args.repo}/pulls/{args.pr}"
+
+    comments = gh.paginate(f"{pr}/comments")
+    placements, repeats = rt.plan_placements(review["findings"], lines, rt.existing_fingerprints(comments, BOT_LOGIN))
+
+    inline = [p for p in placements if p.kind == "line"]
+    if inline:
+        counts = {s: sum(1 for p in placements if p.finding["severity"] == s) for s in rt.SEVERITIES}
+        try:
+            gh.request("POST", f"{pr}/reviews", {
+                "commit_id": head,
+                "event": "COMMENT",
+                "body": f"AI review of `{head[:7]}`: {counts['important']} important, {counts['nit']} nit. The summary comment lists every finding.",
+                "comments": [{"path": p.path, "line": p.line, "side": "RIGHT", "body": rt.render_inline(p, head)} for p in inline],
+            })
+        except urllib.error.HTTPError as error:
+            if error.code != 422:
+                raise
+            print("::warning::GitHub refused the batched review; posting each finding separately.")
+            for placement in inline:
+                try:
+                    gh.request("POST", f"{pr}/comments", {"commit_id": head, "path": placement.path, "line": placement.line, "side": "RIGHT", "body": rt.render_inline(placement, head)})
+                except urllib.error.HTTPError as single:
+                    if single.code != 422:
+                        raise
+                    placement.kind = "file"
+
+    for placement in [p for p in placements if p.kind == "file"]:
+        if placement.path is None:
+            placement.path = placement.finding["path"]
+        try:
+            gh.request("POST", f"{pr}/comments", {"commit_id": head, "path": placement.path, "subject_type": "file", "body": rt.render_inline(placement, head)})
+        except urllib.error.HTTPError as error:
+            if error.code != 422:
+                raise
+            print(f"::warning::GitHub refused a file comment on {placement.path}; the finding stays in the summary.")
+            placement.kind = "summary"
+
+    summary = rt.render_summary(review, placements, repeats, context, args.run_url)
+    existing = [c for c in gh.paginate(f"/repos/{args.repo}/issues/{args.pr}/comments")
+                if (c.get("user") or {}).get("login") == BOT_LOGIN and rt.SUMMARY_MARKER in (c.get("body") or "")]
+    if existing:
+        gh.request("PATCH", f"/repos/{args.repo}/issues/comments/{existing[-1]['id']}", {"body": summary})
+    else:
+        gh.request("POST", f"/repos/{args.repo}/issues/{args.pr}/comments", {"body": summary})
+    append_summary(args.summary, summary.replace(rt.SUMMARY_MARKER + "\n", ""))
+    print(f"posted {len(placements)} findings ({len(inline)} inline); {len(repeats)} repeats skipped")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# evals
+# --------------------------------------------------------------------------
+
+def load_cases(folder: Path) -> list[dict]:
+    cases = []
+    for path in sorted(folder.glob("*.json")):
+        cases.append(rt.validate_case(json.loads(path.read_text(encoding="utf-8")), path.stem))
+    return cases
+
+
+def cmd_list_cases(args: argparse.Namespace) -> int:
+    ids = [case["id"] for case in load_cases(Path(args.dir))]
+    append_output(args.github_output, {"ids": json.dumps(ids, separators=(",", ":"))})
+    print(f"{len(ids)} case(s): {', '.join(ids)}")
+    return 0
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    results = []
+    for case in load_cases(Path(args.cases)):
+        path = Path(args.results) / f"eval-{case['id']}" / "findings.json"
+        review = None
+        if path.is_file():
+            try:
+                review = rt.validate_review(json.loads(path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, rt.FindingsError):
+                review = None
+        results.append(rt.score_case(case, review))
+    baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+    passed, report = rt.score_run(results, baseline)
+    append_summary(args.summary, report)
+    print(report)
+    return 0 if passed else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("classify")
+    p.add_argument("--files", required=True, help="file with one changed path per line")
+    p.add_argument("--expected", type=int, help="GitHub's changed-file count")
+    p.add_argument("--github-output")
+    p.add_argument("--summary")
+    p.set_defaults(func=cmd_classify)
+
+    p = sub.add_parser("stage")
+    p.add_argument("--out", required=True)
+    p.add_argument("--base")
+    p.add_argument("--head")
+    p.add_argument("--case", help="eval case file; replaces --base and --head")
+    p.add_argument("--reviewer-from", required=True, help="git ref holding the reviewer files, or 'worktree'")
+    p.add_argument("--bootstrap-fallback", action="store_true", help="use the working tree's reviewer when the ref has none")
+    p.add_argument("--comments", help="pull-request review comments as JSON")
+    p.add_argument("--github-output")
+    p.set_defaults(func=cmd_stage)
+
+    p = sub.add_parser("save")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_save)
+
+    p = sub.add_parser("post")
+    p.add_argument("--dir", required=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--pr", required=True, type=int)
+    p.add_argument("--run-url", required=True)
+    p.add_argument("--summary")
+    p.set_defaults(func=cmd_post)
+
+    p = sub.add_parser("list-cases")
+    p.add_argument("--dir", required=True)
+    p.add_argument("--github-output")
+    p.set_defaults(func=cmd_list_cases)
+
+    p = sub.add_parser("score")
+    p.add_argument("--cases", required=True)
+    p.add_argument("--results", required=True)
+    p.add_argument("--baseline", required=True)
+    p.add_argument("--summary")
+    p.set_defaults(func=cmd_score)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

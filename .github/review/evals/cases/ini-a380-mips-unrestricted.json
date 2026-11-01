@@ -1,0 +1,17 @@
+{
+  "id": "ini-a380-mips-unrestricted",
+  "title": "Setting the iniBuilds A380 profile's mips to 0 breaks its allocation-group fallback and widens display matching",
+  "source": "Introduced by ddeb1c8; raised in the PR #125 review; fixed in f877ee3.",
+  "base": "d27e206bfeadb209e26b4e4531c7d6aedc9f8bf0",
+  "change": "ddeb1c8da82e807f96a957b753ff31145416a4f3",
+  "fix": "f877ee302755fc30f334f8bb3083167747322f4b",
+  "expected": [
+    {
+      "path": "src/profiles/catalog.hpp",
+      "start_line": 260,
+      "end_line": 265,
+      "what": "mips = 0 makes matches_display accept any mip count, so the detector feeds the eight five-mip panel textures into the allocation-group detector with the eight one-mip targets, which then rejects the group as ambiguous. The comment claiming the fallback is unaffected is wrong."
+    }
+  ],
+  "evidence": "Both the PFD detector and display_candidate_desc use matches_display, so detection sees sixteen candidates and fails whenever names are unavailable. Finding it needs cross-file reasoning from a ten-line diff. The fix restores mips = 1 and adds a separate panel_mips used only for naming."
+}

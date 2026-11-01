@@ -21,7 +21,9 @@ Supporting files are kept separate:
 | `tools/diagnostics/` | Optional interface-inventory, pose, material and telemetry tools for development |
 | `installer/` | Inno Setup definition and package/build/bootstrap scripts; Setup itself runs no scripts |
 | `ci/` | Release version lookup, pinned toolchain helpers and release publication |
-| `.github/workflows/` | GitHub Actions PR test-build and gated Windows release workflows |
+| `.github/workflows/` | GitHub Actions PR test build, AI review, risk gate, reviewer evals and the gated Windows release workflow |
+| `.github/review/` | AI reviewer prompt and findings schema, risk classifier, posting and eval tooling with its tests, and reviewer eval cases; see [Pull requests](pull-requests.md) |
+| `REVIEW.md` | What a pull-request review reports and how severe each finding is |
 | `docs/` | Architecture, integration contracts and development documentation |
 | `docs/whats-new/` | Pictures for What's new features, one folder per version, fetched by the companion from `main` |
 | `licenses/` | Required third-party source/runtime notices |

@@ -1,0 +1,23 @@
+{
+  "id": "tone-table-unfenced-readback",
+  "title": "Tone-curve table readback is accepted after two CPU reads with no GPU completion proof",
+  "source": "Introduced by 630a6bf (PR #121); raised in the PR #121 review; fixed in a5cc71d.",
+  "base": "242c7db4d95853ce0a27f27830beca5c49db43ad",
+  "change": "630a6bf3eb6717bf1c035baeb1c125170255cb46",
+  "fix": "a5cc71d9f1375804bab22208fdeedf51071747a9",
+  "expected": [
+    {
+      "path": "src/bridge/d3d12_bridge.cpp",
+      "start_line": 3652,
+      "end_line": 3664,
+      "what": "read_tone_table treats a recorded copy plus two equal CPU reads of the mapped READBACK buffer as a stable table. That proves nothing about GPU completion: the zeroed buffer before the first copy finishes, or a partly written table, is accepted."
+    },
+    {
+      "path": "src/bridge/d3d12_bridge.cpp",
+      "start_line": 1361,
+      "end_line": 1375,
+      "what": "table_exit records each copy into the simulator's command list at one fixed offset of a single buffer and counts it at record time with no fence or marker, so a later copy can overwrite the region being read."
+    }
+  ],
+  "evidence": "The change copies the tone table into a process-lifetime READBACK buffer inside unfenced simulator recordings. The fix alternates two slots, writes a GPU marker per copy and reads only the slot whose marker is newest."
+}
