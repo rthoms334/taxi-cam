@@ -6,7 +6,7 @@
       "features": [
         {
           "title": "Taxi Cam in your language",
-          "text": "Taxi Cam and Setup follow your Windows display language in German, Spanish, French and Simplified Chinese (with thanks to JCH2333), and English otherwise. To choose another, open Language in the tray menu or under Menu in Settings; Follow Windows goes back. Aircraft names, status messages from the simulator, these notes, logs and bug reports stay in English.",
+          "text": "Taxi Cam and Setup follow your Windows display language in German, Spanish, French and Simplified Chinese (thanks to JCH2333), or English. Choose another under Language in the tray menu or Settings → Menu. Aircraft names, simulator messages, these notes, logs and bug reports stay in English. The translations are new: if one reads wrong, please open an issue on GitHub with a better wording.",
           "image": "docs/whats-new/1.3.0/language.png"
         }
       ],
