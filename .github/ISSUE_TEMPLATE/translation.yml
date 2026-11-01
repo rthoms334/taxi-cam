@@ -1,0 +1,62 @@
+name: Translation correction
+description: Suggest better wording for the German, Spanish, French or Simplified Chinese text in Taxi Cam or Setup.
+title: "[Translation]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping make the translations right. Please use one issue per language; you can list several corrections in it.
+        Pull requests that correct the catalogues in `src/app/translations/` (Taxi Cam) or `installer/messages/` (Setup) are welcome too.
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - Deutsch
+        - Español
+        - Français
+        - 简体中文
+    validations:
+      required: true
+
+  - type: dropdown
+    id: location
+    attributes:
+      label: Where does it appear?
+      description: Taxi Cam is the tray menu, Settings and their messages. Setup is the installer.
+      options:
+        - Taxi Cam
+        - Setup
+    validations:
+      required: true
+
+  - type: textarea
+    id: english
+    attributes:
+      label: English text
+      description: Copy the English wording if you know it. For Taxi Cam text, choose **English** from the language list in the tray menu to see it, then switch back. Setup follows the Windows display language, so for Setup text, or if you are unsure, say which page, button or message it is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: What Taxi Cam shows
+      description: Copy the translated wording exactly as Taxi Cam or Setup shows it now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording
+      description: Write the wording you would use. If it helps, say why, for example a term that pilots or Windows use differently.
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot
+      description: Optional. Drag a screenshot into this field to show where the text appears.
