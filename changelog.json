@@ -6,13 +6,14 @@
       "features": [
         {
           "title": "Taxi Cam in your language",
-          "text": "Taxi Cam and Setup follow your Windows display language in German, Spanish, French and Simplified Chinese (with thanks to JCH2333), and English otherwise. To choose another, open Language in the tray menu or under Menu in Settings; Follow Windows goes back. Aircraft names, status messages from the simulator, these notes, logs and bug reports stay in English."
+          "text": "Taxi Cam and Setup follow your Windows display language in German, Spanish, French and Simplified Chinese (thanks to JCH2333), or English. Choose another under Language in the tray menu or Settings → Menu. Aircraft names, simulator messages, these notes, logs and bug reports stay in English. The translations are new: if one reads wrong, please open an issue on GitHub with a better wording.",
+          "image": "docs/whats-new/1.3.0/language.png"
         }
       ],
       "fixes": [
         "The cameras no longer switch off and on again and again when the simulator keeps stalling. After three stalls within five minutes while the cameras are on, they stay off and Taxi Cam says so; turn them off and on again to retry. bridge.log now records the simulator's graphics memory use, to help find what causes the stalls.",
         "Settings no longer has First camera only. With it on, the cameras never started and the display only showed the waiting page; a saved setting is ignored.",
-        "When the simulator starts Taxi Cam, Taxi Cam now closes a few seconds after the simulator does, so Steam no longer shows the simulator as still running. Quitting the simulator no longer shows a frames-stalled warning when the cameras were off."
+        "When the simulator starts Taxi Cam, Taxi Cam now closes a few seconds after the simulator does, so Steam no longer shows the simulator as still running; unsaved Settings changes are discarded. The frames-stalled warning no longer appears while the cameras are off, for example while a flight loads or when the simulator quits."
       ]
     },
     {
