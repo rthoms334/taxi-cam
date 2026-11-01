@@ -141,13 +141,15 @@ def _diff_path(token: str) -> str | None:
     return token
 
 
-def commentable_lines(diff: str) -> dict[str, set[int]]:
+def commentable_lines(diff: str, context: bool = True) -> dict[str, set[int]]:
     """Map each path in the diff to the head-side lines GitHub accepts.
 
     GitHub accepts review comments on added and context lines inside a hunk
     (side RIGHT). Files changed without hunks (binary, mode-only, pure
     renames) and deleted files map to an empty set: they accept file-level
     comments only, so an Important finding on a deletion still gets a thread.
+    With `context=False` only added lines are returned: the lines a change
+    actually wrote.
     """
     files: dict[str, set[int]] = {}
     header_path: str | None = None
@@ -174,7 +176,9 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
                 old_left -= 1
             else:  # context line; an empty line is context with its space trimmed
                 if current is not None:
-                    files.setdefault(current, set()).add(new_line)
+                    lines = files.setdefault(current, set())
+                    if context:
+                        lines.add(new_line)
                 new_line += 1
                 new_left -= 1
                 old_left -= 1
@@ -217,6 +221,8 @@ SEVERITIES = ("important", "pre-existing", "nit")
 SEVERITY_LABEL = {"important": "Important", "pre-existing": "Pre-existing", "nit": "Nit"}
 INLINE_MARKER = "taxi-cam-ai-review"
 SUMMARY_MARKER = "<!-- taxi-cam-ai-review-summary -->"
+_REVIEWED = re.compile(r"<!-- taxi-cam-ai-review-reviewed sha=([0-9a-f]{40}) -->")
+_REVIEWED_TEXT = re.compile(r"Reviewed `([0-9a-f]{7,40})`")  # summaries written before the marker existed
 _FP = re.compile(r"<!-- " + INLINE_MARKER + r" fp=([0-9a-f]{12})")
 
 
@@ -287,6 +293,57 @@ def fingerprint(finding: dict) -> str:
 
 
 BOT_LOGINS = ("github-actions[bot]", "github-actions")  # REST and GraphQL spellings
+
+
+def last_reviewed_sha(comments: list[dict]) -> str | None:
+    """The head commit of the last review posted on this pull request.
+
+    `comments` are REST issue comments. Only the reviewer's own summary
+    comment counts, so nobody else can move the follow-up starting point.
+    """
+    found = None
+    for comment in comments:
+        if (comment.get("user") or {}).get("login") not in BOT_LOGINS:
+            continue
+        body = comment.get("body") or ""
+        if SUMMARY_MARKER in body:
+            match = _REVIEWED.search(body) or _REVIEWED_TEXT.search(body)
+            found = match.group(1) if match else found
+    return found
+
+
+def follow_up_scope(findings: list[dict], lines: dict[str, set[int]]) -> tuple[list[dict], list[dict]]:
+    """Keep only what a follow-up review may report.
+
+    A follow-up covers the lines changed since the last review, so only
+    Important findings on those lines (or on a whole file changed since then)
+    are kept. Everything else is dropped before posting: re-reviewing code
+    that was already reviewed would keep finding new things to change.
+    """
+    kept, dropped = [], []
+    for finding in findings:
+        in_scope = (finding["severity"] == "important" and finding["path"] in lines
+                    and (finding["line"] == 0 or finding["line"] in lines[finding["path"]] or not lines[finding["path"]]))
+        (kept if in_scope else dropped).append(finding)
+    return kept, dropped
+
+
+FULL_SCOPE = """# Scope: full review
+
+Review the whole change in `change.diff` with the procedure in `prompt.md`.
+"""
+
+FOLLOW_UP_SCOPE = """# Scope: follow-up review
+
+The last review on this pull request covered commit `{since}`. `followup.diff` holds only what changed since then in this pull request's files. `change.diff` is the whole pull request, for context only.
+
+- Review only the code that `followup.diff` changes. Do not report anything about code it does not change, even if you notice it.
+- Check the findings in `previous.json`: if one is still present on lines that `followup.diff` changes, report it again.
+- Report only `important` findings. Report no nits and no pre-existing findings.
+- Run at most two hunters: General correctness, and the one area hunter that best matches `followup.diff`. Keep at most four candidates. Voting is unchanged.
+
+Findings outside this scope are removed before posting.
+"""
 
 
 def open_thread_fingerprints(threads: list[dict]) -> set[str]:
@@ -475,11 +532,21 @@ def render_summary(review: dict, placements: list[Placement], repeats: list[dict
         f"dropped by vote: {stats['dropped_by_vote']} · repeats dropped by the reviewer: {stats['dropped_as_repeat']}."
     )
     lines.append("")
+    if context.get("mode") == "follow-up":
+        lines.append(f"Follow-up review: only the changes since `{context.get('since', '')[:7]}` were reviewed, and only Important findings on them are reported.")
+        if context.get("scope_dropped"):
+            lines.append(f"{context['scope_dropped']} finding(s) outside that scope were not posted.")
+        lines.append("")
+    elif context.get("mode") == "skip":
+        lines.append(f"No file in this pull request changed since `{context.get('since', '')[:7]}`, so nothing was reviewed again.")
+        lines.append("")
     lines.append(f"Reviewed `{head}` with the reviewer from {context.get('reviewer', 'main')}. [Run]({run_url})")
     if context.get("bootstrap"):
         lines.append("")
         lines.append("> The reviewer is not on `main` yet, so this pull request was reviewed with its own reviewer files. After it merges, reviews always use the reviewer from `main`.")
     lines.append("")
     lines.append("Answer every inline finding before merging: fix it, or reply with the reason and resolve the conversation. Pre-existing findings need no answer here.")
+    if len(context.get("head", "")) == 40:
+        lines.append(f"<!-- taxi-cam-ai-review-reviewed sha={context['head']} -->")
     return "\n".join(lines) + "\n"
 

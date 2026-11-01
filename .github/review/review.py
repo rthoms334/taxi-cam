@@ -140,14 +140,37 @@ def cmd_stage(args: argparse.Namespace) -> int:
             raise SystemExit("--threads must be a JSON list of review threads")
         previous = rt.previous_findings(threads)
     (out / "previous.json").write_text(json.dumps(previous, indent=2), encoding="utf-8")
+
+    # After the first review, review only what changed since the last reviewed commit.
+    since = None
+    if args.summary_comments:
+        comments = json.loads(Path(args.summary_comments).read_text(encoding="utf-8"))
+        if not isinstance(comments, list) or not all(isinstance(c, dict) for c in comments):
+            raise SystemExit("--summary-comments must be a JSON list of issue comments")
+        since = rt.last_reviewed_sha(comments)
+        if since:
+            resolved = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{since}^{{commit}}"], capture_output=True, text=True)
+            since = resolved.stdout.strip() if resolved.returncode == 0 else None
+    context["mode"] = "full"
+    if since and subprocess.run(["git", "merge-base", "--is-ancestor", since, head], capture_output=True).returncode == 0:
+        context["since"] = since
+        pr_files = [p for p in git("diff", "--name-only", merge_base, head).splitlines() if p]
+        followup = git("diff", "--no-color", "--no-ext-diff", "-M", since, head, "--", *pr_files) if pr_files else ""
+        if followup.strip():
+            context["mode"] = "follow-up"
+            (out / "followup.diff").write_text(followup, encoding="utf-8")
+        else:
+            context["mode"] = "skip"
+    scope = rt.FOLLOW_UP_SCOPE.format(since=since) if context["mode"] == "follow-up" else rt.FULL_SCOPE
+    (out / "scope.md").write_text(scope, encoding="utf-8")
     context["agent_files_from_base"] = restore_agent_files(base)
     (out / "context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
 
     schema = json.dumps(json.loads(reviewer["findings.schema.json"]), separators=(",", ":"))
     if "'" in schema:
         raise SystemExit("findings.schema.json must not contain single quotes; it is passed to Claude in single quotes")
-    append_output(args.github_output, {"schema": schema, "head": head})
-    print(f"staged {head[:7]} against {merge_base[:7]} with the reviewer from {context['reviewer']}")
+    append_output(args.github_output, {"schema": schema, "head": head, "mode": context["mode"]})
+    print(f"staged a {context['mode']} review of {head[:7]} against {merge_base[:7]} with the reviewer from {context['reviewer']}")
     return 0
 
 
@@ -156,6 +179,15 @@ def cmd_stage(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 def cmd_save(args: argparse.Namespace) -> int:
+    folder = Path(args.out).parent
+    context_path = folder / "context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8")) if context_path.is_file() else {}
+    if context.get("mode") == "skip":
+        review = {"summary": "Nothing in this pull request's files changed since the last review.", "findings": [],
+                  "stats": {"hunters_run": 0, "candidates": 0, "dropped_by_vote": 0, "dropped_as_repeat": 0}, "complete": True}
+        Path(args.out).write_text(json.dumps(review, indent=2), encoding="utf-8")
+        print("nothing changed since the last review; saved an empty review without running Claude")
+        return 0
     raw = os.environ.get("STRUCTURED_OUTPUT", "")
     secrets = [os.environ.get(name, "") for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN")]
     if not raw.strip():
@@ -179,6 +211,13 @@ def cmd_save(args: argparse.Namespace) -> int:
     if not review["complete"]:
         print(f"::error::The review did not finish: not every hunter or verifier returned. Re-run the job. Reviewer's summary: {review['summary'][:400]}")
         return 1
+    if context.get("mode") == "follow-up":
+        lines = rt.commentable_lines((folder / "followup.diff").read_text(encoding="utf-8"), context=False)
+        review["findings"], dropped = rt.follow_up_scope(review["findings"], lines)
+        context["scope_dropped"] = len(dropped)
+        context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")
+        if dropped:
+            print(f"dropped {len(dropped)} finding(s) outside the follow-up scope")
     Path(args.out).write_text(json.dumps(review, indent=2), encoding="utf-8")
     counts = {s: sum(1 for f in review["findings"] if f["severity"] == s) for s in rt.SEVERITIES}
     print(f"saved {len(review['findings'])} findings: {counts}")
@@ -321,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reviewer-from", required=True, help="git ref holding the reviewer files")
     p.add_argument("--bootstrap-fallback", action="store_true", help="use the working tree's reviewer when the ref has none")
     p.add_argument("--threads", help="the pull request's review threads (GraphQL nodes) as JSON")
+    p.add_argument("--summary-comments", help="the pull request's issue comments as JSON, to find the last reviewed commit")
     p.add_argument("--github-output")
     p.set_defaults(func=cmd_stage)
 

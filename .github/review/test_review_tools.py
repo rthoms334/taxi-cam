@@ -152,6 +152,7 @@ class DiffTest(unittest.TestCase):
     def test_commentable_lines(self):
         lines = rt.commentable_lines(DIFF)
         self.assertEqual(lines["src/a.cpp"], {1, 2, 3, 4, 5, 11, 12, 13})
+        self.assertEqual(rt.commentable_lines(DIFF, context=False)["src/a.cpp"], {2, 3, 12})
         self.assertEqual(lines["new name.md"], set())
         self.assertEqual(lines["img.png"], set())
         self.assertEqual(lines["added.txt"], {1})
@@ -399,6 +400,62 @@ class CliTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.run_cli("stage", "--out", str(out), "--base", base, "--head", head, "--reviewer-from", base, cwd=self.repo)
 
+    def three_commit_repo(self):
+        base, first = self.make_repo(True)
+        (self.repo / "src.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+        self.git("commit", "-qam", "fix")
+        return base, first, self.git("rev-parse", "HEAD")
+
+    def summary_for(self, sha):
+        path = self.root / "comments.json"
+        body = rt.render_summary(rt.validate_review(review_output()), [], [], {"head": sha}, "u")
+        path.write_text(json.dumps([{"user": {"login": "github-actions[bot]"}, "body": body}]), encoding="utf-8")
+        return path
+
+    def stage(self, base, head, comments):
+        out, gh_out = self.root / "staged", self.root / "gh_output"
+        gh_out.write_text("", encoding="utf-8")
+        code, _ = self.run_cli("stage", "--out", str(out), "--base", base, "--head", head, "--reviewer-from", base,
+                               "--summary-comments", str(comments), "--github-output", str(gh_out), cwd=self.repo)
+        self.assertEqual(code, 0)
+        outputs = dict(line.split("=", 1) for line in gh_out.read_text(encoding="utf-8").splitlines())
+        return out, outputs["mode"]
+
+    def test_stage_follow_up_reviews_only_changes_since_the_last_review(self):
+        base, first, head = self.three_commit_repo()
+        old_style = self.root / "old.json"
+        old_style.write_text(json.dumps([{"user": {"login": "github-actions[bot]"}, "body": rt.SUMMARY_MARKER + f"\nReviewed `{first[:7]}` with x."}]), encoding="utf-8")
+        self.assertEqual(self.stage(base, head, old_style)[1], "follow-up")
+        out, mode = self.stage(base, head, self.summary_for(first))
+        self.assertEqual(mode, "follow-up")
+        followup = (out / "followup.diff").read_text(encoding="utf-8")
+        self.assertIn("+three", followup)
+        self.assertNotIn("+two", followup)
+        self.assertIn("+two", (out / "change.diff").read_text(encoding="utf-8"))
+        self.assertIn("follow-up review", (out / "scope.md").read_text(encoding="utf-8"))
+
+        # The reviewer reports one finding on the new line and one on code reviewed before.
+        output = review_output([finding(path="src.txt", line=3), finding(path="src.txt", line=2, title="old")])
+        code, _ = self.run_cli("save", "--out", str(out / "findings.json"), env={"STRUCTURED_OUTPUT": json.dumps(output)})
+        self.assertEqual(code, 0)
+        saved = json.loads((out / "findings.json").read_text(encoding="utf-8"))
+        self.assertEqual([f["line"] for f in saved["findings"]], [3])
+        self.assertEqual(json.loads((out / "context.json").read_text(encoding="utf-8"))["scope_dropped"], 1)
+
+    def test_stage_skips_when_nothing_changed_and_reviews_fully_otherwise(self):
+        base, first, head = self.three_commit_repo()
+        out, mode = self.stage(base, head, self.summary_for(head))
+        self.assertEqual(mode, "skip")
+        code, _ = self.run_cli("save", "--out", str(out / "findings.json"), env={"STRUCTURED_OUTPUT": ""})
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads((out / "findings.json").read_text(encoding="utf-8"))["findings"], [])
+
+        empty = self.root / "none.json"
+        empty.write_text("[]", encoding="utf-8")
+        self.assertEqual(self.stage(base, head, empty)[1], "full")
+        # A last-reviewed commit that is not in the branch history (a force push) means a full review.
+        self.assertEqual(self.stage(base, head, self.summary_for("e" * 40))[1], "full")
+
     def test_save(self):
         out = self.root / "findings.json"
         code, _ = self.run_cli("save", "--out", str(out), env={"STRUCTURED_OUTPUT": json.dumps(review_output([finding("nit"), finding()]))})
@@ -420,6 +477,41 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(gh_out.read_text(encoding="utf-8"), "tier=high\n")
         self.assertIn("pr-live-check", summary.read_text(encoding="utf-8"))
+
+
+
+class FollowUpTest(unittest.TestCase):
+    def test_last_reviewed_sha_comes_from_the_reviewer_summary_only(self):
+        mine = rt.render_summary(rt.validate_review(review_output()), [], [], {"head": "a" * 40}, "https://run")
+        self.assertIn("sha=" + "a" * 40, mine)
+        comments = [
+            {"user": {"login": "github-actions[bot]"}, "body": mine},
+            {"user": {"login": "someone"}, "body": mine.replace("a" * 40, "b" * 40)},
+        ]
+        self.assertEqual(rt.last_reviewed_sha(comments), "a" * 40)
+        self.assertIsNone(rt.last_reviewed_sha([]))
+        older = {"user": {"login": "github-actions[bot]"}, "body": rt.SUMMARY_MARKER + "\nReviewed `abcdef1` with the reviewer from main."}
+        self.assertEqual(rt.last_reviewed_sha([older]), "abcdef1")
+
+    def test_scope_keeps_only_important_findings_on_changed_lines(self):
+        lines = {"src/a.cpp": {10, 11}, "img.png": set()}
+        kept, dropped = rt.follow_up_scope([
+            finding(line=10),                         # important on a changed line
+            finding(line=50, title="old code"),       # important on unchanged code
+            finding("nit", line=11),                  # nits are out of scope
+            finding("pre-existing", line=10),         # so are pre-existing findings
+            finding(path="src/b.cpp", line=3),        # file not changed since the last review
+            finding(path="img.png", line=0),          # whole-file finding on a changed file
+        ], lines)
+        self.assertEqual([(f["path"], f["line"]) for f in kept], [("src/a.cpp", 10), ("img.png", 0)])
+        self.assertEqual(len(dropped), 4)
+
+    def test_summary_explains_follow_up_and_skip(self):
+        review = rt.validate_review(review_output())
+        text = rt.render_summary(review, [], [], {"head": "c" * 40, "mode": "follow-up", "since": "d" * 40, "scope_dropped": 2}, "u")
+        self.assertIn("only the changes since `ddddddd`", text)
+        self.assertIn("2 finding(s) outside that scope", text)
+        self.assertIn("nothing was reviewed again", rt.render_summary(review, [], [], {"head": "c" * 40, "mode": "skip", "since": "d" * 40}, "u"))
 
 
 class CredentialTest(unittest.TestCase):

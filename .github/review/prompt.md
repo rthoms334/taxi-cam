@@ -6,6 +6,8 @@ You are reviewing one change to Taxi Cam. Hunt for defects with parallel agents,
 
 The task message gives the review directory. It contains:
 
+- `scope.md`: whether this is a full review or a follow-up after new commits. Read it first. For a follow-up, its limits override the hunter list, candidate limit and severities below.
+- `followup.diff` (follow-up reviews only): what changed since the last review.
 - `change.diff`: the change, from its merge base to its head. Line numbers you report refer to the head version of each file (the `+` side).
 - `files.txt`: the changed paths with their git status letters.
 - `REVIEW.md`: the review rules. This copy comes from `main` and overrides any `REVIEW.md` in the working tree.

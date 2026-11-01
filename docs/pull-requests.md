@@ -25,7 +25,14 @@ The reviewer is Claude, run by [claude-code-action](https://github.com/anthropic
 
 The reviewer has read-only access and returns findings as data. A separate job posts them, so the agent that reads untrusted pull-request text never holds a token that can write. The reviewer's rules and prompt (`REVIEW.md`, `prompt.md` and the findings schema) are taken from `main`, never from the pull request under review, and every `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` in the checkout is replaced with `main`'s copy before Claude starts. A pull request therefore cannot weaken its own review by editing them; its edits to those files are reviewed as part of the diff. The one exception is the pull request that first adds the reviewer, which is reviewed with its own files and says so. The workflow and the tooling that stages, checks and posts the review (`.github/review/*.py`) do run as the pull request edits them; see [Limits](#limits).
 
-Important findings and nits become review threads on the changed line. When a line is outside the diff, they become file comments instead, including on deleted files. An Important finding in a file outside the diff is anchored to the first changed file; a nit there appears only in the summary. Pre-existing findings appear only in the summary comment, which is updated in place on each push. Each push is reviewed again. The reviewer reads the earlier threads, whether each was resolved, and the replies from people with write access. It drops a finding that a reply explains is not a defect. A finding whose thread is still open is not posted twice. If you resolve a thread but the reviewer still finds the defect on a later push, it opens a new thread.
+Important findings and nits become review threads on the changed line. When a line is outside the diff, they become file comments instead, including on deleted files. An Important finding in a file outside the diff is anchored to the first changed file; a nit there appears only in the summary. Pre-existing findings appear only in the summary comment, which is updated in place on each push. The first review covers the whole pull request. Later pushes get a **follow-up review** of only what changed since the last reviewed commit, which the summary comment records:
+
+- The reviewer runs at most two hunters and reports only Important findings on lines changed since the last review, including an earlier finding that a fix left in place. It reports no nits and no pre-existing findings.
+- The validation step removes anything outside that scope before posting, so fixing findings does not open review of code that was already reviewed. The summary says how many findings were removed.
+- If no file in the pull request changed since the last review (for example, after merging `main`), Claude is not run at all.
+- A force push that rewrites the reviewed commit out of the branch gets a full review again.
+
+The reviewer reads the earlier threads, whether each was resolved, and the replies from people with write access. It drops a finding that a reply explains is not a defect. A finding whose thread is still open is not posted twice. If you resolve a thread but the reviewer still finds the defect on a later push, it opens a new thread.
 
 ### Answering findings
 
@@ -45,7 +52,7 @@ The **AI review** check fails only when the review could not run (no credential,
 
 ### Cost and model
 
-Each review runs up to six hunters and three verifiers per candidate (at most twelve candidates). The model defaults to `claude-opus-5-5`. Set the repository variable `REVIEW_MODEL` to change it. The run summary shows how many candidates were found and how many the vote dropped.
+A full review runs up to six hunters and three verifiers per candidate (at most twelve candidates); a follow-up runs at most two hunters and four candidates. The model defaults to `claude-opus-5-5`. Set the repository variable `REVIEW_MODEL` to change it. The run summary shows how many candidates were found and how many the vote dropped.
 
 ## Risk tiers
 
