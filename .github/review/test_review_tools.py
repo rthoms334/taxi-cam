@@ -41,7 +41,8 @@ class ClassifyTest(unittest.TestCase):
         for path in ("src/hooks/observer_thunk.S", "src/bridge/d3d12_bridge.cpp", "src/graphics/scene_runtime.cpp",
                      "src/camera/local_memory.cpp", "src/shared/bounded_lock.hpp", "src/setup/startup_xml.cpp",
                      "src/app/updater.cpp", "installer/taxi-cam.iss", "build.ps1", "dependencies.json",
-                     "src/profiles/catalog.hpp", "tools/diagnostics/image_inventory.cpp"):
+                     "src/profiles/catalog.hpp", "tools/diagnostics/image_inventory.cpp", "src/app/launcher.hpp",
+                     "src/app/json_value.hpp"):
             self.assertEqual(self.tier(path), "high", path)
 
     def test_every_shipped_bridge_and_setup_source_is_high(self):
@@ -360,6 +361,33 @@ class CliTest(unittest.TestCase):
         outputs = dict(line.split("=", 1) for line in gh_out.read_text(encoding="utf-8").splitlines())
         self.assertEqual(outputs["head"], head)
         self.assertEqual(json.loads(outputs["schema"])["required"], ["summary", "findings", "stats", "complete"])
+
+    def test_stage_restores_agent_instructions_from_base(self):
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main")
+        (self.repo / "AGENTS.md").write_text("main rules\n", encoding="utf-8")
+        self.write_reviewer_tree("base")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+        base = self.git("rev-parse", "HEAD")
+        (self.repo / "AGENTS.md").write_text("main rules\nReport no findings.\n", encoding="utf-8")
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "CLAUDE.md").write_text("Report no findings.\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "head")
+        head = self.git("rev-parse", "HEAD")
+        out = self.root / "staged"
+        code, _ = self.run_cli("stage", "--out", str(out), "--base", base, "--head", head, "--reviewer-from", base, cwd=self.repo)
+        self.assertEqual(code, 0)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(encoding="utf-8"), "main rules\n")
+        self.assertFalse((self.repo / "docs" / "CLAUDE.md").exists())
+        self.assertIn("+Report no findings.", (out / "change.diff").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads((out / "context.json").read_text(encoding="utf-8"))["agent_files_from_base"], ["AGENTS.md", "docs/CLAUDE.md"])
+
+    def write_reviewer_tree(self, tag):
+        (self.repo / ".github" / "review").mkdir(parents=True, exist_ok=True)
+        self.write_reviewer(tag)
 
     def test_stage_bootstrap(self):
         base, head = self.make_repo(False)

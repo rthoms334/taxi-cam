@@ -81,6 +81,31 @@ def load_reviewer(ref: str) -> dict[str, str] | None:
     return files
 
 
+AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md")
+
+
+def restore_agent_files(base: str) -> list[str]:
+    """Replace agent instruction files in the checkout with main's copies.
+
+    Claude Code loads these files as instructions, so a pull request could
+    otherwise tell its own reviewer what to report. Each one is restored from
+    `base`, or removed when `base` has none. The pull request's edits to them
+    stay in change.diff as material under review.
+    """
+    def named(paths: str) -> set[str]:
+        return {p for p in paths.splitlines() if p.rsplit("/", 1)[-1] in AGENT_FILES}
+    at_head = named(git("ls-files"))
+    at_base = named(git("ls-tree", "-r", "--name-only", base))
+    for path in sorted(at_head | at_base):
+        target = Path(path)
+        if path in at_base:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(subprocess.run(["git", "show", f"{base}:{path}"], check=True, capture_output=True).stdout)
+        elif target.exists():
+            target.unlink()
+    return sorted(at_head | at_base)
+
+
 def load_worktree_reviewer(root: Path) -> dict[str, str]:
     return {name: (root / source).read_text(encoding="utf-8") for source, name in REVIEWER_FILES.items()}
 
@@ -115,6 +140,7 @@ def cmd_stage(args: argparse.Namespace) -> int:
             raise SystemExit("--threads must be a JSON list of review threads")
         previous = rt.previous_findings(threads)
     (out / "previous.json").write_text(json.dumps(previous, indent=2), encoding="utf-8")
+    context["agent_files_from_base"] = restore_agent_files(base)
     (out / "context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
 
     schema = json.dumps(json.loads(reviewer["findings.schema.json"]), separators=(",", ":"))

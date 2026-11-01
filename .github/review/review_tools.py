@@ -38,6 +38,7 @@ RISK_RULES: tuple[tuple[str, str, str], ...] = (
     ("high", "tools/diagnostics/image_inventory.*", "compiled into the shipped bridge DLL"),
     ("high", "src/setup/*", "installer commands change exe.xml and saved settings"),
     ("high", "src/app/updater.*", "downloads and installs updates"),
+    ("high", "src/app/launcher.*", "writes into the simulator process and starts the bridge there"),
     ("high", "src/app/json_value.hpp", "parses the installation record Setup acts on"),
     ("high", "installer/*", "Setup and uninstall change the user's system"),
     ("high", "build.ps1", "builds and validates the shipped binaries"),
