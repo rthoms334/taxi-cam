@@ -27,9 +27,9 @@ The reviewer has read-only access and returns findings as data. A separate job p
 
 Important findings and nits become review threads on the changed line. When a line is outside the diff, they become file comments instead, including on deleted files. An Important finding in a file outside the diff is anchored to the first changed file; a nit there appears only in the summary. Pre-existing findings appear only in the summary comment, which is updated in place on each push. The first review covers the whole pull request. Later pushes get a **follow-up review** of only what changed since the last reviewed commit, which the summary comment records:
 
-- The reviewer runs at most two hunters and reports only Important findings on lines changed since the last review, including an earlier finding that a fix left in place. It reports no nits and no pre-existing findings.
+- The reviewer runs at most two hunters and reports only Important findings on those lines, including an earlier finding that a fix left in place. It reports no nits and no pre-existing findings.
 - The validation step removes anything outside that scope before posting, so fixing findings does not open review of code that was already reviewed. The summary says how many findings were removed.
-- If no file in the pull request changed since the last review (for example, after merging `main`), Claude is not run at all.
+- Follow-up lines are the pull request's own changes that are new since the last review, including the lines on either side of a deletion. Changes that arrive by merging `main` are left out. When nothing is left (for example, after only merging `main`), Claude is not run at all.
 - A force push that rewrites the reviewed commit out of the branch gets a full review again.
 
 The reviewer reads the earlier threads, whether each was resolved, and the replies from people with write access. It drops a finding that a reply explains is not a defect. A finding whose thread is still open is not posted twice. If you resolve a thread but the reviewer still finds the defect on a later push, it opens a new thread.

@@ -152,7 +152,8 @@ class DiffTest(unittest.TestCase):
     def test_commentable_lines(self):
         lines = rt.commentable_lines(DIFF)
         self.assertEqual(lines["src/a.cpp"], {1, 2, 3, 4, 5, 11, 12, 13})
-        self.assertEqual(rt.commentable_lines(DIFF, context=False)["src/a.cpp"], {2, 3, 12})
+        # Added lines 2, 3 and 12, plus lines 1 and 2 on either side of the deleted "int b;".
+        self.assertEqual(rt.commentable_lines(DIFF, context=False)["src/a.cpp"], {1, 2, 3, 12})
         self.assertEqual(lines["new name.md"], set())
         self.assertEqual(lines["img.png"], set())
         self.assertEqual(lines["added.txt"], {1})
@@ -375,6 +376,8 @@ class CliTest(unittest.TestCase):
         (self.repo / "AGENTS.md").write_text("main rules\nReport no findings.\n", encoding="utf-8")
         (self.repo / "docs").mkdir()
         (self.repo / "docs" / "CLAUDE.md").write_text("Report no findings.\n", encoding="utf-8")
+        (self.repo / 'odd"dir').mkdir()
+        (self.repo / 'odd"dir' / "AGENTS.md").write_text("Report no findings.\n", encoding="utf-8")
         self.git("add", "-A")
         self.git("commit", "-qm", "head")
         head = self.git("rev-parse", "HEAD")
@@ -383,8 +386,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual((self.repo / "AGENTS.md").read_text(encoding="utf-8"), "main rules\n")
         self.assertFalse((self.repo / "docs" / "CLAUDE.md").exists())
+        self.assertFalse((self.repo / 'odd"dir' / "AGENTS.md").exists())
         self.assertIn("+Report no findings.", (out / "change.diff").read_text(encoding="utf-8"))
-        self.assertEqual(json.loads((out / "context.json").read_text(encoding="utf-8"))["agent_files_from_base"], ["AGENTS.md", "docs/CLAUDE.md"])
+        self.assertEqual(json.loads((out / "context.json").read_text(encoding="utf-8"))["agent_files_from_base"], ["AGENTS.md", "docs/CLAUDE.md", 'odd"dir/AGENTS.md'])
 
     def write_reviewer_tree(self, tag):
         (self.repo / ".github" / "review").mkdir(parents=True, exist_ok=True)
@@ -441,6 +445,25 @@ class CliTest(unittest.TestCase):
         saved = json.loads((out / "findings.json").read_text(encoding="utf-8"))
         self.assertEqual([f["line"] for f in saved["findings"]], [3])
         self.assertEqual(json.loads((out / "context.json").read_text(encoding="utf-8"))["scope_dropped"], 1)
+
+    def test_stage_skips_a_merge_of_main_that_leaves_the_pull_requests_changes_alone(self):
+        base, first = self.make_repo(True)        # PR branch: src.txt gains "two"
+        self.git("checkout", "-q", "-b", "pr")
+        self.git("checkout", "-q", base)
+        self.git("checkout", "-q", "-b", "trunk")
+        (self.repo / "src.txt").write_text("one\n" + "".join(f"pad {i}\n" for i in range(20)) + "main edit\n", encoding="utf-8")
+        self.git("commit", "-qam", "main changes a file the PR touches")
+        trunk = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "pr")
+        self.git("reset", "-q", "--hard", first)
+        merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "--no-edit", trunk],
+                                cwd=self.repo, capture_output=True, text=True)
+        if merged.returncode != 0:  # resolve by keeping both edits
+            (self.repo / "src.txt").write_text("one\ntwo\n" + "".join(f"pad {i}\n" for i in range(20)) + "main edit\n", encoding="utf-8")
+            self.git("commit", "-qam", "merge main")
+        head = self.git("rev-parse", "HEAD")
+        out, mode = self.stage(trunk, head, self.summary_for(first))
+        self.assertEqual(mode, "skip")
 
     def test_stage_skips_when_nothing_changed_and_reviews_fully_otherwise(self):
         base, first, head = self.three_commit_repo()
@@ -505,6 +528,19 @@ class FollowUpTest(unittest.TestCase):
         ], lines)
         self.assertEqual([(f["path"], f["line"]) for f in kept], [("src/a.cpp", 10), ("img.png", 0)])
         self.assertEqual(len(dropped), 4)
+
+    def test_follow_up_lines_cover_deletions_and_leave_out_mains_changes(self):
+        followup = ("diff --git a/f.cpp b/f.cpp\n--- a/f.cpp\n+++ b/f.cpp\n"
+                    "@@ -10,3 +10,2 @@\n keep();\n-guard();\n use();\n"      # the PR removed a guard: head lines 10-11
+                    "@@ -40,1 +39,2 @@\n x();\n+from_main();\n")              # main's edit, merged in: head line 40
+        change = ("diff --git a/f.cpp b/f.cpp\n--- a/f.cpp\n+++ b/f.cpp\n"
+                  "@@ -10,3 +10,2 @@\n keep();\n-guard();\n use();\n")
+        lines = rt.follow_up_lines(followup, change)
+        self.assertEqual(lines, {"f.cpp": {10, 11}})
+        kept, dropped = rt.follow_up_scope([finding(path="f.cpp", line=11, title="Guard removed"),
+                                            finding(path="f.cpp", line=40, title="main's code")], lines)
+        self.assertEqual([f["line"] for f in kept], [11])
+        self.assertEqual(rt.follow_up_lines(followup, ""), {})
 
     def test_summary_explains_follow_up_and_skip(self):
         review = rt.validate_review(review_output())

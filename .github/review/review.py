@@ -93,9 +93,10 @@ def restore_agent_files(base: str) -> list[str]:
     stay in change.diff as material under review.
     """
     def named(paths: str) -> set[str]:
-        return {p for p in paths.splitlines() if p.rsplit("/", 1)[-1] in AGENT_FILES}
-    at_head = named(git("ls-files"))
-    at_base = named(git("ls-tree", "-r", "--name-only", base))
+        # NUL-separated: git quotes paths with quotes or backslashes in line mode.
+        return {p for p in paths.split("\0") if p and p.rsplit("/", 1)[-1] in AGENT_FILES}
+    at_head = named(git("ls-files", "-z"))
+    at_base = named(git("ls-tree", "-r", "-z", "--name-only", base))
     for path in sorted(at_head | at_base):
         target = Path(path)
         if path in at_base:
@@ -156,7 +157,7 @@ def cmd_stage(args: argparse.Namespace) -> int:
         context["since"] = since
         pr_files = [p for p in git("diff", "--name-only", merge_base, head).splitlines() if p]
         followup = git("diff", "--no-color", "--no-ext-diff", "-M", since, head, "--", *pr_files) if pr_files else ""
-        if followup.strip():
+        if rt.follow_up_lines(followup, (out / "change.diff").read_text(encoding="utf-8")):
             context["mode"] = "follow-up"
             (out / "followup.diff").write_text(followup, encoding="utf-8")
         else:
@@ -212,7 +213,7 @@ def cmd_save(args: argparse.Namespace) -> int:
         print(f"::error::The review did not finish: not every hunter or verifier returned. Re-run the job. Reviewer's summary: {review['summary'][:400]}")
         return 1
     if context.get("mode") == "follow-up":
-        lines = rt.commentable_lines((folder / "followup.diff").read_text(encoding="utf-8"), context=False)
+        lines = rt.follow_up_lines((folder / "followup.diff").read_text(encoding="utf-8"), (folder / "change.diff").read_text(encoding="utf-8"))
         review["findings"], dropped = rt.follow_up_scope(review["findings"], lines)
         context["scope_dropped"] = len(dropped)
         context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")

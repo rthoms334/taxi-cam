@@ -148,8 +148,9 @@ def commentable_lines(diff: str, context: bool = True) -> dict[str, set[int]]:
     (side RIGHT). Files changed without hunks (binary, mode-only, pure
     renames) and deleted files map to an empty set: they accept file-level
     comments only, so an Important finding on a deletion still gets a thread.
-    With `context=False` only added lines are returned: the lines a change
-    actually wrote.
+    With `context=False` only the lines a change actually touched are
+    returned: added lines, and the head lines on either side of each
+    deletion, where a finding about removed code is anchored.
     """
     files: dict[str, set[int]] = {}
     header_path: str | None = None
@@ -173,6 +174,11 @@ def commentable_lines(diff: str, context: bool = True) -> dict[str, set[int]]:
                 new_line += 1
                 new_left -= 1
             elif marker == "-":
+                if current is not None and not context:
+                    touched = files.setdefault(current, set())
+                    touched.add(new_line)
+                    if new_line > 1:
+                        touched.add(new_line - 1)
                 old_left -= 1
             else:  # context line; an empty line is context with its space trimmed
                 if current is not None:
@@ -312,6 +318,30 @@ def last_reviewed_sha(comments: list[dict]) -> str | None:
     return found
 
 
+def follow_up_lines(followup_diff: str, change_diff: str) -> dict[str, set[int]]:
+    """The lines a follow-up review covers: this pull request's own changes
+    that are also new since the last review.
+
+    `followup_diff` runs from the last reviewed commit to head, so after a
+    merge from main it also holds main's edits to the pull request's files.
+    `change_diff` runs from the merge base to head and holds only the pull
+    request's own changes. Intersecting the two leaves main's edits out.
+    A file without line changes in both (binary, rename, deletion) is in
+    scope as a whole.
+    """
+    new = commentable_lines(followup_diff, context=False)
+    own = commentable_lines(change_diff, context=False)
+    result: dict[str, set[int]] = {}
+    for path, lines in new.items():
+        if path not in own:
+            continue
+        if not lines and not own[path]:
+            result[path] = set()
+        elif lines & own[path]:
+            result[path] = lines & own[path]
+    return result
+
+
 def follow_up_scope(findings: list[dict], lines: dict[str, set[int]]) -> tuple[list[dict], list[dict]]:
     """Keep only what a follow-up review may report.
 
@@ -337,7 +367,7 @@ FOLLOW_UP_SCOPE = """# Scope: follow-up review
 
 The last review on this pull request covered commit `{since}`. `followup.diff` holds only what changed since then in this pull request's files. `change.diff` is the whole pull request, for context only.
 
-- Review only the code that `followup.diff` changes. Do not report anything about code it does not change, even if you notice it.
+- Review only the code that `followup.diff` changes. Do not report anything about code it does not change, even if you notice it. If the branch merged `main`, `main`'s own changes also appear in `followup.diff`; they are not part of this pull request (check `change.diff`) and are out of scope.
 - Check the findings in `previous.json`: if one is still present on lines that `followup.diff` changes, report it again.
 - Report only `important` findings. Report no nits and no pre-existing findings.
 - Run at most two hunters: General correctness, and the one area hunter that best matches `followup.diff`. Keep at most four candidates. Voting is unchanged.
