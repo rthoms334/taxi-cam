@@ -4286,6 +4286,11 @@ bool initialize_graphics() noexcept {
 bool graphics_ready() noexcept {
   return registry().ready.load(std::memory_order_acquire);
 }
+LUID graphics_adapter_luid() noexcept {
+  auto& r = registry();
+  // The device is set once, before ready is published, and never replaced.
+  return r.ready.load(std::memory_order_acquire) && r.device ? r.device->GetAdapterLuid() : LUID{};
+}
 void set_graphics_observation_demand(bool enabled) noexcept {
   auto& r = registry();
   if (observation_enabled() == enabled)
