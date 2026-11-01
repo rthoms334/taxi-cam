@@ -62,8 +62,8 @@ bool same_preferences(const Settings& a, const Settings& b) {
   return a.camera_rate == b.camera_rate && a.camera_mode == b.camera_mode && a.auto_profile == b.auto_profile &&
          a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper && a.tail_corner == b.tail_corner &&
          a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi && a.auto_detect == b.auto_detect &&
-         a.single_camera == b.single_camera && a.calibration_budget == b.calibration_budget && a.mounts == b.mounts &&
-         a.day_brightness == b.day_brightness && a.night_brightness == b.night_brightness;
+         a.calibration_budget == b.calibration_budget && a.mounts == b.mounts && a.day_brightness == b.day_brightness &&
+         a.night_brightness == b.night_brightness;
 }
 
 Settings customized(const profiles::AircraftProfile& profile) {
@@ -75,7 +75,6 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.auto_detect = 0;
   value.camera_rate = 10;
   value.camera_mode = static_cast<UINT>(taxi_camera::CameraMode::smooth);
-  value.single_camera = 1;
   value.calibration_budget = 2048;
   value.day_brightness = -1.25f;
   value.night_brightness = 0.5f;
@@ -126,15 +125,17 @@ void camera_mode_persists_and_migrates() {
   require(save_settings(saved), "Save a profile for camera modes");
   Settings loaded;
   const auto path = settings_path(saved);
-  // Keys of the removed parked floor and dynamic tail rate are ignored and
-  // dropped by the next save.
+  // Keys of the removed parked floor, dynamic tail rate and First camera only
+  // test are ignored and dropped by the next save.
   patch(path, L"display", L"parked_rate", L"2");
   patch(path, L"display", L"parked_rate_revision", L"1");
   patch(path, L"display", L"dynamic_tail", L"1");
-  require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) && save_settings(saved) &&
-              ini(path, L"display", L"parked_rate") == L"<missing>" && ini(path, L"display", L"parked_rate_revision") == L"<missing>" &&
-              ini(path, L"display", L"dynamic_tail") == L"<missing>",
-          "Removed parked floor and dynamic tail keys were not ignored and dropped");
+  patch(path, L"display", L"single_camera", L"1");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) &&
+              loaded.retired_single_camera == 0 && save_settings(saved) && ini(path, L"display", L"parked_rate") == L"<missing>" &&
+              ini(path, L"display", L"parked_rate_revision") == L"<missing>" && ini(path, L"display", L"dynamic_tail") == L"<missing>" &&
+              ini(path, L"display", L"single_camera") == L"<missing>",
+          "Removed parked floor, dynamic tail and single camera keys were not ignored and dropped");
   // Camera mode: saved per profile; profiles from before modes map their rate.
   using taxi_camera::CameraMode;
   const auto mode = [](CameraMode value) { return static_cast<UINT>(value); };

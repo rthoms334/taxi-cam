@@ -62,14 +62,13 @@ Earlier versions saved `camera_weather`, `camera_tone`, `automatic_exposure`, `e
 | `camera_mode` | 4 (Auto) | Camera frame rate per camera: 0 Performance (10), 1 Balanced (15), 2 Smooth (30), 3 Custom (`camera_rate`), 4 Auto (1, 2 or every camera on every frame, chosen to keep the simulator within 10 % of its camera-off update rate and never below 20). A profile saved before camera modes has no key: a saved `camera_rate` below 10 loads as Performance, above 10 as Custom at that rate, and 10 as Auto. An unknown value loads the same way. |
 | `camera_rate` | 10 | Integer 5–60 (minimum 5): the Custom target in frames per second per camera; the other modes keep it for Custom. Missing keys use 10. The bridge caps the target at the aircraft's PFD refresh (`pfd_refresh_hz`) and reports the rate in use; the saved value is never rewritten. The `parked_rate`, `parked_rate_revision` and `dynamic_tail` keys of earlier versions are ignored and dropped on the next save. |
 | `camera_rate_revision` | 2 after the one-shot migrate | Migration marker on `settings.ini`, written by the companion (earlier versions: by Setup); not a user control. The companion skips the rate write when this is 2. Revision 1 (the earlier force-5 migrate) is migrated once to 10. |
-| `single_camera` | 0 | Render only the nose for a performance test |
 | `speed_red`, `speed_green`, `speed_blue` | 22 / 255, 109 / 255, 19 / 255 for all aircraft (`#166D13`) | Normalized RGB, 0–1, edited with the colour picker |
 | `guide_red`, `guide_green`, `guide_blue` | 1, 0, 1 for all aircraft (`#FF00FF`) | Normalized RGB, 0–1, saved in `[guides]`; **Marking colour** changes all reference marks independently of GS |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
 | `day_brightness` | 0 | Camera brightness in daylight, EV added to the exposure the camera images take (see [Exposure](#exposure)); −4 to +2 in 0.25 steps. A hand edit out of range or off a step is snapped when loaded. |
 | `night_brightness` | 0 | The same at night. Between day and night the two blend with the ambient light. |
 
-Boolean settings use 0 or 1. Numeric values must be finite. The single-camera test does not supply the two images required for the normal PFD composition.
+Boolean settings use 0 or 1. Numeric values must be finite. The `single_camera` key of the removed First camera only test is ignored and dropped by the next save; that test never produced camera output.
 
 The following controls are session-only and start cleared:
 

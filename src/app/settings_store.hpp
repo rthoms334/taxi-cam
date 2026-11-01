@@ -424,8 +424,9 @@ inline bool load_settings(Settings& s,
   // Profiles saved before camera modes hold only camera_rate: a lowered rate
   // meant a smaller budget (Performance), a raised one asked for smoother
   // cameras (Custom at that target), and the shipped 10 takes the default
-  // mode. Later saved modes are kept. The parked_rate, parked_rate_revision
-  // and dynamic_tail keys of earlier versions are ignored and dropped.
+  // mode. Later saved modes are kept. The parked_rate, parked_rate_revision,
+  // dynamic_tail and single_camera keys of earlier versions are ignored and
+  // dropped.
   const UINT camera_mode = integer(L"display", L"camera_mode", kCameraModeCount);
   if (camera_mode < kCameraModeCount)
     value.camera_mode = camera_mode;
@@ -435,7 +436,6 @@ inline bool load_settings(Settings& s,
     value.camera_mode = static_cast<UINT>(CameraMode::custom);
   else
     value.camera_mode = static_cast<UINT>(kDefaultCameraMode);
-  value.single_camera = integer(L"display", L"single_camera", 0);
   value.calibration_budget = integer(L"display", L"calibration_budget", 4096);
   // New keys: the exposure and night_boost keys of 0.9.50 and earlier held
   // absolute values and are not read.
@@ -518,7 +518,7 @@ inline bool save_settings(const Settings& s) {
   const int count = std::swprintf(
       text, 4096,
       L"[service]\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
-      L"[display]\r\ncamera_mode=%u\r\ncamera_rate=%u\r\nsingle_camera=%u\r\n"
+      L"[display]\r\ncamera_mode=%u\r\ncamera_rate=%u\r\n"
       L"calibration_budget=%u\r\nday_brightness=%.9g\r\nnight_brightness=%.9g\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\n"
       L"speed_blue=%.9g\r\n"
       L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
@@ -527,10 +527,10 @@ inline bool save_settings(const Settings& s) {
       L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
-      s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_mode, s.camera_rate, s.single_camera, s.calibration_budget,
-      s.day_brightness, s.night_brightness, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1],
-      s.guide_color[2], s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0],
-      s.tail_inner[1], n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
+      s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_mode, s.camera_rate, s.calibration_budget, s.day_brightness,
+      s.night_brightness, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2],
+      s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1],
+      n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
   if (count <= 0)
     return false;
   const auto write = [](const std::wstring& destination, const std::wstring& body) {

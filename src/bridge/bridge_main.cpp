@@ -1616,7 +1616,7 @@ DWORD run_impl() {
           ground.valid,
           ground.on_ground,
           velocity.valid,
-          settings.calibration_mask != 0 || settings.single_camera != 0,
+          settings.calibration_mask != 0,
           velocity.knots,
           native_camera::get_aircraft_session_readiness().ready};
     };
@@ -1664,8 +1664,7 @@ DWORD run_impl() {
     // Only the schedule rate changes here. The pair, its gates and the saved
     // camera_rate are untouched; configure() on a live pair retains its grid.
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
-    const unsigned desired_feeds =
-        settings.single_camera ? 1u : (rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u);
+    const unsigned desired_feeds = rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u;
     const unsigned pfd_refresh_hz = rate_profile ? rate_profile->pfd_refresh_hz : 0;
     const double update_hz = update_meter.update(now, native_camera::scene_update_count());
     if (!demand.suspend) {

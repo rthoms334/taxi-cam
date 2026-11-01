@@ -404,7 +404,7 @@ void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
   const bool automatic = mode == static_cast<unsigned>(CameraMode::automatic);
   // Auto reports the cameras per frame it runs; the other modes their target.
   const bool auto_live = automatic && sample.heartbeat && s.camera_mode == mode && std::isfinite(update_hz);
-  const unsigned feeds = s.single_camera ? 1u : (profile && profile->composition.split_bottom != 0 ? 3u : 2u);
+  const unsigned feeds = profile && profile->composition.split_bottom != 0 ? 3u : 2u;
   const unsigned per_frame = auto_cameras_per_frame(auto_live ? sample.auto_level : 0, feeds);
   const unsigned target =
       automatic ? 0 : effective_camera_rate(camera_mode_target(mode, selected_camera_target()), profile ? profile->pfd_refresh_hz : 0).rate;
@@ -3882,7 +3882,6 @@ void build_controls() {
     update_gallery_buttons();
   } else if (page == 4) {
     button(switch_label(tr(L"Scene test"), s.scene_test).c_str(), 229, 262, 318, 200);
-    button(switch_label(tr(L"First camera only"), s.single_camera).c_str(), 228, 472, 318, 200);
     edit(s.calibration_budget, 203, 872, 392, 120);
     button(tr(L"Open log folder"), 510, 244, 454, 210);
     button(tr(L"Stop camera tests"), 511, 464, 454, 210);
@@ -4683,8 +4682,6 @@ bool is_on(int id, const win::Settings& s) {
       return s.manual_mask & 4;
     case 233:
       return s.calibration_mask & 4;
-    case 228:
-      return s.single_camera;
     case 229:
       return s.scene_test;
     default:
@@ -5249,8 +5246,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           const auto* profile = profiles::find(s.profile);
           s.follow_taxi = s.calibration_mask == 0 && profile && profile->taxi_control != profiles::TaxiControl::manual_only;
         }
-        if (id == 228)
-          s.single_camera = !s.single_camera;
         if (id == 229)
           s.scene_test = !s.scene_test;
         publish(s);
