@@ -1,0 +1,196 @@
+name: AI review
+
+# Hunt, vote and rank: parallel agents look for defects, three independent
+# verifiers vote on each candidate, and the survivors are ranked Important,
+# Nit or Pre-existing (.github/review/prompt.md, REVIEW.md). The reviewer
+# reads code with a read-only token and returns findings as data. A separate
+# job posts them as review threads, and each thread must be resolved before
+# merging. Setup and the whole pull-request process: docs/pull-requests.md.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tooling:
+    name: Review tooling tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the pull-request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Test the risk classifier and poster
+        run: python3 -m unittest discover -s .github/review -p 'test_*.py' -v
+
+  hunt:
+    name: Hunt, vote and rank
+    needs: tooling
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Read-only on purpose: the reviewer reads untrusted pull-request text.
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
+    outputs:
+      artifact: ai-review-${{ github.event.pull_request.number }}-run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+    steps:
+      - name: Check out the pull-request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a Claude credential
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "::error::Add the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN repository secret (docs/pull-requests.md). Pull requests from forks receive no secrets and are not reviewed automatically."
+            exit 1
+          fi
+
+      - name: Stage the change, earlier findings and the reviewer from main
+        id: stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          gh api graphql --paginate -F owner="${REPO%/*}" -F name="${REPO#*/}" -F number="$PR" -f query='
+            query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+              repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+                reviewThreads(first: 100, after: $endCursor) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes { isResolved path line originalLine
+                    comments(first: 50) { nodes { body authorAssociation author { login } } } } } } } }' > "$RUNNER_TEMP/thread-pages.json"
+          jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]]' "$RUNNER_TEMP/thread-pages.json" > "$RUNNER_TEMP/threads.json"
+          # The summary comment records the last reviewed commit; later pushes get a follow-up review of what changed since.
+          gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" > "$RUNNER_TEMP/comment-pages.json"
+          jq -s 'add // []' "$RUNNER_TEMP/comment-pages.json" > "$RUNNER_TEMP/comments.json"
+          python3 .github/review/review.py stage --out build/review --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --reviewer-from "$BASE_SHA" --bootstrap-fallback --threads "$RUNNER_TEMP/threads.json" \
+            --summary-comments "$RUNNER_TEMP/comments.json" --github-output "$GITHUB_OUTPUT"
+
+      - name: Install subprocess isolation for the reviewer
+        if: steps.stage.outputs.mode != 'skip'
+        # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 needs bubblewrap. This is the setup the
+        # action itself performs for untrusted input (allowed_non_write_users).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Review with Claude
+        id: claude
+        # Skipped when no file in the pull request changed since the last review.
+        if: steps.stage.outputs.mode != 'skip'
+        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            You are the automated reviewer for this repository.
+            The review directory is build/review (relative to the repository root).
+            Read build/review/prompt.md and follow it exactly.
+          claude_args: |
+            --model ${{ vars.REVIEW_MODEL || 'claude-opus-5-5' }}
+            --max-turns 80
+            --json-schema '${{ steps.stage.outputs.schema }}'
+            --allowedTools "Read" "Grep" "Glob" "Agent" "Task" "Bash(git log:*)" "Bash(git show:*)"
+            --disallowedTools "Read(//proc/**)" "Read(//sys/**)" "Read(./.git/config)"
+
+      - name: Validate the ranked findings and refuse any credential
+        # Also runs when the Claude step fails, to print Claude Code's last message.
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/review/review.py save --out build/review/findings.json
+
+      - name: Keep the review for the posting job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-review-${{ github.event.pull_request.number }}-run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/review/findings.json
+            build/review/context.json
+            build/review/change.diff
+
+  post:
+    # Required status check. It fails only when the review could not run;
+    # findings block merging through their unresolved review threads.
+    name: AI review
+    needs: [tooling, hunt]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Require a finished review
+        env:
+          TOOLING: ${{ needs.tooling.result }}
+          HUNT: ${{ needs.hunt.result }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$TOOLING" = success ] && [ "$HUNT" = success ]; then exit 0; fi
+          if [ "$TOOLING" = success ] && [ "$HUNT" = skipped ] && [ "$DRAFT" = true ]; then
+            echo "Draft pull request: the review runs when it is marked ready for review." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::error::The review did not finish (tooling tests: $TOOLING, review: $HUNT). Open the failed job for the reason."
+          exit 1
+
+      - name: Check out the pull-request head
+        if: needs.hunt.result == 'success'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Fetch the review
+        if: needs.hunt.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # The hunt job's attempt, so re-running only this job finds the review.
+          name: ${{ needs.hunt.outputs.artifact }}
+          path: ${{ runner.temp }}/review
+
+      - name: Post findings as review threads and a summary
+        if: needs.hunt.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 .github/review/review.py post --dir "$RUNNER_TEMP/review" --repo "$REPO" --pr "$PR" --run-url "$RUN_URL" --summary "$GITHUB_STEP_SUMMARY"

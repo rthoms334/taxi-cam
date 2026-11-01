@@ -1,0 +1,180 @@
+name: Risk gate
+
+# Sets each pull request's risk tier from the paths it touches and waits for
+# the human approvals that tier needs:
+#   low     no approval
+#   medium  owner approval of this exact commit       (environment pr-approval)
+#   high    owner approval, then a live check in MSFS (environment pr-live-check)
+# Approvals are GitHub environment reviews, which a person grants in the
+# Actions UI. A new push starts a new run, so an approval covers one commit.
+#
+# pull_request_target runs main's copy of this file, so a pull request cannot
+# change its own gate. This workflow must never check out or run pull-request
+# code: it holds a token that can write labels. docs/pull-requests.md has the
+# tier rules and the one-time environment setup.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: risk-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: Classify risk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      tier: ${{ steps.classify.outputs.tier }}
+    steps:
+      - name: Check out main's classifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: List every changed path, and the old names of renamed files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" > "$RUNNER_TEMP/files.json"
+          jq -rs 'add // [] | .[].filename' "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/paths.txt"
+          jq -rs 'add // [] | .[] | .previous_filename // empty' "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/old-names.txt"
+
+      - name: Classify
+        id: classify
+        env:
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          python3 .github/review/review.py classify --files "$RUNNER_TEMP/paths.txt" --old-names "$RUNNER_TEMP/old-names.txt" \
+            --expected "$CHANGED_FILES" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Require protected approval environments
+        # An environment without a required reviewer would approve itself.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TIER: ${{ steps.classify.outputs.tier }}
+        run: |
+          case "$TIER" in
+            low) exit 0 ;;
+            medium) needed="pr-approval" ;;
+            high) needed="pr-approval pr-live-check" ;;
+            *) echo "::error::Unknown risk tier '$TIER'."; exit 1 ;;
+          esac
+          failed=0
+          for env in $needed; do
+            # On an HTTP error gh prints the error body instead of the --jq result.
+            reviewers=$(gh api "repos/$REPO/environments/$env" --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' 2>/dev/null) || reviewers=0
+            case "$reviewers" in ''|*[!0-9]*) reviewers=0 ;; esac
+            if [ "$reviewers" -lt 1 ]; then
+              echo "::error::Create the $env environment with a required reviewer before merging $TIER-risk changes (docs/pull-requests.md)."
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  label:
+    name: Label risk
+    needs: classify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Set the risk label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          TIER: ${{ needs.classify.outputs.tier }}
+        run: |
+          gh api -X POST "repos/$REPO/labels" -f name="risk: $TIER" -f color="$(case "$TIER" in low) echo 0e8a16;; medium) echo fbca04;; *) echo b60205;; esac)" \
+            -f description="Set by the risk gate (docs/pull-requests.md)" >/dev/null 2>&1 || true
+          for other in low medium high; do
+            if [ "$other" != "$TIER" ]; then
+              gh api -X DELETE "repos/$REPO/issues/$PR/labels/risk:%20$other" >/dev/null 2>&1 || true
+            fi
+          done
+          gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=risk: $TIER" >/dev/null
+
+  approval:
+    name: Owner approval
+    needs: classify
+    if: needs.classify.outputs.tier == 'medium' || needs.classify.outputs.tier == 'high'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    environment: pr-approval
+    steps:
+      - name: Record the approved commit
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: echo "Owner approved \`$HEAD_SHA\` after reading the change and its review." >> "$GITHUB_STEP_SUMMARY"
+
+  live-check:
+    name: Live check
+    needs: [classify, approval]
+    if: needs.classify.outputs.tier == 'high'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    environment: pr-live-check
+    steps:
+      - name: Record the live check
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: echo "Owner ran \`$HEAD_SHA\`'s PR test build in MSFS and recorded the result in the pull request." >> "$GITHUB_STEP_SUMMARY"
+
+  gate:
+    # Required status check.
+    name: Risk gate
+    needs: [classify, approval, live-check]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Require the approvals this tier needs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TIER: ${{ needs.classify.outputs.tier }}
+          CLASSIFY: ${{ needs.classify.result }}
+          APPROVAL: ${{ needs.approval.result }}
+          LIVE: ${{ needs.live-check.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CLASSIFY" != success ]; then echo "::error::Risk classification did not pass."; exit 1; fi
+          case "$TIER" in
+            low) needed="" ;;
+            medium) needed="pr-approval"; ok=$([ "$APPROVAL" = success ] && echo yes || echo no) ;;
+            high) needed="pr-approval pr-live-check"; ok=$([ "$APPROVAL" = success ] && [ "$LIVE" = success ] && echo yes || echo no) ;;
+            *) echo "::error::Unknown risk tier '$TIER'."; exit 1 ;;
+          esac
+          if [ -n "$needed" ] && [ "$ok" != yes ]; then
+            echo "::error::$TIER risk needs: $needed (owner approval: $APPROVAL, live check: $LIVE)."
+            exit 1
+          fi
+          approvals=$(gh api "repos/$REPO/actions/runs/$RUN_ID/approvals")
+          for env in $needed; do
+            who=$(jq -r --arg env "$env" '[.[] | select(.state == "approved" and .user.type == "User" and any(.environments[]; .name == $env)) | .user.login] | last // empty' <<<"$approvals")
+            if [ -z "$who" ]; then echo "::error::No approval by a person is recorded for $env."; exit 1; fi
+            echo "- \`$env\` approved by $who" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "Risk $TIER: the gate passed for this commit." >> "$GITHUB_STEP_SUMMARY"

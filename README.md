@@ -142,6 +142,7 @@ Taxi Cam asks MSFS to render two extra camera views and combines them on the GPU
 - [Settings, graphics requirements and diagnostics](docs/runtime-reference.md)
 - [Aircraft profiles and calibration](docs/aircraft-profiles.md)
 - [Builds and releases](docs/releases.md)
+- [Pull requests: review, risk and approval](docs/pull-requests.md)
 - [Source layout](docs/repository-structure.md)
 
 See [Third-party notices](THIRD_PARTY_NOTICES.md).
