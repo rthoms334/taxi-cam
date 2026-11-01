@@ -103,7 +103,7 @@ The repository owner does these steps in GitHub's settings. They are not stored 
 
 The session that opens a pull request turns on auto-merge (`gh pr merge <number> --auto --merge`) straight away, as [AGENTS.md](../AGENTS.md) asks, unless the pull request changes anything under `.github/`. GitHub then merges it as soon as the required checks pass and every thread is resolved; for medium and high risk, that includes your approvals in the risk gate.
 
-A pull request that changes `.github/` can add a workflow that fakes the **Risk gate** check (see [the unmitigated limit](#approving)). Auto-merge would merge it before you could check the real gate run, so you merge those yourself. If a later push to a pull request touches `.github/`, the session turns auto-merge off with `gh pr merge <number> --disable-auto`.
+A pull request that changes `.github/` can add a workflow that fakes the **Risk gate** check (see [the unmitigated limit](#approving)). Auto-merge would merge it before you could check the real gate run, so you merge those yourself. GitHub keeps auto-merge on across later pushes, so whoever pushes a commit that touches `.github/` to a pull request with auto-merge on (you or any session) turns it off first with `gh pr merge <number> --disable-auto`, then pushes. Turning it off after the push races the faked checks and can lose.
 
 An auto-merge counts as yours, so the push to `main` starts the [release workflow](releases.md). No workflow turns auto-merge on: a merge made with the Actions token starts no other workflows, so `main` would get no release candidate.
 
