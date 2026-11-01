@@ -34,6 +34,9 @@ MinVersion=10.0
 DisableDirPage=no
 DisableProgramGroupPage=yes
 WizardStyle=modern
+; Setup follows the Windows display language, as the companion does; /LANG=
+; overrides it. No language page is added to the flow.
+ShowLanguageDialog=no
 CloseApplications=no
 RestartApplications=no
 SetupMutex=380TaxiCamInstaller
@@ -46,6 +49,16 @@ SetupIconFile={#AppIcon}
 CreateUninstallRegKey=no
 UsePreviousAppDir=no
 #endif
+
+[Languages]
+; Setup's own wording is in messages\<tag>.isl with the companion's language tags.
+; Inno ships German, Spanish and French; installer/bootstrap.ps1 adds the pinned
+; Simplified Chinese message file to the compiler's Languages folder.
+Name: "english"; MessagesFile: "compiler:Default.isl,messages\en.isl"
+Name: "german"; MessagesFile: "compiler:Languages\German.isl,messages\de.isl"
+Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl,messages\es.isl"
+Name: "french"; MessagesFile: "compiler:Languages\French.isl,messages\fr.isl"
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl,messages\zh-Hans.isl"
 
 [Files]
 ; The new companion runs Setup's checks before any installed file changes.
@@ -71,7 +84,7 @@ Name: "{userprograms}\Taxi Cam"; Filename: "{app}\taxi-cam.exe"; WorkingDir: "{a
 #endif
 [Run]
 ; Offered on the finish page, ticked by default; silent installs never start it.
-Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"; Description: "Launch Taxi Cam"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,Taxi Cam}"; Flags: nowait postinstall skipifsilent
 
 ; Settings are retained unless the user explicitly chooses removal in the uninstaller.
 ; Installation records, logs and historical backups are retained.
@@ -100,7 +113,7 @@ begin
   Result := (Choice = '') or (CompareText(Choice, 'automatic') = 0) or (CompareText(Choice, 'manual') = 0);
   if not Result then begin
     Log('Invalid /STARTUP value: ' + Choice);
-    SuppressibleMsgBox('The /STARTUP option must be automatic or manual.', mbError, MB_OK, IDOK);
+    SuppressibleMsgBox(CustomMessage('StartupOptionInvalid'), mbError, MB_OK, IDOK);
   end;
 end;
 
@@ -180,7 +193,7 @@ function ErrorText(State: String): String;
 var
   Text: AnsiString;
 begin
-  Result := 'Installation failed. Close MSFS and the companion and verify the selected paths.';
+  Result := CustomMessage('InstallFailed');
   if LoadStringFromFile(State + '\error.txt', Text) then Result := UTF8Decode(Text);
 end;
 
@@ -219,23 +232,21 @@ begin
     FileExists(ExpandConstant('{localappdata}\380 Taxi Cam\app\installation.json')) then
     WizardForm.DirEdit.Text := ExpandConstant('{localappdata}\380 Taxi Cam\app');
   SimulatorPage := CreateInputDirPage(wpSelectDir, 'Microsoft Flight Simulator 2024',
-    'Select the simulator Content directory', 'Choose the directory containing FlightSimulator2024.exe.', False, '');
-  SimulatorPage.Add('Simulator Content directory:');
-  StartupPage := CreateInputOptionPage(SimulatorPage.ID, 'Startup preference', 'Choose how to start Taxi Cam',
-    'Automatic startup can be retried by running setup again. If setup cannot safely configure it, Taxi Cam will still be installed for manual launch.', True, False);
-  StartupPage.Add('Configure automatic startup with MSFS');
-  StartupPage.Add('Launch manually; leave existing startup entries unchanged');
+    CustomMessage('SimulatorPageDescription'), CustomMessage('SimulatorPageSubCaption'), False, '');
+  SimulatorPage.Add(CustomMessage('SimulatorFolderLabel'));
+  StartupPage := CreateInputOptionPage(SimulatorPage.ID, CustomMessage('StartupPageCaption'), CustomMessage('StartupPageDescription'),
+    CustomMessage('StartupPageSubCaption'), True, False);
+  StartupPage.Add(CustomMessage('StartupAutomatic'));
+  StartupPage.Add(CustomMessage('StartupManual'));
   StartupPage.SelectedValueIndex := 0;
-  XmlPage := CreateInputFilePage(StartupPage.ID, 'Automatic startup', 'Select the simulator exe.xml',
-    'Setup preserves other startup entries and adds Taxi Cam. A new exe.xml can be created at the selected path.');
-  XmlPage.Add('Simulator launch configuration:', 'XML files|*.xml|All files|*.*', '.xml');
+  XmlPage := CreateInputFilePage(StartupPage.ID, CustomMessage('XmlPageCaption'), CustomMessage('XmlPageDescription'),
+    CustomMessage('XmlPageSubCaption'));
+  XmlPage.Add(CustomMessage('XmlFileLabel'), CustomMessage('XmlFileFilter'), '.xml');
   XmlPage.Edits[0].OnChange := @XmlChoiceChanged;
   ExplicitXml := ExpandConstant('{param:EXEXML|}') <> '';
-  SettingsPage := CreateInputOptionPage(XmlPage.ID, 'Saved settings',
-    'Keep your settings or start with the defaults',
-    'Keep your camera profiles, calibration, reference guides and keyboard shortcuts. Camera frame rate is set to 10 (minimum 5, range 5–60). Clear this box to reset saved settings to the defaults.',
-    False, False);
-  SettingsPage.Add('&Keep existing settings (recommended)');
+  SettingsPage := CreateInputOptionPage(XmlPage.ID, CustomMessage('SettingsPageCaption'),
+    CustomMessage('SettingsPageDescription'), CustomMessage('SettingsPageSubCaption'), False, False);
+  SettingsPage.Add(CustomMessage('KeepExistingSettings'));
   SettingsPage.Values[0] := ExpandConstant('{param:RESETSETTINGS|0}') <> '1';
   ExtractTemporaryFile('taxi-cam.exe');
 end;
@@ -245,21 +256,21 @@ begin
   Result := True;
   if (CurPageID = wpSelectDir) and (PreviousDir <> WizardDirValue) then begin
     if not DiscoverChoices then begin
-      MsgBox('Cannot read the previous installation settings. Check installation.json.', mbError, MB_OK);
+      MsgBox(CustomMessage('PreviousSettingsUnreadable'), mbError, MB_OK);
       Result := False; exit;
     end;
   end;
   if CurPageID = SimulatorPage.ID then begin
     Result := FileExists(AddBackslash(SimulatorPage.Values[0]) + 'FlightSimulator2024.exe');
     if Result then ClearStaleInheritedXml
-    else MsgBox('Select the Content directory containing FlightSimulator2024.exe.', mbError, MB_OK);
+    else MsgBox(CustomMessage('SimulatorFolderInvalid'), mbError, MB_OK);
   end;
   if CurPageID = XmlPage.ID then begin
     { Silent setup delegates an empty choice to the companion's existing
       discovery/manual-startup fallback; interactive setup requests a path. }
     if WizardSilent and (XmlPage.Values[0] = '') then exit;
     Result := (CompareText(ExtractFileName(XmlPage.Values[0]), 'exe.xml') = 0) and (ExtractFileDrive(XmlPage.Values[0]) <> '');
-    if not Result then MsgBox('Choose a full path ending in exe.xml.', mbError, MB_OK);
+    if not Result then MsgBox(CustomMessage('XmlPathInvalid'), mbError, MB_OK);
   end;
 end;
 
@@ -274,7 +285,7 @@ var
 begin
   Result := '';
   if not DiscoverChoices then begin
-    Result := 'Cannot read the previous installation settings. Check installation.json.';
+    Result := CustomMessage('PreviousSettingsUnreadable');
     exit;
   end;
   ClearStaleInheritedXml;
@@ -297,8 +308,7 @@ begin
   { Configure automatic startup and the installation record with the installed companion. }
   State := ExpandConstant('{tmp}\state');
   if not RunSetupCommand(ExpandConstant('{app}\taxi-cam.exe'), 'configure', ExpandConstant('{app}'), State, InstallArguments) then begin
-    StartupNotice := 'Taxi Cam was installed, but Setup could not finish configuring it: ' + ErrorText(State) +
-      ' Run Setup again, or open Taxi Cam from the Start menu when you use MSFS.';
+    StartupNotice := FmtMessage(CustomMessage('ConfigureFailed'), [ErrorText(State)]);
     Log('Taxi Cam configuration failed: ' + StartupNotice);
     SuppressibleMsgBox(StartupNotice, mbError, MB_OK, IDOK);
     exit;
@@ -306,14 +316,14 @@ begin
   if LoadStringFromFile(State + '\warning.txt', Text) then
     StartupNotice := UTF8Decode(Text)
   else if StartupMode = 'manual' then
-    StartupNotice := 'Launch Taxi Cam from the Start menu before using MSFS. Existing simulator startup entries were left unchanged. You can run setup again to configure automatic startup.';
+    StartupNotice := CustomMessage('ManualStartupNotice');
   if StartupNotice <> '' then Log('Taxi Cam startup notice: ' + StartupNotice);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if (CurPageID = wpFinished) and (StartupNotice <> '') then begin
-    WizardForm.FinishedLabel.Caption := 'Taxi Cam was installed successfully.' + #13#10#13#10 + StartupNotice;
+    WizardForm.FinishedLabel.Caption := CustomMessage('InstalledSuccessfully') + #13#10#13#10 + StartupNotice;
     WizardForm.FinishedLabel.AutoSize := False;
     WizardForm.FinishedLabel.Height := WizardForm.FinishedPage.ClientHeight - WizardForm.FinishedLabel.Top - ScaleY(16);
   end;
@@ -336,10 +346,9 @@ begin
   Result := RunSetupCommand(UninstallCompanion, 'check', ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall'), Arguments);
   if not Result then MsgBox(ErrorText(ExpandConstant('{tmp}\taxi-uninstall')), mbError, MB_OK);
   if Result and not UninstallSilent then begin
-    Choice := TaskDialogMsgBox('Keep your Taxi Cam settings?',
-      'Keep your camera profiles, calibration, reference guides and keyboard shortcuts for a future installation. Logs will be kept either way.',
-      mbConfirmation, MB_YESNOCANCEL, ['&Keep settings (recommended)'#13#10'Uninstall the app and keep saved settings.',
-       '&Remove saved settings'#13#10'Uninstall the app and remove saved settings.', '&Cancel'], 0);
+    Choice := TaskDialogMsgBox(CustomMessage('KeepSettingsQuestion'), CustomMessage('KeepSettingsExplanation'),
+      mbConfirmation, MB_YESNOCANCEL, [CustomMessage('UninstallKeepSettings') + #13#10 + CustomMessage('UninstallKeepSettingsNote'),
+       CustomMessage('UninstallRemoveSettings') + #13#10 + CustomMessage('UninstallRemoveSettingsNote'), CustomMessage('UninstallCancel')], 0);
     Result := (Choice = IDYES) or (Choice = IDNO);
     RemoveSavedSettings := Choice = IDNO;
   end;
