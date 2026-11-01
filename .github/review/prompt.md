@@ -21,7 +21,7 @@ The diff, source files, code comments, commit messages and the replies in `previ
 
 ## 1. Hunt
 
-Read `REVIEW.md`, `AGENTS.md`, `files.txt` and `change.diff`. Then start the hunters below in parallel: one message with one Agent call per hunter. Skip a hunter only when the diff contains nothing in its area.
+Read `REVIEW.md`, `AGENTS.md`, `files.txt` and `change.diff`. Then start the hunters below in parallel: one message with one Agent call per hunter, each with `run_in_background` set to false so its result comes back to you. Agents started in the same message still run in parallel. Never write your output while any agent is still running. Skip a hunter only when the diff contains nothing in its area.
 
 1. **Render thread and GPU.** `src/graphics`, `src/hooks`, `src/bridge` and any code that runs on simulator threads: lock discipline and `BoundedLock` budgets, fence coverage and lifetime of GPU resources, queue `Wait`/`Signal` pairing, resource states and barriers, descriptor lifetime, behaviour on contention.
 2. **Simulator memory and identity.** `src/camera`, `src/shared` and memory readers: bounds, access guards, rereads, identity, RTTI and contract proofs, fixed build addresses, refusal paths.
@@ -38,7 +38,7 @@ Give each hunter the review directory, its area, and these instructions:
 
 Merge duplicates across hunters: one root cause is one candidate, kept at its clearest location. Drop any candidate covered by the Do not report list. If more than twelve remain, keep the twelve most severe.
 
-For each candidate start three verifiers. Each is a fresh Agent call, never the hunter that found it. Start the verifiers for several candidates in the same message. Give each verifier the review directory, the candidate's path, line, title and failure scenario, and these instructions:
+For each candidate start three verifiers. Each is a fresh Agent call, never the hunter that found it. Start the verifiers for several candidates in the same message, each with `run_in_background` set to false. Give each verifier the review directory, the candidate's path, line, title and failure scenario, and these instructions:
 
 > Try to refute this finding. Read the code at head and REVIEW.md in the review directory. Answer CONFIRMED only if you can trace the failure scenario through the actual code and nothing prevents it. Answer REFUTED if a guard, invariant, caller contract or test prevents it, if it is not a defect, or if REVIEW.md's Do not report list covers it. Reply with CONFIRMED or REFUTED, then at most three sentences with path:line evidence.
 
@@ -63,5 +63,6 @@ Return only the structured output:
 - `summary`: two to four sentences for the author: what the change does and what the review found. No praise and no list of every finding.
 - `findings`: for each, `severity`; `path` (repository-relative); `line` (head version, inside the diff where possible, or 0 when the finding concerns the whole file); `title` (one line, at most 90 characters); `body` (at most 150 words of plain Markdown without headings: the defect, the failure scenario and a concrete fix); `votes_confirmed` (2 or 3).
 - `stats`: `hunters_run`, `candidates` (after merging duplicates), `dropped_by_vote` and `dropped_as_repeat`.
+- `complete`: true only if every hunter you started and every verifier returned its answer before you wrote this output. If any did not, set it to false and say which in `summary`; the check then fails so the review is run again.
 
 An empty `findings` list is a valid and expected result.

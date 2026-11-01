@@ -227,6 +227,8 @@ def validate_review(data: object) -> dict:
     _require(isinstance(findings, list), "findings must be a list")
     _require(len(findings) <= 25, "at most 25 findings")
     _require(isinstance(stats, dict), "stats must be an object")
+    complete = data.get("complete")
+    _require(isinstance(complete, bool), "complete must be true or false")
     clean_stats = {}
     for key in ("hunters_run", "candidates", "dropped_by_vote", "dropped_as_repeat"):
         value = stats.get(key)
@@ -262,7 +264,7 @@ def validate_review(data: object) -> dict:
             "votes_confirmed": votes,
         })
     clean.sort(key=lambda f: SEVERITIES.index(f["severity"]))  # stable: keeps the reviewer's order within a severity
-    return {"summary": summary.strip(), "findings": clean, "stats": clean_stats}
+    return {"summary": summary.strip(), "findings": clean, "stats": clean_stats, "complete": complete}
 
 
 def fingerprint(finding: dict) -> str:

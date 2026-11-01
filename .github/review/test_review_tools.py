@@ -28,7 +28,7 @@ def finding(severity="important", path="src/a.cpp", line=3, title="Lock taken wi
 
 
 def review_output(findings=None):
-    return {"summary": "Does a thing.", "findings": findings or [], "stats": {"hunters_run": 6, "candidates": 2, "dropped_by_vote": 1, "dropped_as_repeat": 0}}
+    return {"summary": "Does a thing.", "findings": findings or [], "stats": {"hunters_run": 6, "candidates": 2, "dropped_by_vote": 1, "dropped_as_repeat": 0}, "complete": True}
 
 
 class ClassifyTest(unittest.TestCase):
@@ -179,6 +179,7 @@ class ValidateTest(unittest.TestCase):
             review_output([finding(votes=1)]),
             review_output([finding(title=" ")]),
             review_output([finding()] * 26),
+            {k: v for k, v in review_output().items() if k != "complete"},
         ]
         for data in bad:
             with self.assertRaises(rt.FindingsError, msg=repr(data)[:80]):
@@ -362,7 +363,7 @@ class CliTest(unittest.TestCase):
         self.assertFalse(context["bootstrap"])
         outputs = dict(line.split("=", 1) for line in gh_out.read_text(encoding="utf-8").splitlines())
         self.assertEqual(outputs["head"], head)
-        self.assertEqual(json.loads(outputs["schema"])["required"], ["summary", "findings", "stats"])
+        self.assertEqual(json.loads(outputs["schema"])["required"], ["summary", "findings", "stats", "complete"])
 
     def test_stage_bootstrap_and_eval_case(self):
         base, head = self.make_repo(False)
@@ -386,6 +387,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["findings"][0]["severity"], "important")
         self.assertEqual(self.run_cli("save", "--out", str(out), env={"STRUCTURED_OUTPUT": ""})[0], 1)
+        out.unlink()
+        incomplete = {**review_output([finding()]), "complete": False}
+        code, printed = self.run_cli("save", "--out", str(out), env={"STRUCTURED_OUTPUT": json.dumps(incomplete)})
+        self.assertEqual(code, 1)
+        self.assertIn("did not finish", printed)
+        self.assertFalse(out.exists())
         self.assertEqual(self.run_cli("save", "--out", str(out), env={"STRUCTURED_OUTPUT": "{\"summary\": 1}"})[0], 1)
 
     def test_classify(self):

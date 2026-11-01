@@ -160,6 +160,9 @@ def cmd_save(args: argparse.Namespace) -> int:
     except (json.JSONDecodeError, rt.FindingsError) as error:
         print(f"::error::The reviewer's output is invalid: {error}")
         return 1
+    if not review["complete"]:
+        print(f"::error::The review did not finish: not every hunter or verifier returned. Re-run the job. Reviewer's summary: {review['summary'][:400]}")
+        return 1
     Path(args.out).write_text(json.dumps(review, indent=2), encoding="utf-8")
     counts = {s: sum(1 for f in review["findings"] if f["severity"] == s) for s in rt.SEVERITIES}
     print(f"saved {len(review['findings'])} findings: {counts}")
