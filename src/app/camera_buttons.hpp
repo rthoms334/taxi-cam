@@ -31,13 +31,13 @@ inline bool valid_camera_buttons(const CameraButtons& bindings, std::wstring* er
   for (size_t i = 0; i < bindings.size(); ++i) {
     if (!valid_camera_button(bindings[i])) {
       if (error)
-        *error = L"A controller button binding is incomplete. Clear it and set the button again.";
+        *error = ui_text(L"A controller button binding is incomplete. Clear it and set the button again.");
       return false;
     }
     for (size_t j = 0; j < i; ++j)
       if (bindings[i].button && bindings[i] == bindings[j]) {
         if (error)
-          *error = L"Each camera action needs a different controller button. Clear any button you do not need.";
+          *error = ui_text(L"Each camera action needs a different controller button. Clear any button you do not need.");
         return false;
       }
   }
@@ -116,15 +116,26 @@ inline int camera_button_action(const CameraButtons& bindings, CameraButton pres
       return static_cast<int>(i);
   return -1;
 }
+// English wording for a binding: {0} is its button number and {1} its
+// controller, camera_button_controller().
+inline const wchar_t* camera_button_wording(CameraButton binding, const std::wstring& device) noexcept {
+  return !binding.button ? ui_text(L"No button") : device.empty() ? ui_text(L"Button {0} · controller {1}") : ui_text(L"Button {0} · {1}");
+}
+// The connected controller's name, or its USB IDs.
+inline std::wstring camera_button_controller(CameraButton binding, const std::wstring& device) {
+  if (!device.empty())
+    return device;
+  wchar_t ids[16];
+  std::swprintf(ids, 16, L"%04X:%04X", binding.vendor, binding.product);
+  return ids;
+}
 inline std::wstring describe_camera_button(CameraButton binding, const std::wstring& device) {
-  if (!binding.button)
-    return L"No button";
-  wchar_t value[192];
-  if (device.empty())
-    std::swprintf(value, 192, L"Button %u · controller %04X:%04X", binding.button, binding.vendor, binding.product);
-  else
-    std::swprintf(value, 192, L"Button %u · %ls", binding.button, device.c_str());
-  return value;
+  std::wstring text = camera_button_wording(binding, device);
+  for (const auto& [placeholder, value] : {std::pair<const wchar_t*, std::wstring>{L"{0}", std::to_wstring(binding.button)},
+                                           {L"{1}", camera_button_controller(binding, device)}})
+    if (const auto at = text.find(placeholder); at != std::wstring::npos)
+      text.replace(at, 3, value);
+  return text;
 }
 
 // Pressed buttons per HID input report. A controller that splits its buttons
@@ -287,16 +298,16 @@ class CameraButtonInput {
         continue;
       UINT length{};
       if (GetRawInputDeviceInfoW(list[i].hDevice, RIDI_DEVICENAME, nullptr, &length) != 0 || !length)
-        return L"Game controller";
+        return ui_text(L"Game controller");
       std::wstring path(length, L'\0');
       if (GetRawInputDeviceInfoW(list[i].hDevice, RIDI_DEVICENAME, path.data(), &length) == static_cast<UINT>(-1))
-        return L"Game controller";
+        return ui_text(L"Game controller");
       const HANDLE file = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
       wchar_t name[128]{};
       const bool named = file != INVALID_HANDLE_VALUE && HidD_GetProductString(file, name, sizeof(name) - sizeof(wchar_t)) && name[0];
       if (file != INVALID_HANDLE_VALUE)
         CloseHandle(file);
-      return named ? std::wstring(name) : L"Game controller";
+      return named ? std::wstring(name) : ui_text(L"Game controller");
     }
     return {};
   }

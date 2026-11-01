@@ -5,6 +5,7 @@
 #include <limits>
 #include <string>
 #include "../shared/profile_selection.hpp"
+#include "../shared/ui_text.hpp"
 
 namespace taxi_camera::standalone {
 // Companion-only attach preference. Not part of the bridge IPC Settings layout.
@@ -28,7 +29,7 @@ inline bool save_auto_connect(const std::wstring& directory, bool enabled) {
 enum class ConnectCommand : std::uint32_t { none = 0, connect = 1, reset = 2, disconnect = 3 };
 
 inline const wchar_t* connection_button_label(bool requested) noexcept {
-  return requested ? L"Disconnect" : L"Connect";
+  return requested ? ui_text(L"Disconnect") : ui_text(L"Connect");
 }
 
 inline void apply_connection_command(Settings& settings, ConnectCommand command) noexcept {

@@ -1,4 +1,5 @@
 #include "updater.hpp"
+#include "../shared/ui_text.hpp"
 #include "../shared/version.hpp"
 #include <bcrypt.h>
 #include <shlobj.h>
@@ -504,7 +505,7 @@ bool Updater::begin(const std::wstring&, bool manual) {
   worker_ = std::thread([this, cache = cache_, manual] {
     UpdateResult result;
     result.manual = manual;
-    result.error = L"Could not check for updates. Please try again later.";
+    result.error = ui_text(L"Could not check for updates. Please try again later.");
     if (!cache.empty())
       check(cache, result);
     {
@@ -529,11 +530,11 @@ bool Updater::launch(const UpdateResult& result, const std::wstring& installatio
     std::lock_guard lock(mutex_);
     result_.available = false;  // A failed handoff must permit a fresh check/download.
   }
-  error = L"The installer could not be verified or started. Please check for updates again.";
+  error = ui_text(L"The installer could not be verified or started. Please check for updates again.");
   if (!result.available || cache_.empty() || result.installer != cache_ + L"\\setup.exe")
     return false;
   if (simulator_blocks_update()) {
-    error = L"Close Microsoft Flight Simulator before installing this update, then check for updates again.";
+    error = ui_text(L"Close Microsoft Flight Simulator before installing this update, then check for updates again.");
     return false;
   }
   const auto arguments = update_installer_arguments(installation, GetCurrentProcessId());
