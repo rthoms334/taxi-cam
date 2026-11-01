@@ -144,7 +144,6 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"Exit", L"退出"},
     {L"Fine-tune each camera independently. Changes stay with this aircraft.", L"分别微调每路摄像头。更改只作用于当前机型。"},
     {L"Finish the current values before changing pages.", L"请先完成当前数值的填写，再切换页面。"},
-    {L"First camera only", L"仅第一路摄像头"},
     {L"Fixed: {0}", L"已修复：{0}"},
     {L"Fixes", L"修复"},
     {L"Flight-deck control", L"驾驶舱控制"},

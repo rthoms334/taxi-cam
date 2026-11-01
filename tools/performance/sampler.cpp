@@ -254,12 +254,13 @@ std::string settings_json(const ipc::Settings& s) {
   out << std::setprecision(17);
   out << "{\"enabled\":" << s.enabled << ",\"camera_rate\":" << s.camera_rate << ",\"camera_mode\":" << s.camera_mode
       << ",\"profile\":" << s.profile << ",\"auto_profile\":" << s.auto_profile << ",\"follow_taxi\":" << s.follow_taxi
-      << ",\"auto_detect\":" << s.auto_detect << ",\"single_camera\":" << s.single_camera << ",\"manual_mask\":" << s.manual_mask
-      << ",\"calibration_mask\":" << s.calibration_mask << ",\"calibration_budget\":" << s.calibration_budget
-      << ",\"scene_test\":" << s.scene_test << ",\"route_request\":" << s.route_request << ",\"left_id\":" << s.left_id
-      << ",\"right_id\":" << s.right_id << ",\"profile_request\":" << s.profile_request
-      << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch << ",\"taxi_request\":" << s.taxi_request
-      << ",\"taxi_selected_mask\":" << s.taxi_selected_mask << ",\"taxi_desired_mask\":" << s.taxi_desired_mask << ",\"speed_color\":";
+      << ",\"auto_detect\":" << s.auto_detect << ",\"retired_single_camera\":" << s.retired_single_camera
+      << ",\"manual_mask\":" << s.manual_mask << ",\"calibration_mask\":" << s.calibration_mask
+      << ",\"calibration_budget\":" << s.calibration_budget << ",\"scene_test\":" << s.scene_test
+      << ",\"route_request\":" << s.route_request << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
+      << ",\"profile_request\":" << s.profile_request << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch
+      << ",\"taxi_request\":" << s.taxi_request << ",\"taxi_selected_mask\":" << s.taxi_selected_mask
+      << ",\"taxi_desired_mask\":" << s.taxi_desired_mask << ",\"speed_color\":";
   array_json(out, s.speed_color);
   out << ",\"nose_dot\":";
   array_json(out, s.nose_dot);
@@ -440,7 +441,7 @@ std::string validate_capture(const IpcSnapshot& snapshot, const Options& options
   const auto& settings = snapshot.value.settings;
   if (!s.graphics_ready || !s.scene_ready)
     return "scene_not_ready";
-  if (settings.scene_test || settings.calibration_mask || settings.single_camera)
+  if (settings.scene_test || settings.calibration_mask)
     return "diagnostic_mode_enabled";
   if (!fresh(s.identity_sample_ms, GetTickCount64()) || s.active_profile != options.profile || s.detected_profile != options.profile ||
       settings.profile != options.profile)

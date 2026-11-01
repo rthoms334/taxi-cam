@@ -57,7 +57,9 @@ struct Settings {
   std::array<float, 2> tail_upper = profiles::A380.composition.tail_upper;
   std::array<float, 2> tail_corner = profiles::A380.composition.tail_corner;
   std::array<float, 2> tail_inner = profiles::A380.composition.tail_inner;
-  std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, single_camera = 0, manual_mask = 0, calibration_mask = 0,
+  // retired_single_camera keeps the layout of the removed First camera only
+  // test (it never produced output); the companion sends 0, the bridge ignores it.
+  std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, retired_single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
   std::array<std::array<double, 6>, 3> mounts = profiles::A380.mounts;
   // Protocol 15: explicit separate side-2 texture, sent with route_request
@@ -203,8 +205,9 @@ inline bool valid_settings(const Settings& s) noexcept {
   } else {
     return false;
   }
-  if (s.auto_profile > 1 || s.notifications > 1 || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 || s.scene_test > 1 ||
-      s.panel_setup > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 || s.calibration_budget > 16384)
+  if (s.auto_profile > 1 || s.notifications > 1 || s.follow_taxi > 1 || s.auto_detect > 1 || s.retired_single_camera > 1 ||
+      s.scene_test > 1 || s.panel_setup > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 ||
+      s.calibration_budget > 16384)
     return false;
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
     return false;

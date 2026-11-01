@@ -145,7 +145,6 @@ inline constexpr Translation FrenchTranslations[]{
     {L"Exit", L"Quitter"},
     {L"Fine-tune each camera independently. Changes stay with this aircraft.", L"Réglez chaque caméra séparément. Les modifications restent propres à cet avion."},
     {L"Finish the current values before changing pages.", L"Terminez la saisie des valeurs avant de changer de page."},
-    {L"First camera only", L"1re caméra seule"},
     {L"Fixed: {0}", L"Corrigé : {0}"},
     {L"Fixes", L"Corrections"},
     {L"Flight-deck control", L"Commandes du cockpit"},
