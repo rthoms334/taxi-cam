@@ -1,6 +1,7 @@
+#include "../../src/graphics/render_target_shapes.hpp"
 #include <cassert>
 #include <cstdio>
-#include "../../src/graphics/render_target_shapes.hpp"
+#include "../../src/graphics/render_target_sequence.hpp"
 
 int main() {
   using taxi_camera::RenderTargetShapes;
@@ -40,5 +41,16 @@ int main() {
   assert(shapes.record(768, 1024, 1, 27, 1000));
   n = shapes.snapshot(out);
   assert(n == RenderTargetShapes::Capacity && out[0].created == 2 && out[0].last_ms == 1000);
+
+  // Creation order keeps each texture's address, so a texture tracked after
+  // its creation (aircraft discovery) can be matched to its later ID.
+  static taxi_camera::RenderTargetSequence sequence;
+  static std::array<taxi_camera::RenderTargetSequence::Entry, 4> entries;
+  sequence.record(2048, 2048, 5, 28, 0, 100, 0x1000);
+  sequence.record(768, 1024, 5, 28, 230, 110);
+  sequence.record(128, 128, 5, 28, 0, 120, 0x2000);
+  const auto m = sequence.snapshot(0, entries);
+  assert(m == 2 && entries[0].native == 0x1000 && !entries[0].id && entries[0].width == 2048 && entries[0].mips == 5);
+  assert(entries[1].id == 230 && !entries[1].native && entries[1].tick == 110);
   std::puts("render target shapes: ok");
 }

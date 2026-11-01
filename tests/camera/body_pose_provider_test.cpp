@@ -185,12 +185,26 @@ void session_readiness_regressions(Check check) {
   check(!testing::session_readiness_at(now).flow_subscribed &&
         std::strcmp(testing::session_readiness_at(now).error, "flow_not_subscribed") == 0);
   check(get_aircraft_session_epoch() == epoch);
-  check(!testing::session_readiness_at(now + 501).ready);
+  check(testing::session_readiness_at(now).flight_loaded);
+  {
+    // An aircraft no profile matches is never ready, but its flight still
+    // loads: aircraft discovery runs on flight_loaded.
+    auto unsupported = path;
+    std::strcpy(reinterpret_cast<char*>(unsupported.data() + 24),
+                "SimObjects/Airplanes/FNX_32X/presets/fnx/FNX_320_CFM_SL/config/aircraft.CFG");
+    check(!testing::accept_identity_packet(type.data(), type.size(), now));
+    check(!testing::accept_identity_packet(unsupported.data(), unsupported.size(), now));
+    const auto loaded = testing::session_readiness_at(now);
+    check(!loaded.ready && loaded.flight_loaded);
+    supply();
+    check(testing::session_readiness_at(now).ready && get_aircraft_session_epoch() == epoch);
+  }
+  check(!testing::session_readiness_at(now + 501).ready && !testing::session_readiness_at(now + 501).flight_loaded);
   flow_packet(Session::FltLoad);
   check(testing::accept_session_packet(flow.data(), flow.size()));
   check(get_aircraft_session_epoch() == epoch + 1);
   auto status = testing::session_readiness_at(now);
-  check(status.loading && !status.ready && status.last_flow_event == Session::FltLoad);
+  check(status.loading && !status.ready && !status.flight_loaded && status.last_flow_event == Session::FltLoad);
   supply();
   check(!testing::session_readiness_at(now).ready && !sample_body_pose(now).calibration_required);
   check(!calibrate_body_pose(body_math::ecef(cv[0], cv[1], cv[2]), static_cast<float>(fov), now));

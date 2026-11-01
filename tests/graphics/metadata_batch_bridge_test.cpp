@@ -119,6 +119,7 @@ void submission_close_endpoint_checks() {
   item->submission_proof.close(1, true);
   item->closed_recording.store(1, std::memory_order_release);
   r.lists[item->native] = item;
+  target->display_shape = target->display_shape || win::display_shaped(target->desc);  // As admission decides it.
   r.resources[target->native] = target;
   r.profile = &taxi_camera::profiles::A380;
   r.ready = true;
@@ -173,6 +174,7 @@ void submission_profile_filter_checks() {
     item->native = reinterpret_cast<ID3D12Resource*>(0xa00000 + resources.size() * 0x100);
     item->desc = {D3D12_RESOURCE_DIMENSION_TEXTURE2D,     0, 768, 1024, 1, mips, format, {1, 0}, D3D12_TEXTURE_LAYOUT_UNKNOWN,
                   D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET};
+    item->display_shape = item->display_shape || win::display_shaped(item->desc);  // As admission decides it.
     r.resources[item->native] = item;
     resources.push_back(item);
     return item;
@@ -738,6 +740,7 @@ void display_session_reset_checks() {
   item->submission_proof.close(1, true);
   item->closed_recording = 1;
   r.lists[item->native] = item;
+  target->display_shape = target->display_shape || win::display_shaped(target->desc);  // As admission decides it.
   r.resources[target->native] = target;
   r.routes.select_explicit({target->id, 0});
   r.active_mask = r.calibration_mask = 1;
@@ -790,6 +793,7 @@ void inventory_checks() {
     item->desc.Height = r.profile->height;
     item->desc.MipLevels = static_cast<UINT16>(r.profile->mips ? r.profile->mips : 1);
     item->desc.Format = static_cast<DXGI_FORMAT>(r.profile->formats[0]);
+    item->display_shape = item->display_shape || win::display_shaped(item->desc);  // As admission decides it.
     r.resources[item->native] = item;
     resources[i] = std::move(item);
   }
@@ -897,6 +901,7 @@ void deferred_settlement_checks() {
   r.profile = &taxi_camera::profiles::A380;
   r.ready = true;
   r.lists[item->native] = item;
+  target->display_shape = target->display_shape || win::display_shaped(target->desc);  // As admission decides it.
   r.resources[target->native] = target;
   const win::PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(target->native), target->id};
   // A carried RT write: restorable settlement in RENDER_TARGET that wrote the display.
@@ -1141,7 +1146,9 @@ int main() {
     second->native = second_native;
     second->id = 1002;
     r.lists[native] = item;
+    first->display_shape = first->display_shape || win::display_shaped(first->desc);  // As admission decides it.
     r.resources[first_native] = first;
+    second->display_shape = second->display_shape || win::display_shaped(second->desc);  // As admission decides it.
     r.resources[second_native] = second;
     r.routes.select_explicit({1001, 1002});
     r.active_mask = 3;

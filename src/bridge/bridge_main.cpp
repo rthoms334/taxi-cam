@@ -249,11 +249,20 @@ struct PanelIdentityLog {
   std::uint64_t next_analysis_ms{};
   std::string proposal_text;
   std::array<std::uint64_t, MaxDisplaySides> named{};
-  std::uint32_t named_profile{};
+  // Pointer, not id: a set-up aircraft keeps its id across layouts.
+  const profiles::AircraftProfile* named_profile{};
   // First complete mapping of this flight, frozen: the creation log scrolls,
   // so re-deriving it later could shift names onto other textures.
   bool locked{};
   std::array<RenderTargetSequence::Entry, MaxDisplaySides> locked_shapes{};
+  // Panel map published in Status (protocol 26), from the latest proposal,
+  // and each entry's creation record for textures tracked only later.
+  std::vector<win::PanelTexture> map;
+  std::vector<RenderTargetSequence::Entry> map_creations;
+  win::PanelMapState map_state = win::PanelMapState::waiting;
+  int map_shift = -1;
+  display_identity::ProcessTables tables;  // Not reset per flight.
+  bool clean{};
 };
 // Joins items into "prefix [part/total]: ..." lines of bounded length.
 void log_chunks(const win::Status& status, const char* prefix, const std::vector<std::string>& items) noexcept {
@@ -325,9 +334,17 @@ void service_panel_identity(PanelIdentityLog& state,
     state.locked = false;
     state.burst_logged = false;
     state.names.clear();
+    state.map.clear();
+    state.map_creations.clear();
+    state.map_state = win::PanelMapState::waiting;
+    state.map_shift = -1;
   }
   const auto panels = display_identity::read_panels();
   if (panels.error) {
+    // A table changing under the read keeps this flight's pairing.
+    if (state.map.empty())
+      state.map_state =
+          std::strncmp(panels.error, "panel_table", 11) == 0 ? win::PanelMapState::unresolved : win::PanelMapState::unavailable;
     if (!state.refusal_logged) {
       state.refusal_logged = true;
       char detail[160];
@@ -338,12 +355,21 @@ void service_panel_identity(PanelIdentityLog& state,
     return;
   }
   const auto signature = textured_signature(panels);
+  if (state.map_state == win::PanelMapState::unavailable || state.map_state == win::PanelMapState::unresolved)
+    state.map_state = win::PanelMapState::waiting;
   if (signature != state.signature) {
     state.signature = signature;
     state.seen_ms = now;
     state.burst_logged = false;
     state.locked = false;
     state.panels = panels;
+    state.map.clear();
+    state.map_state = win::PanelMapState::waiting;
+    state.map_shift = -1;
+    // A table without textured panels (before the cockpit loads) says nothing
+    // about which aircraft this process has shown.
+    if (display_identity::textured_count(panels))
+      state.clean = state.tables.observe(display_identity::aircraft_signature(panels));
     try {
       std::vector<std::string> items;
       char count[48];
@@ -366,64 +392,94 @@ void service_panel_identity(PanelIdentityLog& state,
   // the wait only has to outlast kPanelLateMs, after which the creation
   // window cannot change. Panel textures are recreated when the cockpit
   // reloads, so the latest multi-mip creations are the current ones.
-  if (!session_ready || state.seen_ms < state.epoch_ms || now - state.seen_ms < kPanelSettleMs || now < state.next_analysis_ms)
+  // Another profile (or set-up layout) pairs its names at once: the aircraft
+  // setup's cockpit test waits on it.
+  const bool profile_changed = state.burst_logged && profile != state.named_profile;
+  if (!session_ready || state.seen_ms < state.epoch_ms || now - state.seen_ms < kPanelSettleMs ||
+      (now < state.next_analysis_ms && !profile_changed))
     return;
   // Re-checked every 10 s: a recreated display texture gets its name back.
   state.next_analysis_ms = now + 10000;
+  // Panels whose texture was tracked after the pairing (aircraft setup turns
+  // discovery on for an aircraft already routed by name) get their IDs.
+  try {
+    if (std::any_of(state.map.begin(), state.map.end(), [](const auto& panel) { return !panel.id; })) {
+      auto entries = state.map_creations;
+      win::resolve_creation_ids(entries.data(), entries.size());
+      for (std::size_t i = 0; i < entries.size() && i < state.map.size(); ++i)
+        state.map[i].id = entries[i].id;
+    }
+  } catch (...) {
+  }
   const bool first = !state.burst_logged;
   state.burst_logged = true;
   const auto profile_id = profile ? profile->id : 0u;
-  if (state.locked && profile_id == state.named_profile) {
-    // Keep the frozen mapping. A destroyed named texture (the 777 recreates
-    // displays) takes the newest live texture of the same shape created later.
-    try {
-      const auto records = win::display_resource_records();
-      const auto alive = [&](std::uint64_t id) {
-        return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
-      };
-      static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
-      const auto n = win::panel_texture_creation_sequence().snapshot(0, entries);
-      // Never a texture the panel table gave to another panel (an A350
-      // replacement once took $INI_FAP's texture for $EFIS_LEFT).
-      const auto paired_elsewhere = [&](std::uint64_t id) {
-        return std::any_of(state.names.begin(), state.names.end(), [&](const auto& name) { return name.first == id; });
-      };
-      auto named = state.named;
-      for (unsigned side = 0; side < MaxDisplaySides; ++side) {
-        if (!named[side] || alive(named[side]))
-          continue;
-        const auto& shape = state.locked_shapes[side];
-        // The simulator copies a display into its replacement (FlyByWire
-        // A380: #1522 -> #1528); follow that chain to a live texture first.
-        std::uint64_t replacement = 0, successor = named[side];
-        const auto feeds = win::display_feed_pairs();
-        for (unsigned step = 0; step < 8; ++step) {
-          const auto next = std::find_if(feeds.begin(), feeds.end(), [&](const auto& feed) { return feed.first == successor; });
-          if (next == feeds.end())
-            break;
-          successor = next->second;
-          if (alive(successor) && !paired_elsewhere(successor) && std::find(named.begin(), named.end(), successor) == named.end()) {
-            replacement = successor;
-            break;
-          }
+  // A destroyed named texture (the 777 and the Fenix recreate displays) takes
+  // its live replacement, so the creation burst's IDs stay current.
+  const auto follow_recreated = [&](std::array<std::uint64_t, MaxDisplaySides> named) {
+    const auto records = win::display_resource_records();
+    const auto alive = [&](std::uint64_t id) {
+      return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
+    };
+    static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
+    const auto n = win::panel_texture_creation_sequence().snapshot(0, entries);
+    // Never a texture the panel table gave to another panel (an A350
+    // replacement once took $INI_FAP's texture for $EFIS_LEFT).
+    const auto paired_elsewhere = [&](std::uint64_t id) {
+      return std::any_of(state.names.begin(), state.names.end(), [&](const auto& name) { return name.first == id; });
+    };
+    for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+      if (!named[side] || alive(named[side]))
+        continue;
+      const auto destroyed = named[side];
+      const auto& shape = state.locked_shapes[side];
+      // The simulator copies a display into its replacement (FlyByWire
+      // A380: #1522 -> #1528); follow that chain to a live texture first.
+      std::uint64_t replacement = 0, successor = destroyed;
+      const auto feeds = win::display_feed_pairs();
+      for (unsigned step = 0; step < 8; ++step) {
+        const auto next = std::find_if(feeds.begin(), feeds.end(), [&](const auto& feed) { return feed.first == successor; });
+        if (next == feeds.end())
+          break;
+        successor = next->second;
+        if (alive(successor) && !paired_elsewhere(successor) && std::find(named.begin(), named.end(), successor) == named.end()) {
+          replacement = successor;
+          break;
         }
-        // Otherwise the newest live texture of the same shape created later.
-        for (std::size_t i = 0; !replacement && i < n; ++i) {
-          const auto& e = entries[n - 1 - i];
-          if (e.id > named[side] && e.width == shape.width && e.height == shape.height && e.mips == shape.mips &&
-              e.format == shape.format && alive(e.id) && std::find(named.begin(), named.end(), e.id) == named.end() &&
-              !paired_elsewhere(e.id))
-            replacement = e.id;
-        }
-        if (replacement)
-          for (auto& id : named)  // Single-display profiles name one texture for several sides.
-            if (id == state.named[side])
-              id = replacement;
       }
+      // Otherwise the newest live texture of the same shape created later.
+      for (std::size_t i = 0; !replacement && i < n; ++i) {
+        const auto& e = entries[n - 1 - i];
+        if (e.id > destroyed && e.width == shape.width && e.height == shape.height && e.mips == shape.mips && e.format == shape.format &&
+            alive(e.id) && std::find(named.begin(), named.end(), e.id) == named.end() && !paired_elsewhere(e.id))
+          replacement = e.id;
+      }
+      if (replacement)
+        for (auto& id : named)  // Single-display profiles name one texture for several sides.
+          if (id == destroyed)
+            id = replacement;
+    }
+    return named;
+  };
+  // The panel map names a display's replacement too: the aircraft setup's
+  // pictures and the PFD routing cards ask for a panel by its ID.
+  const auto rename_recreated = [&](const std::array<std::uint64_t, MaxDisplaySides>& from,
+                                    const std::array<std::uint64_t, MaxDisplaySides>& to) {
+    for (unsigned side = 0; side < MaxDisplaySides; ++side)
+      if (from[side] && to[side] != from[side])
+        for (auto& panel : state.map)
+          if (panel.id == from[side])
+            panel.id = to[side];
+  };
+  if (state.locked && profile == state.named_profile) {
+    // Keep the frozen mapping, following recreated textures.
+    try {
+      const auto named = follow_recreated(state.named);
       // Republished every check: a profile (re)application clears the
       // bridge's named targets.
       win::set_named_targets(named);
       if (named != state.named) {
+        rename_recreated(state.named, named);
         state.named = named;
         char detail[160];
         std::snprintf(detail, sizeof(detail), "Display named routing: recreated ids=%llu,%llu,%llu", static_cast<unsigned long long>(named[0]),
@@ -437,6 +493,13 @@ void service_panel_identity(PanelIdentityLog& state,
   try {
     static std::array<RenderTargetSequence::Entry, RenderTargetSequence::Capacity> entries;
     const auto n = win::panel_texture_creation_sequence().snapshot(0, entries);
+    // Textures tracked only after their creation (aircraft discovery, or a
+    // contended creation hook) get their IDs from the recorded address. Only
+    // the newest creations can pair (textured panels + shift + late ones), so
+    // the registry lock covers a bounded tail.
+    constexpr std::size_t kResolvedTail = 256;
+    const auto tail = std::min(n, kResolvedTail);
+    win::resolve_creation_ids(entries.data() + (n - tail), tail);
 
     std::vector<display_identity::Creation> burst;
     std::vector<std::string> items;
@@ -452,7 +515,7 @@ void service_panel_identity(PanelIdentityLog& state,
       // the last-N pairing.
       const bool late = e.tick > state.seen_ms + kPanelLateMs;
       if (!late)
-        burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format});
+        burst.push_back({e.id, e.tick, e.width, e.height, e.mips, e.format, e.native});
       char item[96];
       std::snprintf(item, sizeof(item), " %llu:%ux%u:m%u:f%u:%+lld%s", static_cast<unsigned long long>(e.id), e.width, e.height, e.mips,
                     e.format, static_cast<long long>(e.tick) - static_cast<long long>(state.seen_ms), late ? ":late" : "");
@@ -473,7 +536,7 @@ void service_panel_identity(PanelIdentityLog& state,
     std::size_t paired = 0;
     std::array<std::uint64_t, MaxDisplaySides> named{};
     const auto fit = [&](const display_identity::Creation& c) {
-      return profile && profiles::matches_display(*profile, c.width, c.height, c.mips, c.format);
+      return profile && profiles::named_display(*profile, c.width, c.height, c.mips, c.format);
     };
     const auto expected = [&](const char* name, std::uint32_t& width, std::uint32_t& height) {
       for (const auto& shape : profile->panel_shapes)
@@ -484,21 +547,29 @@ void service_panel_identity(PanelIdentityLog& state,
         }
       return false;
     };
-    const int shift = profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
-                                                                std::min<std::size_t>(profile->sides, MaxDisplaySides), fit, expected,
-                                                                named.data(), proposal, paired)
-                              : -1;
+    const auto resolve = [&](display_identity::PanelOrder by) {
+      return profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
+                                                       std::min<std::size_t>(profile->sides, MaxDisplaySides), fit, expected, named.data(),
+                                                       proposal, paired, 8, by)
+                     : -1;
+    };
+    // The table's index order first (every catalog aircraft's), else the
+    // panel.cfg section order, for a table listing a section's panels apart:
+    // the names that fit no shift in index order are then paired right.
+    int shift = resolve(display_identity::PanelOrder::index);
+    const bool by_section = shift < 0 && (shift = resolve(display_identity::PanelOrder::section)) >= 0;
     const bool resolved = shift >= 0;
     bool complete = resolved;
     if (!resolved) {
+      display_identity::trim_trailing_ui(burst);
       if (burst.size() > textured)
         burst.erase(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(textured));
       paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
     }
     std::vector<std::string> pairs;
-    char summary[112];
-    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d", complete ? 1 : 0,
-                  paired, shift);
+    char summary[128];
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s",
+                  complete ? 1 : 0, paired, shift, by_section ? "section" : "index");
     pairs.emplace_back(summary);
     state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {
@@ -510,6 +581,23 @@ void service_panel_identity(PanelIdentityLog& state,
                     a.creation.width, a.creation.height, a.creation.mips);
       pairs.push_back(item);
     }
+    state.map.clear();
+    state.map_creations.clear();
+    for (std::size_t i = 0; i < paired; ++i) {
+      const auto& a = proposal[i];
+      const auto& c = a.creation;
+      state.map_creations.push_back({0, c.id, c.tick, c.width, c.height, c.mips, c.format, c.native});
+      win::PanelTexture entry;
+      std::strncpy(entry.name, a.panel->texture.data(), sizeof(entry.name) - 1);
+      entry.id = a.creation.id;
+      entry.index = a.panel->index;
+      entry.width = a.creation.width;
+      entry.height = a.creation.height;
+      entry.mips = a.creation.mips;
+      state.map.push_back(entry);
+    }
+    state.map_state = complete ? win::PanelMapState::paired : win::PanelMapState::incomplete;
+    state.map_shift = shift;
     std::string text;
     for (const auto& item : pairs)
       text += item;
@@ -525,11 +613,17 @@ void service_panel_identity(PanelIdentityLog& state,
           if (named[side] && proposal[i].creation.id == named[side])
             state.locked_shapes[side] = {0, named[side], proposal[i].creation.tick, proposal[i].creation.width, proposal[i].creation.height,
                                          proposal[i].creation.mips, proposal[i].creation.format};
+      // Pairing again for other display choices (or the aircraft setup's
+      // test) starts from the creation burst: follow its recreated textures
+      // now, not at the next check.
+      const auto paired = named;
+      named = follow_recreated(named);
+      rename_recreated(paired, named);
     }
     win::set_named_targets(named);
-    if (named != state.named || profile_id != state.named_profile) {
+    if (named != state.named || profile != state.named_profile) {
       state.named = named;
-      state.named_profile = profile_id;
+      state.named_profile = profile;
       char detail[192];
       std::snprintf(detail, sizeof(detail), "Display named routing: profile=%u resolved=%d ids=%llu,%llu,%llu", profile_id,
                     resolved ? 1 : 0, static_cast<unsigned long long>(named[0]), static_cast<unsigned long long>(named[1]),
@@ -539,12 +633,20 @@ void service_panel_identity(PanelIdentityLog& state,
   } catch (...) {
   }
 }
+void publish_panel_map(const PanelIdentityLog& state, win::Status& status) noexcept {
+  status.panel_state = static_cast<std::uint32_t>(state.map_state);
+  status.panel_count = static_cast<std::uint32_t>(state.map.size());
+  status.panel_clean = state.clean;
+  status.panel_shift = state.map_shift;
+  for (std::size_t i = 0; i < state.map.size() && i < win::MaxPanelTextures; ++i)
+    status.panels[i] = state.map[i];
+}
 // Panel name of a display texture in this flight for the PFD routing cards,
 // or empty. A named texture the simulator recreated keeps its side's name.
 const char* panel_texture_name(const PanelIdentityLog& state, std::uint64_t id, const profiles::AircraftProfile* profile) noexcept {
   if (!id)
     return "";
-  if (profile && state.named_profile == profile->id)
+  if (profile && state.named_profile == profile)
     for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
       if (state.named[side] == id && profile->panel_textures[side][0])
         return profile->panel_textures[side];
@@ -1067,17 +1169,125 @@ DWORD run_impl() {
       const unsigned have = (owned[0] ? 1u : 0u) + (owned[1] ? 1u : 0u) + (owned[2] ? 1u : 0u);
       return have >= (next->composition.split_bottom != 0 ? 3u : 2u);
     };
+    // One snapshot per companion serial. It needs graphics observation while
+    // pending, like calibration, but never a camera or a matching aircraft:
+    // aircraft discovery takes pictures of panel textures while it waits.
+    const auto service_snapshot = [&](bool allowed, const win::Status& log_to) {
+      const auto log_snapshot = [&] {
+        const char* step = "";
+        long code = 0;
+        if (snapshot_save_error) {
+          step = "save";
+          code = static_cast<long>(snapshot_save_error);
+        } else if (snapshot.result == win::DisplaySnapshotResult::failed) {
+          win::display_snapshot_failure(step, code);
+        }
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "Display snapshot: serial=%llu id=%llu result=%s texture=%ux%u format=%u step=%s code=%#lx",
+                      static_cast<unsigned long long>(snapshot.serial), static_cast<unsigned long long>(snapshot.id),
+                      win::display_snapshot_name(snapshot.result), snapshot.width, snapshot.height, snapshot.format, step,
+                      static_cast<unsigned long>(code));
+        snapshot_save_error = 0;
+        log_status(log_to, detail);
+      };
+      if (allowed && settings.snapshot_request && settings.snapshot_request != snapshot.serial) {
+        snapshot = {settings.snapshot_request, settings.snapshot_id, win::request_display_snapshot(settings.snapshot_id, now)};
+        if (snapshot.result != win::DisplaySnapshotResult::pending)
+          log_snapshot();
+      }
+      if (snapshot.result == win::DisplaySnapshotResult::pending) {
+        auto poll = win::poll_display_snapshot(now);
+        if (poll.result != win::DisplaySnapshotResult::pending) {
+          snapshot.width = poll.width;
+          snapshot.height = poll.height;
+          snapshot.format = poll.format;
+          // none: another request replaced this one inside the bridge.
+          snapshot.result = poll.result == win::DisplaySnapshotResult::none ? win::DisplaySnapshotResult::lost : poll.result;
+          if (snapshot.result == win::DisplaySnapshotResult::ready && !win::save_snapshot_bmp(win::display_snapshot_path(), poll.image)) {
+            snapshot.result = win::DisplaySnapshotResult::failed;
+            snapshot_save_error = GetLastError();
+          }
+          if (snapshot.result == win::DisplaySnapshotResult::ready)
+            write_display_candidates(snapshot.id, win::target_ids());
+          log_snapshot();
+        }
+      }
+    };
+    // A set-up aircraft keeps its profile id when its layout changes (another
+    // variant, or set up again), so a new layout is another aircraft profile.
+    const bool layout_changed = settings.profile == profiles::DiscoveredProfileId && !profiles::discovered_current(settings.discovered);
+    // The user's display choices for the profile (another panel or display
+    // area per side) are another profile too. A new layout brings new ones.
+    const bool choices_changed =
+        layout_changed || !profiles::override_current(profiles::base_profile(settings.profile), settings.display_override);
+    // Choices that give the cameras another shape (a reshaped display area,
+    // or another panel on a set-up aircraft) resize them: the transition
+    // below takes the kept pair to the new panes (resize_kept_panes).
+    bool reshaped = false;
+    if (choices_changed && !layout_changed) {
+      const auto* base = profiles::base_profile(settings.profile);
+      const auto* current = profiles::find(settings.profile);
+      if (base && current && profiles::valid_override(base->sides, base->fit_texture, base->camera_padding, settings.display_override)) {
+        auto next = *base;
+        profiles::apply_choices(next, *base, settings.display_override);
+        reshaped = next.camera_panes != current->camera_panes;
+      }
+    }
+    // Display choices alone (same profile and layout, same camera shape)
+    // re-bind the displays without an aircraft transition: the cameras keep
+    // running while the user tests or moves a display area. A new profile or
+    // layout, or a camera shape, takes the transition below, which publishes
+    // them with it.
+    if (connected && settings.enabled && choices_changed && !layout_changed && !reshaped && !changing_profile && applied_profile &&
+        settings.profile == applied_profile) {
+      const auto& o = settings.display_override;
+      const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o);
+      if (chosen)
+        win::set_aircraft_profile(settings.profile);
+      char detail[384];
+      std::snprintf(detail, sizeof(detail), "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u",
+                    chosen ? "applied" : "refused", settings.profile, o.textures[0], o.textures[1], o.textures[2], o.areas[0].left,
+                    o.areas[0].top, o.areas[0].right, o.areas[0].bottom, o.areas[1].left, o.areas[1].top, o.areas[1].right,
+                    o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom);
+      log_status(status, detail);
+    }
+    const bool reapply = layout_changed || (choices_changed && (settings.profile != applied_profile || reshaped));
     if (connected && settings.enabled &&
         (changing_profile || connection.started || connection.generation != applied_connection || settings.profile != applied_profile ||
-         settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch)) {
+         settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch || reapply)) {
       if (!changing_profile || settings.profile != pending_profile || settings.profile_request != pending_profile_request ||
-          session_epoch != pending_session_epoch || connection.generation != pending_connection) {
+          session_epoch != pending_session_epoch || connection.generation != pending_connection || layout_changed) {
         const bool full_reset =
-            pending_full_reset || (applied_profile && (settings.profile != applied_profile || session_epoch != applied_session_epoch));
+            pending_full_reset ||
+            (applied_profile && (settings.profile != applied_profile || layout_changed || session_epoch != applied_session_epoch));
         win::set_target_mask(0);
         win::set_calibration(0, settings.calibration_budget);
         win::set_graphics_observation_demand(false);
         native_camera::suspend_scene_rendering(true);
+        if (layout_changed) {
+          // Published with rendering suspended; detection, texture admission
+          // and every later find() use it from here.
+          const auto* layout = profiles::publish_discovered(settings.discovered);
+          const auto& d = settings.discovered;
+          char detail[448];
+          std::snprintf(
+              detail, sizeof(detail),
+              "Discovered aircraft layout: %s key=%.199s generation=%llu sides=%u panels=%s(%ux%u m%u),%s(%ux%u m%u),%s(%ux%u m%u)",
+              layout ? "published" : "refused", d.key, static_cast<unsigned long long>(profiles::discovered_generation()), d.sides,
+              d.textures[0], d.shapes[0].width, d.shapes[0].height, d.shapes[0].mips, d.textures[1], d.shapes[1].width, d.shapes[1].height,
+              d.shapes[1].mips, d.textures[2], d.shapes[2].width, d.shapes[2].height, d.shapes[2].mips);
+          log_status(status, detail);
+        }
+        if (choices_changed) {
+          const auto& o = settings.display_override;
+          const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o);
+          char detail[384];
+          std::snprintf(detail, sizeof(detail), "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u",
+                        chosen ? "published" : "refused", settings.profile, o.textures[0], o.textures[1], o.textures[2], o.areas[0].left,
+                        o.areas[0].top, o.areas[0].right, o.areas[0].bottom, o.areas[1].left, o.areas[1].top, o.areas[1].right,
+                        o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom);
+          log_status(status, detail);
+        }
         scene_runtime::manager().stop_source_tracking();
         scene_handoff().stop_scene();
         scene_runtime::reset_feed(key);
@@ -1138,8 +1348,32 @@ DWORD run_impl() {
         pending.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
         std::memcpy(pending.aircraft_type, identity.type.data(), sizeof(pending.aircraft_type));
         std::memcpy(pending.aircraft_path, identity.path.data(), sizeof(pending.aircraft_path));
+        // An aircraft no profile matches never leaves this wait (readiness
+        // needs a supported aircraft), so aircraft discovery runs here. The
+        // panel table is first observed once the flight has loaded, as on a
+        // ready flight, so the late-creation rule keeps the same meaning.
+        win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) ||
+                                 (connected && settings.panel_setup));
+        pending.panel_discovery = win::panel_discovery();
+        const bool discovering = pending.panel_discovery && transition_session.flight_loaded;
+        if (discovering)
+          service_panel_identity(panel_identity, pending, now, native_camera::get_aircraft_session_epoch(), true,
+                                 profiles::find(pending_profile));
+        publish_panel_map(panel_identity, pending);
+        // Pictures of the panel textures for the companion's aircraft setup.
+        service_snapshot(connected && settings.enabled && session_settings && discovering && !degraded, pending);
+        win::set_graphics_observation_demand(snapshot.result == win::DisplaySnapshotResult::pending);
+        pending.snapshot_serial = snapshot.serial;
+        pending.snapshot_id = snapshot.id;
+        pending.snapshot_result = static_cast<std::uint32_t>(snapshot.result);
+        pending.snapshot_width = snapshot.width;
+        pending.snapshot_height = snapshot.height;
+        pending.snapshot_format = snapshot.format;
+        // A loaded aircraft no profile matches waits here until it is set up.
+        const bool unsupported = discovering && identity.fresh && !identity.detected_profile;
         std::snprintf(pending.message, sizeof(pending.message), "%s",
-                      !ready             ? camera_transition_message(transition)
+                      unsupported        ? "No Taxi Cam profile matches this aircraft yet. Set it up in Taxi Cam."
+                      : !ready           ? camera_transition_message(transition)
                       : !telemetry_ready ? "Waiting for aircraft telemetry to stop."
                       : !public_ready    ? "Waiting for the flight to finish loading and fresh camera telemetry."
                                          : "Waiting for camera GPU session reset.");
@@ -1154,14 +1388,16 @@ DWORD run_impl() {
           std::snprintf(detail, sizeof(detail),
                         "Aircraft transition waiting: token=%llu session=%llu profile=%u failed=%u request_pending=%u "
                         "creation_pending=%u telemetry_pending=%u entries=%llu/%llu created_total=%llu "
-                        "full_reset=%u gpu_generation=%llu public_ready=%u loading=%u flow_subscribed=%u flow=%u reason=%s",
+                        "full_reset=%u gpu_generation=%llu public_ready=%u loading=%u flow_subscribed=%u flow=%u reason=%s "
+                        "flight_loaded=%u discovery=%u",
                         static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(session_epoch), pending_profile,
                         transition.profile_transition_failed, transition.pair.request_pending, transition.pair.creation_pending,
                         ready && !telemetry_ready, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
                         static_cast<unsigned long long>(transition.pair.owned_ids[1]),
                         static_cast<unsigned long long>(transition.created_total), pending_full_reset,
                         static_cast<unsigned long long>(pending_gpu_generation), public_ready, transition_session.loading,
-                        transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error);
+                        transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error,
+                        transition_session.flight_loaded, pending.panel_discovery);
           log_status(pending, detail);
           // An unsupported aircraft stays here: record what it is and which
           // render targets it creates. Log once per session, then on any type
@@ -1242,48 +1478,7 @@ DWORD run_impl() {
       if (win::assign_targets(settings.left_id, settings.right_id, settings.lower_id))
         route_request = settings.route_request;
     }
-    // One snapshot per companion serial. It needs graphics observation while
-    // pending, like calibration, but never a camera or a matching aircraft.
-    const auto log_snapshot = [&] {
-      const char* step = "";
-      long code = 0;
-      if (snapshot_save_error) {
-        step = "save";
-        code = static_cast<long>(snapshot_save_error);
-      } else if (snapshot.result == win::DisplaySnapshotResult::failed) {
-        win::display_snapshot_failure(step, code);
-      }
-      char detail[256];
-      std::snprintf(detail, sizeof(detail), "Display snapshot: serial=%llu id=%llu result=%s texture=%ux%u format=%u step=%s code=%#lx",
-                    static_cast<unsigned long long>(snapshot.serial), static_cast<unsigned long long>(snapshot.id),
-                    win::display_snapshot_name(snapshot.result), snapshot.width, snapshot.height, snapshot.format, step,
-                    static_cast<unsigned long>(code));
-      snapshot_save_error = 0;
-      log_status(status, detail);
-    };
-    if (connected && settings.enabled && session_settings && session.ready && !degraded && settings.snapshot_request &&
-        settings.snapshot_request != snapshot.serial) {
-      snapshot = {settings.snapshot_request, settings.snapshot_id, win::request_display_snapshot(settings.snapshot_id, now)};
-      if (snapshot.result != win::DisplaySnapshotResult::pending)
-        log_snapshot();
-    }
-    if (snapshot.result == win::DisplaySnapshotResult::pending) {
-      auto poll = win::poll_display_snapshot(now);
-      if (poll.result != win::DisplaySnapshotResult::pending) {
-        snapshot.width = poll.width;
-        snapshot.height = poll.height;
-        snapshot.format = poll.format;
-        // none: another request replaced this one inside the bridge.
-        snapshot.result = poll.result == win::DisplaySnapshotResult::none ? win::DisplaySnapshotResult::lost : poll.result;
-        if (snapshot.result == win::DisplaySnapshotResult::ready && !win::save_snapshot_bmp(win::display_snapshot_path(), poll.image)) {
-          snapshot.result = win::DisplaySnapshotResult::failed;
-          snapshot_save_error = GetLastError();
-        }
-        if (snapshot.result == win::DisplaySnapshotResult::ready)
-          write_display_candidates(snapshot.id, win::target_ids());
-        log_snapshot();
-      }
-    }
+    service_snapshot(connected && settings.enabled && session_settings && session.ready && !degraded, status);
     const bool snapshot_pending = snapshot.result == win::DisplaySnapshotResult::pending;
     const auto identity = native_camera::get_aircraft_identity();
     const bool aircraft_matches =
@@ -1476,6 +1671,8 @@ DWORD run_impl() {
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
     const auto* drawing = profiles::find(applied_profile ? applied_profile : settings.profile);
+    if (!drawing)  // A set-up aircraft is published before its transition starts.
+      drawing = &profiles::A380;
     auto composition = drawing->composition;
     composition.speed_color = settings.speed_color;
     composition.guide_color = settings.guide_color;
@@ -1483,6 +1680,9 @@ DWORD run_impl() {
     composition.tail_upper = settings.tail_upper;
     composition.tail_corner = settings.tail_corner;
     composition.tail_inner = settings.tail_inner;
+    composition.tail_upper_right = settings.tail_upper_right;
+    composition.tail_corner_right = settings.tail_corner_right;
+    composition.tail_inner_right = settings.tail_inner_right;
     if (demand.start && !(background_warmup && GetTickCount64() < next_background_start)) {
       auto& start_timing = background_warmup ? warmup_startup : startup;
       if (background_warmup) {
@@ -1659,6 +1859,10 @@ DWORD run_impl() {
     status.right_id = targets[1];
     status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
     status.named_mask = win::named_target_mask();
+    // The companion's aircraft setup also needs every panel texture tracked.
+    win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) || (connected && settings.panel_setup));
+    status.panel_discovery = win::panel_discovery();
+    publish_panel_map(panel_identity, status);
     status.snapshot_serial = snapshot.serial;
     status.snapshot_id = snapshot.id;
     status.snapshot_result = static_cast<std::uint32_t>(snapshot.result);
@@ -1720,7 +1924,7 @@ DWORD run_impl() {
     std::stable_partition(order.begin(), order.end(),
                           [&](std::size_t i) { return std::find(targets.begin(), targets.end(), inventory[i].id) != targets.end(); });
     const auto* name_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
-    status.candidate_count = static_cast<UINT>(std::min<size_t>(order.size(), 16));
+    status.candidate_count = static_cast<UINT>(std::min<size_t>(order.size(), win::MaxCandidates));
     for (UINT i = 0; i < status.candidate_count; ++i) {
       const auto& item = inventory[order[i]];
       status.candidates[i] = {item.id, item.draws, item.width, item.height, item.levels, item.format};

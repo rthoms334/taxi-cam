@@ -9,19 +9,43 @@
 
 namespace taxi_camera::standalone {
 // "What's new" notes live in changelog.json at the repository root. The
-// companion fetches that file from main when the link is clicked and shows the
-// entries at or below the installed version, newest first.
-inline constexpr std::size_t kChangelogMaxBytes = 64 * 1024, kChangelogMaxReleases = 64, kChangelogMaxChanges = 32, kChangelogMaxText = 400;
+// companion fetches that file from main when What's new opens and shows the
+// entries at or below the installed version, newest first. A feature's picture
+// is a file under docs/whats-new/ in the same repository, fetched the same way.
+inline constexpr std::size_t kChangelogMaxBytes = 64 * 1024, kChangelogMaxReleases = 64, kChangelogMaxChanges = 32, kChangelogMaxText = 400,
+                             kChangelogMaxFeatures = 8, kChangelogMaxTitle = 80, kChangelogMaxImagePath = 120;
 struct ChangelogVersion {
   std::uint32_t major{}, minor{}, patch{};
   friend bool operator==(const ChangelogVersion&, const ChangelogVersion&) = default;
   friend auto operator<=>(const ChangelogVersion&, const ChangelogVersion&) = default;
 };
+// A new feature: a short title, a sentence or two, and optionally a picture.
+struct ChangelogFeature {
+  std::string title, text;
+  std::string image;  // Repository path under docs/whats-new/, or empty.
+};
 struct ChangelogRelease {
   ChangelogVersion version;
   std::string date;  // Optional YYYY-MM-DD.
-  std::vector<std::string> changes;
+  std::vector<ChangelogFeature> features;
+  std::vector<std::string> fixes;
+  std::vector<std::string> changes;  // Other notes (every release before 1.2.0).
 };
+// A feature picture's repository path: docs/whats-new/..., a .png or .jpg
+// file name of letters, digits, '.', '-', '_' and '/' separators.
+inline bool valid_whats_new_image(std::string_view path) {
+  constexpr std::string_view prefix = "docs/whats-new/";
+  if (path.size() > kChangelogMaxImagePath || path.size() <= prefix.size() || path.substr(0, prefix.size()) != prefix ||
+      path.find("..") != std::string_view::npos || path.find("//") != std::string_view::npos)
+    return false;
+  for (const char c : path)
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_' || c == '/'))
+      return false;
+  const auto ends = [&](std::string_view suffix) {
+    return path.size() > suffix.size() && path.substr(path.size() - suffix.size()) == suffix;
+  };
+  return ends(".png") || ends(".jpg") || ends(".jpeg");
+}
 
 // Strict major.minor.patch with 16-bit components, matching Windows version resources.
 inline bool parse_changelog_version(std::string_view text, ChangelogVersion& value) {
@@ -204,6 +228,28 @@ struct Reader {
     } while (take(','));
     return expect(']', "Expected ',' or ']'.");
   }
+  // One value of any kind, nested a few levels at most: a field a newer
+  // changelog added, skipped when parsing leniently.
+  bool skip(unsigned depth = 0) {
+    space();
+    if (depth > 8 || at >= text.size())
+      return fail("Expected a value.");
+    const char c = text[at];
+    if (c == '"') {
+      std::string ignored;
+      return string(ignored, kChangelogMaxBytes);
+    }
+    if (c == '{')
+      return object([&](const std::string&) { return skip(depth + 1); });
+    if (c == '[')
+      return array([&] { return skip(depth + 1); });
+    // true, false, null or a number.
+    const auto start = at;
+    while (at < text.size() && ((text[at] >= 'a' && text[at] <= 'z') || (text[at] >= '0' && text[at] <= '9') || text[at] == '-' ||
+                                text[at] == '+' || text[at] == '.' || text[at] == 'E'))
+      ++at;
+    return at > start || fail("Expected a value.");
+  }
 };
 inline bool valid_date(std::string_view d) {
   if (d.size() != 10 || d[4] != '-' || d[7] != '-')
@@ -216,9 +262,18 @@ inline bool valid_date(std::string_view d) {
 }
 }  // namespace changelog_detail
 
-// Schema: {"releases": [{"version": "0.9.2", "date": "2026-09-23", "changes": ["..."]}]}
-// Releases are newest first with strictly descending versions. Unknown keys are refused.
-inline bool parse_changelog(std::string_view text, std::vector<ChangelogRelease>& releases, const char** error = nullptr) {
+// Schema: {"releases": [{"version": "1.2.0", "date": "2026-11-01",
+//   "features": [{"title": "...", "text": "...", "image": "docs/whats-new/1.2.0/x.png"}],
+//   "fixes": ["..."], "changes": ["..."]}]}
+// Releases are newest first with strictly descending versions and at least one
+// feature, fix or change. Strict parsing (the repository's own check) refuses
+// unknown keys; the companion parses leniently and skips them, so a field a
+// later changelog adds cannot hide the notes from an installed version.
+enum class ChangelogParse { strict, lenient };
+inline bool parse_changelog(std::string_view text,
+                            std::vector<ChangelogRelease>& releases,
+                            const char** error = nullptr,
+                            ChangelogParse mode = ChangelogParse::strict) {
   changelog_detail::Reader r{text};
   std::vector<ChangelogRelease> parsed;
   const auto finish = [&](bool ok) {
@@ -228,16 +283,59 @@ inline bool parse_changelog(std::string_view text, std::vector<ChangelogRelease>
       releases = std::move(parsed);
     return ok;
   };
+  const auto unknown = [&](const char* message) { return mode == ChangelogParse::lenient ? r.skip() : r.fail(message); };
   if (text.size() > kChangelogMaxBytes)
     return finish(r.fail("Changelog is too large."));
   if (text.size() >= 3 && text.substr(0, 3) == "\xEF\xBB\xBF")
     r.at = 3;
+  // A list of 1-32 non-empty notes of at most 400 characters.
+  const auto notes = [&](std::vector<std::string>& out) {
+    return r.array([&] {
+      std::string value;
+      if (out.size() >= kChangelogMaxChanges)
+        return r.fail("Too many changes in one release.");
+      if (!r.string(value, kChangelogMaxText))
+        return false;
+      if (value.find_first_not_of(" \t\r\n") == std::string::npos)
+        return r.fail("Change text is empty.");
+      out.push_back(std::move(value));
+      return true;
+    });
+  };
+  const auto feature = [&](ChangelogRelease& entry) {
+    if (entry.features.size() >= kChangelogMaxFeatures)
+      return r.fail("Too many features in one release.");
+    ChangelogFeature item;
+    bool have_title = false, have_text = false, have_image = false;
+    const bool ok = r.object([&](const std::string& key) {
+      if (key == "title" && !have_title) {
+        have_title = true;
+        return r.string(item.title, kChangelogMaxTitle);
+      }
+      if (key == "text" && !have_text) {
+        have_text = true;
+        return r.string(item.text, kChangelogMaxText);
+      }
+      if (key == "image" && !have_image) {
+        have_image = true;
+        return (r.string(item.image, kChangelogMaxImagePath) && valid_whats_new_image(item.image)) ||
+               r.fail("A feature image is a .png or .jpg path under docs/whats-new/.");
+      }
+      return unknown("Unknown or repeated feature field.");
+    });
+    if (!ok)
+      return false;
+    if (item.title.find_first_not_of(" \t\r\n") == std::string::npos || item.text.find_first_not_of(" \t\r\n") == std::string::npos)
+      return r.fail("Each feature needs a title and text.");
+    entry.features.push_back(std::move(item));
+    return true;
+  };
   bool have_releases = false;
   const auto release = [&] {
     if (parsed.size() >= kChangelogMaxReleases)
       return r.fail("Too many releases.");
     ChangelogRelease entry;
-    bool have_version = false, have_date = false, have_changes = false;
+    bool have_version = false, have_date = false, have_features = false, have_fixes = false, have_changes = false;
     const bool ok = r.object([&](const std::string& key) {
       std::string value;
       if (key == "version" && !have_version) {
@@ -248,25 +346,24 @@ inline bool parse_changelog(std::string_view text, std::vector<ChangelogRelease>
         have_date = true;
         return (r.string(entry.date, 10) && changelog_detail::valid_date(entry.date)) || r.fail("Date must be YYYY-MM-DD.");
       }
+      if (key == "features" && !have_features) {
+        have_features = true;
+        return r.array([&] { return feature(entry); });
+      }
+      if (key == "fixes" && !have_fixes) {
+        have_fixes = true;
+        return notes(entry.fixes);
+      }
       if (key == "changes" && !have_changes) {
         have_changes = true;
-        return r.array([&] {
-          if (entry.changes.size() >= kChangelogMaxChanges)
-            return r.fail("Too many changes in one release.");
-          if (!r.string(value, kChangelogMaxText))
-            return false;
-          if (value.find_first_not_of(" \t\r\n") == std::string::npos)
-            return r.fail("Change text is empty.");
-          entry.changes.push_back(value);
-          return true;
-        });
+        return notes(entry.changes);
       }
-      return r.fail("Unknown or repeated release field.");
+      return unknown("Unknown or repeated release field.");
     });
     if (!ok)
       return false;
-    if (!have_version || entry.changes.empty())
-      return r.fail("Each release needs a version and at least one change.");
+    if (!have_version || (entry.features.empty() && entry.fixes.empty() && entry.changes.empty()))
+      return r.fail("Each release needs a version and at least one feature, fix or change.");
     if (!parsed.empty() && !(entry.version < parsed.back().version))
       return r.fail("Releases must be newest first with unique versions.");
     parsed.push_back(std::move(entry));
@@ -274,7 +371,8 @@ inline bool parse_changelog(std::string_view text, std::vector<ChangelogRelease>
   };
   const bool ok = r.object([&](const std::string& key) {
     if (key != "releases" || have_releases)
-      return r.fail("Unknown or repeated top-level field.");
+      return have_releases && key == "releases" ? r.fail("Unknown or repeated top-level field.")
+                                                : unknown("Unknown or repeated top-level field.");
     have_releases = true;
     return r.array(release);
   });
@@ -306,29 +404,68 @@ inline std::wstring changelog_widen(const std::string& text) {
     MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), n);
   return out;
 }
-// CRLF text for a multiline edit control.
-inline std::wstring format_changelog(const std::vector<ChangelogRelease>& releases, const ChangelogVersion& installed) {
-  if (releases.empty())
-    return L"No notes are listed for Taxi Cam " + changelog_version_text(installed) + L" yet.";
-  std::wstring text;
-  for (const auto& release : releases) {
-    if (!text.empty())
-      text += L"\r\n";
-    text += L"Taxi Cam " + changelog_version_text(release.version);
-    if (!release.date.empty())
-      text += L"  ·  " + changelog_widen(release.date);
-    text += L"\r\n";
-    for (const auto& change : release.changes) {
-      std::wstring line;
-      for (const wchar_t c : changelog_widen(change))
-        if (c == L'\n')
-          line += L"\r\n    ";
-        else if (c != L'\r')
-          line += c;
-      text += L"•  " + line + L"\r\n";
-    }
+// "2026-11-01" as "1 November 2026".
+inline std::wstring changelog_date_text(const std::string& date) {
+  static constexpr const wchar_t* months[]{L"January", L"February", L"March",     L"April",   L"May",      L"June",
+                                           L"July",    L"August",   L"September", L"October", L"November", L"December"};
+  if (!changelog_detail::valid_date(date))
+    return changelog_widen(date);
+  const int month = (date[5] - '0') * 10 + (date[6] - '0'), day = (date[8] - '0') * 10 + (date[9] - '0');
+  return std::to_wstring(day) + L" " + months[month - 1] + L" " + changelog_widen(date.substr(0, 4));
+}
+// What's new top to bottom: the newest release shown in full (its features
+// with their pictures, then fixes and other changes), then earlier releases
+// as compact lists.
+struct WhatsNewBlock {
+  enum class Kind {
+    heading,  // text: "Taxi Cam 1.2.0", detail: its date.
+    section,  // text: "New features", "Fixes", "Other changes" or "Earlier versions".
+    feature,  // text: title, detail: text, image: repository path or empty.
+    bullet,   // text: one fix or change.
+    release,  // An earlier release: text "Taxi Cam 1.1.3", detail: its date.
+    note,     // text: a message instead of notes.
+  } kind;
+  std::wstring text, detail;
+  std::string image;
+};
+inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRelease>& shown, const ChangelogVersion& installed) {
+  using Kind = WhatsNewBlock::Kind;
+  std::vector<WhatsNewBlock> blocks;
+  if (shown.empty()) {
+    blocks.push_back({Kind::note, L"No notes are listed for Taxi Cam " + changelog_version_text(installed) + L" yet.", {}, {}});
+    return blocks;
   }
-  return text;
+  for (std::size_t i = 0; i < shown.size(); ++i) {
+    const auto& release = shown[i];
+    const auto version = L"Taxi Cam " + changelog_version_text(release.version);
+    const auto date = release.date.empty() ? std::wstring{} : changelog_date_text(release.date);
+    if (i == 0) {
+      blocks.push_back({Kind::heading, version, date, {}});
+      if (!release.features.empty())
+        blocks.push_back({Kind::section, L"New features", {}, {}});
+      for (const auto& feature : release.features)
+        blocks.push_back({Kind::feature, changelog_widen(feature.title), changelog_widen(feature.text), feature.image});
+      if (!release.fixes.empty())
+        blocks.push_back({Kind::section, L"Fixes", {}, {}});
+      for (const auto& fix : release.fixes)
+        blocks.push_back({Kind::bullet, changelog_widen(fix), {}, {}});
+      if (!release.changes.empty())
+        blocks.push_back({Kind::section, release.features.empty() && release.fixes.empty() ? L"Changes" : L"Other changes", {}, {}});
+      for (const auto& change : release.changes)
+        blocks.push_back({Kind::bullet, changelog_widen(change), {}, {}});
+      continue;
+    }
+    if (i == 1)
+      blocks.push_back({Kind::section, L"Earlier versions", {}, {}});
+    blocks.push_back({Kind::release, version, date, {}});
+    for (const auto& feature : release.features)
+      blocks.push_back({Kind::bullet, changelog_widen(feature.title) + L": " + changelog_widen(feature.text), {}, {}});
+    for (const auto& fix : release.fixes)
+      blocks.push_back({Kind::bullet, L"Fixed: " + changelog_widen(fix), {}, {}});
+    for (const auto& change : release.changes)
+      blocks.push_back({Kind::bullet, changelog_widen(change), {}, {}});
+  }
+  return blocks;
 }
 
 // The last installed version whose notes were read, in the global settings.ini

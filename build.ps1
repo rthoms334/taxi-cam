@@ -69,7 +69,7 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')) {
     & $windres '-I' $generated '-I' (Join-Path $taskRoot 'src/app') '-i' (Join-Path $taskRoot 'src/app/app.rc') '-O' 'coff' '-o' $resource
     if ($LASTEXITCODE -ne 0) { throw 'Windows application manifest compilation failed.' }
     $setupSources = @($setup | ForEach-Object { Join-Path $taskRoot $_ })
-    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'src/app/companion.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @setupSources $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-cam.exe')
+    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'src/app/companion.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @setupSources $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-lwindowscodecs' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-cam.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Windows companion build failed.' }
     $binaryVersion = (Get-Item -LiteralPath (Join-Path $out 'taxi-cam.exe')).VersionInfo
     if ($binaryVersion.FileVersion -ne $version -or $binaryVersion.ProductVersion -ne $version -or
@@ -321,6 +321,7 @@ if ($Validate) {
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
         @{Name='connection-recoverability'; Sources=@('tests/app/connection_recoverability_test.cpp')},
         @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp','src/camera/local_memory.cpp')},
+        @{Name='discovered-aircraft'; Sources=@('tests/app/discovered_aircraft_test.cpp')},
         @{Name='profile-selection'; Sources=@('tests/app/profile_selection_test.cpp')},
         @{Name='waiting-page'; Sources=@('tests/app/waiting_page_test.cpp')},
         @{Name='settings-store'; Sources=@('tests/app/settings_store_test.cpp')},
@@ -331,6 +332,7 @@ if ($Validate) {
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='startup-state'; Sources=@('tests/app/startup_state_test.cpp')},
         @{Name='changelog'; Sources=@('tests/app/changelog_test.cpp'); Args=@((Join-Path $taskRoot 'changelog.json'))},
+        @{Name='whats-new-image'; Sources=@('tests/app/whats_new_image_test.cpp'); Libs=@('-lole32','-lwindowscodecs','-lgdi32')},
         @{Name='camera-status'; Sources=@('tests/app/camera_status_test.cpp')},
         @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
         @{Name='scene-demand'; Sources=@('tests/camera/scene_demand_test.cpp','src/camera/entry_pair.cpp')},
@@ -377,7 +379,8 @@ if ($Validate) {
     )) {
         $exe = Join-Path $out ($entry.Name + '-test.exe')
         $sources = @($entry.Sources | ForEach-Object { Join-Path $taskRoot $_ })
-        & $compiler @common @sources @libs '-ladvapi32' '-o' $exe
+        $testLibs = @(if ($entry.ContainsKey('Libs')) { $entry.Libs })
+        & $compiler @common @sources @libs '-ladvapi32' @testLibs '-o' $exe
         if ($LASTEXITCODE -ne 0) { throw "Native test compilation failed: $($entry.Name)" }
         $testArgs = @(if ($entry.ContainsKey('Args')) { $entry.Args })
         & $exe @testArgs
@@ -388,12 +391,12 @@ if ($Validate) {
         }
     }
     $diagnosticsTest = Join-Path $out 'companion-diagnostics-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @($setup | ForEach-Object { Join-Path $taskRoot $_ }) '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-o' $diagnosticsTest
+    & $compiler @common (Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @($setup | ForEach-Object { Join-Path $taskRoot $_ }) '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-lwindowscodecs' '-o' $diagnosticsTest
     if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls compilation failed.' }
     & $diagnosticsTest
     if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls validation failed.' }
     $hotkeysTest = Join-Path $out 'camera-hotkeys-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @($setup | ForEach-Object { Join-Path $taskRoot $_ }) '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-o' $hotkeysTest
+    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @($setup | ForEach-Object { Join-Path $taskRoot $_ }) '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-lwindowscodecs' '-o' $hotkeysTest
     if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls compilation failed.' }
     & $hotkeysTest
     if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls validation failed.' }

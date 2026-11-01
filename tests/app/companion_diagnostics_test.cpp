@@ -75,7 +75,7 @@ void marking_controls_tests() {
     bool matching = true;
     for (const bool right : {false, true}) {
       const int x = 817 + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
-      const int y = 191 + static_cast<int>(std::lround(current.nose_dot[1] * 45));
+      const int y = 177 + static_cast<int>(std::lround(current.nose_dot[1] * 45));
       // The corner is inside a square and outside the former circular marker.
       matching = matching && GetPixel(dc, x, y) == marking_color && GetPixel(dc, x + 6, y + 6) == marking_color;
     }

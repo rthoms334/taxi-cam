@@ -12,6 +12,9 @@ struct QueuePatchConfig {
   std::uint32_t profile = 0;
   unsigned camera_mask = 0, calibration_mask = 0;
   std::array<DXGI_FORMAT, MaxDisplaySides> formats{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
+  // Width and height of each side's target texture; a set-up aircraft
+  // (AircraftProfile::fit_texture) fills it whole.
+  std::array<std::array<unsigned, 2>, MaxDisplaySides> sizes{};
   // Camera sides still inside their minimum PLEASE WAIT time. The runtime also
   // shows the page, on profiles that have one, while the image is missing or stale.
   unsigned waiting_mask = 0;

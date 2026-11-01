@@ -64,6 +64,7 @@ void clear_fixture(win::Registry& r) {
 // and descriptor recovery still go through the real production handlers.
 void seed_observed_display(win::Registry& r, const std::shared_ptr<win::Resource>& item) {
   r.seen_resources.remember(item->native);
+  item->display_shape = item->display_shape || win::display_shaped(item->desc);  // As admission decides it.
   r.resources[item->native] = item;
   win::remember_backfill_display(r, item->native);
   win::maybe_stop_live_backfill(r);
@@ -648,6 +649,7 @@ void known_resource_case() {
   r.profile = &profiles::IniA380;
   const auto classifications = [&] { return r.backfill_classifications.load(); };
   const auto registered = display(0);
+  registered->display_shape = registered->display_shape || win::display_shaped(registered->desc);  // As admission decides it.
   r.resources[registered->native] = registered;
   r.resource_index.assign(registered->native, registered);
   win::remember_backfill_display(r, registered->native);
@@ -656,6 +658,7 @@ void known_resource_case() {
   expect("registered copy source needs no classification", classifications() - before, 0);
   expect("registered copy source is remembered", r.seen_resources.contains(registered->native), true);
   const auto second = display(1);
+  second->display_shape = second->display_shape || win::display_shaped(second->desc);  // As admission decides it.
   r.resources[second->native] = second;
   r.resource_index.assign(second->native, second);
   win::remember_backfill_display(r, second->native);
@@ -684,6 +687,7 @@ void known_resource_case() {
   expect("a retired registry entry still takes the full classification", classifications() - before, 1);
   r.ready = false;
   const auto third = display(3);
+  third->display_shape = third->display_shape || win::display_shaped(third->desc);  // As admission decides it.
   r.resources[third->native] = third;
   r.resource_index.assign(third->native, third);
   before = classifications();

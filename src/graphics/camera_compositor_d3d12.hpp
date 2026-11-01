@@ -640,7 +640,7 @@ class CameraCompositorD3D12 {
   static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
   static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
   static constexpr UINT ToneBit = 256;
-  static constexpr UINT RootConstants = 34;
+  static constexpr UINT RootConstants = 41;
   HRESULT initialize_tone_curve() noexcept {
     D3D12_HEAP_PROPERTIES properties{};
     properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1073,7 +1073,9 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder;
+ float TailCornerRX; float TailCornerRY; float TailUpperRX; float TailUpperRY; float TailInnerRX; float TailInnerRY;
+ float UiAspect; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -1169,9 +1171,9 @@ float glyph_coverage(float2 position, float2 origin, uint glyph) {
 static const uint WaitingText[11] = { 13, 14, 15, 16, 11, 15, 20, 17, 16, 18, 19 };
 static const float WaitingScale = 1.5;
 float4 waiting_pixel(float2 position) {
-  float2 size = float2(16 * 10 + 12, 20) * WaitingScale;
+  float2 size = float2((16 * 10 + 12) / UiAspect, 20) * WaitingScale;
   float2 origin = floor((float2(768, 763) - size) * 0.5);
-  float2 local = (position - origin) / WaitingScale;
+  float2 local = (position - origin) * float2(UiAspect, 1) / WaitingScale;
   if (any(local < 0) || local.y >= 20 || local.x >= 16 * 11) return ui_pixel(float3(0, 0, 0));
   uint cell = min((uint)(local.x / 16), 10);
   uint glyph = WaitingText[cell];
@@ -1208,7 +1210,7 @@ float4 ground_speed_pixel(float2 position) {
 bool reference_guide(float2 position, bool nose) {
   if (nose) {
     float2 local = float2(min(position.x, 768 - position.x), position.y);
-    float2 delta = local - float2(NoseDotX * 768, NoseDotY * NoseHeight);
+    float2 delta = (local - float2(NoseDotX * 768, NoseDotY * NoseHeight)) * float2(UiAspect, 1);
     // Profiles use 14px squares; retain 12px circle support for custom layouts.
     return SquareNoseMarkers != 0 ? all(abs(delta) < 7) : length(delta) <= 6;
   }
@@ -1224,10 +1226,19 @@ bool reference_guide(float2 position, bool nose) {
   }
   float2 local = float2(min(x, span - x), position.y - TailTop);
   // The reference bracket's bounding-box centre is near (0.335, 0.69);
-  // its outside lower corner is farther out and below that centre.
-  float2 corner = float2(TailCornerX * span, TailCornerY * (763 - TailTop));
-  float2 upper = float2(TailUpperX * span, TailUpperY * (763 - TailTop));
-  float2 inner = float2(TailInnerX * span, TailInnerY * (763 - TailTop));
+  // its outside lower corner is farther out and below that centre. The right
+  // half draws its own bracket, measured from the right edge, unless it is
+  // negative (mirror the left one).
+  bool right = x >= span * 0.5 && TailCornerRX >= 0;
+  float2 corner = right ? float2(TailCornerRX, TailCornerRY) : float2(TailCornerX, TailCornerY);
+  float2 upper = right ? float2(TailUpperRX, TailUpperRY) : float2(TailUpperX, TailUpperY);
+  float2 inner = right ? float2(TailInnerRX, TailInnerRY) : float2(TailInnerX, TailInnerY);
+  // Measured as the display shows them (UiAspect): even strokes on any area.
+  float2 scale = float2(span * UiAspect, 763 - TailTop);
+  local.x *= UiAspect;
+  corner *= scale;
+  upper *= scale;
+  inner *= scale;
   return min(segment_distance(local, upper, corner), segment_distance(local, corner, inner)) <= 2;
 }
 float hdr_channel(float value) {
@@ -1297,7 +1308,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
   // keep the existing GS panel so font fixtures stay unchanged.
   if (GroundSpeedValid != 2) {
-    float2 speed_position = position.xy - float2(SpeedLeft, SpeedTop);
+    float2 speed_position = (position.xy - float2(SpeedLeft, SpeedTop)) * float2(UiAspect, 1);
     if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
   }
   if (position.y >= DividerTop && position.y < DividerBottom) {

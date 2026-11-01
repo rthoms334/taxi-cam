@@ -55,9 +55,10 @@ struct Resource : Metadata {
   ID3D12Resource* native{};
   std::uint64_t key{};
   D3D12_RESOURCE_DESC desc{};
-  // Matches some catalog profile's display. Only these feed PFD inventory, so
-  // only these count draws: shared scene targets would otherwise have every
-  // recording thread increment the same counter on every draw.
+  // Matches some catalog profile's display, or is a panel texture admitted for
+  // aircraft discovery. Only these feed PFD inventory, so only these count
+  // draws: shared scene targets would otherwise have every recording thread
+  // increment the same counter on every draw.
   bool display_shape{};
   std::atomic<std::uint64_t> draws{};
   std::atomic<std::uint64_t> submission_activity{};
@@ -344,7 +345,8 @@ struct Registry {
   std::atomic<std::uint64_t> queue_patch_generation{1};
   std::array<std::uint64_t, MaxDisplaySides> queue_patch_targets{};
   unsigned queue_patch_camera{}, queue_patch_calibration{}, queue_patch_waiting{};
-  std::uint32_t queue_patch_profile{};
+  // Pointer, not id: a set-up aircraft keeps its id across layouts.
+  const profiles::AircraftProfile* queue_patch_profile{};
   std::atomic<std::uint64_t> queue_patch_plans{};
   // Display snapshot (PFD routing). Guarded by mutex; the submission planner
   // reads it under its try-lock. The pool raises snapshot_completed to the
@@ -751,12 +753,12 @@ void refresh_selected(Registry& r) {
   r.selected_mask.store(r.active_mask | r.calibration_mask, std::memory_order_relaxed);
   const std::array<std::uint64_t, MaxDisplaySides> selected{r.selected_ids[0].load(), r.selected_ids[1].load(), r.selected_ids[2].load()};
   if (selected != r.queue_patch_targets || r.queue_patch_camera != r.active_mask || r.queue_patch_calibration != r.calibration_mask ||
-      r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_profile != r.profile->id) {
+      r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_profile != r.profile) {
     r.queue_patch_targets = selected;
     r.queue_patch_camera = r.active_mask;
     r.queue_patch_calibration = r.calibration_mask;
     r.queue_patch_waiting = r.waiting_mask & r.active_mask;
-    r.queue_patch_profile = r.profile->id;
+    r.queue_patch_profile = r.profile;
     r.queue_patch_generation.fetch_add(1, std::memory_order_release);
   }
 }
@@ -834,20 +836,45 @@ void observe_safely(F&& action) noexcept {
       r.active_mask = r.calibration_mask = 0;
   }
 }
+// Aircraft discovery: while no profile matches the loaded aircraft, every panel
+// texture is tracked like a display so the panel table can name it and PFD
+// routing can take its picture. Profile aircraft keep catalog shapes only.
+std::atomic<bool> panel_discovery_on{};
+// Every VCockpit panel texture logged so far is a multi-mip R8G8B8A8_UNORM
+// render target; camera and scene buffers use other formats or one mip.
+bool panel_texture_desc(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
+         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 && d.MipLevels > 1 && d.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
+         d.Width <= RenderTargetShapes::MaximumEdge && d.Height <= RenderTargetShapes::MaximumEdge;
+}
+bool discovery_panel(const D3D12_RESOURCE_DESC& d) noexcept {
+  return panel_discovery_on.load(std::memory_order_relaxed) && panel_texture_desc(d);
+}
 bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
   bool dimensions = profiles::camera_candidate(static_cast<UINT>(d.Width), d.Height);
   for (const auto* profile : profiles::Catalog)
     dimensions |= d.Width == profile->width && d.Height == profile->height;
-  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
-         (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+  if (const auto* discovered = profiles::discovered_profile.load(std::memory_order_acquire))
+    for (unsigned side = 0; side < discovered->sides && side < MaxDisplaySides; ++side)
+      dimensions |= d.Width == discovered->side_shapes[side][0] && d.Height == discovered->side_shapes[side][1];
+  return (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
+          (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0) ||
+         discovery_panel(d);
 }
-bool display_candidate_desc(const D3D12_RESOURCE_DESC& d) noexcept {
-  if (!relevant(d))
-    return false;
+// A display shape of a catalog profile, or a panel the user set up an
+// aircraft on. The set-up aircraft's other panels are tracked by discovery.
+bool catalog_display(const D3D12_RESOURCE_DESC& d) noexcept {
   for (const auto* profile : profiles::Catalog)
     if (profiles::matches_display(*profile, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format)))
       return true;
-  return false;
+  const auto* discovered = profiles::discovered_profile.load(std::memory_order_acquire);
+  return discovered && profiles::named_display(*discovered, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format));
+}
+// Decided once at admission (Resource::display_shape): a discovery texture
+// stays a display candidate for its lifetime, so its barrier history has no
+// gap if discovery is switched off and on again.
+bool display_shaped(const D3D12_RESOURCE_DESC& d) noexcept {
+  return catalog_display(d) || discovery_panel(d);
 }
 bool same_device(ID3D12Device* device) noexcept {
   IUnknown *a{}, *b{};
@@ -930,10 +957,28 @@ bool display_set_ready(const Registry& r, unsigned need, DXGI_FORMAT format, UIN
   }
   return false;
 }
+// Every side's named texture is tracked as a live display of the profile.
+bool named_set_ready(const Registry& r) noexcept {
+  for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {
+    const auto id = r.named_targets[side];
+    bool live = false;
+    for (const auto& [native, item] : r.resources) {
+      (void)native;
+      if (id && item->id == id) {
+        live = item->alive && display_item(r, *item);
+        break;
+      }
+    }
+    if (!live)
+      return false;
+  }
+  return true;
+}
 // The detector can assign only this set. A generic pair, or another mip/format
 // that still matches the profile size, must not end discovery.
 bool backfill_resources_ready(const Registry& r) noexcept {
-  if (!r.profile)
+  // Discovery has no display set: panel textures first drawn later still join.
+  if (!r.profile || panel_discovery_on.load(std::memory_order_relaxed))
     return false;
   if (r.profile->id == profiles::A359.id || r.profile->id == profiles::A35K.id)
     return display_set_ready(r, 3, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
@@ -943,6 +988,8 @@ bool backfill_resources_ready(const Registry& r) noexcept {
     return display_set_ready(r, 2, static_cast<DXGI_FORMAT>(r.profile->formats[0]), r.profile->mips);
   if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display)
     return live_display_resources(r) >= 1;
+  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::named)
+    return named_set_ready(r);
   return false;
 }
 unsigned live_display_rtvs(const Registry& r) noexcept {
@@ -1138,13 +1185,14 @@ RenderTargetSequence& panel_texture_sequence() noexcept {
   static RenderTargetSequence sequence;
   return sequence;
 }
-void record_creation(const D3D12_RESOURCE_DESC& desc, std::uint64_t id) noexcept {
+void record_creation(const D3D12_RESOURCE_DESC& desc, std::uint64_t id, ID3D12Resource* native) noexcept {
   const auto now = GetTickCount64();
-  render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels, static_cast<std::uint32_t>(desc.Format),
-                                  id, now);
-  if (desc.MipLevels > 1 && desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+  const auto address = reinterpret_cast<std::uint64_t>(native);
+  render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
+                                  static_cast<std::uint32_t>(desc.Format), id, now, address);
+  if (panel_texture_desc(desc))
     panel_texture_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
-                                    static_cast<std::uint32_t>(desc.Format), id, now);
+                                    static_cast<std::uint32_t>(desc.Format), id, now, address);
 }
 bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial, bool created, bool* settled) {
   auto& r = registry();
@@ -1181,7 +1229,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
       const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
       if (!lock) {
         if (sequenced)  // Keep the creation order complete; the ID is unknown here.
-          record_creation(desc, 0);
+          record_creation(desc, 0, native);
         // The window's seen set may still hold an earlier object at this
         // address; it must not hide this one from its first barrier or copy.
         if (created)
@@ -1200,9 +1248,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         item->key = r.key;
         item->desc = desc;
         item->id = ++r.next_id;
-        for (const auto* profile : profiles::Catalog)
-          item->display_shape = item->display_shape || profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height,
-                                                                                 desc.MipLevels, static_cast<UINT>(desc.Format));
+        item->display_shape = display_shaped(desc);
         r.resources[native] = item;
         r.resource_index.assign(native, item);
         sequenced_id = item->id;
@@ -1216,14 +1262,14 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
           creation.serial = ++r.display_creation_count;
           r.display_creations[(creation.serial - 1) % r.display_creations.size()] = creation;
         }
-        for (const auto* profile : profiles::Catalog)
-          if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels,
-                                        static_cast<UINT>(desc.Format))) {
+        if (item->display_shape) {
+          // Live binding associates profile displays' RTVs; a discovery
+          // texture is never stamped, so its RT entries skip the lock.
+          if (catalog_display(desc))
             remember_backfill_display(r, native);
-            const auto hash = Registry::SeenResources::hash(native);
-            r.display_filter[hash / 64].fetch_or(1ull << (hash % 64), std::memory_order_release);
-            break;
-          }
+          const auto hash = Registry::SeenResources::hash(native);
+          r.display_filter[hash / 64].fetch_or(1ull << (hash % 64), std::memory_order_release);
+        }
         maybe_stop_live_backfill(r);
       } else {
         r.pfd_inventory_complete = false;
@@ -1252,7 +1298,7 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
     }
   }
   if (sequenced)
-    record_creation(desc, sequenced_id);
+    record_creation(desc, sequenced_id, native);
   native->Release();
   return true;
 }
@@ -1934,7 +1980,7 @@ void observe_legacy(void*,
     if (auto* item = metadata_list(list, id)) {
       if (invalid_submission)
         item->submission_proof.invalidate(PfdSubmissionProof::Refusal::barrier_uncertainty);
-      else if (const auto target = resource(b.Transition.pResource); target && target->alive && display_candidate_desc(target->desc)) {
+      else if (const auto target = resource(b.Transition.pResource); target && target->alive && target->display_shape) {
         const auto subresource = b.Transition.Subresource;
         // Exact admitted 8-bit color displays have one layer/plane. A complete
         // transition of another valid mip cannot change the copied base mip.
@@ -2303,11 +2349,12 @@ void stage_pfd(List& item, std::uint64_t id) noexcept {
           boundary::recording_allows_injection(native, id) && current != r.rtvs.end() && current->second.resource == view.resource &&
           current->second.format == view.format && current->second.recovered == view.recovered && !current->second.mip &&
           r.calibration_budget.try_acquire(0, GetTickCount64())) {
-        const auto area = profiles::display_rect(*r.profile, side);
+        const auto area =
+            profiles::side_rect(*r.profile, side, static_cast<unsigned>(view.resource->desc.Width), view.resource->desc.Height);
         const boundary::ScopedBypass bypass;
-        // Single-display gauges are whole rectangles anywhere on the texture;
-        // other profiles calibrate the upper region of their column.
-        const bool gauge = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+        // Single-display gauges and set-up aircraft panels are whole
+        // rectangles; other profiles calibrate the upper region of their column.
+        const bool gauge = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display || r.profile->fit_texture;
         if (gauge ? record_calibration_area(native, retained, area.right - area.left, area.bottom - area.top, GetTickCount64() / 16,
                                             area.left, area.top)
                   : record_calibration(native, retained, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16,
@@ -2356,7 +2403,9 @@ void drain_pfds(List& item, std::uint64_t id, bool recording_end = false) noexce
       ++r.fallback_state_refused;
       continue;
     }
-    const auto area = profiles::display_rect(*r.profile, side), content = profiles::display_content_rect(*r.profile, side);
+    const auto texture_width = static_cast<unsigned>(view.resource->desc.Width), texture_height = view.resource->desc.Height;
+    const auto area = profiles::side_rect(*r.profile, side, texture_width, texture_height),
+               content = profiles::side_content_rect(*r.profile, side, texture_width, texture_height);
     const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
                                  static_cast<LONG>(area.bottom)};
     const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
@@ -2498,7 +2547,9 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
           item = r.selected_resources[i];
         if (r.selected_resources[i] != item)
           continue;
-        placed[placed_count++] = {profiles::display_rect(*r.profile, i), profiles::display_content_rect(*r.profile, i),
+        const auto& desc = r.selected_resources[i]->desc;
+        placed[placed_count++] = {profiles::side_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
+                                  profiles::side_content_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
                                   (r.waiting_mask & (1u << i)) != 0};
       }
     if (!item || !placed_count ||
@@ -4596,6 +4647,8 @@ void service_display_patches() noexcept {
       config.formats[side] = output_format(owned_encoding);
       if (config.formats[side] == DXGI_FORMAT_UNKNOWN)
         continue;
+      // A set-up aircraft's patch is the size of the texture each side uses.
+      config.sizes[side] = {static_cast<unsigned>(target->desc.Width), target->desc.Height};
       config.camera_mask |= r.active_mask & (1u << side);
       config.waiting_mask |= r.active_mask & r.waiting_mask & (1u << side);
       config.calibration_mask |= r.calibration_mask & (1u << side);
@@ -4647,7 +4700,7 @@ DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t n
     device = r.ready && id ? r.device : nullptr;
     for (const auto& [native, item] : r.resources) {
       (void)native;
-      if (device && item->alive && item->id == id && display_candidate_desc(item->desc)) {
+      if (device && item->alive && item->id == id && item->display_shape) {
         target = item;
         break;
       }
@@ -4772,6 +4825,40 @@ void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) no
   auto& r = registry();
   const WorkerRegistryLock lock(r);
   r.named_targets = ids;
+}
+void set_panel_discovery(bool on) noexcept {
+  if (panel_discovery_on.exchange(on, std::memory_order_relaxed) == on || !on)
+    return;
+  // Panel textures that already exist join on their next render-target
+  // transition: forget what the live scan has seen and reopen it.
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  rearm_live_backfill(r);
+}
+bool panel_discovery() noexcept {
+  return panel_discovery_on.load(std::memory_order_relaxed);
+}
+std::size_t resolve_creation_ids(RenderTargetSequence::Entry* entries, std::size_t count) noexcept {
+  std::size_t resolved = 0;
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  for (std::size_t i = 0; i < count; ++i) {
+    auto& entry = entries[i];
+    if (entry.id || !entry.native)
+      continue;
+    // The address is only a map key here. A later texture at a reused address
+    // must also have the recorded shape.
+    const auto found = r.resources.find(reinterpret_cast<ID3D12Resource*>(entry.native));
+    if (found == r.resources.end() || !found->second->alive)
+      continue;
+    const auto& desc = found->second->desc;
+    if (desc.Width == entry.width && desc.Height == entry.height && desc.MipLevels == entry.mips &&
+        static_cast<std::uint32_t>(desc.Format) == entry.format) {
+      entry.id = found->second->id;
+      ++resolved;
+    }
+  }
+  return resolved;
 }
 bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();
@@ -5021,10 +5108,13 @@ void discover_pfds(std::uint64_t now) noexcept {
     }
     const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
     const bool single_display = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    // A set-up aircraft is routed by name only: its displays share one shape
+    // with other panels, so activity cannot tell them apart.
+    const bool named_only = r.profile->pfd_detection == profiles::PfdDetectionPolicy::named;
     const bool separate_lower = profiles::separate_lower_texture(*r.profile);
     const bool missing =
         single_display ? !r.routes.targets[0] || (separate_lower && !r.routes.targets[2]) : (!r.routes.targets[0] || !r.routes.targets[1]);
-    if (now && (ranked_group || missing)) {
+    if (now && !named_only && (ranked_group || missing)) {
       // Take the full inventory after retirement cleanup, under the same
       // registry lock used for detector configuration and target assignment.
       // The detector sorts by incarnation itself. Avoid the unrelated UI

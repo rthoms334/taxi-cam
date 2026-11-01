@@ -1706,7 +1706,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   report.pose_waiting = resume_requested && validated && panes == KeptPanes::ready && !pose_ready;
   report.message = transition.failed() ? "Aircraft change paused: retained camera identity could not be validated. Restart MSFS to resume."
                    : !validated        ? "Waiting for complete retained camera views before changing aircraft profile."
-                   : panes == KeptPanes::pending     ? "Resizing the kept cameras for the new aircraft's displays."
+                   : panes == KeptPanes::pending     ? "Resizing the cameras for the aircraft's display areas."
                    : resume_requested && !pose_ready ? "Retained cameras are closed; waiting for fresh aircraft pose calibration."
                                                      : "Camera pair retained with gates closed; ready for the new aircraft profile.";
   const std::lock_guard lock(runtime.mutex);

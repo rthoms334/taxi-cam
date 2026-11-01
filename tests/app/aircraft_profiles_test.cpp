@@ -432,6 +432,20 @@ int main() {
   assert(identity.sample(1100).detected_profile == 2 && identity.sample(1100).fresh);
   assert(identity.sample(4001).detected_profile == 2 && !identity.sample(4001).fresh);
   assert(!identity.sample(999).fresh);
+  // Aircraft discovery: on for a fresh identity no profile matches, off for a
+  // matched one, unchanged while the identity is stale or has no path yet.
+  assert(!native_camera::next_panel_discovery(false, identity.sample(1100)));
+  assert(!native_camera::next_panel_discovery(true, identity.sample(1100)));
+  assert(native_camera::next_panel_discovery(true, identity.sample(4001)));
+  assert(!native_camera::next_panel_discovery(false, identity.sample(4001)));
+  {
+    native_camera::AircraftIdentitySample unknown;
+    unknown.fresh = true;
+    std::strcpy(unknown.path.data(), "SimObjects\\Airplanes\\Asobo_B787_10\\aircraft.CFG");
+    assert(native_camera::next_panel_discovery(false, unknown));
+    unknown.path[0] = '\0';
+    assert(!native_camera::next_panel_discovery(true, unknown));
+  }
   native_camera::AutoProfileSelection selection;
   assert(!selection.observe(2, 1000));
   assert(!selection.observe(2, 1000));

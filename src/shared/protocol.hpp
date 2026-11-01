@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
-#include "../profiles/catalog.hpp"
+#include "../profiles/discovered.hpp"
 #include "camera_brightness.hpp"
 #include "camera_rate.hpp"
 #include "sim_messages.hpp"
@@ -31,7 +31,11 @@ namespace taxi_camera::standalone {
 // Protocol 25: camera modes. Settings gains camera_mode and drops parked_rate
 // and dynamic_tail; Status gains update_hz, reachable_rate, auto_level and
 // auto_floor and drops parked. Every camera renders on the same frames.
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 25;
+// Protocol 26: aircraft discovery. Status gains panel_discovery and the panel
+// map (each textured cockpit panel with its paired texture) and lists up to 32
+// candidates (any panel can be a set-up aircraft's display); Settings gains
+// the discovered layout of an aircraft the user set up.
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 26;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
@@ -68,6 +72,21 @@ struct Settings {
   // Protocol 25: CameraMode. Custom targets camera_rate; Auto and the presets
   // carry their own targets and keep it for Custom. Saved per aircraft profile.
   std::uint32_t camera_mode = static_cast<std::uint32_t>(kDefaultCameraMode);
+  // Protocol 26: with profile == profiles::DiscoveredProfileId, the set-up
+  // aircraft's display layout (discovered.hpp). Ignored for other profiles.
+  profiles::DiscoveredLayout discovered{};
+  // Session-only: 1 while the companion's aircraft setup is open. The bridge
+  // then tracks every panel texture, also on an aircraft already set up, so
+  // the setup can show and pair them.
+  std::uint32_t panel_setup{};
+  // Protocol 26: the right tail bracket, measured from the right edge (the
+  // left guides above are from the left). Saved per aircraft profile.
+  std::array<float, 2> tail_upper_right = profiles::A380.composition.tail_upper;
+  std::array<float, 2> tail_corner_right = profiles::A380.composition.tail_corner;
+  std::array<float, 2> tail_inner_right = profiles::A380.composition.tail_inner;
+  // Protocol 26: the user's display choices for this profile (discovered.hpp
+  // DisplayOverride). All empty is the profile as it comes.
+  profiles::DisplayOverride display_override{};
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -75,6 +94,11 @@ inline void reset_guide_settings(Settings& settings, const profiles::AircraftPro
   settings.tail_upper = profile.composition.tail_upper;
   settings.tail_corner = profile.composition.tail_corner;
   settings.tail_inner = profile.composition.tail_inner;
+  // A profile without its own right bracket mirrors the left one.
+  const auto& c = profile.composition;
+  settings.tail_upper_right = c.tail_upper_right[0] < 0 ? c.tail_upper : c.tail_upper_right;
+  settings.tail_corner_right = c.tail_corner_right[0] < 0 ? c.tail_corner : c.tail_corner_right;
+  settings.tail_inner_right = c.tail_inner_right[0] < 0 ? c.tail_inner : c.tail_inner_right;
 }
 struct Candidate {
   std::uint64_t id{}, draws{};
@@ -83,6 +107,20 @@ struct Candidate {
   // when the panel table pairs it this flight; empty otherwise.
   char name[32]{};
 };
+// Protocol 26: one textured VCockpit panel and the texture paired with it.
+struct PanelTexture {
+  char name[32]{};     // panel.cfg texture= name
+  std::uint64_t id{};  // tracked texture, 0 when the bridge does not track it
+  std::uint32_t index{}, width{}, height{}, mips{};
+};
+enum class PanelMapState : std::uint32_t {
+  waiting,            // no settled panel table in this flight yet
+  unavailable,        // the panel table could not be read
+  unresolved,         // the panel table was not found in this simulator build
+  incomplete,         // fewer cockpit-load textures than textured panels
+  paired,
+};
+inline constexpr std::size_t MaxPanelTextures = 32, MaxCandidates = 32;
 struct Status {
   std::uint64_t heartbeat{}, captures{}, composed{}, stamps{}, left_id{}, right_id{}, hook_failures{};
   std::uint32_t graphics_ready{}, scene_ready{}, taxi_mask{}, candidate_count{};
@@ -94,7 +132,7 @@ struct Status {
   float speed{}, exposure{};
   double probe_cpu_ms{}, probe_max_ms{};
   std::array<double, 10> stage_ms{};
-  Candidate candidates[16]{};
+  Candidate candidates[MaxCandidates]{};
   char message[384]{};
   // Protocol 11: target requested from the schedule now, the aircraft's PFD
   // refresh cap and CameraRateLimit bits. The saved camera_rate is never
@@ -120,6 +158,17 @@ struct Status {
   // frame) and the update rate it keeps above (0 until a rate is measured).
   std::uint32_t auto_level{};
   float auto_floor{};
+  // Protocol 26: 1 while no profile matches the aircraft and the bridge tracks
+  // every panel texture. panel_state is a PanelMapState; panels lists up to
+  // MaxPanelTextures of panel_count textured panels, highest index first.
+  // panel_shift is the pairing window shift that put the selected profile's
+  // names on its display shape, or -1 when they did not resolve and the panels
+  // are paired with the last cockpit-load textures as created. panel_clean is
+  // 1 when this is the simulator process's first cockpit table or the same
+  // aircraft again: pairings after a switch to another aircraft can be off.
+  std::uint32_t panel_discovery{}, panel_state{}, panel_count{}, panel_clean{};
+  std::int32_t panel_shift{-1};
+  PanelTexture panels[MaxPanelTextures]{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};
@@ -128,7 +177,8 @@ struct Shared {
   Status status;
 };
 inline bool valid_settings(const Settings& s) noexcept {
-  for (const auto& position : {s.nose_dot, s.tail_upper, s.tail_corner, s.tail_inner})
+  for (const auto& position :
+       {s.nose_dot, s.tail_upper, s.tail_corner, s.tail_inner, s.tail_upper_right, s.tail_corner_right, s.tail_inner_right})
     if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || position[0] < 0 || position[0] > 0.5f || position[1] < 0 ||
         position[1] > 1)
       return false;
@@ -136,14 +186,29 @@ inline bool valid_settings(const Settings& s) noexcept {
     for (const float c : color)
       if (!std::isfinite(c) || c < 0 || c > 1)
         return false;
-  const auto* profile = profiles::find(s.profile);
-  if (s.auto_profile > 1 || s.notifications > 1 || !profile || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
-      s.scene_test > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 || s.calibration_budget > 16384)
+  // A set-up aircraft is checked against the layout in this message, not
+  // against a profile this process may not have published yet.
+  unsigned sides = 0;
+  bool separate_lower = false;
+  if (s.profile == profiles::DiscoveredProfileId) {
+    if (!profiles::valid_layout(s.discovered) ||
+        !profiles::valid_override(s.discovered.sides, true, s.discovered.padding, s.display_override))
+      return false;
+    sides = (1u << s.discovered.sides) - 1;
+  } else if (const auto* profile = profiles::base_profile(s.profile)) {
+    if (!profiles::valid_override(profile->sides, profile->fit_texture, profile->camera_padding, s.display_override))
+      return false;
+    sides = profiles::side_mask(*profile);
+    separate_lower = profiles::separate_lower_texture(*profile);
+  } else {
     return false;
-  const auto sides = profiles::side_mask(*profile);
+  }
+  if (s.auto_profile > 1 || s.notifications > 1 || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 || s.scene_test > 1 ||
+      s.panel_setup > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 || s.calibration_budget > 16384)
+    return false;
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
     return false;
-  if (s.lower_id && (!profiles::separate_lower_texture(*profile) || s.lower_id == s.left_id || s.lower_id == s.right_id))
+  if (s.lower_id && (!separate_lower || s.lower_id == s.left_id || s.lower_id == s.right_id))
     return false;
   if ((s.taxi_selected_mask & ~sides) || (s.taxi_desired_mask & ~s.taxi_selected_mask) || (!s.taxi_request && s.taxi_selected_mask))
     return false;

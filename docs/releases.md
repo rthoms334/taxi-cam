@@ -93,25 +93,35 @@ Notes contain installation guidance, GPLv3 licence information, links to the exa
 
 ## What's new notes
 
-[`changelog.json`](../changelog.json) at the repository root holds the short, user-facing notes behind the companion's **What's new** link. They are written by hand and are separate from the generated GitHub release notes above.
+[`changelog.json`](../changelog.json) at the repository root holds the short, user-facing notes behind the companion's **What's new** window. They are written by hand and are separate from the generated GitHub release notes above.
 
-- The link appears in the Settings sidebar whenever the installed version differs from the last version whose notes were read, recorded as `[whats_new] seen` in `settings.ini`. A settings reset shows it again.
-- Nothing is downloaded until the link is clicked. The click fetches `https://raw.githubusercontent.com/rthoms334/taxi-cam/main/changelog.json` off the UI thread: HTTPS only, no redirects, 64 KiB limit. If the fetch or the file fails, the link stays and the status line says so.
-- The dialog lists the releases at or below the installed version, newest first, so notes for merged but unpublished builds stay hidden. Once the dialog has been shown, the link is hidden until a different version is installed.
+- **What's new** is a link in the Settings sidebar. It opens by itself the first time Settings is shown after an update: the installed version differs from the last one whose notes were shown, recorded as `[whats_new] seen` in `settings.ini` (a settings reset shows them again).
+- Opening it fetches `https://raw.githubusercontent.com/rthoms334/taxi-cam/main/changelog.json` off the UI thread: HTTPS only, no redirects, 64 KiB limit. If the fetch or the file fails, the status line says so. Feature pictures are then fetched one at a time from the same repository path (2 MiB each); a picture that cannot be loaded is left out.
+- The window lists the releases at or below the installed version, newest first, so notes for merged but unpublished builds stay hidden. The newest release shows its features as cards with their pictures, then its fixes and other changes; earlier releases follow as compact lists.
+- The `--preview` UI reads `changelog.json` and the pictures from the repository checkout it is started in, so new notes can be checked before they reach `main`.
 
 To add notes, put a new object at the top of `releases`:
 
 ~~~json
 {
-  "version": "0.9.39",
-  "date": "2026-09-23",
-  "changes": ["One short sentence per user-visible change."]
+  "version": "1.2.0",
+  "date": "2026-11-01",
+  "features": [
+    {
+      "title": "Set up any aircraft",
+      "text": "One or two sentences on what it does and where to find it.",
+      "image": "docs/whats-new/1.2.0/aircraft-setup.png"
+    }
+  ],
+  "fixes": ["One short sentence per fixed problem."]
 }
 ~~~
 
-`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. `changes` holds 1–32 non-empty strings of at most 400 characters. Unknown keys are refused. The top entry's `version` is the version every build is stamped with, so adding an entry is how a release version is chosen. Each published release needs its own higher entry; notes for changes merged before that release go into the current top entry.
+`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. A release needs at least one entry in `features` (up to 8), `fixes` or `changes` (up to 32 each). A feature has a `title` of at most 80 characters, a `text` of at most 400 and an optional `image`: a `.png` or `.jpg` path under `docs/whats-new/` that exists in the repository (keep pictures under 2 MiB; a window screenshot about 1000 pixels wide fits the card). `fixes` and `changes` hold non-empty strings of at most 400 characters; `changes` is the single list every release before 1.2.0 used. The top entry's `version` is the version every build is stamped with, so adding an entry is how a release version is chosen. Each published release needs its own higher entry; notes for changes merged before that release go into the current top entry.
 
-Because the companion reads the file from `main`, wording can be corrected after a release without reinstalling. `changelog.json` is a build input, so any change to it starts the release workflow; publishing that candidate still needs approval. Every pull request still validates the file through `tests/app/changelog_test.cpp` in `build.ps1 -Validate`.
+The repository check (`tests/app/changelog_test.cpp` in `build.ps1 -Validate`) refuses unknown keys and missing pictures. The companion skips keys it does not know, so a field added later does not hide the notes from an installed 1.2.0 or newer. Companions before 1.2.0 refuse the `features` and `fixes` keys and report that What's new could not be read until they are updated.
+
+Because the companion reads the file from `main`, wording can be corrected after a release without reinstalling. `changelog.json` is a build input, so any change to it starts the release workflow; publishing that candidate still needs approval.
 
 ## Failures and reruns
 

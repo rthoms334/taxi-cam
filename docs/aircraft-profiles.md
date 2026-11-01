@@ -64,6 +64,19 @@ Changing profiles hides output and closes the owned views through the engine upd
 
 Flight/aircraft load notifications and changes in simulation running state also trigger this suspended transition, including reloads of the same aircraft. Confirming the current profile again in the dropdown explicitly retries its connection and display discovery. Manual texture IDs and preview/calibration requests belong to one flight and are cleared at the transition; saved mounts and guides remain intact. Native identity and GPU lifetime checks still apply. If the retained manager, IDs or output allocations cannot be verified, the cameras remain unavailable; a flight-load notification does not authorize abandoning or replacing those objects.
 
+## Aircraft without a profile
+
+When no profile matches the loaded aircraft, the bridge tracks every cockpit panel texture (multi-mip RGBA8 render targets) and pairs them with the panel names in the simulator's panel table. **Overview** then shows **Set up this aircraft**:
+
+1. **Set up aircraft** lists the panels with a picture of each. Pick the display each camera side is drawn on (**Left**, **Right**, and **Lower** with **Lower display** on). Panel names can be wrong and the two PFDs look alike, so **Test in cockpit** on a side shows the calibration bars on that side's pick in the cockpit. The test runs your picks as an unsaved trial; leaving the setup without saving restores your previous settings. Panels that are not being drawn (an EFB that is off, for example) show **Not being drawn**; **Refresh pictures** tries them again.
+2. **Save and position cameras** saves the layout, selects the aircraft and opens **Camera views** with previews on. The cameras start from default positions (the A350-900's); move each one, then choose **Save changes**.
+
+Sides can use panels of different sizes. Each camera fills the whole panel texture its side is routed to, at that texture's size, so **PFD routing** lists every panel texture of a set-up aircraft and any of them can be chosen. Name routing still expects the panel sizes picked in setup.
+
+The aircraft is identified by its exact `AircraftLoaded` path: the SimObject folder up to `aircraft.cfg`, without a trailing `config` folder. Each preset is its own variant, so the Fenix A320 CFM (`SimObjects/Airplanes/FNX_32X/presets/fnx/FNX_320_CFM_SL`) and A321 IAE keep separate camera positions. Settings are saved in `%LOCALAPPDATA%\Taxi Cam\profiles\discovered\`, in folders named after that path (`Airplanes\FNX_32X\presets\fnx\FNX_320_CFM_SL\variant.ini`). Each airplane folder also keeps the latest layout of any of its presets in `layout.ini`, so another preset of the same aircraft starts with the same displays and the default camera positions. **Auto aircraft** selects a saved variant when two samples of its path agree. A set-up aircraft is routed by panel name only, uses shortcuts and previews (no cockpit buttons), and appears in the profile list as `<preset> (set up)`; **Change displays** on Overview sets it up again.
+
+Panel names are only learned from a clean cockpit load: the simulator session's first aircraft, or the same aircraft again. After a switch to another aircraft, leftover textures can move the pairing by a texture, so setup asks for a simulator restart with this aircraft loaded first. Once saved, the layout also stores the sizes of the panels created next to each display, which keeps name routing on the right textures after later aircraft switches. If the simulator's panel table cannot be found, the aircraft cannot be set up.
+
 ## Adding an aircraft
 
 ### iniBuilds A380 configuration

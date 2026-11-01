@@ -31,6 +31,32 @@ void assert_settings_path(const std::wstring& path, const std::wstring& root) {
     cursor = next;
   }
 }
+namespace {
+// The variant.ini and layout.ini files of aircraft the user set up, below
+// profiles\discovered. A reparse point is listed rather than followed, so the
+// path check refuses it.
+void discovered_targets(const std::wstring& folder, const std::wstring& root, unsigned depth, std::vector<SettingsTarget>& targets) {
+  if (depth > 8 || targets.size() > 4096)
+    fail(L"Too many saved aircraft settings below " + folder);
+  WIN32_FIND_DATAW data{};
+  HANDLE find = FindFirstFileW(join(folder, L"*").c_str(), &data);
+  if (find == INVALID_HANDLE_VALUE)
+    return;
+  do {
+    const std::wstring name = data.cFileName;
+    if (name == L"." || name == L"..")
+      continue;
+    const auto path = join(folder, name);
+    if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      targets.push_back({path, root});
+    else if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      discovered_targets(path, root, depth + 1, targets);
+    else if (equal_insensitive(name, L"variant.ini") || equal_insensitive(name, L"layout.ini"))
+      targets.push_back({path, root});
+  } while (FindNextFileW(find, &data));
+  FindClose(find);
+}
+}  // namespace
 std::vector<SettingsTarget> settings_targets(const std::wstring& installation, bool include_mount) {
   const auto local_value = environment(L"LOCALAPPDATA");
   if (local_value.empty() || !path_rooted(local_value))
@@ -45,6 +71,7 @@ std::vector<SettingsTarget> settings_targets(const std::wstring& installation, b
     for (const auto& folder : {current, legacy})
       targets.push_back({join(folder, name), folder});
   }
+  discovered_targets(join(current, L"profiles\\discovered"), current, 0, targets);
   if (include_mount) {
     const auto root = full_path(installation);
     targets.push_back({join(root, L"taxi-camera-mounts.cfg"), root});

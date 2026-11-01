@@ -39,6 +39,9 @@ struct Device {
   profiles::Composition composition{};
   Snapshot status;
   std::uint32_t patch_profile = 1;
+  // The profile patch_profile named when it was set: a set-up aircraft keeps
+  // its id when its layout (and with it the patch size) changes.
+  const profiles::AircraftProfile* patch_layout{};
   // Latest simulator tone-curve table, until the composition accepts it.
   std::vector<std::uint32_t> tone_table;
   bool tone_table_pending = false;
@@ -118,12 +121,18 @@ bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
   if (!profile || config.profile != item.patch_profile ||
       ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) || (config.waiting_mask & ~config.camera_mask))
     return false;
-  for (unsigned side = 0; side < profile->sides; ++side)
-    if (((config.camera_mask | config.calibration_mask) & (1u << side)) &&
-        (std::find(Formats.begin(), Formats.end(), config.formats[side]) == Formats.end() ||
-         !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
-                                    static_cast<UINT>(config.formats[side]))))
+  for (unsigned side = 0; side < profile->sides; ++side) {
+    if (!((config.camera_mask | config.calibration_mask) & (1u << side)))
+      continue;
+    if (std::find(Formats.begin(), Formats.end(), config.formats[side]) == Formats.end() ||
+        !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
+                                   static_cast<UINT>(config.formats[side])))
       return false;
+    // A set-up aircraft's side is the whole target texture, so it needs one.
+    const auto [width, height] = config.sizes[side];
+    if (profile->fit_texture && (!width || !height || width > profiles::MaxPanelEdge || height > profiles::MaxPanelEdge))
+      return false;
+  }
   return true;
 }
 bool request_queue_patches(Device& item) {
@@ -135,7 +144,9 @@ bool request_queue_patches(Device& item) {
       (!item.calibration_output.initialize(item.native, true) || !item.calibration_output.set_patch_profile(config.profile)))
     return false;
   for (unsigned side = 0; side < profile->sides; ++side) {
-    const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
+    const auto [texture_width, texture_height] = config.sizes[side];
+    const auto outer = profiles::side_rect(*profile, side, texture_width, texture_height),
+               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
     if ((config.camera_mask & (1u << side)) &&
@@ -170,7 +181,9 @@ void publish_queue_patches(Device& item) {
       if (waiting ? !item.waiting_ready : !camera_ready)
         continue;
     }
-    const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
+    const auto [texture_width, texture_height] = config.sizes[side];
+    const auto outer = profiles::side_rect(*profile, side, texture_width, texture_height),
+               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
     const auto& source = calibration ? item.calibration_output : waiting ? item.waiting_output : item.output;
@@ -333,7 +346,8 @@ bool prepare(std::uint64_t key) {
   return true;
 }
 bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
-  if (!profiles::find(profile))
+  const auto* layout = profiles::find(profile);
+  if (!layout)
     return false;
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
@@ -344,11 +358,12 @@ bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
       item->waiting_available = item->waiting_ready = false;
     if (item->waiting_available && !item->waiting_output.set_patch_profile(profile))
       item->waiting_available = item->waiting_ready = false;
-    if (item->patch_profile != profile)
+    if (item->patch_profile != profile || item->patch_layout != layout)
       item->status.output = false;
     item->queue_snapshot = {};
     item->queue_config = {};
     item->patch_profile = profile;
+    item->patch_layout = layout;
     return true;
   }
   return false;

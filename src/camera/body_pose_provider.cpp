@@ -89,6 +89,10 @@ struct State {
 };
 State state;
 std::atomic<std::uint32_t> profile_id{1};
+// The profile the worker started with, bound under the lifecycle lock. A
+// set-up aircraft keeps its id when its layout changes, so a new layout needs
+// a new worker too.
+std::atomic<const profiles::AircraftProfile*> worker_profile{};
 std::atomic<std::uint64_t> session_epoch{0};
 // Bit0: callback notification; bit1: reset serviced. Fresh telemetry is needed
 // before returning to0. Repeated invalid samples cannot churn epochs.
@@ -179,6 +183,8 @@ AircraftSessionReadiness readiness_locked(std::uint64_t now) noexcept {
   out.loading = state.aircraft_session.loading() || pending != 0;
   const auto identity = state.identity.sample(now);
   const bool telemetry = identity.fresh && identity.detected_profile && fresh(state.aircraft_ms, now) && fresh(state.camera_ms, now);
+  out.flight_loaded = !state.aircraft_session.loading() && state.aircraft_session.running() && !(pending & 1u) && identity.fresh &&
+                      fresh(state.aircraft_ms, now) && fresh(state.camera_ms, now);
   out.ready = !state.aircraft_session.loading() && state.aircraft_session.running() && !(pending & 1u) && telemetry;
   if (out.ready && pending == 2) {
     unsigned serviced = 2;
@@ -411,7 +417,12 @@ bool accept_lighting_packet(const void* raw, DWORD bytes, std::uint64_t sample_m
   return true;
 }
 DWORD WINAPI worker(void*) noexcept {
-  const auto& profile = *profiles::find(profile_id.load());
+  const auto* bound = worker_profile.load();
+  if (!bound) {
+    failure("aircraft_profile");
+    return 0;
+  }
+  const auto& profile = *bound;
   wchar_t path[32768]{};
   const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
   if (!length || length >= 32768) {
@@ -917,8 +928,8 @@ bool select_aircraft_profile(std::uint32_t id) noexcept {
     ReleaseSRWLockExclusive(&lifecycle);
     return false;
   }
-  if (id == profile_id.load() && state.worker && state.stop && WaitForSingleObject(state.worker, 0) == WAIT_TIMEOUT &&
-      WaitForSingleObject(state.stop, 0) == WAIT_TIMEOUT) {
+  if (id == profile_id.load() && profiles::find(id) == worker_profile.load() && state.worker && state.stop &&
+      WaitForSingleObject(state.worker, 0) == WAIT_TIMEOUT && WaitForSingleObject(state.stop, 0) == WAIT_TIMEOUT) {
     // Explicit reconnect/full reset still requires new samples and calibration,
     // but the same adapter needs no unsubscribe gap that could lose FLOW_END
     // or FLIGHT_START. The worker will issue a new coherent identity poll.
@@ -976,7 +987,7 @@ AircraftSessionReadiness nonblocking_readiness(std::uint64_t now) noexcept {
   out = cached;
   out.cached = true;
   if (pending & 1u) {
-    out.ready = false;
+    out.ready = out.flight_loaded = false;
     out.loading = true;
     out.error = "camera_world_revalidation";
   }
@@ -1019,6 +1030,7 @@ bool initialize_body_pose_provider() noexcept {
     return false;
   }
   state.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  worker_profile.store(profiles::find(profile_id.load()));
   if (state.stop)
     state.worker = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
   const bool ready = state.worker != nullptr;
@@ -1210,6 +1222,7 @@ bool install_worker(void* worker_handle, void* stop_handle) noexcept {
         DuplicateHandle(process, stop_handle, process, &stop_copy, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
       state.worker = worker_copy;
       state.stop = stop_copy;
+      worker_profile.store(profiles::find(profile_id.load()));
       installed = true;
     } else if (worker_copy) {
       CloseHandle(worker_copy);
