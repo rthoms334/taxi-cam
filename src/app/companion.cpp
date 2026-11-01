@@ -92,6 +92,8 @@ ULONGLONG next_update_check{};
 bool update_prompt{};
 // An update downloaded while the simulator blocked installing it.
 bool update_after_simulator{};
+// The pilot chose to keep the app open; it no longer quits with the simulator.
+bool stay_after_simulator{};
 win::ChangelogFetcher changelog_fetcher;
 bool whats_new{};  // The installed version's notes have not been read yet.
 int scale(int v) {
@@ -4641,6 +4643,8 @@ void poll_updates() {
                                               L"changes.\nCancel: keep the app open."),
                                            tr(L"Unsaved settings"), MB_YESNOCANCEL | MB_ICONQUESTION);
             proceed = choice == IDNO || (choice == IDYES && apply());
+            // Cancel keeps the app open, so the quit with the simulator stands down.
+            stay_after_simulator = stay_after_simulator || choice == IDCANCEL;
           }
           if (proceed) {
             std::wstring error;
@@ -4916,13 +4920,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       return 0;
     case ExitWithSimulatorMessage:
-      // The tray Quit path. It never waits for Settings to close: a companion
-      // left running keeps Steam showing the simulator as running. Valid unsaved
-      // edits are saved first, as the live view saves on close; the aircraft
-      // setup keeps its own Save, as when it is left. The worker asks again on
+      // The tray Quit path: unsaved edits are discarded, as by tray Quit, since
+      // the draft also holds previews and calibration takeovers nobody chose to
+      // keep. It never waits for Settings to close: a companion left running
+      // keeps Steam showing the simulator as running. The worker asks again on
       // every loop, so the quit waits only for a modal dialog (it disables the
       // window) or an update check. An update that downloaded while the
       // simulator ran is offered first; a manual check reuses that download.
+      if (stay_after_simulator)
+        return 0;
       if (update_after_simulator && !update_prompt && !updater.busy()) {
         update_after_simulator = false;
         check_updates(true);
@@ -4931,8 +4937,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (update_prompt || updater.busy() || !IsWindowEnabled(hwnd))
         return 0;
-      if (dirty && page != SetupPage)
-        apply();
       PostMessageW(hwnd, WM_CLOSE, 1, 0);
       return 0;
     case WhatsNewMessage:
