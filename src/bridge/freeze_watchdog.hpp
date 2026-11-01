@@ -52,6 +52,9 @@ class FreezeWatchdog {
     // Hooked lists and queues went quiet while SIM_FRAME continued: flight
     // reload or a renderer path we do not hook, logged once, never a trip.
     bool presentation_stall_noted = false;
+    // A trip while cameras were requested. Only these release anything the
+    // pilot sees; the rest (flight loading, the simulator quitting) are logged.
+    bool cameras_wanted = false;
     bool worker_alive = false;
     const char* reason = "";
     std::uint64_t stalled_ms = 0;
@@ -120,6 +123,7 @@ class FreezeWatchdog {
       ++trips_;
       recover_since_ = 0;
       decision.trip = true;
+      decision.cameras_wanted = wanted_at_progress_;
       decision.reason = pulse_stalled ? (sim_known ? "presentation_and_sim_frame_stalled" : "presentation_stalled_no_telemetry")
                                       : "sim_frame_stalled_before_first_submit";
       decision.stalled_ms = pulse_stalled ? pulse_stalled_ms : sim_stalled_ms;

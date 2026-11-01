@@ -325,6 +325,7 @@ void watchdog_hold() {
       seen.trip |= decision.trip;
       seen.recover |= decision.recover;
       seen.hold |= decision.hold;
+      seen.cameras_wanted |= decision.cameras_wanted;
     }
     return seen;
   };
@@ -371,6 +372,16 @@ void watchdog_hold() {
     require(resumed.recover && !resumed.hold, "Stall with nothing requested held the gate");
   }
   require(loading.recent_trips(now) == 0 && loading.trips() == FreezeWatchdog::HoldTrips + 2, "Unrequested trips were counted");
+  // Issue 137: only a trip while cameras were requested is announced. The
+  // simulator quitting from its menu stalls with nothing requested.
+  FreezeWatchdog quitting;
+  run(quitting, 8, true, false);
+  const auto quit_trip = run(quitting, 14, false, false);
+  require(quit_trip.trip && !quit_trip.cameras_wanted, "A trip with nothing requested was marked for a notice");
+  FreezeWatchdog flying;
+  run(flying, 8, true, true);
+  const auto flying_trip = run(flying, 14, false, false);
+  require(flying_trip.trip && flying_trip.cameras_wanted, "A trip while cameras were requested was not marked for a notice");
   for (unsigned i = 1; i < FreezeWatchdog::HoldTrips; ++i)
     require(cycle(loading, 0, true, true).recover, "Requested trips after loading held early");
   require(cycle(loading, 0, true, true).hold, "Requested trips after loading did not hold");

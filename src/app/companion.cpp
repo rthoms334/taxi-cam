@@ -41,7 +41,8 @@ namespace {
 using namespace taxi_camera;
 namespace win = standalone;
 using win::decimal, win::tr, win::tr_format;
-constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, WhatsNewImageMessage = WM_APP + 4;
+constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, WhatsNewImageMessage = WM_APP + 4,
+               ExitWithSimulatorMessage = WM_APP + 5;
 constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CAM_VERSION_MINOR, TAXI_CAM_VERSION_PATCH};
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
@@ -4351,6 +4352,7 @@ DWORD WINAPI connection_worker(void*) {
   constexpr std::uint64_t kDetachedRescanMs = 1000;
   win::SimulatorAttach attach;
   std::uint64_t last_scan_ms = 0;
+  win::ExitWithSimulator exit_with_simulator(background_start && !preview_ui);
   while (running.load()) {
     if (preview_ui) {
       Sleep(100);
@@ -4420,8 +4422,9 @@ DWORD WINAPI connection_worker(void*) {
                          : ui_text(L"Simulator closed. Waiting for the next session.");
       }
       PostMessageW(window, StatusMessage, 0, 0);
-      // Stay in the tray so a later manual or auto connect can attach without
-      // depending on MSFS auto-launch of Taxi Cam.
+      // A manual start stays in the tray so a later manual or auto connect can
+      // attach without depending on MSFS auto-launch of Taxi Cam. A start from
+      // exe.xml quits below once the simulator stays gone.
     }
     if (pid && pid != attached) {
       win::log_attach(win::settings_directory(), attach, expected_simulator);
@@ -4447,6 +4450,8 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       }
     }
+    if (exit_with_simulator.observe(attached != 0, now_ms))
+      PostMessageW(window, ExitWithSimulatorMessage, 0, 0);
     const bool want_connect =
         win::should_attempt_connect(auto_on, attempted, command, manual_armed, connection_disconnected.load(std::memory_order_acquire));
     if (attached && want_connect && startup_retry.ready(GetTickCount64())) {
@@ -4909,6 +4914,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         InvalidateRect(hwnd, nullptr, FALSE);
         invalidate_camera_mode_cards();
       }
+      return 0;
+    case ExitWithSimulatorMessage:
+      // The tray Quit path. The worker asks again while an update prompt is open.
+      if (!update_prompt)
+        PostMessageW(hwnd, WM_CLOSE, 1, 0);
       return 0;
     case WhatsNewMessage:
       show_whats_new();

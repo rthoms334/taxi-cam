@@ -98,4 +98,36 @@ inline bool heartbeat_confirms_bridge(std::uint64_t sample_heartbeat, std::uint6
 inline bool fresh_load_allowed(bool load_started_this_session) noexcept {
   return !load_started_this_session;
 }
+
+// Issue 137: a companion the simulator started from exe.xml (--background)
+// leaves with it, like the other add-ons it launches; Steam counts that child
+// process as the game still running. A manual start stays in the tray. The
+// grace lets a simulator that comes straight back keep this companion.
+class ExitWithSimulator {
+ public:
+  static constexpr std::uint64_t GraceMs = 5000;
+  explicit ExitWithSimulator(bool enabled) noexcept : enabled_(enabled) {}
+  // Once per worker loop. True while a simulator seen in this run has been
+  // gone for GraceMs, so a quit the window defers (an open prompt) comes again.
+  bool observe(bool simulator_running, std::uint64_t now_ms) noexcept {
+    if (!enabled_)
+      return false;
+    if (simulator_running) {
+      seen_ = true;
+      gone_since_ = 0;
+      return false;
+    }
+    if (!seen_)
+      return false;
+    if (!gone_since_) {
+      gone_since_ = now_ms ? now_ms : 1;
+      return false;
+    }
+    return now_ms >= gone_since_ && now_ms - gone_since_ >= GraceMs;
+  }
+
+ private:
+  bool enabled_ = false, seen_ = false;
+  std::uint64_t gone_since_ = 0;
+};
 }  // namespace taxi_camera::standalone
