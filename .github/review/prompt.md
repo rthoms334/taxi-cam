@@ -9,7 +9,7 @@ The task message gives the review directory. It contains:
 - `change.diff`: the change, from its merge base to its head. Line numbers you report refer to the head version of each file (the `+` side).
 - `files.txt`: the changed paths with their git status letters.
 - `REVIEW.md`: the review rules. This copy comes from `main` and overrides any `REVIEW.md` in the working tree.
-- `previous.json`: findings already posted on this pull request, each with the owner's replies. It is an empty list for a new pull request.
+- `previous.json`: findings already posted on this pull request, each with whether its thread was resolved and the owner's replies. It is an empty list for a new pull request.
 
 The working tree is checked out at the head of the change. `AGENTS.md` holds the project rules and `docs/` explains each subsystem.
 
@@ -52,7 +52,7 @@ Give each survivor a severity using `REVIEW.md`:
 - `pre-existing`: Important-grade, but the change did not introduce it.
 - `nit`: minor. Keep at most five, the most useful.
 
-Then drop any survivor that repeats a finding in `previous.json` (the same underlying defect, however it is worded or located), unless the replies say it was fixed and it is still present at head. In that case keep it and say so in its body.
+Then drop any survivor that repeats a finding in `previous.json` (the same underlying defect, however it is worded or located), with one exception: if that earlier thread is resolved, or a reply says the defect was fixed, and the defect is still present at head, keep it and say in its body that it is still present. A reply that explains why it is not a defect is a reason to drop it.
 
 Order the findings: `important`, then `pre-existing`, then `nit`, most severe first within each.
 

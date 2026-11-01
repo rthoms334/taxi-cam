@@ -58,7 +58,8 @@ def append_summary(path: str | None, text: str) -> None:
 
 def cmd_classify(args: argparse.Namespace) -> int:
     paths = Path(args.files).read_text(encoding="utf-8").splitlines()
-    result = rt.classify(paths, args.expected)
+    old_names = Path(args.old_names).read_text(encoding="utf-8").splitlines() if args.old_names else []
+    result = rt.classify(paths, args.expected, old_names)
     append_output(args.github_output, {"tier": result["tier"]})
     append_summary(args.summary, rt.render_classification(result))
     print(f"risk tier: {result['tier']}")
@@ -108,8 +109,11 @@ def cmd_stage(args: argparse.Namespace) -> int:
     (out / "files.txt").write_text(git("diff", "--name-status", "-M", merge_base, head), encoding="utf-8")
 
     previous: list[dict] = []
-    if args.comments:
-        previous = rt.previous_findings(json.loads(Path(args.comments).read_text(encoding="utf-8")), BOT_LOGIN)
+    if args.threads:
+        threads = json.loads(Path(args.threads).read_text(encoding="utf-8"))
+        if not isinstance(threads, list) or not all(isinstance(t, dict) for t in threads):
+            raise SystemExit("--threads must be a JSON list of review threads")
+        previous = rt.previous_findings(threads)
     (out / "previous.json").write_text(json.dumps(previous, indent=2), encoding="utf-8")
     (out / "context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
 
@@ -278,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("classify")
     p.add_argument("--files", required=True, help="file with one changed path per line")
+    p.add_argument("--old-names", help="file with the previous name of each renamed file")
     p.add_argument("--expected", type=int, help="GitHub's changed-file count")
     p.add_argument("--github-output")
     p.add_argument("--summary")
@@ -289,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--head", required=True)
     p.add_argument("--reviewer-from", required=True, help="git ref holding the reviewer files")
     p.add_argument("--bootstrap-fallback", action="store_true", help="use the working tree's reviewer when the ref has none")
-    p.add_argument("--comments", help="pull-request review comments as JSON")
+    p.add_argument("--threads", help="the pull request's review threads (GraphQL nodes) as JSON")
     p.add_argument("--github-output")
     p.set_defaults(func=cmd_stage)
 

@@ -42,18 +42,24 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: List every changed path, including old names of renamed files
+      - name: List every changed path, and the old names of renamed files
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-        run: gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/paths.txt"
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" > "$RUNNER_TEMP/files.json"
+          jq -rs 'add // [] | .[].filename' "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/paths.txt"
+          jq -rs 'add // [] | .[] | .previous_filename // empty' "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/old-names.txt"
 
       - name: Classify
         id: classify
         env:
           CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
-        run: python3 .github/review/review.py classify --files "$RUNNER_TEMP/paths.txt" --expected "$CHANGED_FILES" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+        run: |
+          python3 .github/review/review.py classify --files "$RUNNER_TEMP/paths.txt" --old-names "$RUNNER_TEMP/old-names.txt" \
+            --expected "$CHANGED_FILES" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Require protected approval environments
         # An environment without a required reviewer would approve itself.

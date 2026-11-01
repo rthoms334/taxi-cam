@@ -9,6 +9,11 @@ from pathlib import Path
 WORKFLOWS = Path(__file__).resolve().parent.parent / "workflows"
 
 
+def workflow_files() -> list[Path]:
+    # GitHub runs both extensions.
+    return sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
+
+
 def read(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
 
@@ -35,19 +40,19 @@ def permissions(block: str) -> str:
 
 class WorkflowTest(unittest.TestCase):
     def test_every_action_is_pinned_to_a_commit(self):
-        for path in WORKFLOWS.glob("*.yml"):
+        for path in workflow_files():
             for ref in re.findall(r"(?m)^\s*(?:-\s*)?uses:\s*(\S+)", path.read_text(encoding="utf-8")):
                 if ref.startswith("./"):
                     continue
                 self.assertRegex(ref, r"@[0-9a-f]{40}$", f"{path.name}: {ref} must be pinned to a commit SHA")
 
     def test_only_the_gate_uses_pull_request_target(self):
-        for path in WORKFLOWS.glob("*.yml"):
+        for path in workflow_files():
             uses_target = "pull_request_target" in path.read_text(encoding="utf-8")
             self.assertEqual(uses_target, path.name == "pr-risk-gate.yml", path.name)
 
     def test_no_untrusted_pull_request_text_in_expressions(self):
-        for path in WORKFLOWS.glob("*.yml"):
+        for path in workflow_files():
             text = path.read_text(encoding="utf-8")
             for field in ("title", "body", "head.ref", "head.label"):
                 self.assertNotIn(f"github.event.pull_request.{field}", text, path.name)
@@ -59,7 +64,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("pull_request.head.sha }}\n", gate.replace("HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n", ""))
         self.assertNotIn("secrets.", gate)
         self.assertNotIn("claude-code-action", gate)
-        self.assertRegex(gate, r"(?m)^\s+run: python3 \.github/review/review\.py classify ")
+        self.assertIn("python3 .github/review/review.py classify --files", gate)
+        self.assertIn("--old-names", gate)
         for name in ("classify", "label", "approval", "live-check", "gate"):
             job(gate, name)
 
@@ -86,6 +92,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("id-token", review)
         self.assertNotIn("mcp__github", review)
         self.assertIn("--reviewer-from \"$BASE_SHA\"", hunt)
+        # A failed thread fetch must fail the job, not stage an empty history.
+        self.assertIn("set -euo pipefail", step(review, "Stage the change, earlier findings and the reviewer from main"))
         post = job(review, "post")
         self.assertIn("name: AI review", post)
         self.assertIn("pull-requests: write", permissions(post))
@@ -119,8 +127,8 @@ class WorkflowTest(unittest.TestCase):
     def test_required_check_names_have_one_owner(self):
         # Required checks match by name, so another job with the same name could satisfy one.
         owners = {"PR test build": "pr-test-build.yml", "AI review": "pr-review.yml", "Risk gate": "pr-risk-gate.yml"}
-        for path in WORKFLOWS.glob("*.yml"):
-            names = re.findall(r"(?m)^    name: (.+?)\s*$", path.read_text(encoding="utf-8"))
+        for path in workflow_files():
+            names = [n.strip("'\"") for n in re.findall(r"(?m)^\s+name:\s*(.+?)\s*$", path.read_text(encoding="utf-8"))]
             for check, owner in owners.items():
                 expected = 1 if path.name == owner else 0
                 self.assertEqual(names.count(check), expected, f"{path.name}: job name {check!r}")

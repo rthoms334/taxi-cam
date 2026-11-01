@@ -38,6 +38,7 @@ RISK_RULES: tuple[tuple[str, str, str], ...] = (
     ("high", "tools/diagnostics/image_inventory.*", "compiled into the shipped bridge DLL"),
     ("high", "src/setup/*", "installer commands change exe.xml and saved settings"),
     ("high", "src/app/updater.*", "downloads and installs updates"),
+    ("high", "src/app/json_value.hpp", "parses the installation record Setup acts on"),
     ("high", "installer/*", "Setup and uninstall change the user's system"),
     ("high", "build.ps1", "builds and validates the shipped binaries"),
     ("high", "bootstrap.ps1", "downloads and verifies the toolchain"),
@@ -48,7 +49,12 @@ RISK_RULES: tuple[tuple[str, str, str], ...] = (
     ("medium", "ci/*", "release versioning and publication"),
     ("medium", "REVIEW.md", "rules for the reviewer"),
     ("medium", "AGENTS.md", "rules for coding agents"),
+    ("medium", "*/AGENTS.md", "rules for coding agents"),
     ("medium", "CLAUDE.md", "rules for coding agents"),
+    ("medium", "*/CLAUDE.md", "rules for coding agents"),
+    ("medium", "CLAUDE.local.md", "rules for coding agents"),
+    ("medium", ".claude/*", "settings and instructions for coding agents"),
+    ("medium", ".mcp.json", "tools for coding agents"),
     ("medium", "changelog.json", "the release version; installed companions read it from main"),
     ("medium", "docs/whats-new/*", "installed companions fetch these pictures from main"),
     ("medium", "LICENSE", "shipped licence"),
@@ -69,14 +75,18 @@ def classify_path(path: str) -> tuple[str, str]:
     return DEFAULT_RISK
 
 
-def classify(paths: list[str], expected_count: int | None = None) -> dict:
+def classify(paths: list[str], expected_count: int | None = None, old_names: list[str] = ()) -> dict:
     """Classify a pull request from every path it touches.
 
-    `expected_count` is GitHub's changed-file count for the pull request. The
-    files endpoint stops listing at 3000 files, so a shorter list means the
-    classifier cannot see every path and the change is treated as high risk.
+    `paths` are the files GitHub lists for the pull request and `old_names`
+    the previous names of renamed ones. `expected_count` is GitHub's
+    changed-file count. The files endpoint stops listing at 3000 files, so
+    fewer listed files than that count means the classifier cannot see every
+    path and the change is treated as high risk. Old names are classified but
+    never counted, or renames could hide a truncated list.
     """
-    unique = sorted({p.strip() for p in paths if p.strip()})
+    listed = {p.strip() for p in paths if p.strip()}
+    unique = sorted(listed | {p.strip() for p in old_names if p.strip()})
     per_path = []
     for path in unique:
         tier, reason = classify_path(path)
@@ -90,10 +100,9 @@ def classify(paths: list[str], expected_count: int | None = None) -> dict:
     for item in per_path:
         if TIERS.index(item["tier"]) > TIERS.index(tier):
             tier = item["tier"]
-    if expected_count is not None and len(unique) < expected_count:
-        # Renames add their old path, so more paths than files is normal.
+    if expected_count is not None and len(listed) < expected_count:
         tier = "high"
-        notes.append(f"GitHub reports {expected_count} changed files but listed {len(unique)}; the file list is incomplete.")
+        notes.append(f"GitHub reports {expected_count} changed files but listed {len(listed)}; the file list is incomplete.")
     return {"tier": tier, "paths": per_path, "notes": notes}
 
 
@@ -132,12 +141,12 @@ def _diff_path(token: str) -> str | None:
 
 
 def commentable_lines(diff: str) -> dict[str, set[int]]:
-    """Map each path present at head to the head-side lines GitHub accepts.
+    """Map each path in the diff to the head-side lines GitHub accepts.
 
     GitHub accepts review comments on added and context lines inside a hunk
     (side RIGHT). Files changed without hunks (binary, mode-only, pure
-    renames) map to an empty set: they accept file-level comments only.
-    Deleted files are left out.
+    renames) and deleted files map to an empty set: they accept file-level
+    comments only, so an Important finding on a deletion still gets a thread.
     """
     files: dict[str, set[int]] = {}
     header_path: str | None = None
@@ -147,7 +156,7 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
     new_line = 0
 
     def close_file() -> None:
-        if header_path is not None and not deleted:
+        if header_path is not None:
             files.setdefault(header_path, set())
 
     for raw in diff.splitlines():
@@ -183,6 +192,8 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
             deleted = True
         elif raw.startswith("rename to "):
             header_path = raw[len("rename to "):]
+        elif raw.startswith("--- ") and deleted:
+            header_path = _diff_path(raw[4:]) or header_path
         elif raw.startswith("+++ "):
             current = _diff_path(raw[4:])
             if current is not None:
@@ -295,10 +306,10 @@ def open_thread_fingerprints(threads: list[dict]) -> set[str]:
 
 
 _CREDENTIAL_PATTERNS = (
-    ("Anthropic key", re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}")),
+    ("Anthropic key", re.compile(r"sk-ant-[A-Za-z0-9_-]{40,}")),
     ("GitHub token", re.compile(r"\bgh[opsu]_[A-Za-z0-9]{20,}")),
     ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
-    ("token in a URL", re.compile(r"x-access-token:[^@\s]+@")),
+    ("token in a URL", re.compile(r"x-access-token:[A-Za-z0-9_.-]{20,}@")),
 )
 
 
@@ -341,31 +352,30 @@ def execution_error(messages: object, secrets: list[str]) -> str | None:
 TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 
 
-def previous_findings(comments: list[dict], bot_login: str) -> list[dict]:
-    """Summarize posted findings and the replies of people with write access.
+def previous_findings(threads: list[dict]) -> list[dict]:
+    """Summarize the reviewer's earlier threads for the next review.
 
-    Replies from anyone else are left out: on a public repository anyone can
-    reply, and the reviewer must not read their text as context.
+    `threads` are GraphQL reviewThreads nodes. Each finding keeps whether its
+    thread was resolved and the replies of people with write access. Replies
+    from anyone else are left out: on a public repository anyone can reply,
+    and the reviewer must not read their text as context.
     """
-    ours = [c for c in comments if (c.get("user") or {}).get("login") == bot_login and _FP.search(c.get("body") or "")]
-    replies: dict[int, list[dict]] = {}
-    for comment in comments:
-        parent = comment.get("in_reply_to_id")
-        if parent is None or comment.get("author_association") not in TRUSTED_ASSOCIATIONS:
-            continue
-        replies.setdefault(parent, []).append({
-            "author": (comment.get("user") or {}).get("login", ""),
-            "body": (comment.get("body") or "")[:2000],
-        })
     result = []
-    for comment in ours:
-        body = comment.get("body") or ""
-        text = body.split("<sub>", 1)[0].strip()
+    for thread in threads:
+        comments = ((thread.get("comments") or {}).get("nodes")) or []
+        if not comments or ((comments[0].get("author") or {}).get("login")) not in BOT_LOGINS:
+            continue
+        body = comments[0].get("body") or ""
+        if not _FP.search(body):
+            continue
+        replies = [{"author": (c.get("author") or {}).get("login", ""), "body": (c.get("body") or "")[:2000]}
+                   for c in comments[1:] if c.get("authorAssociation") in TRUSTED_ASSOCIATIONS]
         result.append({
-            "path": comment.get("path"),
-            "line": comment.get("line") or comment.get("original_line") or 0,
-            "finding": text[:3000],
-            "replies": replies.get(comment.get("id"), []),
+            "path": thread.get("path"),
+            "line": thread.get("line") or thread.get("originalLine") or 0,
+            "resolved": bool(thread.get("isResolved")),
+            "finding": body.split("<sub>", 1)[0].strip()[:3000],
+            "replies": replies,
         })
     return result
 

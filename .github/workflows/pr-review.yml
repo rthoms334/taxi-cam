@@ -75,9 +75,17 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh api --paginate "repos/$REPO/pulls/$PR/comments?per_page=100" | jq -s 'add // []' > "$RUNNER_TEMP/comments.json"
+          set -euo pipefail
+          gh api graphql --paginate -F owner="${REPO%/*}" -F name="${REPO#*/}" -F number="$PR" -f query='
+            query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+              repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+                reviewThreads(first: 100, after: $endCursor) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes { isResolved path line originalLine
+                    comments(first: 50) { nodes { body authorAssociation author { login } } } } } } } }' > "$RUNNER_TEMP/thread-pages.json"
+          jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]]' "$RUNNER_TEMP/thread-pages.json" > "$RUNNER_TEMP/threads.json"
           python3 .github/review/review.py stage --out build/review --base "$BASE_SHA" --head "$HEAD_SHA" \
-            --reviewer-from "$BASE_SHA" --bootstrap-fallback --comments "$RUNNER_TEMP/comments.json" --github-output "$GITHUB_OUTPUT"
+            --reviewer-from "$BASE_SHA" --bootstrap-fallback --threads "$RUNNER_TEMP/threads.json" --github-output "$GITHUB_OUTPUT"
 
       - name: Install subprocess isolation for the reviewer
         # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 needs bubblewrap. This is the setup the
