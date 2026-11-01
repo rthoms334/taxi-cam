@@ -91,7 +91,7 @@ The repository owner does these steps in GitHub's settings. They are not stored 
 
    Until an environment exists with a required reviewer, the gate refuses the tiers that need it rather than letting the approval pass with no one.
 3. **Branch ruleset for `main`.** Under **Settings → Rules → Rulesets**:
-   - Require a pull request before merging.
+   - Require a pull request before merging, with **Required approvals** set to 0 and **Require review from Code Owners** off. GitHub does not let you approve your own pull request, so any required review blocks every merge, auto-merge included. Your approval is the environment review in the risk gate.
    - Require status checks: **PR test build**, **AI review** and **Risk gate**, each with **GitHub Actions** as its source so that no other app can set it. Do not require **Owner approval** or **Live check**: a job skipped by its condition reports success, so those would pass on low-risk changes. **Risk gate** is the check that enforces them.
    - GitHub lists a check here only after it has run in the repository. **AI review** appears after its first run on any pull request. **Risk gate** runs from `main`, so it appears only after this workflow is merged and a later pull request has run it. Add it then: requiring it earlier blocks the pull request that adds it, because the gate cannot run there.
    - Require branches to be up to date before merging. GitHub's merge queue is only available to organization-owned repositories, so this setting is what makes the checks run again on the latest `main`.
