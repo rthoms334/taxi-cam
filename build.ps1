@@ -366,6 +366,7 @@ if ($Validate) {
         @{Name='calibration'; Sources=@('tests/graphics/calibration_test.cpp')},
         @{Name='write-budget'; Sources=@('tests/graphics/write_budget_test.cpp')},
         @{Name='freeze-guards'; Sources=@('tests/graphics/freeze_guards_test.cpp')},
+        @{Name='video-memory'; Sources=@('tests/graphics/video_memory_test.cpp')},
         @{Name='hook-timing'; Sources=@('tests/hooks/hook_timing_test.cpp')},
         @{Name='lock-hold-stats'; Sources=@('tests/hooks/lock_hold_stats_test.cpp')},
         @{Name='lock-holder-priority'; Sources=@('tests/hooks/lock_holder_priority_test.cpp')},

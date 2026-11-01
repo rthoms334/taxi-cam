@@ -11,6 +11,7 @@
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
+#include "../graphics/video_memory.hpp"
 #include "../hooks/render_boundary_observer.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/companion_control.hpp"
@@ -36,6 +37,15 @@ std::atomic<std::uint64_t> worker_heartbeat_ms{};
 std::atomic<bool> bridge_connected{};
 std::atomic<unsigned> watchdog_trips{};
 std::atomic<std::uint64_t> watchdog_last_stall_ms{};
+// Repeated-stall hold: the watchdog publishes it; the worker requests a
+// release on a known OFF and the watchdog releases on a new count.
+std::atomic<bool> watchdog_held{};
+std::atomic<unsigned> watchdog_release_requests{};
+// Cameras requested before the watchdog gate. Only trips while they are
+// requested count toward a repeated-stall hold.
+std::atomic<bool> cameras_wanted{};
+// Latest worker video-memory sample in MiB, for the watchdog's trip line.
+std::atomic<std::uint64_t> video_local_mb{}, video_local_budget_mb{}, video_nonlocal_mb{};
 std::atomic<bool> notifications_enabled{};
 // Admitted events for the companion's tray notifications; the worker copies
 // the log into every IPC status it publishes. Nothing is shown from here.
@@ -876,6 +886,7 @@ void log_render_target_shapes(const win::Status& status, std::uint64_t now) noex
 DWORD WINAPI watchdog_run(void*) noexcept {
   FreezeWatchdog watchdog;
   SimMessageLimiter limiter;
+  unsigned release_seen = watchdog_release_requests.load(std::memory_order_acquire);
   for (;;) {
     Sleep(250);
     const auto now = GetTickCount64();
@@ -883,10 +894,23 @@ DWORD WINAPI watchdog_run(void*) noexcept {
     const auto telemetry = native_camera::get_body_telemetry_timing();
     const auto session = native_camera::get_aircraft_session_readiness();
     const auto pulse = win::frame_pulse();
-    const auto decision = watchdog.observe({now, pulse, pulse != 0, telemetry.accepted_samples, session.ready,
-                                            win::graphics_ready() && bridge_connected.load(std::memory_order_acquire),
-                                            heartbeat != 0 && now >= heartbeat && now - heartbeat < WorkerAliveMs});
-    if (!decision.trip && !decision.recover && !decision.telemetry_stall_noted && !decision.presentation_stall_noted)
+    auto decision = watchdog.observe({now, pulse, pulse != 0, telemetry.accepted_samples, session.ready,
+                                      win::graphics_ready() && bridge_connected.load(std::memory_order_acquire),
+                                      heartbeat != 0 && now >= heartbeat && now - heartbeat < WorkerAliveMs,
+                                      cameras_wanted.load(std::memory_order_acquire)});
+    // A fresh camera request while held. Requests made before the hold were
+    // already consumed here and never release a later hold.
+    const auto release = watchdog_release_requests.load(std::memory_order_acquire);
+    if (release != release_seen) {
+      release_seen = release;
+      if (!decision.trip && !decision.recover && !decision.hold) {
+        const auto released = watchdog.release();
+        if (released.recover)
+          decision = released;
+      }
+    }
+    watchdog_held.store(watchdog.held(), std::memory_order_release);
+    if (!decision.trip && !decision.recover && !decision.hold && !decision.telemetry_stall_noted && !decision.presentation_stall_noted)
       continue;
     win::Status status{};
     status.heartbeat = now;
@@ -900,23 +924,31 @@ DWORD WINAPI watchdog_run(void*) noexcept {
       announce(SimEvent::presentation_stalled, limiter, now);
     } else if (decision.recover) {
       win::set_graphics_armed(true);
+    } else if (decision.hold) {
+      // The gate stays closed; only a fresh camera request re-arms it.
+      announce(SimEvent::stalls_held, limiter, now);
     }
     const auto graphics = win::graphics_status();
     const auto output = scene_runtime::snapshot(graphics.device);
-    char detail[512];
+    char detail[640];
     std::snprintf(detail, sizeof(detail),
                   "Presentation watchdog: event=%s reason=%s stalled_ms=%llu worker_alive=%u pulse=%llu sim_frames=%llu "
-                  "session_ready=%u trips=%u",
+                  "session_ready=%u trips=%u recent_trips=%u held=%u local_mb=%llu/%llu nonlocal_mb=%llu",
                   decision.trip                       ? "tripped"
                   : decision.recover                  ? "recovered"
+                  : decision.hold                     ? "held"
                   : decision.presentation_stall_noted ? "presentation_quiet"
                                                       : "telemetry_stall",
                   decision.reason, static_cast<unsigned long long>(decision.stalled_ms), decision.worker_alive,
                   static_cast<unsigned long long>(pulse), static_cast<unsigned long long>(telemetry.accepted_samples), session.ready,
-                  watchdog.trips());
+                  watchdog.trips(), watchdog.recent_trips(now), watchdog.held(),
+                  static_cast<unsigned long long>(video_local_mb.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(video_local_budget_mb.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(video_nonlocal_mb.load(std::memory_order_relaxed)));
     std::snprintf(status.message, sizeof(status.message), "%s",
-                  decision.trip                       ? "Presentation stalled: cameras disarmed so the simulator can keep running."
-                  : decision.recover                  ? "Presentation resumed: cameras re-armed."
+                  decision.trip      ? "Presentation stalled: cameras disarmed so the simulator can keep running."
+                  : decision.recover ? "Presentation resumed: cameras re-armed."
+                  : decision.hold    ? "Repeated simulator stalls: cameras stay off until they are turned off and on again."
                   : decision.presentation_stall_noted ? "Hooked presentation went quiet while simulator frames continue."
                                                       : "Simulator frame telemetry paused while presentation continues.");
     log_status(status, detail);
@@ -1030,6 +1062,16 @@ DWORD run_impl() {
   std::uint64_t applied_connection{}, pending_connection{};
   win::Status last_logged{};
   bool logged = false, last_connected = false, last_requested = false, last_degraded = false, halted_logged = false;
+  StallHoldRelease hold_release;
+  const auto request_hold_release = [&](bool known_off, const win::Status& at) {
+    if (!hold_release.observe(watchdog_held.load(std::memory_order_acquire), known_off))
+      return;
+    watchdog_release_requests.fetch_add(1, std::memory_order_acq_rel);
+    log_status(at, "Presentation watchdog: cameras turned off; releasing the repeated-stall hold.");
+  };
+  VideoMemoryProbe video_probe;
+  VideoMemoryRecord video_record;
+  std::uint64_t next_video_sample{};
   SimEventTracker sim_events;
   SimMessageLimiter sim_limiter;
   const auto announce_all = [&](const SimEventInputs& inputs, std::uint64_t at) {
@@ -1108,6 +1150,23 @@ DWORD run_impl() {
     control.refresh(mailbox);
     const auto now = GetTickCount64();
     worker_heartbeat_ms.store(now, std::memory_order_release);
+    // Process-wide GPU memory against the OS budget, once a second; the
+    // watchdog's trip line reads the latest values from atomics.
+    if (now >= next_video_sample && win::graphics_ready()) {
+      next_video_sample = now + 1000;
+      // A failed open or query records an invalid sample: zeros, reason logged.
+      video_record.add(video_probe.open(win::graphics_adapter_luid()) ? video_probe.sample() : VideoMemorySample{});
+      const auto& latest = video_record.latest();
+      constexpr std::uint64_t MiB = 1024 * 1024;
+      video_local_mb.store(latest.local_usage / MiB, std::memory_order_relaxed);
+      video_local_budget_mb.store(latest.local_budget / MiB, std::memory_order_relaxed);
+      video_nonlocal_mb.store(latest.nonlocal_usage / MiB, std::memory_order_relaxed);
+    }
+    const auto log_video_memory = [&](const win::Status& at) {
+      char detail[256];
+      if (video_record.format(detail, sizeof(detail), video_probe.error()) > 0)
+        log_status(at, detail);
+    };
     const auto& settings = control.settings();
     const auto owner_pid = control.owner_pid();
     const bool connected = control.connected(now);
@@ -1419,6 +1478,7 @@ DWORD run_impl() {
             log_status(pending, identity_detail);
           }
           log_render_target_shapes(pending, now);
+          log_video_memory(pending);
           next_log = now + 5000;
         }
         service_scene();
@@ -1429,6 +1489,10 @@ DWORD run_impl() {
         sim_inputs.degraded = degraded;
         sim_inputs.simulator_unsupported = transition.profile_transition_failed;
         announce_all(sim_inputs, now);
+        // Nothing is requested while the aircraft changes: no trip counts,
+        // and a repeated-stall hold from the previous aircraft is released.
+        cameras_wanted.store(false, std::memory_order_release);
+        request_hold_release(true, status);
         Sleep(25);
         continue;
       }
@@ -1493,15 +1557,27 @@ DWORD run_impl() {
     const auto buttons = native_camera::get_taxi_buttons();
     const auto desired = intent.observe(now, buttons.valid, buttons.mask());
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
-    const unsigned mask =
-        connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() && !degraded
-            ? (pmdg_dsp                               ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
-               : settings.follow_taxi && !manual_only ? desired.buttons
-                                                      : settings.manual_mask) &
-                  sides
-            : 0;
-    const bool test_scene =
-        connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test && !degraded;
+    // The pilot's own request, before readiness and the watchdog gate.
+    const bool uses_buttons = settings.follow_taxi && (pmdg_dsp || !manual_only);
+    const unsigned requested_mask = (pmdg_dsp ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
+                                     : settings.follow_taxi && !manual_only ? desired.buttons
+                                                                            : settings.manual_mask) &
+                                    sides;
+    // What is requested and ready, before the watchdog gate.
+    const unsigned wanted = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready()
+                                ? requested_mask
+                                : 0;
+    const unsigned mask = degraded ? 0u : wanted;
+    const bool wanted_test_scene =
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test;
+    const bool test_scene = wanted_test_scene && !degraded;
+    // Trips count toward a repeated-stall hold only while cameras are wanted;
+    // the hold lasts until the pilot turns them off (a known OFF, never a
+    // readiness lapse or a stale button reading).
+    cameras_wanted.store(wanted || wanted_test_scene, std::memory_order_release);
+    request_hold_release(
+        stall_hold_known_off(connected, settings.enabled != 0, settings.scene_test != 0, requested_mask, uses_buttons, buttons.valid),
+        status);
     const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
@@ -1979,6 +2055,8 @@ DWORD run_impl() {
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : degraded && graphics.admission_halted
             ? "Native hook failures exceeded the safe rate; Taxi Cam is disarmed for this simulator session. Restart MSFS to re-enable it."
+        : degraded && watchdog_held.load(std::memory_order_acquire)
+            ? "Repeated simulator stalls: cameras stay off so the simulator can keep running. Turn them off and on again to retry."
         : degraded          ? "Presentation stalled: cameras disarmed so the simulator can keep running; they re-arm when frames resume."
         : !aircraft_matches ? aircraft_message
         : failed            ? scene.message.c_str()
@@ -2120,6 +2198,7 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.backfill_unclassified), static_cast<unsigned long long>(graphics.backfill_unremembered));
       log_status(status, selection_detail);
       log_render_target_shapes(status, now);
+      log_video_memory(status);
       char control_detail[256];
       std::snprintf(control_detail, sizeof(control_detail),
                     "Control loop timing: discovery_max_ms=%llu service_max_ms=%llu observed_loop_max_ms=%llu",

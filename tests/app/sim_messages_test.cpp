@@ -52,7 +52,7 @@ void toast_policy() {
       {SimEvent::bridge_connected, false},     {SimEvent::cameras_ready, false},       {SimEvent::connection_stopped, false},
       {SimEvent::simulator_unsupported, true}, {SimEvent::presentation_stalled, true}, {SimEvent::cameras_disarmed, false},
       {SimEvent::presentation_resumed, false}, {SimEvent::aircraft_mismatch, false},   {SimEvent::camera_startup_failed, true},
-      {SimEvent::capture_paused, false},       {SimEvent::hook_storm, true},
+      {SimEvent::capture_paused, false},       {SimEvent::hook_storm, true},           {SimEvent::stalls_held, true},
   };
   static_assert(sizeof(rows) / sizeof(rows[0]) == static_cast<unsigned>(SimEvent::count), "Classify every SimEvent in the toast table");
   unsigned toasting = 0;
@@ -64,7 +64,7 @@ void toast_policy() {
       require(taxi_camera::sim_message_for(rows[i].event).alert, "A toasting event is not a warning");
     }
   }
-  require(toasting == 4, "Toast count changed; update the docs and this table");
+  require(toasting == 5, "Toast count changed; update the docs and this table");
   require(!taxi_camera::sim_event_toasts(SimEvent::count), "Invalid event toasts");
   // The worker's echo of a disarm never toasts on its own: the watchdog posts
   // presentation_stalled and the storm posts hook_storm, one notice each.

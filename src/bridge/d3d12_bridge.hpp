@@ -178,6 +178,8 @@ bool initialize_graphics() noexcept;
 // never calls the simulator or telemetry.
 bool initialize_graphics(IUnknown*) noexcept;
 bool graphics_ready() noexcept;
+// Adapter of the native device; zero until graphics are ready.
+LUID graphics_adapter_luid() noexcept;
 // Include bounded warmup, rendering and calibration demand. Idle keeps native
 // resource/descriptor lifetime and display activity discovery, plus retirement
 // of previously recorded/submitted work. Source models stay continuously
