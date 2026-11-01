@@ -1,23 +1,23 @@
 {
   "releases": [
     {
-      "version": "1.4.0",
+      "version": "1.2.0",
       "date": "2026-11-01",
       "features": [
         {
           "title": "Set up any aircraft",
           "text": "An aircraft without a Taxi Cam profile gets Set up this aircraft on Overview: pick each camera's display from pictures of the cockpit panels (Test in cockpit shows which screen a pick is), then position the cameras. Each variant, such as the Fenix A320 and A321, is saved separately; Overview → Set-up aircraft copies or removes them.",
-          "image": "docs/whats-new/1.4.0/aircraft-setup.png"
+          "image": "docs/whats-new/1.2.0/aircraft-setup.png"
         },
         {
           "title": "Adjust the cameras live",
           "text": "Camera views → Adjust with live view shows the cameras on the display as you change them: drag to aim, the wheel zooms, and the guides drag into place. The left and right tail guides can now differ. Changes save when the window closes; Undo changes returns to the saved ones.",
-          "image": "docs/whats-new/1.4.0/live-view.png"
+          "image": "docs/whats-new/1.2.0/live-view.png"
         },
         {
           "title": "Your choice of displays",
           "text": "Overview → Change displays picks other cockpit panels for built-in aircraft too. In the live view, Display area moves or resizes where the cameras are drawn, and the cameras render at the area's shape, so nothing is stretched.",
-          "image": "docs/whats-new/1.4.0/display-area.png"
+          "image": "docs/whats-new/1.2.0/display-area.png"
         },
         {
           "title": "What's new, reworked",

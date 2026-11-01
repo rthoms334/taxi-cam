@@ -104,22 +104,22 @@ To add notes, put a new object at the top of `releases`:
 
 ~~~json
 {
-  "version": "1.4.0",
+  "version": "1.2.0",
   "date": "2026-11-01",
   "features": [
     {
       "title": "Set up any aircraft",
       "text": "One or two sentences on what it does and where to find it.",
-      "image": "docs/whats-new/1.4.0/aircraft-setup.png"
+      "image": "docs/whats-new/1.2.0/aircraft-setup.png"
     }
   ],
   "fixes": ["One short sentence per fixed problem."]
 }
 ~~~
 
-`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. A release needs at least one entry in `features` (up to 8), `fixes` or `changes` (up to 32 each). A feature has a `title` of at most 80 characters, a `text` of at most 400 and an optional `image`: a `.png` or `.jpg` path under `docs/whats-new/` that exists in the repository (keep pictures under 2 MiB; a window screenshot about 1000 pixels wide fits the card). `fixes` and `changes` hold non-empty strings of at most 400 characters; `changes` is the single list every release before 1.4.0 used. The top entry's `version` is the version every build is stamped with, so adding an entry is how a release version is chosen. Each published release needs its own higher entry; notes for changes merged before that release go into the current top entry.
+`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. A release needs at least one entry in `features` (up to 8), `fixes` or `changes` (up to 32 each). A feature has a `title` of at most 80 characters, a `text` of at most 400 and an optional `image`: a `.png` or `.jpg` path under `docs/whats-new/` that exists in the repository (keep pictures under 2 MiB; a window screenshot about 1000 pixels wide fits the card). `fixes` and `changes` hold non-empty strings of at most 400 characters; `changes` is the single list every release before 1.2.0 used. The top entry's `version` is the version every build is stamped with, so adding an entry is how a release version is chosen. Each published release needs its own higher entry; notes for changes merged before that release go into the current top entry.
 
-The repository check (`tests/app/changelog_test.cpp` in `build.ps1 -Validate`) refuses unknown keys and missing pictures. The companion skips keys it does not know, so a field added later does not hide the notes from an installed 1.4.0 or newer. Companions before 1.4.0 refuse the `features` and `fixes` keys and report that What's new could not be read until they are updated.
+The repository check (`tests/app/changelog_test.cpp` in `build.ps1 -Validate`) refuses unknown keys and missing pictures. The companion skips keys it does not know, so a field added later does not hide the notes from an installed 1.2.0 or newer. Companions before 1.2.0 refuse the `features` and `fixes` keys and report that What's new could not be read until they are updated.
 
 Because the companion reads the file from `main`, wording can be corrected after a release without reinstalling. `changelog.json` is a build input, so any change to it starts the release workflow; publishing that candidate still needs approval.
 

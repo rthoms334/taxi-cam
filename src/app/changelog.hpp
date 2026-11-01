@@ -29,7 +29,7 @@ struct ChangelogRelease {
   std::string date;  // Optional YYYY-MM-DD.
   std::vector<ChangelogFeature> features;
   std::vector<std::string> fixes;
-  std::vector<std::string> changes;  // Other notes (every release before 1.4.0).
+  std::vector<std::string> changes;  // Other notes (every release before 1.2.0).
 };
 // A feature picture's repository path: docs/whats-new/..., a .png or .jpg
 // file name of letters, digits, '.', '-', '_' and '/' separators.
@@ -262,8 +262,8 @@ inline bool valid_date(std::string_view d) {
 }
 }  // namespace changelog_detail
 
-// Schema: {"releases": [{"version": "1.4.0", "date": "2026-11-01",
-//   "features": [{"title": "...", "text": "...", "image": "docs/whats-new/1.4.0/x.png"}],
+// Schema: {"releases": [{"version": "1.2.0", "date": "2026-11-01",
+//   "features": [{"title": "...", "text": "...", "image": "docs/whats-new/1.2.0/x.png"}],
 //   "fixes": ["..."], "changes": ["..."]}]}
 // Releases are newest first with strictly descending versions and at least one
 // feature, fix or change. Strict parsing (the repository's own check) refuses
@@ -418,7 +418,7 @@ inline std::wstring changelog_date_text(const std::string& date) {
 // as compact lists.
 struct WhatsNewBlock {
   enum class Kind {
-    heading,  // text: "Taxi Cam 1.4.0", detail: its date.
+    heading,  // text: "Taxi Cam 1.2.0", detail: its date.
     section,  // text: "New features", "Fixes", "Other changes" or "Earlier versions".
     feature,  // text: title, detail: text, image: repository path or empty.
     bullet,   // text: one fix or change.

@@ -76,28 +76,28 @@ int main(int argc, char** argv) {
     require(none.size() == 1 && none[0].kind == Kind::note && none[0].text == L"No notes are listed for Taxi Cam 0.9.39 yet.",
             "Explain an empty list");
 
-    // Features with pictures and fixes (1.4.0 on).
+    // Features with pictures and fixes (1.2.0 on).
     const std::string rich = wrap(
-        "{\"version\":\"1.4.0\",\"date\":\"2026-11-01\",\"features\":[{\"title\":\"Set up any aircraft\",\"text\":\"Pick its "
-        "displays.\",\"image\":\"docs/whats-new/1.4.0/setup.png\"},{\"text\":\"No picture.\",\"title\":\"Live view\"}],\"fixes\":[\"A "
+        "{\"version\":\"1.2.0\",\"date\":\"2026-11-01\",\"features\":[{\"title\":\"Set up any aircraft\",\"text\":\"Pick its "
+        "displays.\",\"image\":\"docs/whats-new/1.2.0/setup.png\"},{\"text\":\"No picture.\",\"title\":\"Live view\"}],\"fixes\":[\"A "
         "fix.\"],\"changes\":[\"Other.\"]}," +
-        std::string("{\"version\":\"1.3.0\",\"features\":[{\"title\":\"Older\",\"text\":\"Feature.\"}],\"fixes\":[\"Old fix.\"]}"));
+        std::string("{\"version\":\"1.1.0\",\"features\":[{\"title\":\"Older\",\"text\":\"Feature.\"}],\"fixes\":[\"Old fix.\"]}"));
     require(parse_changelog(rich, releases, &error) && releases.size() == 2 && releases[0].features.size() == 2 &&
-                releases[0].features[0].image == "docs/whats-new/1.4.0/setup.png" && releases[0].features[1].image.empty() &&
+                releases[0].features[0].image == "docs/whats-new/1.2.0/setup.png" && releases[0].features[1].image.empty() &&
                 releases[0].fixes.size() == 1 && releases[0].changes.size() == 1,
             "Parse features, pictures, fixes and changes");
-    const auto blocks = whats_new_blocks(releases, {1, 4, 0});
+    const auto blocks = whats_new_blocks(releases, {1, 2, 0});
     const std::vector<Kind> order{Kind::heading, Kind::section, Kind::feature, Kind::feature, Kind::section, Kind::bullet,
                                   Kind::section, Kind::bullet,  Kind::section, Kind::release, Kind::bullet,  Kind::bullet};
     require(blocks.size() == order.size(), "Every note has its block");
     for (std::size_t i = 0; i < order.size(); ++i)
       require(blocks[i].kind == order[i], "Features, then fixes, then other changes, then earlier releases");
     require(blocks[1].text == L"New features" && blocks[2].text == L"Set up any aircraft" && blocks[2].detail == L"Pick its displays." &&
-                blocks[2].image == "docs/whats-new/1.4.0/setup.png" && blocks[4].text == L"Fixes" && blocks[6].text == L"Other changes",
+                blocks[2].image == "docs/whats-new/1.2.0/setup.png" && blocks[4].text == L"Fixes" && blocks[6].text == L"Other changes",
             "Feature cards carry their title, text and picture");
     require(blocks[10].text == L"Older: Feature." && blocks[11].text == L"Fixed: Old fix.", "Earlier releases list features and fixes");
     // Repository pictures only.
-    for (const char* path : {"docs/whats-new/1.4.0/a.png", "docs/whats-new/b-c_d.jpg", "docs/whats-new/x.jpeg"})
+    for (const char* path : {"docs/whats-new/1.2.0/a.png", "docs/whats-new/b-c_d.jpg", "docs/whats-new/x.jpeg"})
       require(valid_whats_new_image(path), "Accept pictures under docs/whats-new/");
     for (const char* path :
          {"", "docs/whats-new/", "docs/whats-new/a.gif", "docs/a.png", "/docs/whats-new/a.png", "docs/whats-new/../secret.png",
