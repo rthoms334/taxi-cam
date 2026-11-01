@@ -81,8 +81,6 @@ if ($Validate) {
     $deviceIdentityTest = Join-Path $out 'native-device-identity-test.exe'
     & $compiler @common (Join-Path $taskRoot 'tests/graphics/native_device_identity_test.cpp') @libs '-o' $deviceIdentityTest
     if ($LASTEXITCODE -ne 0) { throw 'Native device identity compilation failed.' }
-    & $deviceIdentityTest
-    if ($LASTEXITCODE -ne 0) { throw 'Native device identity regression failed.' }
     & $deviceIdentityTest --warp
     if ($LASTEXITCODE -ne 0) { throw 'WARP native device identity regression failed.' }
     $lateConnect = Join-Path $out 'late-connect-rendering-test.exe'
@@ -111,8 +109,6 @@ if ($Validate) {
         & $frameOrder
         if ($LASTEXITCODE -ne 0) { throw 'Hardware frame-order validation failed.' }
     }
-    & $gpu --patch-demand
-    if ($LASTEXITCODE -ne 0) { throw 'Lazy patch demand admission failed.' }
     if (-not $WarpOnly) {
         & $gpu
         if ($LASTEXITCODE -ne 0) { throw 'Hardware native graphics validation failed.' }

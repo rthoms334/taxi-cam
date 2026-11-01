@@ -62,7 +62,6 @@ Additional focused checks remain available:
 
 - `tests/graphics/scene_capture_build.ps1`: capture packet pixels, producer/consumer fences and storage reuse; see [capture contracts](../docs/scene-capture-validation.md).
 - `tests/graphics/scene_capture_manager_test.ps1`: recording lifetime, submission receipts and capture publication.
-- `tests/graphics/scene_frame_output_test.ps1`: stable output composition and synchronization.
 - `tests/graphics/reshade_validation.ps1 -ReShadeDll <trusted-local-dll>`: actual proxy forwarding, native device identity and PFD pixel preservation in isolated hardware/WARP harnesses; see [ReShade compatibility](../docs/reshade-compatibility.md).
 - `tests/hooks/render_boundary_test.ps1`: native render-boundary observations.
 - `tests/installer/package_test.ps1`: exact five-file runtime inventory, validated binary hashes, and verbatim `LICENSE.txt` and `THIRD_PARTY_NOTICES.txt` contents.

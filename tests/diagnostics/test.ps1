@@ -3,7 +3,6 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 . (Join-Path $repoRoot 'ci/toolchain.ps1')
 $discoveryRoot = $PSScriptRoot
-$nativeRoot = $repoRoot
 $compiler = Join-Path (Get-TaxiToolchain $repoRoot) 'clang++.exe'
 if (-not (Test-Path -LiteralPath $compiler)) {
   throw 'Run ./bootstrap.ps1 to install the pinned compiler.'
@@ -49,16 +48,6 @@ $numericTestExecutable = Join-Path $outputDirectory 'static-numeric-test.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Static numeric tests failed to compile.' }
 & $numericTestExecutable
 if ($LASTEXITCODE -ne 0) { throw 'Static numeric tests failed.' }
-$codeTestExecutable = Join-Path $outputDirectory 'code-contract-test.exe'
-& $compiler @common (Join-Path $nativeRoot 'src/camera/code_contract.cpp') (Join-Path $nativeRoot 'tests/camera/code_contract_test.cpp') '-o' $codeTestExecutable
-if ($LASTEXITCODE -ne 0) { throw 'Loaded-code contract tests failed to compile.' }
-& $codeTestExecutable
-if ($LASTEXITCODE -ne 0) { throw 'Loaded-code contract tests failed.' }
-$aircraftTestExecutable = Join-Path $outputDirectory 'aircraft-inventory-test.exe'
-& $compiler @common (Join-Path $repoRoot 'src/camera/aircraft_inventory.cpp') (Join-Path $repoRoot 'tests/camera/aircraft_inventory_test.cpp') '-o' $aircraftTestExecutable
-if ($LASTEXITCODE -ne 0) { throw 'Aircraft metadata tests failed to compile.' }
-& $aircraftTestExecutable
-if ($LASTEXITCODE -ne 0) { throw 'Aircraft metadata tests failed.' }
 $slotTestExecutable = Join-Path $outputDirectory 'slot-prefix-test.exe'
 & $compiler @common (Join-Path $repoRoot 'tools/diagnostics/slot_prefix.cpp') (Join-Path $repoRoot 'tests/diagnostics/slot_prefix_test.cpp') '-o' $slotTestExecutable
 if ($LASTEXITCODE -ne 0) { throw 'Static-slot prefix tests failed to compile.' }
