@@ -195,9 +195,10 @@ void reshade_present_gate() {
   manager->set_submission_gate(false);
   require(timeline.cpu_signals.load() == 2, "Closing the gate after the waited value completed signaled again");
 }
-// Issue 97: a receipt never Waits on another simulator queue's unfinished
-// receipt, directly or through private work queued after it. It is escaped
-// unordered instead; same-queue and finished-receipt Waits stay.
+// Issue 97: a receipt without in-list capture packets never Waits on another
+// simulator queue's unfinished receipt, directly or through private work
+// queued after it. It is escaped unordered instead; same-queue and
+// finished-receipt Waits stay, and a packet batch keeps its Wait.
 void cross_queue_escape() {
   void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
   Device device{device_table};

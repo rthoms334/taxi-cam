@@ -2128,11 +2128,11 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   // a cycle with the simulator's own cross-queue waits, freezing it until the
   // watchdog releases the Wait (every trip in the reports released one). Escape
   // like a contended batch instead: this frame's capture and display copy are
-  // lost, and the simulator never waits on us. A Wait behind the same queue, or
+  // lost, and the simulator does not wait on us. A Wait behind the same queue, or
   // behind private work queued after a finished simulator receipt, cannot
   // cycle. Read only in this case, so the fence call under mutex_ is rare.
   // An escape quarantines in-list capture packets for good (16 in all), so a
-  // batch carrying them keeps its Wait and is counted instead.
+  // batch carrying them keeps its Wait, cycle risk included, and is counted.
   const bool cross_queue_unfinished = owner->last_simulator_signal && owner->last_simulator_queue != queue &&
                                       owner->timeline->GetCompletedValue() < owner->last_simulator_signal;
   if (cross_queue_unfinished && mask)
