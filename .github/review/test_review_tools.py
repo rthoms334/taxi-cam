@@ -446,24 +446,63 @@ class CliTest(unittest.TestCase):
         self.assertEqual([f["line"] for f in saved["findings"]], [3])
         self.assertEqual(json.loads((out / "context.json").read_text(encoding="utf-8"))["scope_dropped"], 1)
 
-    def test_stage_skips_a_merge_of_main_that_leaves_the_pull_requests_changes_alone(self):
-        base, first = self.make_repo(True)        # PR branch: src.txt gains "two"
+    def merged_main_repo(self, main_line: int):
+        """PR edits line 2 of a 30-line file, then main edits `main_line` and is merged in."""
+        self.repo = self.root / "repo"
+        (self.repo / ".github" / "review").mkdir(parents=True)
+        self.git("init", "-q", "-b", "main")
+        lines = [f"line {i}\n" for i in range(1, 31)]
+        (self.repo / "src.txt").write_text("".join(lines), encoding="utf-8")
+        self.write_reviewer("base")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+        base = self.git("rev-parse", "HEAD")
         self.git("checkout", "-q", "-b", "pr")
-        self.git("checkout", "-q", base)
-        self.git("checkout", "-q", "-b", "trunk")
-        (self.repo / "src.txt").write_text("one\n" + "".join(f"pad {i}\n" for i in range(20)) + "main edit\n", encoding="utf-8")
-        self.git("commit", "-qam", "main changes a file the PR touches")
+        pr_lines = list(lines)
+        pr_lines[1] = "line 2 changed by the PR\n"
+        (self.repo / "src.txt").write_text("".join(pr_lines), encoding="utf-8")
+        self.git("commit", "-qam", "pr change")
+        reviewed = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "main")
+        main_lines = list(lines)
+        main_lines[main_line - 1] = f"line {main_line} changed on main\n"
+        (self.repo / "src.txt").write_text("".join(main_lines), encoding="utf-8")
+        self.git("commit", "-qam", "main change")
         trunk = self.git("rev-parse", "HEAD")
         self.git("checkout", "-q", "pr")
-        self.git("reset", "-q", "--hard", first)
         merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "--no-edit", trunk],
                                 cwd=self.repo, capture_output=True, text=True)
-        if merged.returncode != 0:  # resolve by keeping both edits
-            (self.repo / "src.txt").write_text("one\ntwo\n" + "".join(f"pad {i}\n" for i in range(20)) + "main edit\n", encoding="utf-8")
+        if merged.returncode != 0:  # conflict: keep both edits
+            both = list(main_lines)
+            both[1] = "line 2 changed by the PR\n"
+            (self.repo / "src.txt").write_text("".join(both), encoding="utf-8")
             self.git("commit", "-qam", "merge main")
-        head = self.git("rev-parse", "HEAD")
-        out, mode = self.stage(trunk, head, self.summary_for(first))
+        return trunk, reviewed, self.git("rev-parse", "HEAD")
+
+    def test_stage_skips_a_clean_merge_of_main_into_the_pull_requests_files(self):
+        trunk, reviewed, head = self.merged_main_repo(25)
+        out, mode = self.stage(trunk, head, self.summary_for(reviewed))
         self.assertEqual(mode, "skip")
+
+    def test_stage_reviews_fully_after_a_conflicting_merge_of_main(self):
+        trunk, reviewed, head = self.merged_main_repo(2)
+        out, mode = self.stage(trunk, head, self.summary_for(reviewed))
+        self.assertEqual(mode, "full")
+
+    def test_stage_follows_up_on_reverting_a_line_and_on_a_rename(self):
+        base, first, head = self.three_commit_repo()            # the PR added "two", then "three"
+        (self.repo / "src.txt").write_text("one\nthree\n", encoding="utf-8")
+        self.git("commit", "-qam", "drop the earlier addition")
+        out, mode = self.stage(base, self.git("rev-parse", "HEAD"), self.summary_for(head))
+        self.assertEqual(mode, "follow-up")
+        self.assertIn("-two", (out / "followup.diff").read_text(encoding="utf-8"))
+
+        reverted = self.git("rev-parse", "HEAD")
+        self.git("mv", "src.txt", "renamed.txt")
+        self.git("commit", "-qm", "rename only")
+        out, mode = self.stage(base, self.git("rev-parse", "HEAD"), self.summary_for(reverted))
+        self.assertEqual(mode, "follow-up")
+        self.assertEqual(rt.commentable_lines((out / "followup.diff").read_text(encoding="utf-8"), context=False), {"renamed.txt": set()})
 
     def test_stage_skips_when_nothing_changed_and_reviews_fully_otherwise(self):
         base, first, head = self.three_commit_repo()
@@ -529,18 +568,18 @@ class FollowUpTest(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"]) for f in kept], [("src/a.cpp", 10), ("img.png", 0)])
         self.assertEqual(len(dropped), 4)
 
-    def test_follow_up_lines_cover_deletions_and_leave_out_mains_changes(self):
+    def test_scope_covers_deletions_and_renames(self):
         followup = ("diff --git a/f.cpp b/f.cpp\n--- a/f.cpp\n+++ b/f.cpp\n"
-                    "@@ -10,3 +10,2 @@\n keep();\n-guard();\n use();\n"      # the PR removed a guard: head lines 10-11
-                    "@@ -40,1 +39,2 @@\n x();\n+from_main();\n")              # main's edit, merged in: head line 40
-        change = ("diff --git a/f.cpp b/f.cpp\n--- a/f.cpp\n+++ b/f.cpp\n"
-                  "@@ -10,3 +10,2 @@\n keep();\n-guard();\n use();\n")
-        lines = rt.follow_up_lines(followup, change)
-        self.assertEqual(lines, {"f.cpp": {10, 11}})
+                    "@@ -10,3 +10,2 @@\n keep();\n-guard();\n use();\n"       # a guard removed: head lines 10-11
+                    "diff --git a/x.yml.disabled b/.github/workflows/x.yml\nsimilarity index 100%\n"
+                    "rename from x.yml.disabled\nrename to .github/workflows/x.yml\n")
+        lines = rt.commentable_lines(followup, context=False)
+        self.assertEqual(lines, {"f.cpp": {10, 11}, ".github/workflows/x.yml": set()})
         kept, dropped = rt.follow_up_scope([finding(path="f.cpp", line=11, title="Guard removed"),
-                                            finding(path="f.cpp", line=40, title="main's code")], lines)
-        self.assertEqual([f["line"] for f in kept], [11])
-        self.assertEqual(rt.follow_up_lines(followup, ""), {})
+                                            finding(path=".github/workflows/x.yml", line=0, title="Workflow enabled"),
+                                            finding(path="f.cpp", line=40, title="old code")], lines)
+        self.assertEqual([f["title"] for f in kept], ["Guard removed", "Workflow enabled"])
+        self.assertEqual(len(dropped), 1)
 
     def test_summary_explains_follow_up_and_skip(self):
         review = rt.validate_review(review_output())

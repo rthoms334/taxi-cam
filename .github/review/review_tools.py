@@ -318,36 +318,13 @@ def last_reviewed_sha(comments: list[dict]) -> str | None:
     return found
 
 
-def follow_up_lines(followup_diff: str, change_diff: str) -> dict[str, set[int]]:
-    """The lines a follow-up review covers: this pull request's own changes
-    that are also new since the last review.
-
-    `followup_diff` runs from the last reviewed commit to head, so after a
-    merge from main it also holds main's edits to the pull request's files.
-    `change_diff` runs from the merge base to head and holds only the pull
-    request's own changes. Intersecting the two leaves main's edits out.
-    A file without line changes in both (binary, rename, deletion) is in
-    scope as a whole.
-    """
-    new = commentable_lines(followup_diff, context=False)
-    own = commentable_lines(change_diff, context=False)
-    result: dict[str, set[int]] = {}
-    for path, lines in new.items():
-        if path not in own:
-            continue
-        if not lines and not own[path]:
-            result[path] = set()
-        elif lines & own[path]:
-            result[path] = lines & own[path]
-    return result
-
-
 def follow_up_scope(findings: list[dict], lines: dict[str, set[int]]) -> tuple[list[dict], list[dict]]:
     """Keep only what a follow-up review may report.
 
-    A follow-up covers the lines changed since the last review, so only
-    Important findings on those lines (or on a whole file changed since then)
-    are kept. Everything else is dropped before posting: re-reviewing code
+    A follow-up covers the lines touched since the last review (see
+    commentable_lines with context=False), so only Important findings on
+    those lines are kept. A file changed without line changes (a rename,
+    binary or mode change) is in scope as a whole. Everything else is dropped before posting: re-reviewing code
     that was already reviewed would keep finding new things to change.
     """
     kept, dropped = [], []
@@ -367,7 +344,7 @@ FOLLOW_UP_SCOPE = """# Scope: follow-up review
 
 The last review on this pull request covered commit `{since}`. `followup.diff` holds only what changed since then in this pull request's files. `change.diff` is the whole pull request, for context only.
 
-- Review only the code that `followup.diff` changes. Do not report anything about code it does not change, even if you notice it. If the branch merged `main`, `main`'s own changes also appear in `followup.diff`; they are not part of this pull request (check `change.diff`) and are out of scope.
+- Review only the code that `followup.diff` changes. Do not report anything about code it does not change, even if you notice it.
 - Check the findings in `previous.json`: if one is still present on lines that `followup.diff` changes, report it again.
 - Report only `important` findings. Report no nits and no pre-existing findings.
 - Run at most two hunters: General correctness, and the one area hunter that best matches `followup.diff`. Keep at most four candidates. Voting is unchanged.

@@ -29,7 +29,7 @@ Important findings and nits become review threads on the changed line. When a li
 
 - The reviewer runs at most two hunters and reports only Important findings on those lines, including an earlier finding that a fix left in place. It reports no nits and no pre-existing findings.
 - The validation step removes anything outside that scope before posting, so fixing findings does not open review of code that was already reviewed. The summary says how many findings were removed.
-- Follow-up lines are the pull request's own changes that are new since the last review, including the lines on either side of a deletion. Changes that arrive by merging `main` are left out. When nothing is left (for example, after only merging `main`), Claude is not run at all.
+- Follow-up lines are the pull request's own changes that are new since the last review, including the lines on either side of a deletion and whole renamed files. When `main` has been merged in, the comparison starts from the last reviewed commit merged with `main`, so `main`'s changes are left out; if that merge conflicts, a full review runs instead. When nothing is left (for example, after only merging `main`), Claude is not run at all.
 - A force push that rewrites the reviewed commit out of the branch gets a full review again.
 
 The reviewer reads the earlier threads, whether each was resolved, and the replies from people with write access. It drops a finding that a reply explains is not a defect. A finding whose thread is still open is not posted twice. If you resolve a thread but the reviewer still finds the defect on a later push, it opens a new thread.
