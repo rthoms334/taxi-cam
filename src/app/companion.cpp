@@ -90,6 +90,8 @@ std::vector<win::CameraButton> button_capture_down;  // Went down while waiting;
 win::Updater updater;
 ULONGLONG next_update_check{};
 bool update_prompt{};
+// An update downloaded while the simulator blocked installing it.
+bool update_after_simulator{};
 win::ChangelogFetcher changelog_fetcher;
 bool whats_new{};  // The installed version's notes have not been read yet.
 int scale(int v) {
@@ -4622,6 +4624,7 @@ void poll_updates() {
     } else {
       update_prompt = true;
       if (win::simulator_blocks_update()) {
+        update_after_simulator = true;
         notice = tr(L"Update downloaded. Close Microsoft Flight Simulator, then choose Check for updates to install.");
         if (result.manual)
           MessageBoxW(window, notice.c_str(), tr(L"Taxi Cam updates"), MB_OK | MB_ICONINFORMATION);
@@ -4913,8 +4916,16 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       return 0;
     case ExitWithSimulatorMessage:
-      // The tray Quit path. The worker asks again while an update prompt is open.
-      if (!update_prompt)
+      // The tray Quit path, which saves nothing. The worker asks again on every
+      // loop, so the quit waits while Settings is open or holds unsaved edits,
+      // and while an update is being checked or offered. An update that
+      // downloaded while the simulator ran is offered first; a manual check
+      // reuses that download.
+      if (update_after_simulator && !update_prompt && !updater.busy()) {
+        update_after_simulator = false;
+        check_updates(true);
+      }
+      if (!update_prompt && !updater.busy() && !dirty && !IsWindowVisible(hwnd))
         PostMessageW(hwnd, WM_CLOSE, 1, 0);
       return 0;
     case WhatsNewMessage:
