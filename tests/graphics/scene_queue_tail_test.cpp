@@ -254,6 +254,19 @@ void cross_queue_escape() {
   require(submit(queue) && queue.last_wait == 4 && owner.last_simulator_signal == 5 && manager->statistics().cross_queue_escapes == 2,
           "A receipt behind private work after a finished receipt was not ordered");
   require(manager->statistics().unordered_consumers == 2 && !owner.failed, "An escaped consumer failed the device");
+  // In-list capture packets: an escape would quarantine them for good, so the
+  // batch keeps its Wait on other_queue's unfinished receipt and is counted.
+  timeline.completed.store(5);
+  require(submit(other_queue) && owner.last_simulator_signal == 6, "Queue a receipt on the other queue");
+  auto& packet = manager->packets_[0];
+  packet.assigned = true;
+  recording.packets = 1;
+  manager->publish_list(recording);
+  const auto waits = other_queue.waits;
+  require(submit(queue) && queue.last_wait == 6 && !packet.quarantined && manager->statistics().cross_queue_waits == 1 &&
+              manager->statistics().cross_queue_escapes == 2 && !manager->statistics().quarantined,
+          "A batch carrying capture packets was escaped and lost them");
+  require(other_queue.waits == waits, "The packet batch changed the other queue's Waits");
 }
 // Plans one display copy for device 7 while active; the copy names no target
 // or source, so Pool::record refuses it.

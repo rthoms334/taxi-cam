@@ -695,7 +695,7 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       detail, sizeof(detail),
       "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
       "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu released_waits=%llu cross_queue_escapes=%llu "
-      "deferred_retirements=%llu "
+      "cross_queue_waits=%llu deferred_retirements=%llu "
       "deferred_evidence=%llu "
       "deferred_overflows=%llu deferred_lifecycle=%llu "
       "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu notifications=%u/%llu hook_failures=%llu "
@@ -708,6 +708,7 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       static_cast<unsigned long long>(output.capture.unordered_submissions),
       static_cast<unsigned long long>(output.capture.gated_submissions), static_cast<unsigned long long>(output.capture.released_waits),
       static_cast<unsigned long long>(output.capture.cross_queue_escapes),
+      static_cast<unsigned long long>(output.capture.cross_queue_waits),
       static_cast<unsigned long long>(output.capture.deferred_retirements),
       static_cast<unsigned long long>(output.capture.deferred_evidence), static_cast<unsigned long long>(output.capture.deferred_overflows),
       static_cast<unsigned long long>(graphics.deferred_lifecycle), static_cast<unsigned long long>(output.contended_writes),

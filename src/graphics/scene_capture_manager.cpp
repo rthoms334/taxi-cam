@@ -2131,8 +2131,13 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   // lost, and the simulator never waits on us. A Wait behind the same queue, or
   // behind private work queued after a finished simulator receipt, cannot
   // cycle. Read only in this case, so the fence call under mutex_ is rare.
-  if (owner->last_simulator_signal && owner->last_simulator_queue != queue &&
-      owner->timeline->GetCompletedValue() < owner->last_simulator_signal) {
+  // An escape quarantines in-list capture packets for good (16 in all), so a
+  // batch carrying them keeps its Wait and is counted instead.
+  const bool cross_queue_unfinished = owner->last_simulator_signal && owner->last_simulator_queue != queue &&
+                                      owner->timeline->GetCompletedValue() < owner->last_simulator_signal;
+  if (cross_queue_unfinished && mask)
+    cross_queue_waits_.fetch_add(1, std::memory_order_relaxed);
+  else if (cross_queue_unfinished) {
     lock.unlock();
     submission_lock.unlock();
     cross_queue_escapes_.fetch_add(1, std::memory_order_relaxed);
@@ -2476,6 +2481,7 @@ SceneCaptureManager::Statistics SceneCaptureManager::statistics() const noexcept
   result.gated_submissions = gated_submissions_.load(std::memory_order_relaxed);
   result.released_waits = released_waits_.load(std::memory_order_relaxed);
   result.cross_queue_escapes = cross_queue_escapes_.load(std::memory_order_relaxed);
+  result.cross_queue_waits = cross_queue_waits_.load(std::memory_order_relaxed);
   result.deferred_evidence = deferred_evidence_count_.load(std::memory_order_relaxed);
   for (const auto& counts : reset_counts_)
     result.fast_resets += counts.fast.load(std::memory_order_relaxed);
