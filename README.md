@@ -69,7 +69,7 @@ Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles th
 
 Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved separately for each aircraft profile.
 
-To use another language, choose **Language** in the tray menu or under **Menu** in Settings. **Follow Windows** returns to the Windows display language. Aircraft names, logs and bug reports stay in English.
+To use another language, choose **Language** in the tray menu or under **Menu** in Settings. **Follow Windows** returns to the Windows display language. Aircraft names, status messages from the simulator, logs and bug reports stay in English.
 
 ### Camera views
 
