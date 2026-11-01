@@ -220,8 +220,10 @@ int main() {
     page = 4;
     build_controls();
     const auto original = current;
-    require(GetDlgItem(window, 229) && GetDlgItem(window, 228) && GetDlgItem(window, 203) && GetDlgItem(window, 511),
-            "Scene, first-camera, calibration budget and stop controls remain available");
+    require(GetDlgItem(window, 229) && GetDlgItem(window, 203) && GetDlgItem(window, 511),
+            "Scene, calibration budget and stop controls remain available");
+    // First camera only never produced camera output; its control is gone.
+    require(!GetDlgItem(window, 228), "First-camera control is absent");
     require(!GetDlgItem(window, 232), "Temporary graphics control is absent");
     command(229);
     require(current.scene_test == 1 && is_on(229, current), "Scene control enables scene testing");
@@ -231,10 +233,6 @@ int main() {
     wchar_t label[96]{};
     GetDlgItemTextW(window, 229, label, 96);
     require(std::wstring(label) == L"Scene test: On", "Scene control label reflects its enabled state");
-    command(228);
-    require(current.single_camera == 1 && is_on(228, current), "First-camera control remains functional");
-    command(228);
-    require(!current.single_camera, "First-camera control can be disabled");
     require(!GetDlgItem(window, 235), "Dynamic tail rate has no control");
     // Camera weather is always on: no control on the Camera views page.
     page = 1;
