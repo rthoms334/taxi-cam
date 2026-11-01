@@ -99,6 +99,10 @@ The repository owner does these steps in GitHub's settings. They are not stored 
    - Block force pushes, and leave the bypass list empty. A bypass skips every gate above.
 4. **Other review bots (optional).** A review bot such as Codex can keep running alongside as a second opinion. Its threads also need resolving under the conversation-resolution rule.
 
+## Merging
+
+The session that opens a pull request turns on auto-merge (`gh pr merge <number> --auto --merge`) straight away, as [AGENTS.md](../AGENTS.md) asks. GitHub then merges it as soon as the required checks pass and every thread is resolved; for medium and high risk, that includes your approvals in the risk gate. The merge counts as yours, so the push to `main` starts the [release workflow](releases.md). No workflow turns auto-merge on: a merge made with the Actions token starts no other workflows, so `main` would get no release candidate.
+
 ## After merge
 
 Merging does not ship anything by itself. The [Windows build and release](releases.md) workflow builds a release candidate on `main`, and it is published only after you test it and approve the `release` environment. Only `changelog.json` and `docs/whats-new/` reach installed companions directly from `main`, which is why changes to them are at least medium risk.

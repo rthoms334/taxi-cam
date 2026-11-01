@@ -16,6 +16,7 @@ This is an independent Windows native project. Keep project source, builds and d
 
 The process is in `docs/pull-requests.md`; review severity rules are in `REVIEW.md`.
 
+- Turn on auto-merge right after opening a pull request: `gh pr merge <number> --auto --merge`. GitHub merges it once the checks and the owner's approvals pass.
 - Fill in the pull-request template. Put in-simulator observations under **Live result** and local results under **Tests**; write "Not run" rather than leaving a live result implied.
 - Answer every AI review thread: fix the finding, or reply with the specific reason it is not a defect. Resolve a thread only after answering it. Pre-existing findings in the summary need no answer.
 - Never approve or attempt to approve the `pr-approval`, `pr-live-check` or `release` environments, and never post approvals of any kind. Approvals are the owner's.
