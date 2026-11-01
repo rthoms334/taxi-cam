@@ -8,6 +8,9 @@
           "title": "Taxi Cam in your language",
           "text": "Taxi Cam and Setup follow your Windows display language in German, Spanish, French and Simplified Chinese (with thanks to JCH2333), and English otherwise. To choose another, open Language in the tray menu or under Menu in Settings; Follow Windows goes back. Aircraft names, status messages from the simulator, these notes, logs and bug reports stay in English."
         }
+      ],
+      "fixes": [
+        "The cameras no longer switch off and on again and again when the simulator keeps stalling. After three stalls within five minutes while the cameras are on, they stay off and Taxi Cam says so; turn them off and on again to retry. bridge.log now records the simulator's graphics memory use, to help find what causes the stalls."
       ]
     },
     {
