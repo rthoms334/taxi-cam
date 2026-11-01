@@ -8,16 +8,21 @@
 
 namespace taxi_camera::profiles {
 // The display layout of an aircraft the user set up: its variant key
-// (aircraft_variant.hpp), the panel.cfg texture= name and region of each
-// display side, and the shapes of panels created next to those displays,
-// which keep name pairing on the right textures after an aircraft switch.
-// Travels in the companion's Settings and is saved per variant.
+// (aircraft_variant.hpp), the panel.cfg texture= name and shape of the panel
+// each display side was set up on, and the shapes of panels created next to
+// those, which keep name pairing on the right textures after an aircraft
+// switch. Each camera fills whichever panel texture its side is routed to,
+// at that texture's size. Travels in the companion's Settings and is saved
+// per variant.
 inline constexpr std::size_t MaxPanelName = 32, MaxPanelAnchors = 8;
 struct DiscoveredLayout {
   char key[MaxVariantKey]{};
-  std::uint32_t sides{}, width{}, height{}, mips{}, format{};
+  std::uint32_t sides{};
   char textures[MaxDisplaySides][MaxPanelName]{};
-  DisplayRect regions[MaxDisplaySides]{};
+  struct Shape {
+    std::uint32_t width{}, height{}, mips{};
+  };
+  Shape shapes[MaxDisplaySides]{};
   DisplayInsets padding{};
   struct Anchor {
     char name[MaxPanelName]{};
@@ -31,9 +36,9 @@ static_assert(std::is_trivially_copyable_v<DiscoveredLayout>);
 inline bool same_layout(const DiscoveredLayout& a, const DiscoveredLayout& b) noexcept {
   return std::memcmp(&a, &b, sizeof(a)) == 0;
 }
-// Panel textures are multi-mip R8G8B8A8_UNORM render targets (format 28), the
-// only shape aircraft discovery tracks.
-inline constexpr std::uint32_t DiscoveredFormat = 28, MaxDiscoveredEdge = 16384;
+// Panel textures are created R8G8B8A8_UNORM (format 28), the only format
+// aircraft discovery pairs with panel names.
+inline constexpr std::uint32_t DiscoveredFormat = 28;
 // Starting camera mounts until the user positions the cameras: the A350-900's.
 inline constexpr std::array<std::array<double, 6>, 3> DiscoveredMounts = A359.mounts;
 namespace discovered_detail {
@@ -56,27 +61,19 @@ inline bool valid_layout(const DiscoveredLayout& l) noexcept {
   VariantKey own{};
   if (!terminated_name(l.key, false) || !variant_key(l.key, own) || std::strcmp(own.data(), l.key) != 0)
     return false;
-  if (l.sides < 2 || l.sides > MaxDisplaySides || !l.width || l.width > MaxDiscoveredEdge || !l.height || l.height > MaxDiscoveredEdge ||
-      l.mips < 2 || l.mips > 12 || l.format != DiscoveredFormat)
+  if (l.sides < 2 || l.sides > MaxDisplaySides)
     return false;
-  AircraftProfile shape{};
-  shape.sides = l.sides;
-  shape.camera_padding = l.padding;
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
-    const auto& r = l.regions[side];
+    const auto& shape = l.shapes[side];
     if (side >= l.sides) {
-      if (l.textures[side][0] || r.left || r.top || r.right || r.bottom || !terminated_name(l.textures[side], true))
+      if (l.textures[side][0] || shape.width || shape.height || shape.mips || !terminated_name(l.textures[side], true))
         return false;
       continue;
     }
-    shape.display_regions[side] = r;
-    // Every side is one patch size (scene_frame_output.cpp checks side 0's).
-    const auto& first = l.regions[0];
-    if (!terminated_name(l.textures[side], false) || r.right > l.width || r.bottom > l.height ||
-        r.right - r.left != first.right - first.left || r.bottom - r.top != first.bottom - first.top)
-      return false;
-    const auto content = display_content_rect(shape, side);
-    if (content.right <= content.left || content.bottom <= content.top)
+    // The camera inset must fit the panel the side was set up on.
+    const auto content = inset_rect({0, 0, shape.width, shape.height}, l.padding);
+    if (!terminated_name(l.textures[side], false) || !panel_texture_shape(shape.width, shape.height, shape.mips, DiscoveredFormat) ||
+        content.right <= content.left || content.bottom <= content.top)
       return false;
   }
   bool ended = false;
@@ -89,7 +86,7 @@ inline bool valid_layout(const DiscoveredLayout& l) noexcept {
         return false;
       continue;
     }
-    if (ended || !anchor.width || anchor.width > MaxDiscoveredEdge || !anchor.height || anchor.height > MaxDiscoveredEdge)
+    if (ended || !anchor.width || anchor.width > MaxPanelEdge || !anchor.height || anchor.height > MaxPanelEdge)
       return false;
     for (unsigned side = 0; side < l.sides; ++side)
       if (std::strcmp(anchor.name, l.textures[side]) == 0)
@@ -104,7 +101,8 @@ struct DiscoveredProfile {
   AircraftProfile profile{};
 };
 // Shortcuts and previews only, the generic Airbus guide layout and starting
-// mounts; the display shape, names and regions come from the layout.
+// mounts; names and panel shapes come from the layout, and each side fits the
+// texture routed to it (AircraftProfile::fit_texture).
 inline void build_discovered(DiscoveredProfile& out) noexcept {
   const auto& l = out.layout;
   auto& p = out.profile;
@@ -118,24 +116,31 @@ inline void build_discovered(DiscoveredProfile& out) noexcept {
   p.name = out.name;
   p.taxi_lvars = p.taxi_events = p.pfd_labels = {"", "", ""};
   p.mounts = DiscoveredMounts;
-  p.width = l.width;
-  p.height = l.height;
-  p.mips = l.mips;
+  // Side 0's panel stands for the display shape where one is still read.
+  p.width = l.shapes[0].width;
+  p.height = l.shapes[0].height;
+  p.mips = l.shapes[0].mips;
   p.taxi_control = TaxiControl::manual_only;
   p.aircraft_types = {"", "", ""};
   p.package_markers = {"", "", ""};
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
-    p.display_regions[side] = l.regions[side];
+    const auto& shape = l.shapes[side];
+    p.display_regions[side] = {0, 0, shape.width, shape.height};
+    p.side_shapes[side] = {shape.width, shape.height, shape.mips};
     p.panel_textures[side] = l.textures[side];
   }
+  p.fit_texture = true;
   p.composition = A350Etacs;
-  p.formats = {l.format};
+  p.formats = {28, 29};
   p.camera_padding = l.padding;
   p.pfd_detection = PfdDetectionPolicy::named;
   p.sides = l.sides;
   for (std::size_t i = 0; i < MaxPanelAnchors; ++i)
     p.panel_shapes[i] = l.anchors[i].name[0] ? AircraftProfile::PanelShape{l.anchors[i].name, l.anchors[i].width, l.anchors[i].height}
                                              : AircraftProfile::PanelShape{};
+  // The cameras take side 0's panel shape, from the A380 panes made for its
+  // camera area; every other side shows that picture at its shape.
+  shape_cameras(p, A380.camera_panes, display_content_rect(A380, 0), 1, {1, 1, 1});
 }
 static_assert(MaxPanelAnchors == std::tuple_size_v<decltype(AircraftProfile::panel_shapes)>);
 namespace discovered_detail {
@@ -169,5 +174,98 @@ inline const AircraftProfile* publish_discovered(const DiscoveredLayout& layout)
 }
 inline std::uint64_t discovered_generation() noexcept {
   return discovered_detail::generation.load(std::memory_order_relaxed);
+}
+// The user's display choices for a profile, saved with it: per side, another
+// panel to route by name (empty keeps the profile's) and a display area in
+// that texture's pixels (empty keeps the profile's region; on a set-up
+// aircraft, the whole panel). Travels in Settings for the selected profile.
+struct DisplayOverride {
+  char textures[MaxDisplaySides][MaxPanelName]{};
+  DisplayRect areas[MaxDisplaySides]{};
+};
+static_assert(std::has_unique_object_representations_v<DisplayOverride>);
+inline bool empty_area(const DisplayRect& r) noexcept {
+  return !r.left && !r.top && !r.right && !r.bottom;
+}
+inline bool valid_override(unsigned sides, bool fit_texture, const DisplayInsets& padding, const DisplayOverride& o) noexcept {
+  using discovered_detail::terminated_name;
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+    const auto& a = o.areas[side];
+    if (!terminated_name(o.textures[side], true) || (side >= sides && (o.textures[side][0] || !empty_area(a))))
+      return false;
+    if (empty_area(a))
+      continue;
+    // A real rectangle on a texture, leaving room for the camera inset. A
+    // catalog profile keeps a whole display: no area narrower than 64 pixels.
+    if (a.right <= a.left || a.bottom <= a.top || a.right > MaxPanelEdge || a.bottom > MaxPanelEdge ||
+        (!fit_texture && (a.right - a.left < 64 || a.bottom - a.top < 64)))
+      return false;
+    const auto content = inset_rect(a, padding);
+    if (content.right <= content.left || content.bottom <= content.top)
+      return false;
+  }
+  return true;
+}
+struct OverrideProfile {
+  DisplayOverride choices;
+  const AircraftProfile* base{};
+  AircraftProfile profile{};
+};
+namespace discovered_detail {
+inline const OverrideProfile* override_published{};
+}
+// p (a copy of base) with valid display choices: other panels by name (kept
+// in `choices`, which must outlive p), display areas, and the cameras shaped
+// for side 0's camera area (shape_cameras) from the ones base was made for.
+inline void apply_choices(AircraftProfile& p, const AircraftProfile& base, const DisplayOverride& choices) noexcept {
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+    if (choices.textures[side][0])
+      p.panel_textures[side] = choices.textures[side];
+    if (empty_area(choices.areas[side]))
+      continue;
+    if (base.fit_texture)
+      p.areas[side] = choices.areas[side];
+    else
+      p.display_regions[side] = choices.areas[side];
+  }
+  // base's own camera area per side: its display region, or a set-up
+  // aircraft's whole panel (whose sides all show side 0's shape).
+  const auto own = [&](unsigned side) {
+    return base.fit_texture ? inset_rect({0, 0, base.side_shapes[side][0], base.side_shapes[side][1]}, base.camera_padding)
+                            : display_content_rect(base, side);
+  };
+  const auto aspect = [](DisplayRect r) {
+    return r.right > r.left && r.bottom > r.top ? double(r.right - r.left) / double(r.bottom - r.top) : 1.0;
+  };
+  std::array<float, MaxDisplaySides> ratios{1, 1, 1};
+  if (!base.fit_texture)
+    for (unsigned side = 1; side < base.sides && side < MaxDisplaySides; ++side)
+      ratios[side] = static_cast<float>(aspect(own(side)) / aspect(own(0)));
+  shape_cameras(p, base.camera_panes, own(0), base.composition.ui_aspect, ratios);
+}
+inline bool override_current(const AircraftProfile* base, const DisplayOverride& choices) noexcept {
+  const std::lock_guard lock(discovered_detail::publish_mutex);
+  const auto* current = discovered_detail::override_published;
+  return current && base && current->base == base && std::memcmp(&current->choices, &choices, sizeof(choices)) == 0;
+}
+// Makes find(base->id) return base with these display choices. The same base
+// and choices keep their profile; nullptr when they are invalid.
+inline const AircraftProfile* publish_override(const AircraftProfile* base, const DisplayOverride& choices) noexcept {
+  if (!base || !valid_override(base->sides, base->fit_texture, base->camera_padding, choices))
+    return nullptr;
+  const std::lock_guard lock(discovered_detail::publish_mutex);
+  if (const auto* current = discovered_detail::override_published;
+      current && current->base == base && std::memcmp(&current->choices, &choices, sizeof(choices)) == 0)
+    return &current->profile;
+  auto* next = new (std::nothrow) OverrideProfile{};  // Never freed: older readers keep their profile.
+  if (!next)
+    return nullptr;
+  next->choices = choices;
+  next->base = base;
+  next->profile = *base;
+  apply_choices(next->profile, *base, next->choices);
+  discovered_detail::override_published = next;
+  override_profile.store(&next->profile, std::memory_order_release);
+  return &next->profile;
 }
 }  // namespace taxi_camera::profiles

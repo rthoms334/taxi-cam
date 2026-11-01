@@ -26,11 +26,29 @@ bool SceneFrameOutput::valid_patch_request(DXGI_FORMAT format, UINT width, UINT 
       !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
                                  static_cast<unsigned>(format)))
     return false;
-  const auto outer = profiles::display_rect(*profile, 0), inner = profiles::display_content_rect(*profile, 0);
-  const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
-                         static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
-  return width && width <= 16384 && height && height <= 16384 && width == outer.right - outer.left && height == outer.bottom - outer.top &&
-         same_rect(content, local);
+  if (!width || width > 16384 || !height || height > 16384)
+    return false;
+  // Any side's patch: sides can differ in size (the user's display areas, or
+  // a set-up aircraft's panels, whose patch is the size of its texture area).
+  for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side) {
+    if (profile->fit_texture) {
+      // The area on a texture of unknown size: any patch whose content is
+      // the padded patch, at the cameras' shape (shape_cameras).
+      const auto inner =
+          profiles::fit_rect(profiles::inset_rect({0, 0, width, height}, profile->camera_padding), profile->fit_aspect[side]);
+      const D3D12_RECT local{static_cast<LONG>(inner.left), static_cast<LONG>(inner.top), static_cast<LONG>(inner.right),
+                             static_cast<LONG>(inner.bottom)};
+      if (same_rect(content, local))
+        return true;
+      continue;
+    }
+    const auto outer = profiles::display_rect(*profile, side), inner = profiles::side_content_rect(*profile, side, width, height);
+    const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+    if (width == outer.right - outer.left && height == outer.bottom - outer.top && same_rect(content, local))
+      return true;
+  }
+  return false;
 }
 bool SceneFrameOutput::request_patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) noexcept {
   if (!valid_patch_request(format, width, height, content))
@@ -201,12 +219,12 @@ bool SceneFrameOutput::prepare_patches(std::uint64_t calibration_frame) noexcept
     list_->ResourceBarrier(1, &barrier);
     list_->OMSetRenderTargets(1, &patch->rtv, FALSE, nullptr);
     if (calibration_only_) {
-      // All admitted profiles currently use the same upper display height.
-      // Clear precisely that patch; never copy over the lower native trim.
-      // Single-display profiles place whole gauge rectangles instead; the
-      // patch is then exactly that gauge.
+      // Column profiles (A380, A350) share one upper display height. Clear
+      // precisely that patch; never copy over the lower native trim.
+      // Single-display gauges and set-up aircraft panels are whole
+      // rectangles instead; the patch is then exactly that rectangle.
       const auto* profile = profiles::find(patch_profile_);
-      const bool gauge = profile && profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+      const bool gauge = profile && (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display || profile->fit_texture);
       if (!profile || (!gauge && upper_height(profile->height) != height) ||
           !(gauge ? record_calibration_area(list_, patch->rtv, width, height, calibration_frame)
                   : record_calibration(list_, patch->rtv, width, profile->height, calibration_frame)))

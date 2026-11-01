@@ -855,19 +855,20 @@ bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
   for (const auto* profile : profiles::Catalog)
     dimensions |= d.Width == profile->width && d.Height == profile->height;
   if (const auto* discovered = profiles::discovered_profile.load(std::memory_order_acquire))
-    dimensions |= d.Width == discovered->width && d.Height == discovered->height;
+    for (unsigned side = 0; side < discovered->sides && side < MaxDisplaySides; ++side)
+      dimensions |= d.Width == discovered->side_shapes[side][0] && d.Height == discovered->side_shapes[side][1];
   return (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
           (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0) ||
          discovery_panel(d);
 }
-// A display shape of a catalog profile or of the aircraft the user set up.
+// A display shape of a catalog profile, or a panel the user set up an
+// aircraft on. The set-up aircraft's other panels are tracked by discovery.
 bool catalog_display(const D3D12_RESOURCE_DESC& d) noexcept {
   for (const auto* profile : profiles::Catalog)
     if (profiles::matches_display(*profile, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format)))
       return true;
   const auto* discovered = profiles::discovered_profile.load(std::memory_order_acquire);
-  return discovered &&
-         profiles::matches_display(*discovered, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format));
+  return discovered && profiles::named_display(*discovered, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format));
 }
 // Decided once at admission (Resource::display_shape): a discovery texture
 // stays a display candidate for its lifetime, so its barrier history has no
@@ -2348,11 +2349,12 @@ void stage_pfd(List& item, std::uint64_t id) noexcept {
           boundary::recording_allows_injection(native, id) && current != r.rtvs.end() && current->second.resource == view.resource &&
           current->second.format == view.format && current->second.recovered == view.recovered && !current->second.mip &&
           r.calibration_budget.try_acquire(0, GetTickCount64())) {
-        const auto area = profiles::display_rect(*r.profile, side);
+        const auto area =
+            profiles::side_rect(*r.profile, side, static_cast<unsigned>(view.resource->desc.Width), view.resource->desc.Height);
         const boundary::ScopedBypass bypass;
-        // Single-display gauges are whole rectangles anywhere on the texture;
-        // other profiles calibrate the upper region of their column.
-        const bool gauge = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+        // Single-display gauges and set-up aircraft panels are whole
+        // rectangles; other profiles calibrate the upper region of their column.
+        const bool gauge = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display || r.profile->fit_texture;
         if (gauge ? record_calibration_area(native, retained, area.right - area.left, area.bottom - area.top, GetTickCount64() / 16,
                                             area.left, area.top)
                   : record_calibration(native, retained, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16,
@@ -2401,7 +2403,9 @@ void drain_pfds(List& item, std::uint64_t id, bool recording_end = false) noexce
       ++r.fallback_state_refused;
       continue;
     }
-    const auto area = profiles::display_rect(*r.profile, side), content = profiles::display_content_rect(*r.profile, side);
+    const auto texture_width = static_cast<unsigned>(view.resource->desc.Width), texture_height = view.resource->desc.Height;
+    const auto area = profiles::side_rect(*r.profile, side, texture_width, texture_height),
+               content = profiles::side_content_rect(*r.profile, side, texture_width, texture_height);
     const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
                                  static_cast<LONG>(area.bottom)};
     const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
@@ -2543,7 +2547,9 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
           item = r.selected_resources[i];
         if (r.selected_resources[i] != item)
           continue;
-        placed[placed_count++] = {profiles::display_rect(*r.profile, i), profiles::display_content_rect(*r.profile, i),
+        const auto& desc = r.selected_resources[i]->desc;
+        placed[placed_count++] = {profiles::side_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
+                                  profiles::side_content_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
                                   (r.waiting_mask & (1u << i)) != 0};
       }
     if (!item || !placed_count ||
@@ -4641,6 +4647,8 @@ void service_display_patches() noexcept {
       config.formats[side] = output_format(owned_encoding);
       if (config.formats[side] == DXGI_FORMAT_UNKNOWN)
         continue;
+      // A set-up aircraft's patch is the size of the texture each side uses.
+      config.sizes[side] = {static_cast<unsigned>(target->desc.Width), target->desc.Height};
       config.camera_mask |= r.active_mask & (1u << side);
       config.waiting_mask |= r.active_mask & r.waiting_mask & (1u << side);
       config.calibration_mask |= r.calibration_mask & (1u << side);

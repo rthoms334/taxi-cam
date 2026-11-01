@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -34,8 +35,17 @@ struct Composition {
   // panes) and the black frame width around the nose and bottom panes.
   float bottom_pane_height = 0;
   float frame_border = 10;
+  // Right tail bracket, measured from the right edge as the left one is from
+  // the left. Negative mirrors the left bracket. In the same order as the left
+  // points above: corner, upper, inner.
+  std::array<float, 2> tail_corner_right{-1, -1}, tail_upper_right{-1, -1}, tail_inner_right{-1, -1};
+  // Width of an overlay pixel relative to its height once the working image
+  // is stretched over the display's camera area, against the area the profile
+  // was made for. The GS text, nose markers and guide strokes are drawn that
+  // much narrower so a reshaped area (shape_cameras) keeps their proportions.
+  float ui_aspect = 1;
 };
-static_assert(sizeof(Composition) == 29 * sizeof(float));
+static_assert(sizeof(Composition) == 36 * sizeof(float));
 // pmdg_dsp_cam reads the glareshield Display Select Panel. Nothing is written.
 enum class TaxiControl { push_event, lvar_off, manual_only, pmdg_dsp_cam };
 // named routes only by panel name (aircraft set up by the user): a side whose
@@ -118,6 +128,20 @@ struct AircraftProfile {
     unsigned width, height;
   };
   std::array<PanelShape, 8> panel_shapes{};
+  // Aircraft set up by the user (discovered.hpp): any panel texture is a
+  // display, and each side's area is the whole texture routed to it, whatever
+  // its size. side_shapes (width, height, mips) are the panels the user picked;
+  // name routing expects those shapes. False for catalog profiles.
+  bool fit_texture = false;
+  std::array<std::array<unsigned, 3>, MaxDisplaySides> side_shapes{};
+  // fit_texture only: a display area the user chose on each side's texture
+  // (texture pixels); empty uses the whole texture.
+  std::array<DisplayRect, MaxDisplaySides> areas{};
+  // Width / height of the camera picture each side shows, when the cameras
+  // were shaped for another side's area (shape_cameras): a side whose camera
+  // area has another shape shows the picture at this one inside it, with
+  // black either side. 0 fills the area.
+  std::array<float, MaxDisplaySides> fit_aspect{};
 };
 inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
   return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
@@ -487,24 +511,97 @@ inline constexpr std::array<const AircraftProfile*, 10> Catalog{&A380,         &
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < p.sides && side < MaxDisplaySides ? side : 0];
 }
-inline constexpr DisplayRect display_content_rect(const AircraftProfile& p, unsigned side) noexcept {
-  const auto outer = display_rect(p, side);
+// The camera inset of a display area; empty when the padding leaves none.
+inline constexpr DisplayRect inset_rect(DisplayRect outer, DisplayInsets padding) noexcept {
   if (outer.right <= outer.left || outer.bottom <= outer.top)
     return {};
   const auto width = outer.right - outer.left, height = outer.bottom - outer.top;
-  const auto padding = p.camera_padding;
   if (padding.left >= width || padding.right >= width - padding.left || padding.top >= height || padding.bottom >= height - padding.top)
     return {};
   return {outer.left + padding.left, outer.top + padding.top, outer.right - padding.right, outer.bottom - padding.bottom};
 }
-inline bool camera_candidate(unsigned width, unsigned height) noexcept {
-  for (const auto* profile : Catalog)
-    for (const auto& pane : profile->camera_panes)
-      if (width == static_cast<unsigned>(pane[0]) && height == static_cast<unsigned>(pane[1]))
-        return true;
-  return false;
+inline constexpr DisplayRect display_content_rect(const AircraftProfile& p, unsigned side) noexcept {
+  return inset_rect(display_rect(p, side), p.camera_padding);
+}
+// A side's display area on the width x height texture routed to it: the
+// profile's region, or the whole texture on a set-up aircraft.
+inline constexpr DisplayRect side_rect(const AircraftProfile& p, unsigned side, unsigned width, unsigned height) noexcept {
+  if (!p.fit_texture)
+    return display_rect(p, side);
+  // A chosen area, kept on the texture; else (or if nothing is left) all of it.
+  const auto a = side < MaxDisplaySides ? p.areas[side] : DisplayRect{};
+  const DisplayRect kept{a.left < width ? a.left : width, a.top < height ? a.top : height, a.right < width ? a.right : width,
+                         a.bottom < height ? a.bottom : height};
+  return kept.right > kept.left && kept.bottom > kept.top ? kept : DisplayRect{0, 0, width, height};
+}
+// The largest rectangle of width / height `aspect` centred in r. r itself for
+// no aspect, or one within half a percent of r's.
+inline constexpr DisplayRect fit_rect(DisplayRect r, float aspect) noexcept {
+  if (!(aspect > 0) || r.right <= r.left || r.bottom <= r.top)
+    return r;
+  const double width = r.right - r.left, height = r.bottom - r.top, own = width / height;
+  if (own > aspect * 0.995 && own < aspect * 1.005)
+    return r;
+  if (own > aspect) {
+    const auto fitted = static_cast<unsigned>(height * aspect + 0.5), left = r.left + (r.right - r.left - fitted) / 2;
+    return {left, r.top, left + fitted, r.bottom};
+  }
+  const auto fitted = static_cast<unsigned>(width / aspect + 0.5), top = r.top + (r.bottom - r.top - fitted) / 2;
+  return {r.left, top, r.right, top + fitted};
+}
+inline constexpr DisplayRect side_content_rect(const AircraftProfile& p, unsigned side, unsigned width, unsigned height) noexcept {
+  return fit_rect(inset_rect(side_rect(p, side, width, height), p.camera_padding), side < MaxDisplaySides ? p.fit_aspect[side] : 0);
+}
+// Camera views are 32 to 2048 pixels on each edge (view_resize.cpp).
+inline constexpr std::int32_t MinCameraPane = 32, MaxCameraPane = 2048;
+// The cameras rendered at the shape of side 0's camera area instead of
+// stretched to it. `panes` were made for a camera area of `reference`'s size
+// with overlays at `ui_aspect`; `ratios` are each side's own area shape over
+// side 0's when the profile was made (1 where every side shares side 0's). The
+// panes scale with the area (all by one factor when an edge would pass the
+// engine's limit), the overlays keep their proportions, and other sides show
+// the picture at its shape inside their areas. An area of the reference size
+// keeps everything as it is.
+inline void shape_cameras(AircraftProfile& p,
+                          const CameraPanes& panes,
+                          DisplayRect reference,
+                          float ui_aspect,
+                          const std::array<float, MaxDisplaySides>& ratios) noexcept {
+  p.camera_panes = panes;
+  p.composition.ui_aspect = ui_aspect;
+  p.fit_aspect = {};
+  const auto texture = p.fit_texture ? p.side_shapes[0] : std::array<unsigned, 3>{p.width, p.height, p.mips};
+  const auto content = inset_rect(side_rect(p, 0, texture[0], texture[1]), p.camera_padding);
+  const double width = content.right - content.left, height = content.bottom - content.top;
+  const double reference_width = reference.right - reference.left, reference_height = reference.bottom - reference.top;
+  if (!(width > 0 && height > 0 && reference_width > 0 && reference_height > 0))
+    return;
+  const double aspect = width / height;
+  for (unsigned side = 1; side < p.sides && side < MaxDisplaySides; ++side)
+    p.fit_aspect[side] = static_cast<float>(aspect * ratios[side]);
+  if (width == reference_width && height == reference_height)
+    return;
+  double scale_x = width / reference_width, scale_y = height / reference_height, largest = 0;
+  for (const auto& pane : panes)
+    largest = std::max({largest, pane[0] * scale_x, pane[1] * scale_y});
+  if (largest > MaxCameraPane) {
+    scale_x *= MaxCameraPane / largest;
+    scale_y *= MaxCameraPane / largest;
+  }
+  for (std::size_t i = 0; i < panes.size(); ++i)
+    p.camera_panes[i] = {std::clamp(static_cast<std::int32_t>(panes[i][0] * scale_x + 0.5), MinCameraPane, MaxCameraPane),
+                         std::clamp(static_cast<std::int32_t>(panes[i][1] * scale_y + 0.5), MinCameraPane, MaxCameraPane)};
+  p.composition.ui_aspect = static_cast<float>(ui_aspect * aspect / (reference_width / reference_height));
+}
+// Cockpit panel textures: multi-mip R8G8B8A8_UNORM render targets, drawn
+// through UNORM or sRGB views.
+inline constexpr unsigned MaxPanelEdge = 16384;
+inline constexpr bool panel_texture_shape(unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
+  return width && height && width <= MaxPanelEdge && height <= MaxPanelEdge && mips >= 2 && mips <= 12 && (format == 28 || format == 29);
 }
 inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
+  if (p.fit_texture)
+    return panel_texture_shape(width, height, mips, format);
   if (width != p.width || height != p.height || !mips || mips > 12 || (p.mips && p.mips != mips && p.panel_mips != mips) || !format)
     return false;
   bool listed = false;
@@ -526,6 +623,18 @@ inline constexpr bool matches_detection(const AircraftProfile& p,
                                         unsigned mips,
                                         unsigned format) noexcept {
   return matches_display(p, width, height, mips, format) && (!p.mips || mips == p.mips);
+}
+// Name routing: a texture a named side may resolve to. On a set-up aircraft
+// that is one of the panel shapes the user picked, not any panel texture.
+inline constexpr bool named_display(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
+  if (!p.fit_texture)
+    return matches_display(p, width, height, mips, format);
+  if (!panel_texture_shape(width, height, mips, format))
+    return false;
+  for (unsigned side = 0; side < p.sides && side < MaxDisplaySides; ++side)
+    if (p.side_shapes[side] == std::array<unsigned, 3>{width, height, mips})
+      return true;
+  return false;
 }
 inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) noexcept {
   const auto equal = [](std::string_view a, std::string_view b) {
@@ -549,13 +658,38 @@ inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) no
 // returns the newest, or nullptr before any is published in this process.
 inline constexpr std::uint32_t DiscoveredProfileId = 100;
 inline std::atomic<const AircraftProfile*> discovered_profile{};
-inline const AircraftProfile* find(std::uint32_t id) noexcept {
+// The selected profile with the user's display choices (discovered.hpp
+// DisplayOverride): a copy of a catalog profile or of the set-up aircraft's,
+// never freed. One profile at a time has one.
+inline std::atomic<const AircraftProfile*> override_profile{};
+// The profile without the user's display choices.
+inline const AircraftProfile* base_profile(std::uint32_t id) noexcept {
   if (id == DiscoveredProfileId)
     return discovered_profile.load(std::memory_order_acquire);
   for (auto* p : Catalog)
     if (p->id == id)
       return p;
   return nullptr;
+}
+inline const AircraftProfile* find(std::uint32_t id) noexcept {
+  if (const auto* chosen = override_profile.load(std::memory_order_acquire); chosen && chosen->id == id)
+    return chosen;
+  return base_profile(id);
+}
+// A camera view's output: the panes of a catalog profile, or the ones shaped
+// for a set-up aircraft's panels or the user's display areas (shape_cameras).
+inline bool camera_candidate(unsigned width, unsigned height) noexcept {
+  const auto pane_of = [&](const AircraftProfile* profile) {
+    if (profile)
+      for (const auto& pane : profile->camera_panes)
+        if (width == static_cast<unsigned>(pane[0]) && height == static_cast<unsigned>(pane[1]))
+          return true;
+    return false;
+  };
+  for (const auto* profile : Catalog)
+    if (pane_of(profile))
+      return true;
+  return pane_of(discovered_profile.load(std::memory_order_acquire)) || pane_of(override_profile.load(std::memory_order_acquire));
 }
 // Match a complete path component (or component sequence), independent of drive,
 // slash direction and case. Aircraft type alone does not identify its vendor.

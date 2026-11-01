@@ -105,6 +105,64 @@ unsigned waiting_page_case(ID3D12Device* device, const wchar_t* preview) {
   return lit_total;
 }
 
+// A display area stretching the working image sideways (Composition::ui_aspect)
+// gets the text drawn that much narrower, centred, at its full height.
+void waiting_page_aspect_case(ID3D12Device* device) {
+  constexpr unsigned Width = 768, Height = 763, Pitch = 768 * 4, TextWidth = Compositor::WaitingTextWidth,
+                     TextHeight = Compositor::WaitingTextHeight;
+  constexpr std::array<float, 2> aspects{2.f, .5f};
+  constexpr UINT64 FrameBytes = UINT64(Pitch) * Height;
+  Compositor compositor;
+  check(compositor.initialize(device), compositor.last_error());
+  D3D12_RESOURCE_DESC bd{};
+  bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  bd.Width = aspects.size() * FrameBytes;
+  bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+  bd.SampleDesc.Count = 1;
+  bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  Reference<ID3D12Resource> readback;
+  const auto rh = heap_properties(D3D12_HEAP_TYPE_READBACK);
+  check(device->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(readback.put())),
+        "Shaped waiting page readback");
+  PrivateSubmission submission(device);
+  for (unsigned c = 0; c < aspects.size(); ++c) {
+    auto layout = taxi_camera::profiles::A359.composition;
+    layout.ui_aspect = aspects[c];
+    compositor.set_composition(layout);
+    check(compositor.record_waiting(submission.list()), compositor.last_error());
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = compositor.output();
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.pResource = readback.get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint = {c * FrameBytes, {DXGI_FORMAT_R8G8B8A8_UNORM, Width, Height, 1, Pitch}};
+    submission.list()->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+  }
+  submission.finish(compositor);
+  void* mapped{};
+  const D3D12_RANGE range{0, static_cast<SIZE_T>(bd.Width)};
+  check(readback->Map(0, &range, &mapped), "Shaped waiting page pixels");
+  const auto* data = static_cast<const unsigned char*>(mapped);
+  for (unsigned c = 0; c < aspects.size(); ++c) {
+    unsigned left = Width, right = 0, top = Height, bottom = 0;
+    for (unsigned y = 0; y < Height; ++y)
+      for (unsigned x = 0; x < Width; ++x)
+        if (data[c * FrameBytes + y * Pitch + x * 4 + 1] > 0) {
+          left = std::min(left, x);
+          right = std::max(right, x + 1);
+          top = std::min(top, y);
+          bottom = std::max(bottom, y + 1);
+        }
+    const double expected = TextWidth / aspects[c], drawn = right - left;
+    require(right > left && drawn > expected * 0.9 && drawn <= expected, "Shaped PLEASE WAIT is narrower or wider by the stretch");
+    require(bottom - top <= TextHeight && bottom - top > TextHeight * 0.8, "Shaped PLEASE WAIT keeps its height");
+    require(std::abs(int(left + right) - int(Width)) <= 4, "Shaped PLEASE WAIT stays centred");
+  }
+  const D3D12_RANGE none{0, 0};
+  readback->Unmap(0, &none);
+}
+
 int wmain(int argc, wchar_t** argv) {
   try {
     bool warp = false;
@@ -275,9 +333,10 @@ int wmain(int argc, wchar_t** argv) {
     const D3D12_RANGE none{0, 0};
     readback->Unmap(0, &none);
     const auto waiting_lit = waiting_page_case(device.get(), waiting_preview);
+    waiting_page_aspect_case(device.get());
     std::printf(
         "PASS GS font %s: %u cases, 10 distinct digits, %llu two-space gap pixels, %llu antialiased pixels; all profiles and overflow "
-        "'--'; PLEASE WAIT page %u full-colour pixels in three colours.\n",
+        "'--'; PLEASE WAIT page %u full-colour pixels in three colours, narrower and wider for shaped areas.\n",
         warp ? "WARP" : "hardware", Frames, gap_pixels, antialiased, waiting_lit);
     return 0;
   } catch (const std::exception& e) {

@@ -121,12 +121,18 @@ bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
   if (!profile || config.profile != item.patch_profile ||
       ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) || (config.waiting_mask & ~config.camera_mask))
     return false;
-  for (unsigned side = 0; side < profile->sides; ++side)
-    if (((config.camera_mask | config.calibration_mask) & (1u << side)) &&
-        (std::find(Formats.begin(), Formats.end(), config.formats[side]) == Formats.end() ||
-         !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
-                                    static_cast<UINT>(config.formats[side]))))
+  for (unsigned side = 0; side < profile->sides; ++side) {
+    if (!((config.camera_mask | config.calibration_mask) & (1u << side)))
+      continue;
+    if (std::find(Formats.begin(), Formats.end(), config.formats[side]) == Formats.end() ||
+        !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
+                                   static_cast<UINT>(config.formats[side])))
       return false;
+    // A set-up aircraft's side is the whole target texture, so it needs one.
+    const auto [width, height] = config.sizes[side];
+    if (profile->fit_texture && (!width || !height || width > profiles::MaxPanelEdge || height > profiles::MaxPanelEdge))
+      return false;
+  }
   return true;
 }
 bool request_queue_patches(Device& item) {
@@ -138,7 +144,9 @@ bool request_queue_patches(Device& item) {
       (!item.calibration_output.initialize(item.native, true) || !item.calibration_output.set_patch_profile(config.profile)))
     return false;
   for (unsigned side = 0; side < profile->sides; ++side) {
-    const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
+    const auto [texture_width, texture_height] = config.sizes[side];
+    const auto outer = profiles::side_rect(*profile, side, texture_width, texture_height),
+               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
     if ((config.camera_mask & (1u << side)) &&
@@ -173,7 +181,9 @@ void publish_queue_patches(Device& item) {
       if (waiting ? !item.waiting_ready : !camera_ready)
         continue;
     }
-    const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
+    const auto [texture_width, texture_height] = config.sizes[side];
+    const auto outer = profiles::side_rect(*profile, side, texture_width, texture_height),
+               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
     const auto& source = calibration ? item.calibration_output : waiting ? item.waiting_output : item.output;

@@ -23,6 +23,10 @@ If you find Taxi Cam useful, please consider donating.
 
 ## Supported aircraft
 
+Taxi Cam works with **any aircraft** whose displays are cockpit panels. For an aircraft without a built-in profile, **Overview** shows **Set up this aircraft**: pick each camera's display from pictures of the cockpit panels (**Test in cockpit** shows which screen a pick is), then position the cameras in the live view. Each aircraft variant, such as the Fenix A320 and A321, is saved separately, and **Overview → Set-up aircraft** copies a setup to another variant or removes it. A set-up aircraft's cameras are turned on with the keyboard shortcuts or the previews, because Taxi Cam does not know its cockpit buttons. See [Aircraft without a profile](docs/aircraft-profiles.md#aircraft-without-a-profile).
+
+These aircraft have built-in profiles, with camera positions, reference guides and cockpit camera controls ready to use. **Overview → Change displays** can still pick other panels or display areas for them.
+
 - **FlyByWire A380X** — nose and tail cameras on the PFD.
 - **iniBuilds A350-900**, including **ULR** — nose and tail cameras on the PFD.
 - **iniBuilds A350-1000** — nose and tail cameras on the PFD.
@@ -33,7 +37,7 @@ If you find Taxi Cam useful, please consider donating.
 
 ## Installation
 
-For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above. Keep Windows and your graphics driver up to date. Setup checks required components and explains if anything is missing. [Detailed graphics requirements](docs/runtime-reference.md#graphics-requirements).
+For **Windows 10/11 (64-bit)** and **MSFS 2024**. Keep Windows and your graphics driver up to date. Setup checks required components and explains if anything is missing. [Detailed graphics requirements](docs/runtime-reference.md#graphics-requirements).
 
 1. Download the **Windows x64 setup EXE** from [the latest release](https://github.com/rthoms334/taxi-cam/releases/latest).
 2. Close MSFS and exit Taxi Cam if it is already running.
@@ -49,9 +53,9 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 
 ## Using Taxi Cam
 
-1. Load a supported aircraft. Leave **Auto aircraft** enabled in **Overview** to select the matching settings automatically.
+1. Load an aircraft. Leave **Auto aircraft** enabled in **Overview** to select the matching settings automatically. For an aircraft without a profile, **Overview** shows **Set up this aircraft** (see [Supported aircraft](#supported-aircraft)); once it is set up, it is selected automatically too.
 2. Allow a few seconds for the cameras to become ready.
-3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380, use **Ctrl + Shift + L**, **R** or **B**. Repeat the control to turn them off.
+3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380 and on aircraft you set up yourself, use **Ctrl + Shift + L**, **R** or **B**. Repeat the control to turn them off.
 
    On the PMDG 777, use the glareshield display select panel: select **L INBD**, **R INBD** or **LWR CTR**, then press **CAM** (labelled INOP). That display shows the cameras until you press **CAM** again with the same display selected. PMDG's data broadcast setting is not needed. The keyboard shortcuts add displays manually. If the lower DU shows the cameras on the wrong screen, pick its texture under **LOWER DU TEXTURE** in **PFD routing**; its automatic choice is not yet verified.
 
@@ -71,9 +75,11 @@ With the aircraft parked and the cameras on, open **Camera views**. Adjust each 
 
 Choose **Save changes** to apply and keep your adjustments. **Reset camera mounts** restores the profile's default views; save afterwards to keep the reset.
 
+**Adjust with live view…** opens a window with the display as the cameras draw it: drag a camera to aim it, use the wheel to zoom, and drag the guide points. **Display area** shows the whole display texture with the camera area as a white rectangle; drag its handles to resize it or its frame to move it. A new shape renders the cameras at that shape after a few seconds, so nothing is stretched; the cameras follow the left display's area, and the other display shows them at that shape inside its own area, with black either side if its shape differs. Changes save when the window closes.
+
 ### Reference guides
 
-Set your camera views first, then open **Reference guides** to position the nose markers and tail brackets. **X** moves them sideways and **Y** moves them up or down; the right side mirrors the left. The PMDG 777 does not use these markers, so that aircraft does not need guide calibration.
+Set your camera views first, then open **Reference guides** to position the nose markers and tail brackets. **X** moves them sideways and **Y** moves them up or down. The nose markers mirror each other; the left and right tail brackets are set separately, each measured from its own edge. The PMDG 777 does not use these markers, so that aircraft does not need guide calibration.
 
 Choose **Apply live** to preview the positions, then **Save changes** to keep them. To restore the defaults, choose **Reset guide positions** and save. The guides may need realigning if you change the camera view.
 
@@ -100,7 +106,7 @@ All aircraft start with the same green ground-speed colour. Exposure and night b
 If automatic detection stays at a waiting message or selects the wrong screens, open **PFD routing**:
 
 1. **Assigned displays** shows a picture of the texture behind each display and whether it was named, detected or chosen. **Overview → Cockpit displays** shows the same in small.
-2. Under **Display textures**, find the screen in the pictures (select one to enlarge it) and choose **Left** or **Right** on its card. Use **Swap left / right** if the two sides are reversed, or **Automatic** to go back to detection.
+2. Under **Display textures**, find the screen in the pictures (select one to enlarge it) and choose **Left** or **Right** on its card. Use **Swap left / right** if the two sides are reversed, or **Clear choices** to go back to automatic selection. **Auto select** off stops automatic selection altogether, so only the textures you choose are used.
 3. If the pictures are not conclusive, use **Calibrate Left** or **Right** to identify that screen with an animated pattern, then turn calibration off. On aircraft with working TAXI buttons, turning the last calibration control off automatically restores button control. The iniBuilds A380 stays in manual control.
 
 Assignments apply immediately and belong to the current flight; texture IDs can change after a reload. **Preview Left** and **Right** are also available, but these controls turn off **Overview → TAXI buttons**. Re-enable that setting to return to cockpit-button control. Keyboard shortcuts preserve the setting.
@@ -108,6 +114,7 @@ Assignments apply immediately and belong to the current flight; texture IDs can 
 ## Known issues and limitations
 
 - **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. The camera views draw as far as the main view at every speed, so taxiing can cost more than with the 1,000 m distance of earlier versions. Choose **Performance** under Display → Camera frame rate if needed.
+- **Aircraft you set up:** Taxi Cam works out which cockpit panel name belongs to which display from the order the simulator creates them, so on some aircraft a panel's name may not match its picture. Pick by the picture and check with **Test in cockpit**; the panel you pick is used for that flight either way. If the names stay wrong, or the cameras do not appear on a later flight, please report the aircraft with **Report a bug**.
 
 Please report unexpected behaviour using **Report a bug**.
 

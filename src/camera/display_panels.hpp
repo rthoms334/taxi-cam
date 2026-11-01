@@ -51,29 +51,57 @@ inline bool textured(const Panel& p) noexcept {
 struct Creation {
   std::uint64_t id{}, tick{};
   std::uint32_t width{}, height{}, mips{}, format{};
+  std::uint64_t native{};  // Resource address at creation (RenderTargetSequence::Entry).
 };
 struct Assignment {
   const Panel* panel{};
   Creation creation{};
 };
+// The NN of a panel's [VCockpitNN] / [VPaintingNN] section, or -1.
+inline int section_number(const Panel& p) noexcept {
+  const char* digits = std::strncmp(p.section.data(), "VCockpit", 8) == 0    ? p.section.data() + 8
+                       : std::strncmp(p.section.data(), "VPainting", 9) == 0 ? p.section.data() + 9
+                                                                             : nullptr;
+  if (!digits || !*digits)
+    return -1;
+  int n = 0;
+  for (; *digits; ++digits) {
+    if (*digits < '0' || *digits > '9' || n > 9999)
+      return -1;
+    n = n * 10 + (*digits - '0');
+  }
+  return n;
+}
+// The order panel textures are taken to be created in, last first: the table
+// index (every catalog aircraft logged), or the panel.cfg section with the
+// index within it, for a table listing a section's panels apart (the Fenix
+// A320 put one VCockpit17 panel first and the other last on 2026-11-01, its
+// textures still created with the section's).
+enum class PanelOrder { index, section };
 // Proposed rule from two PMDG 777 sessions: panel textures are created in
 // reverse panel-index order, and they are the multi-mip creations of the
 // cockpit-load burst. Pairs the k-th such creation with the k-th textured
-// panel counted from the highest index. complete is false when the burst has
-// fewer candidates than textured panels.
+// panel counted from the highest index (or section, then index). complete is
+// false when the burst has fewer candidates than textured panels.
 inline std::size_t propose(const Panels& panels,
                            const Creation* burst,
                            std::size_t count,
                            std::array<Assignment, kMaxPanels>& out,
-                           bool& complete) noexcept {
+                           bool& complete,
+                           PanelOrder by = PanelOrder::index) noexcept {
   std::array<const Panel*, kMaxPanels> order{};
   std::size_t textured_count = 0;
   for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
     if (textured(panels.panels[i]))
       order[textured_count++] = &panels.panels[i];
-  // Highest index first; insertion sort keeps this dependency-free.
+  const auto before = [by](const Panel* a, const Panel* b) {
+    if (by == PanelOrder::section && section_number(*a) != section_number(*b))
+      return section_number(*a) > section_number(*b);
+    return a->index > b->index;
+  };
+  // Highest first; insertion sort keeps this dependency-free.
   for (std::size_t i = 1; i < textured_count; ++i)
-    for (std::size_t j = i; j > 0 && order[j - 1]->index < order[j]->index; --j) {
+    for (std::size_t j = i; j > 0 && before(order[j], order[j - 1]); --j) {
       const auto* t = order[j - 1];
       order[j - 1] = order[j];
       order[j] = t;
@@ -94,7 +122,7 @@ inline std::size_t propose(const Panels& panels,
 // accepts (the profile's display shape) and every panel expected() gives a
 // shape for lands on that shape. A repeated name is checked on its lowest
 // index, the texture created last. Returns the shift used with ids and out
-// filled, or -1 with ids zeroed.
+// filled, or -1 with ids zeroed. by is the panel order (propose).
 template <class Fit, class Expected>
 int resolve_names(const Panels& panels,
                   const Creation* creations,
@@ -106,7 +134,8 @@ int resolve_names(const Panels& panels,
                   std::uint64_t* ids,
                   std::array<Assignment, kMaxPanels>& out,
                   std::size_t& paired,
-                  unsigned max_shift = 8) noexcept {
+                  unsigned max_shift = 8,
+                  PanelOrder by = PanelOrder::index) noexcept {
   std::size_t textured_count = 0, wanted = 0;
   for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
     textured_count += textured(panels.panels[i]);
@@ -114,7 +143,7 @@ int resolve_names(const Panels& panels,
     wanted += names[k] && names[k][0];
   for (unsigned shift = 0; textured_count && wanted && shift <= max_shift && count >= textured_count + shift; ++shift) {
     bool complete = false;
-    paired = propose(panels, creations + (count - textured_count - shift), textured_count, out, complete);
+    paired = propose(panels, creations + (count - textured_count - shift), textured_count, out, complete, by);
     bool all = complete;
     for (std::size_t i = 0; all && i < paired; ++i) {
       std::uint32_t width = 0, height = 0;
@@ -161,7 +190,32 @@ inline std::size_t textured_count(const Panels& panels) noexcept {
     n += textured(panels.panels[i]);
   return n;
 }
-// Cockpit tables seen in this simulator process, by textured signature. A
+// Which aircraft a table belongs to: its textured panels' names, in any
+// order. The Fenix A320 rebuilt its table during one flight load with its two
+// VCockpit17 panels moved from first to last (2026-10-31); that is still the
+// same aircraft.
+inline std::uint64_t aircraft_signature(const Panels& panels) noexcept {
+  std::array<const char*, kMaxPanels> names{};
+  std::size_t n = 0;
+  for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
+    if (textured(panels.panels[i]))
+      names[n++] = panels.panels[i].texture.data();
+  for (std::size_t i = 1; i < n; ++i)
+    for (std::size_t j = i; j > 0 && std::strcmp(names[j - 1], names[j]) > 0; --j) {
+      const auto* t = names[j - 1];
+      names[j - 1] = names[j];
+      names[j] = t;
+    }
+  std::uint64_t hash = 0xcbf29ce484222325ull;
+  for (std::size_t i = 0; i < n; ++i)
+    for (const char* c = names[i];; ++c) {
+      hash = (hash ^ static_cast<unsigned char>(*c)) * 0x100000001b3ull;
+      if (!*c)
+        break;
+    }
+  return hash;
+}
+// Cockpit tables seen in this simulator process, by aircraft_signature. A
 // table is clean when it is the process's first or the same aircraft again.
 // After a switch to another aircraft, leftover textures can sit among the new
 // cockpit's creations (replayed loads, 2026-10-31: an A350 after a 777 needed

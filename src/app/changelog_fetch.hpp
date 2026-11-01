@@ -10,18 +10,26 @@
 
 namespace taxi_camera::standalone {
 inline constexpr wchar_t ChangelogHost[] = L"raw.githubusercontent.com";
-inline constexpr wchar_t ChangelogPath[] = L"/rthoms334/taxi-cam/main/changelog.json";
+inline constexpr wchar_t ChangelogRoot[] = L"/rthoms334/taxi-cam/main/";
+inline constexpr char ChangelogFile[] = "changelog.json";
+inline constexpr std::size_t kWhatsNewImageMaxBytes = 2 * 1024 * 1024;
 struct ChangelogFetchResult {
   bool ok{};
-  std::string body;
+  std::string path, body;
 };
-// One bounded HTTPS GET from the fixed repository, off the UI thread. stop()
-// closes the pending request so shutdown does not wait for network timeouts.
+// One bounded HTTPS GET of a file in the fixed repository's main branch, off
+// the UI thread: changelog.json, or a feature picture under docs/whats-new/.
+// stop() closes the pending request so shutdown does not wait for network
+// timeouts. With a local root (the --preview UI), the file is read from that
+// repository checkout instead, so unmerged notes and pictures can be checked.
 class ChangelogFetcher {
  public:
   ~ChangelogFetcher() { stop(); }
   bool busy() const { return busy_; }
-  bool begin(HWND notify, UINT message) {
+  void set_local_root(std::wstring root) { local_root_ = std::move(root); }
+  bool begin(HWND notify, UINT message, std::string path = ChangelogFile, std::size_t limit = kChangelogMaxBytes) {
+    if (path != ChangelogFile && !valid_whats_new_image(path))
+      return false;
     if (busy_)
       return false;
     if (worker_.joinable())
@@ -33,9 +41,10 @@ class ChangelogFetcher {
       ready_ = false;
     }
     busy_ = true;
-    worker_ = std::thread([this, notify, message] {
+    worker_ = std::thread([this, notify, message, path = std::move(path), limit] {
       ChangelogFetchResult result;
-      result.ok = fetch(result.body);
+      result.path = path;
+      result.ok = local_root_.empty() ? fetch(path, limit, result.body) : read_local(path, limit, result.body);
       {
         std::lock_guard lock(mutex_);
         result_ = std::move(result);
@@ -68,14 +77,34 @@ class ChangelogFetcher {
   }
 
  private:
-  bool fetch(std::string& body) {
+  bool read_local(const std::string& path, std::size_t limit, std::string& body) {
+    std::wstring file = local_root_ + L"\\";
+    for (const char c : path)
+      file += c == '/' ? L'\\' : static_cast<wchar_t>(c);
+    const HANDLE handle = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+      return false;
+    LARGE_INTEGER size{};
+    bool ok = GetFileSizeEx(handle, &size) && size.QuadPart > 0 && static_cast<unsigned long long>(size.QuadPart) <= limit;
+    if (ok) {
+      body.resize(static_cast<std::size_t>(size.QuadPart));
+      DWORD read{};
+      ok = ReadFile(handle, body.data(), static_cast<DWORD>(body.size()), &read, nullptr) && read == body.size();
+    }
+    CloseHandle(handle);
+    return ok;
+  }
+  bool fetch(const std::string& path, std::size_t limit, std::string& body) {
+    std::wstring request_path = ChangelogRoot;
+    for (const char c : path)
+      request_path += static_cast<wchar_t>(c);
     HINTERNET session = WinHttpOpen(L"Taxi Cam/" TAXI_CAM_VERSION_WIDE, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                     WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session)
       return false;
     WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
     HINTERNET connection = WinHttpConnect(session, ChangelogHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", ChangelogPath, nullptr, WINHTTP_NO_REFERER,
+    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", request_path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                                         WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
                                    : nullptr;
     bool ok = false;
@@ -101,7 +130,7 @@ class ChangelogFetcher {
         char buffer[8192];
         DWORD read{};
         while (ok) {
-          if (!WinHttpReadData(request, buffer, sizeof(buffer), &read) || body.size() + read > kChangelogMaxBytes)
+          if (!WinHttpReadData(request, buffer, sizeof(buffer), &read) || body.size() + read > limit)
             ok = false;
           else if (!read)
             break;
@@ -128,6 +157,7 @@ class ChangelogFetcher {
   std::mutex mutex_;
   HINTERNET request_{};
   bool ready_{}, stopping_{};
+  std::wstring local_root_;
   ChangelogFetchResult result_;
 };
 }  // namespace taxi_camera::standalone

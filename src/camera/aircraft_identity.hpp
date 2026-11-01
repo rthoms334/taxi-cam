@@ -163,12 +163,13 @@ class AircraftIdentityCache {
   std::uint32_t type_request_ = 5, path_request_ = 6;
 };
 // Aircraft discovery (track every panel texture) follows a fresh identity that
-// no profile matches; a stale sample keeps the last decision, so a loading
-// screen does not reopen the bridge's live texture scan.
+// no profile matches, or an aircraft the user set up, whose sides can use any
+// panel. A stale sample keeps the last decision, so a loading screen does not
+// reopen the bridge's live texture scan.
 inline bool next_panel_discovery(bool current, const AircraftIdentitySample& identity) noexcept {
   if (!identity.fresh)
     return current;
-  return !identity.detected_profile && identity.path[0] != '\0';
+  return (!identity.detected_profile || identity.detected_profile == profiles::DiscoveredProfileId) && identity.path[0] != '\0';
 }
 // Two distinct metadata samples must agree; repeated UI refreshes cannot count
 // as repeated simulator observations. Missing data never selects a fallback.

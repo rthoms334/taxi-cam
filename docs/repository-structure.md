@@ -23,6 +23,7 @@ Supporting files are kept separate:
 | `ci/` | Release version lookup, pinned toolchain helpers and release publication |
 | `.github/workflows/` | GitHub Actions PR test-build and gated Windows release workflows |
 | `docs/` | Architecture, integration contracts and development documentation |
+| `docs/whats-new/` | Pictures for What's new features, one folder per version, fetched by the companion from `main` |
 | `licenses/` | Required third-party source/runtime notices |
 | `LICENSE` | Project copyright notice and GNU GPLv3-only terms |
 | `build/` | Ignored binaries, toolchains, packages, validation results and historical captures |

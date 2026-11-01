@@ -160,12 +160,12 @@ inline bool prepare_settings_file(const std::wstring& file) {
 inline std::wstring discovered_layout_text(const profiles::DiscoveredLayout& l) {
   const auto ascii = [](const char* text) { return std::wstring(text, text + std::strlen(text)); };
   wchar_t line[160];
-  std::swprintf(line, 160, L"[layout]\r\nsides=%u\r\nwidth=%u\r\nheight=%u\r\nmips=%u\r\nformat=%u\r\npadding=%u,%u,%u,%u\r\n", l.sides,
-                l.width, l.height, l.mips, l.format, l.padding.left, l.padding.top, l.padding.right, l.padding.bottom);
+  std::swprintf(line, 160, L"[layout]\r\nsides=%u\r\npadding=%u,%u,%u,%u\r\n", l.sides, l.padding.left, l.padding.top, l.padding.right,
+                l.padding.bottom);
   std::wstring text = line;
   for (unsigned side = 0; side < l.sides && side < MaxDisplaySides; ++side) {
-    const auto& r = l.regions[side];
-    std::swprintf(line, 160, L"region%u=%u,%u,%u,%u\r\n", side, r.left, r.top, r.right, r.bottom);
+    const auto& shape = l.shapes[side];
+    std::swprintf(line, 160, L"shape%u=%u,%u,%u\r\n", side, shape.width, shape.height, shape.mips);
     text += L"texture" + std::to_wstring(side) + L"=" + ascii(l.textures[side]) + L"\r\n" + line;
   }
   for (unsigned i = 0; i < profiles::MaxPanelAnchors && l.anchors[i].name[0]; ++i) {
@@ -203,6 +203,7 @@ inline bool read_discovered_layout(const std::wstring& path, std::string_view ke
     unsigned v[4]{};
     wchar_t extra{};
     const int read = count == 4   ? std::swscanf(text, L"%u,%u,%u,%u%lc", &v[0], &v[1], &v[2], &v[3], &extra)
+                     : count == 3 ? std::swscanf(text, L"%u,%u,%u%lc", &v[0], &v[1], &v[2], &extra)
                      : count == 2 ? std::swscanf(text, L"%u,%u%lc", &v[0], &v[1], &extra)
                                   : std::swscanf(text, L"%u%lc", &v[0], &extra);
     if (read != static_cast<int>(count))
@@ -211,13 +212,12 @@ inline bool read_discovered_layout(const std::wstring& path, std::string_view ke
     return true;
   };
   std::uint32_t padding[4]{};
-  bool ok = numbers(L"sides", 1, &l.sides) && numbers(L"width", 1, &l.width) && numbers(L"height", 1, &l.height) &&
-            numbers(L"mips", 1, &l.mips) && numbers(L"format", 1, &l.format) && numbers(L"padding", 4, padding);
+  bool ok = numbers(L"sides", 1, &l.sides) && numbers(L"padding", 4, padding);
   l.padding = {padding[0], padding[1], padding[2], padding[3]};
   for (unsigned side = 0; ok && side < l.sides && side < MaxDisplaySides; ++side) {
-    std::uint32_t r[4]{};
-    ok = name(L"texture" + std::to_wstring(side), l.textures[side]) && numbers(L"region" + std::to_wstring(side), 4, r);
-    l.regions[side] = {r[0], r[1], r[2], r[3]};
+    std::uint32_t shape[3]{};
+    ok = name(L"texture" + std::to_wstring(side), l.textures[side]) && numbers(L"shape" + std::to_wstring(side), 3, shape);
+    l.shapes[side] = {shape[0], shape[1], shape[2]};
   }
   for (unsigned i = 0; ok && i < profiles::MaxPanelAnchors; ++i) {
     if (!name(L"anchor" + std::to_wstring(i), l.anchors[i].name))
@@ -240,11 +240,90 @@ inline bool load_discovered_layout(std::string_view key, profiles::DiscoveredLay
   return !folder.empty() &&
          (read_discovered_layout(folder + L"\\variant.ini", key, out) || read_discovered_layout(discovered_layout_path(key), key, out));
 }
+// Every set-up aircraft saved in profiles\discovered, by variant key, sorted.
+// Junctions and symbolic links are not followed.
+inline std::vector<std::string> saved_discovered_variants() {
+  std::vector<std::string> keys;
+  const auto root = settings_directory();
+  if (root.empty())
+    return keys;
+  std::vector<std::pair<std::wstring, std::string>> folders{{root + L"\\profiles\\discovered", "SimObjects"}};
+  for (std::size_t visited = 0; !folders.empty() && visited < 4096; ++visited) {
+    const auto [folder, key] = folders.back();
+    folders.pop_back();
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW((folder + L"\\*").c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE)
+      continue;
+    do {
+      const std::wstring name = data.cFileName;
+      if (name == L"." || name == L".." || (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        continue;
+      if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        std::string component;
+        for (const wchar_t c : name)
+          component += c < 127 ? static_cast<char>(c) : '?';
+        folders.push_back({folder + L"\\" + name, key + "/" + component});
+      } else if (_wcsicmp(name.c_str(), L"variant.ini") == 0) {
+        profiles::VariantKey own{};
+        if (profiles::variant_key(key, own) && key == own.data())
+          keys.push_back(key);
+      }
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+  }
+  std::sort(keys.begin(), keys.end());
+  return keys;
+}
+// Deletes a set-up aircraft's settings: its variant.ini, the folders left
+// empty, and its airplane folder's layout.ini with the folder's last variant.
+inline bool remove_discovered_variant(std::string_view key) {
+  const auto folder = discovered_folder(key), family = discovered_folder(key, true);
+  const auto root = settings_directory() + L"\\profiles\\discovered";
+  const auto file = folder + L"\\variant.ini";
+  if (folder.empty() || family.empty() || !settings_path_without_links(file) || !DeleteFileW(file.c_str()))
+    return false;
+  const auto family_key = profiles::variant_family(key);
+  const auto others = saved_discovered_variants();
+  if (std::none_of(others.begin(), others.end(), [&](const std::string& other) { return profiles::variant_family(other) == family_key; }))
+    DeleteFileW((family + L"\\layout.ini").c_str());
+  for (auto dir = folder; dir.size() > root.size() && RemoveDirectoryW(dir.c_str());)
+    dir.resize(dir.find_last_of(L'\\'));
+  return true;
+}
+inline bool load_settings(Settings& s,
+                          const std::wstring& installation,
+                          std::uint32_t profile_id,
+                          std::string_view variant,
+                          const profiles::DiscoveredLayout* layout);
+inline bool save_settings(const Settings& s);
+// Saves a set-up aircraft's displays, cameras and guides as another variant's
+// (a preset of the same aircraft starts from one already set up). `out` is
+// the copy, saved and ready to select.
+inline bool copy_discovered_variant(std::string_view source, std::string_view target, const std::wstring& installation, Settings& out) {
+  profiles::VariantKey own{};
+  if (!profiles::variant_key(target, own) || std::string_view(own.data()) != target || target.size() >= profiles::MaxVariantKey)
+    return false;
+  Settings copy;
+  if (!load_settings(copy, installation, profiles::DiscoveredProfileId, source, nullptr))
+    return false;
+  std::fill(std::begin(copy.discovered.key), std::end(copy.discovered.key), '\0');
+  target.copy(copy.discovered.key, target.size());
+  if (!profiles::valid_layout(copy.discovered) || !save_settings(copy))
+    return false;
+  out = copy;
+  return true;
+}
 inline constexpr unsigned kCamButtonRevision = 1;
 // profile_id 0 loads the saved selection, falling back to the A380 profile.
 // An explicit set-up aircraft (DiscoveredProfileId) needs its variant key and
-// a saved layout for it.
-inline bool load_settings(Settings& s, const std::wstring& installation, std::uint32_t profile_id = 0, std::string_view variant = {}) {
+// a saved layout for it, or a new layout (setup) that replaces the saved one
+// while the variant keeps its saved calibration.
+inline bool load_settings(Settings& s,
+                          const std::wstring& installation,
+                          std::uint32_t profile_id = 0,
+                          std::string_view variant = {},
+                          const profiles::DiscoveredLayout* layout = nullptr) {
   const auto selection = settings_directory() + L"\\settings.ini";
   const bool saved_selection = !profile_id;
   char saved_variant[profiles::MaxVariantKey]{};
@@ -259,7 +338,9 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   profiles::DiscoveredProfile discovered{};
   const profiles::AircraftProfile* profile = nullptr;
   if (profile_id == profiles::DiscoveredProfileId) {
-    if (load_discovered_layout(variant, discovered.layout)) {
+    if (layout && profiles::valid_layout(*layout))
+      discovered.layout = *layout;
+    if (layout ? discovered.layout.sides != 0 : load_discovered_layout(variant, discovered.layout)) {
       profiles::build_discovered(discovered);
       profile = &discovered.profile;
     } else if (!saved_selection) {
@@ -374,6 +455,37 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   guide(value.tail_upper, L"tail_upper_x", L"tail_upper_y");
   guide(value.tail_corner, L"tail_corner_x", L"tail_corner_y");
   guide(value.tail_inner, L"tail_inner_x", L"tail_inner_y");
+  // [guides_right]: the right tail bracket; files without it mirror the left.
+  const auto right = [&](std::array<float, 2>& position, const std::array<float, 2>& left, const wchar_t* x_key, const wchar_t* y_key) {
+    position[0] = static_cast<float>(read(L"guides_right", x_key, left[0]));
+    position[1] = static_cast<float>(read(L"guides_right", y_key, left[1]));
+  };
+  right(value.tail_upper_right, value.tail_upper, L"tail_upper_x", L"tail_upper_y");
+  right(value.tail_corner_right, value.tail_corner, L"tail_corner_x", L"tail_corner_y");
+  right(value.tail_inner_right, value.tail_inner, L"tail_inner_x", L"tail_inner_y");
+  // [displays]: the user's panel and display area per side, if any. An
+  // unreadable entry keeps the profile's own; the whole set must be valid.
+  {
+    profiles::DisplayOverride choices{};
+    for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+      wchar_t text[64]{};
+      GetPrivateProfileStringW(L"displays", (L"texture" + std::to_wstring(side)).c_str(), L"", text, 64, path.c_str());
+      const auto n = std::wcslen(text);
+      bool printable = n < profiles::MaxPanelName;
+      for (std::size_t i = 0; printable && i < n; ++i)
+        printable = text[i] >= 32 && text[i] <= 126;
+      for (std::size_t i = 0; printable && i < n; ++i)
+        choices.textures[side][i] = static_cast<char>(text[i]);
+      GetPrivateProfileStringW(L"displays", (L"area" + std::to_wstring(side)).c_str(), L"", text, 64, path.c_str());
+      unsigned r[4]{};
+      wchar_t extra{};
+      if (std::swscanf(text, L"%u,%u,%u,%u%lc", &r[0], &r[1], &r[2], &r[3], &extra) == 4)
+        choices.areas[side] = {r[0], r[1], r[2], r[3]};
+    }
+    value.display_override = choices;
+    if (!valid_settings(value))
+      value.display_override = {};
+  }
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
   constexpr std::array<const wchar_t*, 3> sections{L"nose", L"tail", L"wing_right"};
   for (unsigned i = 0; i < 3; ++i)
@@ -435,7 +547,30 @@ inline bool save_settings(const Settings& s) {
     return ok && MoveFileExW(staged.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
   };
   const auto layout = discovered ? discovered_layout_text(s.discovered) : std::wstring{};
-  if (!write(path, std::wstring(text, static_cast<std::size_t>(count)) + layout))
+  wchar_t right[384];
+  const int right_count =
+      std::swprintf(right, 384,
+                    L"[guides_right]\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\ntail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\n"
+                    L"tail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n",
+                    s.tail_upper_right[0], s.tail_upper_right[1], s.tail_corner_right[0], s.tail_corner_right[1], s.tail_inner_right[0],
+                    s.tail_inner_right[1]);
+  if (right_count <= 0)
+    return false;
+  std::wstring displays = L"[displays]\r\n";
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+    const auto& o = s.display_override;
+    if (o.textures[side][0])
+      displays += L"texture" + std::to_wstring(side) + L"=" +
+                  std::wstring(o.textures[side], o.textures[side] + std::strlen(o.textures[side])) + L"\r\n";
+    if (!profiles::empty_area(o.areas[side])) {
+      wchar_t line[96];
+      std::swprintf(line, 96, L"area%u=%u,%u,%u,%u\r\n", side, o.areas[side].left, o.areas[side].top, o.areas[side].right,
+                    o.areas[side].bottom);
+      displays += line;
+    }
+  }
+  if (!write(path, std::wstring(text, static_cast<std::size_t>(count)) + std::wstring(right, static_cast<std::size_t>(right_count)) +
+                       displays + layout))
     return false;
   // The airplane folder's latest layout lets its other presets start from it.
   const auto family = discovered ? discovered_layout_path(s.discovered.key) : std::wstring{};

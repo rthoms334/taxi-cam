@@ -157,6 +157,67 @@ int main() {
     require(resolve_names(fbw, fresh.data(), fresh.size(), names, 3, fit, shapes, ids, out, pairs) == 0 && ids[0] == 1522 && ids[1] == 1521,
             "A fresh FlyByWire load names without a shift");
   }
+  {
+    // Fenix A320 load of 2026-11-01 (bridge.log): the table lists one
+    // VCockpit17 panel first and the other last, while the textures were
+    // created in section order. The setup page's pictures showed #247-#252
+    // are ND FO, PFD FO, ECAM lower, ECAM upper, ND and PFD captain.
+    Panels fenix;
+    const char* layout[][2]{
+        {"VCockpit17", "Panel_Refueling"},    {"VCockpit01", "$A320_PFD_Captain"},  {"VCockpit02", "$A320_ND_Captain"},
+        {"VCockpit03", "$A320_ECAM_Upper"},   {"VCockpit04", "$A320_ECAM_Lower"},   {"VCockpit05", "$A320_PFD_FO"},
+        {"VCockpit06", "$A320_ND_FO"},        {"VCockpit07", "$A320_Standby"},      {"VCockpit08", "$A320_Readouts_Legacy"},
+        {"VCockpit09", "$A320_Clock_Legacy"}, {"VCockpit10", "$A320_DCDU"},         {"VCockpit11", "$A320_MCDU_Captain"},
+        {"VCockpit12", "$A320_MCDU_FO"},      {"VCockpit13", "$EFB_Captain"},       {"VCockpit14", "$EFB_FO"},
+        {"VCockpit15", "NO_TEXTURE"},         {"VCockpit16", "DisplaysReflection"}, {"VCockpit17", "$FAP"}};
+    for (std::uint32_t i = 0; i < 18; ++i)
+      add(fenix, i, layout[i][0], layout[i][1], 4, 1024);
+    const std::vector<Creation> load{{232, 0, 768, 768, 10, 28}, {233, 1, 384, 264, 9, 28},   {234, 2, 1024, 768, 5, 28},
+                                     {235, 3, 1024, 512, 5, 28}, {236, 4, 2048, 1536, 5, 28}, {237, 5, 2048, 1536, 5, 28},
+                                     {238, 6, 512, 432, 5, 28},  {239, 7, 512, 432, 5, 28},   {240, 8, 512, 680, 5, 28},
+                                     {242, 9, 512, 512, 5, 28},  {246, 10, 256, 256, 5, 28},  {247, 11, 768, 768, 5, 28},
+                                     {248, 12, 768, 768, 5, 28}, {249, 13, 768, 768, 5, 28},  {250, 14, 768, 768, 5, 28},
+                                     {251, 15, 768, 768, 5, 28}, {252, 16, 768, 768, 5, 28}};
+    const auto fit = [](const Creation& c) { return c.width == 768 && c.height == 768 && c.mips == 5; };
+    // The saved setup's anchors: four displays and the standby instrument.
+    const auto anchors = [](const char* panel, std::uint32_t& width, std::uint32_t& height) {
+      const bool display = std::strcmp(panel, "$A320_ECAM_Upper") == 0 || std::strcmp(panel, "$A320_ND_Captain") == 0 ||
+                           std::strcmp(panel, "$A320_ND_FO") == 0 || std::strcmp(panel, "$A320_ECAM_Lower") == 0;
+      width = height = display ? 768 : 256;
+      return display || std::strcmp(panel, "$A320_Standby") == 0;
+    };
+    const char* names[]{"$A320_PFD_Captain", "$A320_PFD_FO", ""};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    std::array<Assignment, kMaxPanels> out{};
+    require(resolve_names(fenix, load.data(), load.size(), names, 3, fit, anchors, ids, out, pairs) == -1,
+            "Index order fits no shift on a table listing a section's panels apart");
+    require(resolve_names(fenix, load.data(), load.size(), names, 3, fit, anchors, ids, out, pairs, 8, PanelOrder::section) == 0 &&
+                ids[0] == 252 && ids[1] == 248,
+            "Section order names the captain and FO PFDs");
+    bool complete = false;
+    const auto n = propose(fenix, load.data(), load.size(), out, complete, PanelOrder::section);
+    const auto named = [&](const char* texture) {
+      for (std::size_t i = 0; i < n; ++i)
+        if (std::strcmp(out[i].panel->texture.data(), texture) == 0)
+          return out[i].creation.id;
+      return std::uint64_t{};
+    };
+    require(complete && named("$A320_ND_Captain") == 251 && named("$A320_ECAM_Upper") == 250 && named("$A320_ECAM_Lower") == 249 &&
+                named("$A320_ND_FO") == 247 && named("$A320_Standby") == 246,
+            "Every display gets the picture it shows");
+    // A table already in section order pairs the same either way.
+    Panels ordered;
+    for (std::uint32_t i = 1; i < 18; ++i)
+      add(ordered, i - 1, layout[i][0], layout[i][1], 4, 1024);
+    add(ordered, 17, "VCockpit17", "Panel_Refueling", 4, 1024);
+    std::uint64_t by_index[3]{}, by_section[3]{};
+    require(
+        resolve_names(ordered, load.data(), load.size(), names, 3, fit, anchors, by_index, out, pairs) ==
+                resolve_names(ordered, load.data(), load.size(), names, 3, fit, anchors, by_section, out, pairs, 8, PanelOrder::section) &&
+            by_index[0] == by_section[0] && by_index[1] == by_section[1] && by_index[0] == 252,
+        "A table in section order names the same in either order");
+  }
 
   std::array<char, 8> name{};
   const unsigned char raw[] = {'E', 'I', 'C', 'A', 'S', 'C', 'D', 'U', 'X'};
@@ -210,6 +271,26 @@ int main() {
     require(!tables.observe(0xa350), "A switch to another aircraft is not clean");
     require(tables.observe(0xa350), "Reloading that aircraft is clean again");
     require(!tables.observe(0x777), "Switching back is not clean");
+  }
+  {
+    // The Fenix A320 rebuilt its table in one load with its VCockpit17 panels
+    // moved from first to last: the same aircraft.
+    Panels first, rebuilt, other;
+    add(first, 0, "VCockpit17", "Panel_Refueling", 4, 512);
+    add(first, 1, "VCockpit17", "$FAP", 4, 1024);
+    add(first, 2, "VCockpit01", "$A320_PFD_Captain", 4, 1024);
+    add(first, 3, "VCockpit15", "NO_TEXTURE", 4, 32);
+    add(rebuilt, 0, "VCockpit01", "$A320_PFD_Captain", 4, 1024);
+    add(rebuilt, 1, "VCockpit15", "NO_TEXTURE", 4, 32);
+    add(rebuilt, 2, "VCockpit17", "Panel_Refueling", 4, 512);
+    add(rebuilt, 3, "VCockpit17", "$FAP", 4, 1024);
+    add(other, 0, "VCockpit01", "$A320_PFD_Captain", 4, 1024);
+    add(other, 1, "VCockpit17", "$FAP", 4, 1024);
+    require(aircraft_signature(first) == aircraft_signature(rebuilt), "A reordered table is the same aircraft");
+    require(aircraft_signature(first) != aircraft_signature(other), "Other panels are another aircraft");
+    ProcessTables tables;
+    require(tables.observe(aircraft_signature(first)) && tables.observe(aircraft_signature(rebuilt)),
+            "A rebuilt table of the same aircraft stays clean");
   }
   std::printf("PASS: %u display identity checks.\n", checks);
   return 0;
