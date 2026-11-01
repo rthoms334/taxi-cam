@@ -14,6 +14,7 @@ on:
       - REVIEW.md
       - .github/review/prompt.md
       - .github/review/findings.schema.json
+      - .github/review/*.py
       - .github/review/evals/**
       - .github/workflows/pr-review.yml
       - .github/workflows/review-evals.yml
@@ -51,6 +52,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -99,17 +102,22 @@ jobs:
             --model ${{ vars.REVIEW_MODEL || 'claude-opus-5-5' }}
             --max-turns 80
             --json-schema '${{ steps.stage.outputs.schema }}'
-            --allowedTools "Read" "Grep" "Glob" "Agent" "Task" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git blame:*)"
+            --allowedTools "Read" "Grep" "Glob" "Agent" "Task" "Bash(git log:*)" "Bash(git show:*)"
+            --disallowedTools "Read(//proc/**)" "Read(//sys/**)" "Read(./.git/config)"
 
-      - name: Validate the ranked findings
+      - name: Validate the ranked findings and refuse any credential
         env:
           STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 "$RUNNER_TEMP/review.py" save --out build/review/findings.json
 
       - name: Keep the findings for scoring
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: eval-${{ matrix.case }}
+          overwrite: true
           if-no-files-found: error
           retention-days: 14
           path: build/review/findings.json

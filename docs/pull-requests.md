@@ -27,7 +27,7 @@ The reviewer is Claude, run by [claude-code-action](https://github.com/anthropic
 
 The reviewer has read-only access and returns findings as data. A separate job posts them, so the agent that reads untrusted pull-request text never holds a token that can write. The reviewer's rules and prompt are always taken from `main`, never from the pull request under review. A pull request therefore cannot weaken its own review by editing `REVIEW.md`. The one exception is the pull request that first adds the reviewer, which is reviewed with its own files and says so.
 
-Important findings and nits become review threads on the changed line. When a line is outside the diff, they become file comments instead. A finding outside the diff is anchored to the first changed file. Pre-existing findings appear only in the summary comment, which is updated in place on each push. Each push is reviewed again: the reviewer reads the earlier threads and your replies, and does not repeat a finding already raised. Only replies from people with write access are passed back to it.
+Important findings and nits become review threads on the changed line. When a line is outside the diff, they become file comments instead. A finding outside the diff is anchored to the first changed file. Pre-existing findings appear only in the summary comment, which is updated in place on each push. Each push is reviewed again. The reviewer reads the earlier threads and the replies from people with write access, and drops findings already answered. A finding whose thread is still open is not posted twice. If you resolve a thread but the reviewer still finds the defect on a later push, it opens a new thread.
 
 ### Answering findings
 
@@ -41,9 +41,9 @@ The **AI review** check fails only when the review could not run (no credential,
 ### Limits
 
 - The reviewer can miss defects and can be wrong. Voting removes most false findings; it does not prove absence.
-- Pull-request text is untrusted input. The reviewer is told to report text that addresses it rather than follow it, but prompt injection cannot be ruled out. That is why the reviewer holds no write token, and why no approval depends on it.
+- Pull-request text is untrusted input. The reviewer is told to report text that addresses it rather than follow it, but prompt injection cannot be ruled out. So the reviewer holds no write token, and no approval depends on it. It may only read files and run `git log` and `git show`; it cannot read `/proc`, `/sys` or `.git/config`, and secrets are scrubbed from the commands it runs. Its output is refused, and nothing is posted, if it contains the job's Claude credential or GitHub token, or anything shaped like a key or token.
 - A pull request that edits `pr-review.yml` itself runs its edited copy of that workflow (normal `pull_request` behaviour). Changes under `.github/` are therefore at least medium risk, which needs your approval.
-- Pull requests from forks receive no secrets, so the AI review cannot run on them. Review those yourself.
+- Pull requests from forks receive no secrets, so the AI review cannot run on them and its required check fails. To take a contribution from a fork, review it yourself, push its commits to a branch in this repository and open a pull request from there; the review and the gate then run normally.
 
 ### Cost and model
 
@@ -55,9 +55,9 @@ The [risk gate](../.github/workflows/pr-risk-gate.yml) sets a tier from every pa
 
 | Tier | Paths | Approvals needed |
 | --- | --- | --- |
-| **High** | `src/hooks`, `src/bridge`, `src/graphics`, `src/camera`, `src/shared` (code inside the simulator's process); `src/setup`, `src/app/updater.*`, `installer/` (the user's system); `build.ps1`, `bootstrap.ps1`, `smoke-test.ps1`, `dependencies.json` (the shipped binaries and toolchain) | Owner approval, then a live check |
-| **Medium** | Other `src/` code, `tests/`, `changelog.json` and `docs/whats-new/` (installed companions read them from `main`), `.github/`, `ci/`, `REVIEW.md`, `AGENTS.md`, licences, and anything not listed | Owner approval |
-| **Low** | Documentation (`docs/`, `*.md`), `tools/` (outside the shipped build), issue forms | None, once the other checks pass and threads are resolved |
+| **High** | `src/hooks`, `src/bridge`, `src/graphics`, `src/camera`, `src/shared`, `src/profiles` and `tools/diagnostics/image_inventory.*` (code compiled into the bridge, inside the simulator's process); `src/setup`, `src/app/updater.*`, `installer/` (the user's system); `build.ps1`, `bootstrap.ps1`, `smoke-test.ps1`, `dependencies.json` (the shipped binaries and toolchain) | Owner approval, then a live check |
+| **Medium** | `src/app/` (except the updater), `tests/`, `changelog.json` and `docs/whats-new/` (installed companions read them from `main`), `.github/`, `ci/`, `REVIEW.md`, `AGENTS.md`, licences, and anything not listed | Owner approval |
+| **Low** | Documentation (`docs/`, `*.md`), the rest of `tools/` (outside the shipped build), issue forms | None, once the other checks pass and threads are resolved |
 
 The change sets the tier, not its author. The gate runs from `main`'s copy of its workflow (`pull_request_target`), so a pull request cannot change its own tier. The gate never checks out or runs pull-request code.
 

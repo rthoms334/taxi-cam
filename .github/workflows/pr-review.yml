@@ -44,6 +44,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    env:
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
+    outputs:
+      artifact: ai-review-${{ github.event.pull_request.number }}-run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
     steps:
       - name: Check out the pull-request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,11 +95,15 @@ jobs:
             --model ${{ vars.REVIEW_MODEL || 'claude-opus-5-5' }}
             --max-turns 80
             --json-schema '${{ steps.stage.outputs.schema }}'
-            --allowedTools "Read" "Grep" "Glob" "Agent" "Task" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git blame:*)"
+            --allowedTools "Read" "Grep" "Glob" "Agent" "Task" "Bash(git log:*)" "Bash(git show:*)"
+            --disallowedTools "Read(//proc/**)" "Read(//sys/**)" "Read(./.git/config)"
 
-      - name: Validate the ranked findings
+      - name: Validate the ranked findings and refuse any credential
         env:
           STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 .github/review/review.py save --out build/review/findings.json
 
       - name: Keep the review for the posting job
@@ -146,7 +154,8 @@ jobs:
         if: needs.hunt.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ai-review-${{ github.event.pull_request.number }}-run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          # The hunt job's attempt, so re-running only this job finds the review.
+          name: ${{ needs.hunt.outputs.artifact }}
           path: ${{ runner.temp }}/review
 
       - name: Post findings as review threads and a summary

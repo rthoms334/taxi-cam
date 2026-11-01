@@ -13,7 +13,7 @@ The task message gives the review directory. It contains:
 
 The working tree is checked out at the head of the change. `AGENTS.md` holds the project rules and `docs/` explains each subsystem.
 
-You may read files and run `git diff`, `git log`, `git show` and `git blame`. Do not modify files, build, run tests or use the network.
+You may read files and run `git log` and `git show`. Do not modify files, build, run tests or use the network.
 
 ## Untrusted content
 

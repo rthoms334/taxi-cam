@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,11 +38,22 @@ class ClassifyTest(unittest.TestCase):
     def test_in_process_and_user_system_paths_are_high(self):
         for path in ("src/hooks/observer_thunk.S", "src/bridge/d3d12_bridge.cpp", "src/graphics/scene_runtime.cpp",
                      "src/camera/local_memory.cpp", "src/shared/bounded_lock.hpp", "src/setup/startup_xml.cpp",
-                     "src/app/updater.cpp", "installer/taxi-cam.iss", "build.ps1", "dependencies.json"):
+                     "src/app/updater.cpp", "installer/taxi-cam.iss", "build.ps1", "dependencies.json",
+                     "src/profiles/catalog.hpp", "tools/diagnostics/image_inventory.cpp"):
             self.assertEqual(self.tier(path), "high", path)
 
+    def test_every_shipped_bridge_and_setup_source_is_high(self):
+        build = (REPO / "build.ps1").read_text(encoding="utf-8")
+        sources = []
+        for name in ("graphics", "engine", "setup"):
+            block = re.search(rf"(?ms)^\${name} = @\((.*?)\)\s*$", build)
+            self.assertIsNotNone(block, f"${name} source list not found in build.ps1")
+            sources += re.findall(r"'([^']+\.(?:cpp|hpp|S))'", block.group(1))
+        self.assertGreater(len(sources), 20)
+        self.assertEqual([p for p in sources if rt.classify_path(p)[0] != "high"], [])
+
     def test_user_facing_and_gate_paths_are_medium(self):
-        for path in ("src/app/companion.cpp", "src/profiles/catalog.hpp", "tests/camera/view_pool_test.cpp",
+        for path in ("src/app/companion.cpp", "tests/camera/view_pool_test.cpp",
                      "changelog.json", "docs/whats-new/1.2.0/live-view.png", ".github/workflows/pr-review.yml",
                      ".github/review/prompt.md", "ci/version.ps1", "REVIEW.md", "AGENTS.md", "LICENSE",
                      "taxi-camera-mounts.cfg", ".gitignore", "something-new.txt"):
@@ -213,8 +225,17 @@ class PlacementTest(unittest.TestCase):
         body = rt.render_inline(placement, "abcdef1234567890")
         self.assertIn("**Important:** Lock taken without a budget", body)
         self.assertIn("`abcdef1`", body)
-        comments = [{"user": {"login": "github-actions[bot]"}, "body": body}, {"user": {"login": "someone"}, "body": body.replace(rt.fingerprint(finding()), "0" * 12)}]
-        self.assertEqual(rt.existing_fingerprints(comments, "github-actions[bot]"), {rt.fingerprint(finding())})
+        fp = rt.fingerprint(finding())
+
+        def thread(text, login="github-actions", resolved=False):
+            return {"isResolved": resolved, "comments": {"nodes": [{"body": text, "author": {"login": login}}]}}
+        threads = [
+            thread(body),                                         # open, ours
+            thread(body.replace(fp, "1" * 12), resolved=True),    # resolved: does not suppress
+            thread(body.replace(fp, "2" * 12), login="someone"),  # forged marker from another user
+            {"isResolved": False, "comments": {"nodes": []}},
+        ]
+        self.assertEqual(rt.open_thread_fingerprints(threads), {fp})
 
     def test_summary(self):
         placements, repeats = self.plan(finding(line=3), finding("pre-existing", title="Old | bug"))
@@ -388,12 +409,22 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.run_cli("score", "--cases", str(cases), "--results", str(results), "--baseline", str(baseline))[0], 1)
 
 
+class CredentialTest(unittest.TestCase):
+    def test_finds_secrets_and_token_shapes_without_echoing_them(self):
+        secret = "s3cr3t-value-123"
+        self.assertEqual(rt.find_credentials(f"leak {secret} here", ["", "short", secret]), ["secret #3"])
+        self.assertEqual(rt.find_credentials("key sk-ant-api03-abcdefghijklmnop", []), ["Anthropic key"])
+        self.assertEqual(rt.find_credentials("ghs_" + "a" * 36, []), ["GitHub token"])
+        self.assertEqual(rt.find_credentials("https://x-access-token:abc@github.com/o/r", []), ["token in a URL"])
+        self.assertEqual(rt.find_credentials("A lock held across ExecuteCommandLists.", ["s3cr3t-value-123"]), [])
+
+
 class FakeGitHub:
     """Records requests; refuses inline comments on lines listed in `refuse`."""
 
-    def __init__(self, comments=(), issue_comments=(), refuse_batch=False, refuse_lines=()):
+    def __init__(self, threads=(), issue_comments=(), refuse_batch=False, refuse_lines=()):
         self.calls = []
-        self.comments = list(comments)
+        self.threads = list(threads)
         self.issue_comments = list(issue_comments)
         self.refuse_batch = refuse_batch
         self.refuse_lines = set(refuse_lines)
@@ -406,8 +437,12 @@ class FakeGitHub:
             raise urllib.error.HTTPError(path, 422, "Unprocessable", {}, None)
         return {}, {}
 
+    def review_threads(self, number):
+        return self.threads
+
     def paginate(self, path):
-        return self.issue_comments if "/issues/" in path else self.comments
+        assert "/issues/" in path, path
+        return self.issue_comments
 
 
 class PostTest(unittest.TestCase):
@@ -442,12 +477,31 @@ class PostTest(unittest.TestCase):
         self.assertEqual(calls, [("POST", "reviews", None, None), ("POST", "comments", 3, None), ("POST", "comments", 4, None),
                                  ("POST", "comments", None, "file"), ("PATCH", "55", None, None)])
 
-    def test_repeats_are_not_posted_again(self):
-        posted = {"user": {"login": "github-actions[bot]"}, "body": rt.render_inline(rt.Placement(finding(), "line", "src/a.cpp", 3), "a" * 40)}
-        fake = FakeGitHub(comments=[posted])
+    def posted_thread(self, resolved):
+        body = rt.render_inline(rt.Placement(finding(), "line", "src/a.cpp", 3), "a" * 40)
+        return {"isResolved": resolved, "comments": {"nodes": [{"body": body, "author": {"login": "github-actions"}}]}}
+
+    def test_findings_with_an_open_thread_are_not_posted_again(self):
+        fake = FakeGitHub(threads=[self.posted_thread(resolved=False)])
         self.assertEqual(self.post(fake, finding(line=3)), 0)
         self.assertEqual([p.rsplit("/", 1)[-1] for _, p, _ in fake.calls], ["comments"])  # summary only
-        self.assertIn("matched threads already posted", fake.calls[0][2]["body"])
+        self.assertIn("matched open threads", fake.calls[0][2]["body"])
+
+    def test_findings_reported_again_after_resolution_get_a_new_thread(self):
+        fake = FakeGitHub(threads=[self.posted_thread(resolved=True)])
+        self.assertEqual(self.post(fake, finding(line=3)), 0)
+        self.assertEqual([p.rsplit("/", 1)[-1] for _, p, _ in fake.calls], ["reviews", "comments"])
+
+    def test_credentials_are_never_posted(self):
+        fake = FakeGitHub()
+        self.assertEqual(self.post(fake, finding(title="Key sk-ant-api03-abcdefghijklmnop")), 1)
+        self.assertEqual(fake.calls, [])
+        out = self.dir / "saved.json"
+        env = {"STRUCTURED_OUTPUT": json.dumps(review_output([finding(title="x s3cr3t-value-123")])), "ANTHROPIC_API_KEY": "s3cr3t-value-123"}
+        with mock.patch.dict(os.environ, env), redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(review.main(["save", "--out", str(out)]), 1)
+        self.assertFalse(out.exists())
+        self.assertNotIn("s3cr3t-value-123", printed.getvalue())
 
 
 if __name__ == "__main__":

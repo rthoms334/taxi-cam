@@ -144,6 +144,11 @@ def cmd_save(args: argparse.Namespace) -> int:
     if not raw.strip():
         print("::error::The reviewer returned no structured output.")
         return 1
+    secrets = [os.environ.get(name, "") for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN")]
+    leaked = rt.find_credentials(raw, secrets)
+    if leaked:
+        print(f"::error::The reviewer's output contains a credential ({', '.join(sorted(set(leaked)))}); it was not saved or posted. Rotate the credential if it may have been exposed elsewhere.")
+        return 1
     try:
         review = rt.validate_review(json.loads(raw))
     except (json.JSONDecodeError, rt.FindingsError) as error:
@@ -178,6 +183,25 @@ class GitHub:
             payload = response.read()
             return (json.loads(payload) if payload else None), dict(response.headers)
 
+    def review_threads(self, number: int) -> list[dict]:
+        owner, name = self.repo.split("/", 1)
+        query = """query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    reviewThreads(first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes { isResolved comments(first: 1) { nodes { body author { login } } } } } } } }"""
+        threads: list[dict] = []
+        cursor = None
+        while True:
+            data, _ = self.request("POST", "/graphql", {"query": query, "variables": {"owner": owner, "name": name, "number": number, "cursor": cursor}})
+            if not isinstance(data, dict) or data.get("errors") or not (data.get("data") or {}).get("repository"):
+                raise RuntimeError(f"review thread query failed: {data.get('errors') if isinstance(data, dict) else data}")
+            page = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+            threads.extend(page["nodes"])
+            if not page["pageInfo"]["hasNextPage"]:
+                return threads
+            cursor = page["pageInfo"]["endCursor"]
+
     def paginate(self, path: str) -> list:
         items: list = []
         url: str | None = f"{path}{'&' if '?' in path else '?'}per_page=100"
@@ -191,21 +215,21 @@ class GitHub:
         return items
 
 
-def _http_status(error: Exception) -> int | None:
-    return error.code if isinstance(error, urllib.error.HTTPError) else None
-
-
 def cmd_post(args: argparse.Namespace) -> int:
     folder = Path(args.dir)
-    review = rt.validate_review(json.loads((folder / "findings.json").read_text(encoding="utf-8")))
+    raw = (folder / "findings.json").read_text(encoding="utf-8")
+    if rt.find_credentials(raw, []):
+        print("::error::The findings contain something shaped like a credential; nothing was posted.")
+        return 1
+    review = rt.validate_review(json.loads(raw))
     context = json.loads((folder / "context.json").read_text(encoding="utf-8"))
     lines = rt.commentable_lines((folder / "change.diff").read_text(encoding="utf-8"))
     head = context["head"]
     gh = GitHub(os.environ["GH_TOKEN"], args.repo)
     pr = f"/repos/{args.repo}/pulls/{args.pr}"
 
-    comments = gh.paginate(f"{pr}/comments")
-    placements, repeats = rt.plan_placements(review["findings"], lines, rt.existing_fingerprints(comments, BOT_LOGIN))
+    open_threads = rt.open_thread_fingerprints(gh.review_threads(args.pr))
+    placements, repeats = rt.plan_placements(review["findings"], lines, open_threads)
 
     inline = [p for p in placements if p.kind == "line"]
     if inline:

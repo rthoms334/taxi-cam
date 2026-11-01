@@ -34,6 +34,8 @@ RISK_RULES: tuple[tuple[str, str, str], ...] = (
     ("high", "src/graphics/*", "GPU capture, composition and synchronization run inside the simulator"),
     ("high", "src/camera/*", "simulator memory, camera ownership and lifecycle"),
     ("high", "src/shared/*", "compiled into the in-process bridge: protocol, locks and control policy"),
+    ("high", "src/profiles/*", "aircraft profiles compiled into the in-process bridge"),
+    ("high", "tools/diagnostics/image_inventory.*", "compiled into the shipped bridge DLL"),
     ("high", "src/setup/*", "installer commands change exe.xml and saved settings"),
     ("high", "src/app/updater.*", "downloads and installs updates"),
     ("high", "installer/*", "Setup and uninstall change the user's system"),
@@ -270,12 +272,43 @@ def fingerprint(finding: dict) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
-def existing_fingerprints(comments: list[dict], bot_login: str) -> set[str]:
+BOT_LOGINS = ("github-actions[bot]", "github-actions")  # REST and GraphQL spellings
+
+
+def open_thread_fingerprints(threads: list[dict]) -> set[str]:
+    """Fingerprints of the reviewer's threads that are still unresolved.
+
+    `threads` are GraphQL reviewThreads nodes. A finding with an open thread
+    is not posted again. A resolved thread does not suppress a finding: if
+    the reviewer still reports it, the defect needs answering again.
+    """
     found = set()
-    for comment in comments:
-        if (comment.get("user") or {}).get("login") != bot_login:
+    for thread in threads:
+        if thread.get("isResolved"):
             continue
-        found.update(_FP.findall(comment.get("body") or ""))
+        first = ((thread.get("comments") or {}).get("nodes") or [{}])[0]
+        if ((first.get("author") or {}).get("login")) in BOT_LOGINS:
+            found.update(_FP.findall(first.get("body") or ""))
+    return found
+
+
+_CREDENTIAL_PATTERNS = (
+    ("Anthropic key", re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}")),
+    ("GitHub token", re.compile(r"\bgh[opsu]_[A-Za-z0-9]{20,}")),
+    ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
+    ("token in a URL", re.compile(r"x-access-token:[^@\s]+@")),
+)
+
+
+def find_credentials(text: str, secrets: list[str]) -> list[str]:
+    """Name the credentials found in text, without repeating them.
+
+    The reviewer reads untrusted text while its process holds credentials, so
+    its output is refused if it contains one of the job's secrets or anything
+    shaped like a key or token.
+    """
+    found = [f"secret #{index + 1}" for index, secret in enumerate(secrets) if secret and len(secret) >= 8 and secret in text]
+    found += [name for name, pattern in _CREDENTIAL_PATTERNS if pattern.search(text)]
     return found
 
 
@@ -329,7 +362,8 @@ def plan_placements(findings: list[dict], lines: dict[str, set[int]], seen: set[
     the first changed file when their own file is not in the diff. Nits get a
     thread when their file is in the diff. Pre-existing findings stay in the
     summary because they do not need an answer on this pull request.
-    Findings already posted on an earlier push are returned as repeats.
+    Findings whose thread from an earlier push is still open are returned as
+    repeats.
     """
     placements: list[Placement] = []
     repeats: list[dict] = []
@@ -395,7 +429,7 @@ def render_summary(review: dict, placements: list[Placement], repeats: list[dict
         lines += ["No new findings.", ""]
 
     if repeats:
-        lines += [f"{len(repeats)} finding(s) matched threads already posted on this pull request and were not posted again.", ""]
+        lines += [f"{len(repeats)} finding(s) matched open threads on this pull request and were not posted again.", ""]
 
     stats = review["stats"]
     lines.append(

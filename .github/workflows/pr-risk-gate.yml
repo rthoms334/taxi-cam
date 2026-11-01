@@ -70,8 +70,10 @@ jobs:
           esac
           failed=0
           for env in $needed; do
-            reviewers=$(gh api "repos/$REPO/environments/$env" --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' 2>/dev/null || true)
-            if [ "${reviewers:-0}" -lt 1 ]; then
+            # On an HTTP error gh prints the error body instead of the --jq result.
+            reviewers=$(gh api "repos/$REPO/environments/$env" --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' 2>/dev/null) || reviewers=0
+            case "$reviewers" in ''|*[!0-9]*) reviewers=0 ;; esac
+            if [ "$reviewers" -lt 1 ]; then
               echo "::error::Create the $env environment with a required reviewer before merging $TIER-risk changes (docs/pull-requests.md)."
               failed=1
             fi
@@ -85,7 +87,6 @@ jobs:
     timeout-minutes: 5
     continue-on-error: true
     permissions:
-      issues: write
       pull-requests: write
     steps:
       - name: Set the risk label

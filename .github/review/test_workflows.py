@@ -72,7 +72,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("if: ${{ !cancelled() }}", job(gate, "gate"))
         self.assertIn('.user.type == "User"', job(gate, "gate"))
         self.assertIn("required_reviewers", job(gate, "classify"))
+        self.assertIn("|| reviewers=0", job(gate, "classify"))
         self.assertEqual(permissions(job(gate, "approval")).strip(), "{}")
+        self.assertNotIn("issues: write", gate)
 
     def test_reviewer_is_read_only_and_poster_is_separate(self):
         review = read("pr-review.yml")
@@ -83,13 +85,29 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("github_token: ${{ github.token }}", hunt)
         self.assertNotIn("id-token", review)
         self.assertNotIn("mcp__github", review)
-        self.assertNotRegex(hunt, r'"(Write|Edit|Bash)"|Bash\(gh |Bash\(\*')
         self.assertIn("--reviewer-from \"$BASE_SHA\"", hunt)
         post = job(review, "post")
         self.assertIn("name: AI review", post)
         self.assertIn("pull-requests: write", permissions(post))
         self.assertNotIn("claude-code-action", post)
         self.assertNotIn("secrets.", post)
+        # Re-running only the post job must find the hunt job's artifact.
+        self.assertIn("name: ${{ needs.hunt.outputs.artifact }}", post)
+        self.assertIn("artifact: ai-review-", hunt)
+
+    def test_reviewer_cannot_read_or_publish_credentials(self):
+        for name in ("pr-review.yml", "review-evals.yml"):
+            text = read(name)
+            claude = step(text, "Review with Claude")
+            allowed = re.search(r"--allowedTools (.*)", claude).group(1)
+            self.assertEqual(re.findall(r'"Bash\(([^"]*)\)"', allowed), ["git log:*", "git show:*"], name)
+            self.assertNotRegex(allowed, r'"(Write|Edit|Bash|WebFetch|WebSearch)"|mcp__', name)
+            for denied in ('"Read(//proc/**)"', '"Read(//sys/**)"', '"Read(./.git/config)"'):
+                self.assertIn(denied, claude, name)
+            self.assertEqual(len(re.findall(r"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'", text)), 1, name)
+            save = step(text, "Validate the ranked findings and refuse any credential")
+            for secret in ("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}", "CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", "GITHUB_TOKEN: ${{ github.token }}"):
+                self.assertIn(secret, save, name)
 
     def test_live_review_and_evals_run_the_same_reviewer(self):
         live = step(read("pr-review.yml"), "Review with Claude")
@@ -98,7 +116,7 @@ class WorkflowTest(unittest.TestCase):
 
     def test_evals_run_when_the_reviewer_changes(self):
         evals = read("review-evals.yml")
-        for path in ("REVIEW.md", ".github/review/prompt.md", ".github/review/findings.schema.json",
+        for path in ("REVIEW.md", ".github/review/prompt.md", ".github/review/findings.schema.json", ".github/review/*.py",
                      ".github/review/evals/**", ".github/workflows/pr-review.yml", ".github/workflows/review-evals.yml"):
             self.assertIn(f"      - {path}\n", evals)
         self.assertNotIn("write", permissions(job(evals, "replay")))
