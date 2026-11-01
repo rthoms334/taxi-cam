@@ -1802,6 +1802,10 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   // GPU completion and the pixel walk above may take longer than one interval
   // on a hosted runner. Validate capture timestamps rather than assuming this
   // replay is still immediate. A burst checks any additional captures per feed.
+  // The fixture captures at 20 Hz, and from rate 10 up the spacing is the full
+  // interval: 50 ms. A replay 50-67 ms after the last capture is due.
+  require(manager->source_rate_ == 20, "The tail replay burst no longer runs at the fixture's 20 Hz rate");
+  constexpr std::uint64_t spacing_us = 50000;
   for (unsigned replay = 0; replay < 8; ++replay) {
     if (replay == 4)
       Sleep(70);  // Also exercise a replay legitimately due after one interval.
@@ -1813,7 +1817,8 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       const auto captured = manager->last_tail_us_[feed];
       if (captured != previous[feed]) {
         ++changed;
-        require(captured > previous[feed] && captured - previous[feed] >= 66667, "Tail capture exceeded the configured 15 Hz interval");
+        require(captured > previous[feed] && captured - previous[feed] >= spacing_us,
+                "Tail capture exceeded the configured 20 Hz interval");
       }
     }
     require(manager->statistics().tail_captures == before + changed, "Tail capture counts disagree with per-feed timestamps");

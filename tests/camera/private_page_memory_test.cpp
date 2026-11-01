@@ -227,16 +227,28 @@ void proven_copy_faults() {
       std::memset(allocation.data + page, 0x39, 64);
     }
   });
+  // The page only ever holds 0x00 (fresh commit) or 0x39 (flipper fill) bytes.
+  // A copy is not atomic, like RPM: a replacement between two of its bytes
+  // legitimately mixes both lifetimes in one field, so check every byte.
+  const auto held = [](std::uint64_t value) {
+    for (unsigned byte = 0; byte < sizeof(value); ++byte)
+      if (const auto part = (value >> (8 * byte)) & 0xff; part != 0 && part != 0x39)
+        return false;
+    return true;
+  };
+  constexpr std::uint64_t untouched = 0xadadadadadadadadull;
   unsigned succeeded = 0, failed = 0;
   for (unsigned round = 0; round < 20000; ++round) {
     ScopedLocalMemoryQueryCache cache(LocalMemoryQueryMode::private_pages);
     LocalMemoryReader reader;
-    std::uint64_t first = 0, second = 0;
-    const bool ok = reader.read(allocation.address(page + 8), &first, sizeof(first)) &&
-                    reader.read(allocation.address(page + 8), &second, sizeof(second)) && cache.finish();
+    std::uint64_t first = untouched, second = untouched;
+    const bool read_first = reader.read(allocation.address(page + 8), &first, sizeof(first));
+    const bool read_second = read_first && reader.read(allocation.address(page + 8), &second, sizeof(second));
+    require((read_first || first == untouched) && (read_second || second == untouched),
+            "A failed racing direct copy published partial bytes");
+    const bool ok = read_second && cache.finish();
     if (ok) {
-      require((first == 0x3939393939393939ull || first == 0) && (second == 0x3939393939393939ull || second == 0),
-              "A racing direct copy returned bytes the page never held");
+      require(held(first) && held(second), "A racing direct copy returned bytes the page never held");
       ++succeeded;
     } else {
       ++failed;
