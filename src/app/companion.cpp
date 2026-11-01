@@ -4643,6 +4643,9 @@ void poll_updates() {
                                               L"changes.\nCancel: keep the app open."),
                                            tr(L"Unsaved settings"), MB_YESNOCANCEL | MB_ICONQUESTION);
             proceed = choice == IDNO || (choice == IDYES && apply());
+            // Discarding includes the camera adjustment window, which saves when it closes.
+            if (choice == IDNO)
+              live_view.changed = false;
             // Cancel keeps the app open, as does a save that failed, so the quit
             // with the simulator stands down.
             stay_after_simulator = stay_after_simulator || choice == IDCANCEL || (choice == IDYES && !proceed);
