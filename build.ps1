@@ -1,14 +1,22 @@
-[CmdletBinding()]
-param([switch]$Validate, [switch]$Bootstrap, [switch]$WarpOnly)
+[CmdletBinding(PositionalBinding=$false)]
+param([switch]$Validate, [switch]$Bootstrap, [switch]$WarpOnly, [switch]$Serial, [int]$Throttle = 0)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($WarpOnly -and -not $Validate) { throw '-WarpOnly requires -Validate.' }
+if ($Serial -and $Throttle) { throw 'Use -Serial or -Throttle, not both.' }
+if ($Throttle -lt 0) { throw '-Throttle must be positive.' }
+# Independent compiles and test runs use a process pool; -Serial runs one process at a time.
+# Test executables get half the slots: WARP renders on several CPU threads per process, and
+# GPU fixtures wait about one second for frames.
+$throttleLimit = if ($Serial) { 1 } elseif ($Throttle) { $Throttle } else { [Environment]::ProcessorCount }
+$runThrottle = [Math]::Max(1, [int][Math]::Floor($throttleLimit / 2))
 $taskRoot = $PSScriptRoot
 . (Join-Path $taskRoot 'ci/version.ps1')
+. (Join-Path $taskRoot 'ci/parallel.ps1')
 $buildNumber = Get-TaxiReleaseBuildNumber
 $releaseVersion = Get-TaxiVersion -Repository $taskRoot -BuildNumber $buildNumber
 $version = $releaseVersion.Version
-Write-Output "Building Taxi Cam $version (build $buildNumber; version from changelog.json)."
+Write-Output "Building Taxi Cam $version (build $buildNumber; version from changelog.json; $throttleLimit parallel compiles, $runThrottle parallel tests)."
 $deps = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'dependencies.json') | ConvertFrom-Json
 $compiler = Join-Path $taskRoot ('build/deps/' + $deps.'llvm-mingw'.directory + '/bin/clang++.exe')
 if ($Bootstrap -and -not (Test-Path -LiteralPath $compiler)) { & (Join-Path $taskRoot 'bootstrap.ps1') }
@@ -30,6 +38,9 @@ $manifest.Replace('@TAXI_CAM_VERSION@', $version) | Set-Content -LiteralPath (Jo
 $releaseVersion | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'version.json') -Encoding utf8
 $receipt = Join-Path $out 'validation.json'
 if (Test-Path -LiteralPath $receipt) { Remove-Item -LiteralPath $receipt }
+if ($Validate) {
+    & (Join-Path $taskRoot 'ci/parallel_test.ps1')
+}
 $common = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-fms-extensions','-static',
     '-DNOMINMAX','-DWIN32_LEAN_AND_MEAN','-D_WIN32_WINNT=0x0A00',
     '-mno-avx','-mno-avx2','-mno-avx512f')
@@ -53,267 +64,70 @@ $engine = @(
 )
 $libs = @('-ld3d12','-ldxgi','-ldxguid','-ld3dcompiler')
 $objects = @()
+$objectJobs = @()
 foreach ($source in @($graphics + $engine)) {
     $object = Join-Path $out (($source -replace '[/\\]','_') + '.o')
-    & $compiler @common '-c' (Join-Path $taskRoot $source) '-o' $object
-    if ($LASTEXITCODE -ne 0) { throw "Native compilation failed: $source" }
+    $objectJobs += New-TaxiJob -Name (Split-Path -Leaf $object) -File $compiler -Arguments @($common + '-c' + (Join-Path $taskRoot $source) + '-o' + $object) -Failure "Native compilation failed: $source"
     $objects += $object
 }
-if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/bridge/bridge_main.cpp')) {
-    & $compiler @common '-shared' (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') @objects @libs '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-camera-bridge.dll')
-    if ($LASTEXITCODE -ne 0) { throw 'Native bridge link failed.' }
+Invoke-TaxiJobs $objectJobs $throttleLimit
+function Add-Compile([string]$Output, [object[]]$Arguments, [string]$Failure) {
+    $script:compileJobs += New-TaxiJob -Name (Split-Path -Leaf $Output) -File $compiler -Arguments @($common + $Arguments + '-o' + $Output) -Failure $Failure
+    return $Output
 }
-if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')) {
+function Add-Run([string]$Executable, [object[]]$Arguments, [string]$Failure, [int[]]$Ok = @(0), [switch]$Timing) {
+    $job = New-TaxiJob -File $Executable -Arguments $Arguments -Failure $Failure -Ok $Ok
+    if ($Timing) { $script:timingJobs += $job } else { $script:runJobs += $job }
+    return $job
+}
+$compileJobs = @()
+$runJobs = @()
+$timingJobs = @()
+if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/bridge/bridge_main.cpp')) {
+    $compileJobs += New-TaxiJob -Name 'taxi-camera-bridge.dll' -File $compiler -Arguments @($common + '-shared' + (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') + $objects + $libs + '-Wl,--no-insert-timestamp' + '-o' + (Join-Path $out 'taxi-camera-bridge.dll')) -Failure 'Native bridge link failed.'
+}
+$companion = Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')
+$companionLibs = @('-lbcrypt','-lshell32','-lcomctl32','-lcomdlg32','-ladvapi32','-ldwmapi','-luxtheme','-lwinhttp','-lhid','-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lwindowscodecs')
+$setupSources = @($setup | ForEach-Object { Join-Path $taskRoot $_ })
+if ($companion) {
     $windres = Join-Path (Split-Path -Parent $compiler) 'llvm-windres.exe'
     $resource = Join-Path $out 'app.res.o'
     & $windres '-I' $generated '-I' (Join-Path $taskRoot 'src/app') '-i' (Join-Path $taskRoot 'src/app/app.rc') '-O' 'coff' '-o' $resource
     if ($LASTEXITCODE -ne 0) { throw 'Windows application manifest compilation failed.' }
-    $setupSources = @($setup | ForEach-Object { Join-Path $taskRoot $_ })
-    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'src/app/companion.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @setupSources $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-lwindowscodecs' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-cam.exe')
-    if ($LASTEXITCODE -ne 0) { throw 'Windows companion build failed.' }
-    $binaryVersion = (Get-Item -LiteralPath (Join-Path $out 'taxi-cam.exe')).VersionInfo
-    if ($binaryVersion.FileVersion -ne $version -or $binaryVersion.ProductVersion -ne $version -or
-        "$($binaryVersion.FileMajorPart).$($binaryVersion.FileMinorPart).$($binaryVersion.FileBuildPart)" -ne $version) {
-        throw 'Windows executable version differs from the release version.'
-    }
+    [void](Add-Compile (Join-Path $out 'taxi-cam.exe') (@('-municode','-mwindows',(Join-Path $taskRoot 'src/app/companion.cpp'),(Join-Path $taskRoot 'src/app/updater.cpp')) + $setupSources + $resource + $companionLibs + '-Wl,--no-insert-timestamp') 'Windows companion build failed.')
 }
 if ($Validate) {
-    $deviceIdentityTest = Join-Path $out 'native-device-identity-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/native_device_identity_test.cpp') @libs '-o' $deviceIdentityTest
-    if ($LASTEXITCODE -ne 0) { throw 'Native device identity compilation failed.' }
-    & $deviceIdentityTest --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP native device identity regression failed.' }
-    $lateConnect = Join-Path $out 'late-connect-rendering-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/late_connect_rendering_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $lateConnect
-    if ($LASTEXITCODE -ne 0) { throw 'Active-rendering late Connect compilation failed.' }
-    & $lateConnect --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP active-rendering late Connect failed.' }
-    if (-not $WarpOnly) {
-        & $lateConnect
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware active-rendering late Connect failed.' }
-    }
-    $iconTest = Join-Path $out 'application-icon-test.exe'
-    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/app/application_icon_test.cpp') '-lshell32' '-lgdi32' '-o' $iconTest
-    if ($LASTEXITCODE -ne 0) { throw 'Application icon validation compilation failed.' }
-    & $iconTest (Join-Path $out 'taxi-cam.exe') (Join-Path $out 'application-icon')
-    if ($LASTEXITCODE -ne 0) { throw 'Application icon validation failed.' }
-    $gpu = Join-Path $out 'native-graphics-validation.exe'
-    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/graphics/graphics_validation.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $gpu
-    if ($LASTEXITCODE -ne 0) { throw 'Native validation compilation failed.' }
-    $frameOrder = Join-Path $out 'native-frame-order-validation.exe'
-    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/graphics/frame_order_validation.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $frameOrder
-    if ($LASTEXITCODE -ne 0) { throw 'Frame-order validation compilation failed.' }
-    & $frameOrder --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP frame-order validation failed.' }
-    if (-not $WarpOnly) {
-        & $frameOrder
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware frame-order validation failed.' }
-    }
-    if (-not $WarpOnly) {
-        & $gpu
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware native graphics validation failed.' }
-        & $gpu --a350
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware A350 graphics validation failed.' }
-        & $gpu --ini-a380
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware ini A380 graphics validation failed.' }
-    } else { Write-Output 'Hardware GPU validation not run: explicit WARP-only CI mode.' }
-    & $gpu --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP native graphics validation failed.' }
-    & $gpu --warp --a350
-    if ($LASTEXITCODE -ne 0) { throw 'WARP A350 graphics validation failed.' }
-    & $gpu --warp --ini-a380
-    if ($LASTEXITCODE -ne 0) { throw 'WARP ini A380 graphics validation failed.' }
-    foreach ($queryAdapter in @('hardware', 'warp')) {
-        if ($WarpOnly -and $queryAdapter -eq 'hardware') { continue }
-        foreach ($queryProfile in @('a380', 'a350')) {
-            $queryArgs = @('--query-fallback')
-            if ($queryAdapter -eq 'warp') { $queryArgs += '--warp' }
-            if ($queryProfile -eq 'a350') { $queryArgs += '--a350' }
-            & $gpu @queryArgs
-            if ($LASTEXITCODE -ne 0) { throw "Query-aware PFD regression failed: $queryAdapter / $queryProfile" }
-        }
-    }
-    foreach ($copyAdapter in @('hardware', 'warp')) {
-        if ($WarpOnly -and $copyAdapter -eq 'hardware') { continue }
-        foreach ($copyProfile in @('a380', 'a350')) {
-            $copyArgs = @('--prefer-copy')
-            if ($copyAdapter -eq 'warp') { $copyArgs += '--warp' }
-            if ($copyProfile -eq 'a350') { $copyArgs += '--a350' }
-            & $gpu @copyArgs
-            if ($LASTEXITCODE -ne 0) { throw "PFD boundary-copy regression failed: $copyAdapter / $copyProfile" }
-        }
-    }
-    $metadataTest = Join-Path $out 'metadata-batch-bridge-test.exe'
-    $metadataObjects = @($objects | Select-Object -First $graphics.Count | Select-Object -Skip 1)
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/metadata_batch_bridge_test.cpp') @metadataObjects @libs '-o' $metadataTest
-    if ($LASTEXITCODE -ne 0) { throw 'Bridge metadata batching regression compilation failed.' }
-    & $metadataTest
-    if ($LASTEXITCODE -ne 0) { throw 'Bridge metadata batching regression failed.' }
-    $lateAttachTest = Join-Path $out 'late-attach-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/late_attach_test.cpp') @metadataObjects @libs '-o' $lateAttachTest
-    if ($LASTEXITCODE -ne 0) { throw 'Late-attach regression compilation failed.' }
-    & $lateAttachTest
-    if ($LASTEXITCODE -ne 0) { throw 'Late-attach regression failed.' }
-    $sourceObservationTest = Join-Path $out 'source-observation-test.exe'
-    & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'tests/graphics/source_observation_test.cpp') @metadataObjects @libs '-o' $sourceObservationTest
-    if ($LASTEXITCODE -ne 0) { throw 'Source observation regression compilation failed.' }
-    if (-not $WarpOnly) {
-        & $sourceObservationTest
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware source observation regression failed.' }
-    }
-    & $sourceObservationTest --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP source observation regression failed.' }
-    foreach ($grayAdapter in @('hardware', 'warp')) {
-        if ($WarpOnly -and $grayAdapter -eq 'hardware') { continue }
-        $grayArgs = @('--textured-gray')
-        if ($grayAdapter -eq 'warp') { $grayArgs += '--warp' }
-        & $gpu @grayArgs
-        if ($LASTEXITCODE -ne 0) { throw "Textured gray PFD fallback regression failed: $grayAdapter" }
-    }
-    $frameOutputTest = Join-Path $out 'scene-frame-output-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/scene_frame_output_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $frameOutputTest
-    if ($LASTEXITCODE -ne 0) { throw 'Lazy patch replay validation compilation failed.' }
-    if (-not $WarpOnly) {
-        & $frameOutputTest
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware lazy patch replay validation failed.' }
-    }
-    & $frameOutputTest --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP lazy patch replay validation failed.' }
-    $fontGpu = Join-Path $out 'gs-font-validation.exe'
-    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/graphics/gs_font_validation.cpp') @libs '-o' $fontGpu
-    if ($LASTEXITCODE -ne 0) { throw 'GS font validation compilation failed.' }
-    if (-not $WarpOnly) {
-        & $fontGpu
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware GS font validation failed.' }
-    }
-    & $fontGpu '--warp'
-    if ($LASTEXITCODE -ne 0) { throw 'WARP GS font validation failed.' }
-    $dynamicGpu = Join-Path $out 'dynamic-state-validation.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/dynamic_state_validation.cpp') (Join-Path $out 'src_graphics_pfd_stamp_state.cpp.o') (Join-Path $out 'src_graphics_pfd_stamp_d3d12.cpp.o') (Join-Path $out 'src_hooks_pfd_state_observer.cpp.o') @libs '-o' $dynamicGpu
-    if ($LASTEXITCODE -ne 0) { throw 'Dynamic graphics-state validation compilation failed.' }
-    $dynamicStateResults = @()
-    foreach ($dynamicAdapter in @('hardware', 'warp')) {
-        if ($WarpOnly -and $dynamicAdapter -eq 'hardware') { continue }
-        $dynamicArgs = @()
-        if ($dynamicAdapter -eq 'warp') { $dynamicArgs += '--warp' }
-        & $dynamicGpu @dynamicArgs
-        $dynamicExit = $LASTEXITCODE
-        if ($dynamicExit -notin @(0, 77)) { throw "Dynamic graphics-state regression failed: $dynamicAdapter" }
-        $dynamicStateResults += [ordered]@{adapter=$dynamicAdapter; result=$(if ($dynamicExit -eq 77) { 'unsupported; skipped' } else { 'passed' })}
-    }
-    $sampleGpu = Join-Path $out 'sample-positions-validation.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/sample_positions_validation.cpp') (Join-Path $out 'src_graphics_pfd_stamp_state.cpp.o') (Join-Path $out 'src_graphics_pfd_stamp_d3d12.cpp.o') (Join-Path $out 'src_hooks_pfd_state_observer.cpp.o') @libs '-o' $sampleGpu
-    if ($LASTEXITCODE -ne 0) { throw 'Sample-position validation compilation failed.' }
-    $sampleResults = @()
-    foreach ($sampleAdapter in @('hardware', 'warp')) {
-        if ($WarpOnly -and $sampleAdapter -eq 'hardware') { continue }
-        $sampleArgs = @()
-        if ($sampleAdapter -eq 'warp') { $sampleArgs += '--warp' }
-        & $sampleGpu @sampleArgs
-        $sampleExit = $LASTEXITCODE
-        if ($sampleExit -notin @(0, 77)) { throw "Sample-position graphics regression failed: $sampleAdapter" }
-        $sampleResults += [ordered]@{adapter=$sampleAdapter; result=$(if ($sampleExit -eq 77) { 'unsupported; skipped' } else { 'passed' })}
-    }
-    $encodingGpu = Join-Path $out 'stamp-encoding-validation.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/stamp_encoding_validation.cpp') (Join-Path $out 'src_graphics_pfd_stamp_state.cpp.o') (Join-Path $out 'src_graphics_pfd_stamp_d3d12.cpp.o') (Join-Path $out 'src_hooks_pfd_state_observer.cpp.o') @libs '-o' $encodingGpu
-    if ($LASTEXITCODE -ne 0) { throw 'Stamp encoding validation compilation failed.' }
-    foreach ($encodingAdapter in @('hardware', 'warp')) {
-        if ($WarpOnly -and $encodingAdapter -eq 'hardware') { continue }
-        $encodingArgs = @()
-        if ($encodingAdapter -eq 'warp') { $encodingArgs += '--warp' }
-        & $encodingGpu @encodingArgs
-        if ($LASTEXITCODE -ne 0) { throw "Stamp encoding validation failed: $encodingAdapter" }
-    }
-    $tailTest = Join-Path $out 'scene-queue-tail-test.exe'
-    & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'tests/graphics/scene_queue_tail_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $tailTest
-    if ($LASTEXITCODE -ne 0) { throw 'Live capture regression compilation failed.' }
-    & $tailTest --submission-locks
-    if ($LASTEXITCODE -ne 0) { throw 'Submission lock ordering regression failed.' }
-    foreach ($tailAdapter in @('hardware', 'warp')) {
-        if ($WarpOnly -and $tailAdapter -eq 'hardware') { continue }
-        foreach ($tailOrigin in @('transition', 'creation')) {
-            $tailArgs = @()
-            if ($tailAdapter -eq 'warp') { $tailArgs += '--warp' }
-            if ($tailOrigin -eq 'creation') { $tailArgs += '--born-render-target' }
-            & $tailTest @tailArgs
-            if ($LASTEXITCODE -ne 0) { throw "Live capture regression failed: $tailAdapter / $tailOrigin" }
-        }
-    }
-
-    $runtimeContention = Join-Path $out 'scene-runtime-contention-test.exe'
-    $runtimeContentionObjects = @($objects | Select-Object -First $graphics.Count | Where-Object { (Split-Path -Leaf $_) -ne 'src_graphics_scene_runtime.cpp.o' })
-    & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'tests/graphics/scene_runtime_contention_test.cpp') @runtimeContentionObjects @libs '-o' $runtimeContention
-    if ($LASTEXITCODE -ne 0) { throw 'Camera service contention regression compilation failed.' }
-    & $runtimeContention --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP camera service contention regression failed.' }
-    if (-not $WarpOnly) {
-        & $runtimeContention
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware camera service contention regression failed.' }
-    }
-    $queuePatchTest = Join-Path $out 'queue-patch-snapshot-test.exe'
-    & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'tests/graphics/queue_patch_snapshot_test.cpp') @runtimeContentionObjects @libs '-o' $queuePatchTest
-    if ($LASTEXITCODE -ne 0) { throw 'Queue patch snapshot compilation failed.' }
-    $splitSubmissionTest = Join-Path $out 'pfd-split-submission-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/pfd_split_submission_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $splitSubmissionTest
-    if ($LASTEXITCODE -ne 0) { throw 'Split-list display submission compilation failed.' }
-    $displayPoolTest = Join-Path $out 'pfd-submission-pool-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/graphics/pfd_submission_pool_test.cpp') (Join-Path $taskRoot 'src/graphics/pfd_submission_pool.cpp') (Join-Path $taskRoot 'src/hooks/queue_submit_observer.cpp') @libs '-o' $displayPoolTest
-    if ($LASTEXITCODE -ne 0) { throw 'Display submission pool compilation failed.' }
-    foreach ($displayAdapter in @('warp','hardware')) {
-        if ($WarpOnly -and $displayAdapter -eq 'hardware') { continue }
-        $displayArgs = @()
-        if ($displayAdapter -eq 'warp') { $displayArgs += '--warp' }
-        & $queuePatchTest @displayArgs
-        if ($LASTEXITCODE -ne 0) { throw "Queue patch snapshot failed: $displayAdapter" }
-        & $queuePatchTest @displayArgs --a350
-        if ($LASTEXITCODE -ne 0) { throw "A350 queue patch snapshot failed: $displayAdapter" }
-        foreach ($displayProfile in @('ini','fbw','fbw-three')) {
-            foreach ($displayState in @('srv','common')) {
-                foreach ($displayPlacement in @('separate','mixed-exit','first-list')) {
-                    $splitArgs = @($displayArgs)
-                    if ($displayProfile -ne 'ini') { $splitArgs += "--$displayProfile" }
-                    if ($displayState -eq 'common') { $splitArgs += '--common' }
-                    if ($displayPlacement -ne 'separate') { $splitArgs += "--$displayPlacement" }
-                    & $splitSubmissionTest @splitArgs
-                    if ($LASTEXITCODE -ne 0) { throw "Display submission failed: $displayAdapter / $displayProfile / $displayState / $displayPlacement" }
-                }
-            }
-        }
-        & $displayPoolTest @displayArgs
-        if ($LASTEXITCODE -ne 0) { throw "Display submission pool failed: $displayAdapter" }
-        & $displayPoolTest @displayArgs --common
-        if ($LASTEXITCODE -ne 0) { throw "COMMON display submission pool failed: $displayAdapter" }
-        & $displayPoolTest @displayArgs --before
-        if ($LASTEXITCODE -ne 0) { throw "Before-list display submission pool failed: $displayAdapter" }
-    }
-
-    $compositor = Join-Path $out 'compositor-validation.exe'
-    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/graphics/compositor_main.cpp') @libs '-o' $compositor
-    if ($LASTEXITCODE -ne 0) { throw 'Compositor validation compilation failed.' }
-    if (-not $WarpOnly) {
-        & $compositor
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware compositor validation failed.' }
-    }
-    & $compositor --warp
-    if ($LASTEXITCODE -ne 0) { throw 'WARP compositor validation failed.' }
-
-    if (-not $WarpOnly) {
-        & $gpu --profile-switch
-        if ($LASTEXITCODE -ne 0) { throw 'Hardware active-feed aircraft-switch validation failed.' }
-    }
-    & $gpu --warp --profile-switch
-    if ($LASTEXITCODE -ne 0) { throw 'WARP active-feed aircraft-switch validation failed.' }
-    $smoke = Join-Path $out 'native-smoke-validation.exe'
-    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/app/smoke_validation.cpp') '-ladvapi32' '-o' $smoke
-    if ($LASTEXITCODE -ne 0) { throw 'Native smoke compilation failed.' }
-    & $smoke (Join-Path $out 'taxi-camera-bridge.dll')
-    if ($LASTEXITCODE -ne 0) { throw 'Exact native DLL smoke failed.' }
-    $logTest = Join-Path $out 'rotating-log-test.exe'
-    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/app/rotating_log_test.cpp') '-o' $logTest
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime log rotation compilation failed.' }
-    & $logTest
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime log rotation regression failed.' }
-    foreach ($entry in @(
+    $graphicsObjects = @($objects | Select-Object -First $graphics.Count)
+    $metadataObjects = @($graphicsObjects | Select-Object -Skip 1)
+    $runtimeContentionObjects = @($graphicsObjects | Where-Object { (Split-Path -Leaf $_) -ne 'src_graphics_scene_runtime.cpp.o' })
+    $stampObjects = @('src_graphics_pfd_stamp_state.cpp.o','src_graphics_pfd_stamp_d3d12.cpp.o','src_hooks_pfd_state_observer.cpp.o') | ForEach-Object { Join-Path $out $_ }
+    # The two companion-sized test compiles take longest; start them with the companion link.
+    $diagnosticsTest = Add-Compile (Join-Path $out 'companion-diagnostics-test.exe') (@((Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp'), (Join-Path $taskRoot 'src/app/updater.cpp')) + $setupSources + '-lgdi32' + $companionLibs) 'Diagnostic controls compilation failed.'
+    $hotkeysTest = Add-Compile (Join-Path $out 'camera-hotkeys-test.exe') (@((Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp'), (Join-Path $taskRoot 'src/app/updater.cpp')) + $setupSources + '-lgdi32' + $companionLibs) 'Camera shortcut controls compilation failed.'
+    $deviceIdentityTest = Add-Compile (Join-Path $out 'native-device-identity-test.exe') (@((Join-Path $taskRoot 'tests/graphics/native_device_identity_test.cpp')) + $libs) 'Native device identity compilation failed.'
+    $lateConnect = Add-Compile (Join-Path $out 'late-connect-rendering-test.exe') (@((Join-Path $taskRoot 'tests/graphics/late_connect_rendering_test.cpp')) + $graphicsObjects + $libs) 'Active-rendering late Connect compilation failed.'
+    $iconTest = Add-Compile (Join-Path $out 'application-icon-test.exe') @('-municode', (Join-Path $taskRoot 'tests/app/application_icon_test.cpp'), '-lshell32', '-lgdi32') 'Application icon validation compilation failed.'
+    $gpu = Add-Compile (Join-Path $out 'native-graphics-validation.exe') (@('-municode', (Join-Path $taskRoot 'tests/graphics/graphics_validation.cpp')) + $graphicsObjects + $libs) 'Native validation compilation failed.'
+    $frameOrder = Add-Compile (Join-Path $out 'native-frame-order-validation.exe') (@('-municode', (Join-Path $taskRoot 'tests/graphics/frame_order_validation.cpp')) + $graphicsObjects + $libs) 'Frame-order validation compilation failed.'
+    $metadataTest = Add-Compile (Join-Path $out 'metadata-batch-bridge-test.exe') (@((Join-Path $taskRoot 'tests/graphics/metadata_batch_bridge_test.cpp')) + $metadataObjects + $libs) 'Bridge metadata batching regression compilation failed.'
+    $lateAttachTest = Add-Compile (Join-Path $out 'late-attach-test.exe') (@((Join-Path $taskRoot 'tests/graphics/late_attach_test.cpp')) + $metadataObjects + $libs) 'Late-attach regression compilation failed.'
+    $sourceObservationTest = Add-Compile (Join-Path $out 'source-observation-test.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/source_observation_test.cpp')) + $metadataObjects + $libs) 'Source observation regression compilation failed.'
+    $frameOutputTest = Add-Compile (Join-Path $out 'scene-frame-output-test.exe') (@((Join-Path $taskRoot 'tests/graphics/scene_frame_output_test.cpp')) + $graphicsObjects + $libs) 'Lazy patch replay validation compilation failed.'
+    $fontGpu = Add-Compile (Join-Path $out 'gs-font-validation.exe') (@('-municode', (Join-Path $taskRoot 'tests/graphics/gs_font_validation.cpp')) + $libs) 'GS font validation compilation failed.'
+    $dynamicGpu = Add-Compile (Join-Path $out 'dynamic-state-validation.exe') (@((Join-Path $taskRoot 'tests/graphics/dynamic_state_validation.cpp')) + $stampObjects + $libs) 'Dynamic graphics-state validation compilation failed.'
+    $sampleGpu = Add-Compile (Join-Path $out 'sample-positions-validation.exe') (@((Join-Path $taskRoot 'tests/graphics/sample_positions_validation.cpp')) + $stampObjects + $libs) 'Sample-position validation compilation failed.'
+    $encodingGpu = Add-Compile (Join-Path $out 'stamp-encoding-validation.exe') (@((Join-Path $taskRoot 'tests/graphics/stamp_encoding_validation.cpp')) + $stampObjects + $libs) 'Stamp encoding validation compilation failed.'
+    $tailTest = Add-Compile (Join-Path $out 'scene-queue-tail-test.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/scene_queue_tail_test.cpp')) + $graphicsObjects + $libs) 'Live capture regression compilation failed.'
+    $runtimeContention = Add-Compile (Join-Path $out 'scene-runtime-contention-test.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/scene_runtime_contention_test.cpp')) + $runtimeContentionObjects + $libs) 'Camera service contention regression compilation failed.'
+    $queuePatchTest = Add-Compile (Join-Path $out 'queue-patch-snapshot-test.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/queue_patch_snapshot_test.cpp')) + $runtimeContentionObjects + $libs) 'Queue patch snapshot compilation failed.'
+    $splitSubmissionTest = Add-Compile (Join-Path $out 'pfd-split-submission-test.exe') (@((Join-Path $taskRoot 'tests/graphics/pfd_split_submission_test.cpp')) + $graphicsObjects + $libs) 'Split-list display submission compilation failed.'
+    $displayPoolTest = Add-Compile (Join-Path $out 'pfd-submission-pool-test.exe') (@((Join-Path $taskRoot 'tests/graphics/pfd_submission_pool_test.cpp'), (Join-Path $taskRoot 'src/graphics/pfd_submission_pool.cpp'), (Join-Path $taskRoot 'src/hooks/queue_submit_observer.cpp')) + $libs) 'Display submission pool compilation failed.'
+    $compositor = Add-Compile (Join-Path $out 'compositor-validation.exe') (@('-municode', (Join-Path $taskRoot 'tests/graphics/compositor_main.cpp')) + $libs) 'Compositor validation compilation failed.'
+    $smoke = Add-Compile (Join-Path $out 'native-smoke-validation.exe') @('-municode', (Join-Path $taskRoot 'tests/app/smoke_validation.cpp'), '-ladvapi32') 'Native smoke compilation failed.'
+    $logTest = Add-Compile (Join-Path $out 'rotating-log-test.exe') @('-municode', (Join-Path $taskRoot 'tests/app/rotating_log_test.cpp')) 'Runtime log rotation compilation failed.'
+    # Wall-clock budgets, lock timing and concurrent-writer tests run one at a time after the pool.
+    $timingTests = @('crash-evidence','freeze-guards','hook-timing','lock-hold-stats','lock-holder-priority')
+    $nativeTests = @(foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
         @{Name='connection-recoverability'; Sources=@('tests/app/connection_recoverability_test.cpp')},
         @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp','src/camera/local_memory.cpp')},
@@ -374,62 +188,131 @@ if ($Validate) {
         @{Name='source-state'; Sources=@('tests/graphics/scene_source_state_test.cpp','src/graphics/scene_source_state.cpp')},
         @{Name='queue-submit'; Sources=@('tests/hooks/queue_submit_observer_test.cpp','src/hooks/queue_submit_observer.cpp')}
     )) {
-        $exe = Join-Path $out ($entry.Name + '-test.exe')
         $sources = @($entry.Sources | ForEach-Object { Join-Path $taskRoot $_ })
         $testLibs = @(if ($entry.ContainsKey('Libs')) { $entry.Libs })
-        & $compiler @common @sources @libs '-ladvapi32' @testLibs '-o' $exe
-        if ($LASTEXITCODE -ne 0) { throw "Native test compilation failed: $($entry.Name)" }
-        $testArgs = @(if ($entry.ContainsKey('Args')) { $entry.Args })
-        & $exe @testArgs
-        if ($LASTEXITCODE -ne 0) { throw "Native test failed: $($entry.Name)" }
-        if ($entry.Name -eq 'queue-submit') {
-            & $exe augment
-            if ($LASTEXITCODE -ne 0) { throw 'Queue submission augmentation failed.' }
+        $entry.Exe = Add-Compile (Join-Path $out ($entry.Name + '-test.exe')) ($sources + $libs + '-ladvapi32' + $testLibs) "Native test compilation failed: $($entry.Name)"
+        $entry
+    })
+    $buttonsTest = Add-Compile (Join-Path $out 'camera-buttons-test.exe') @((Join-Path $taskRoot 'tests/app/camera_buttons_test.cpp'), '-lhid') 'Controller button bindings compilation failed.'
+    $setupLibs = @('-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lbcrypt')
+    $startupXmlTest = Add-Compile (Join-Path $out 'startup-xml-test.exe') (@((Join-Path $taskRoot 'tests/setup/startup_xml_test.cpp'), (Join-Path $taskRoot 'src/setup/startup_xml.cpp'), (Join-Path $taskRoot 'src/setup/setup_common.cpp')) + $setupLibs) 'Startup XML test compilation failed.'
+    $prerequisitesTest = Add-Compile (Join-Path $out 'prerequisites-test.exe') (@((Join-Path $taskRoot 'tests/setup/prerequisites_test.cpp'), (Join-Path $taskRoot 'src/setup/prerequisites.cpp'), (Join-Path $taskRoot 'src/setup/setup_common.cpp')) + $setupLibs) 'Prerequisite test compilation failed.'
+    $setupHost = Add-Compile (Join-Path $out 'setup-host-test.exe') (@('-municode', '-DTAXI_SETUP_TEST', (Join-Path $taskRoot 'tests/setup/setup_host.cpp')) + $setupSources + $setupLibs) 'Setup command test host compilation failed.'
+    $updaterTest = Add-Compile (Join-Path $out 'updater-test.exe') @((Join-Path $taskRoot 'tests/app/updater_test.cpp'), (Join-Path $taskRoot 'src/app/updater.cpp'), '-lbcrypt', '-lshell32', '-lwinhttp') 'Updater test compilation failed.'
+    $observerTest = Add-Compile (Join-Path $out 'pfd-state-observer-test.exe') @('-DTAXI_PFD_STATE_OBSERVER_VALIDATION', (Join-Path $taskRoot 'tests/hooks/pfd_state_observer_test.cpp'), (Join-Path $taskRoot 'src/hooks/pfd_state_observer.cpp')) 'PFD state observer test compilation failed.'
+}
+Invoke-TaxiJobs $compileJobs $throttleLimit
+if ($companion) {
+    $binaryVersion = (Get-Item -LiteralPath (Join-Path $out 'taxi-cam.exe')).VersionInfo
+    if ($binaryVersion.FileVersion -ne $version -or $binaryVersion.ProductVersion -ne $version -or
+        "$($binaryVersion.FileMajorPart).$($binaryVersion.FileMinorPart).$($binaryVersion.FileBuildPart)" -ne $version) {
+        throw 'Windows executable version differs from the release version.'
+    }
+}
+if ($Validate) {
+    $adapters = @(if (-not $WarpOnly) { 'hardware' }) + 'warp'
+    # Always wrap calls in @(): a one-element result is returned as a bare string, and string + array concatenates text.
+    function Get-AdapterArgs([string]$Adapter) { if ($Adapter -eq 'warp') { @('--warp') } else { @() } }
+    [void](Add-Run $deviceIdentityTest @('--warp') 'WARP native device identity regression failed.')
+    [void](Add-Run $lateConnect @('--warp') 'WARP active-rendering late Connect failed.' -Timing)
+    if (-not $WarpOnly) { [void](Add-Run $lateConnect @() 'Hardware active-rendering late Connect failed.' -Timing) }
+    [void](Add-Run $iconTest @((Join-Path $out 'taxi-cam.exe'), (Join-Path $out 'application-icon')) 'Application icon validation failed.')
+    [void](Add-Run $frameOrder @('--warp') 'WARP frame-order validation failed.')
+    if (-not $WarpOnly) { [void](Add-Run $frameOrder @() 'Hardware frame-order validation failed.') }
+    if (-not $WarpOnly) {
+        [void](Add-Run $gpu @() 'Hardware native graphics validation failed.')
+        [void](Add-Run $gpu @('--a350') 'Hardware A350 graphics validation failed.')
+        [void](Add-Run $gpu @('--ini-a380') 'Hardware ini A380 graphics validation failed.')
+    } else { Write-Output 'Hardware GPU validation not run: explicit WARP-only CI mode.' }
+    [void](Add-Run $gpu @('--warp') 'WARP native graphics validation failed.')
+    [void](Add-Run $gpu @('--warp', '--a350') 'WARP A350 graphics validation failed.')
+    [void](Add-Run $gpu @('--warp', '--ini-a380') 'WARP ini A380 graphics validation failed.')
+    foreach ($queryAdapter in $adapters) {
+        foreach ($queryProfile in @('a380', 'a350')) {
+            $queryArgs = @('--query-fallback') + @(Get-AdapterArgs $queryAdapter) + @(if ($queryProfile -eq 'a350') { '--a350' })
+            [void](Add-Run $gpu $queryArgs "Query-aware PFD regression failed: $queryAdapter / $queryProfile")
         }
     }
-    $diagnosticsTest = Join-Path $out 'companion-diagnostics-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @($setup | ForEach-Object { Join-Path $taskRoot $_ }) '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-lwindowscodecs' '-o' $diagnosticsTest
-    if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls compilation failed.' }
-    & $diagnosticsTest
-    if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls validation failed.' }
-    $hotkeysTest = Join-Path $out 'camera-hotkeys-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') @($setup | ForEach-Object { Join-Path $taskRoot $_ }) '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-lwinhttp' '-lhid' '-lole32' '-loleaut32' '-lshlwapi' '-lmsxml6' '-lwindowscodecs' '-o' $hotkeysTest
-    if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls compilation failed.' }
-    & $hotkeysTest
-    if ($LASTEXITCODE -ne 0) { throw 'Camera shortcut controls validation failed.' }
-    $buttonsTest = Join-Path $out 'camera-buttons-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/camera_buttons_test.cpp') '-lhid' '-o' $buttonsTest
-    if ($LASTEXITCODE -ne 0) { throw 'Controller button bindings compilation failed.' }
-    & $buttonsTest
-    if ($LASTEXITCODE -ne 0) { throw 'Controller button bindings validation failed.' }
-    $setupLibs = @('-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lbcrypt')
-    $startupXmlTest = Join-Path $out 'startup-xml-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/setup/startup_xml_test.cpp') (Join-Path $taskRoot 'src/setup/startup_xml.cpp') (Join-Path $taskRoot 'src/setup/setup_common.cpp') @setupLibs '-o' $startupXmlTest
-    if ($LASTEXITCODE -ne 0) { throw 'Startup XML test compilation failed.' }
-    & $startupXmlTest
-    if ($LASTEXITCODE -ne 0) { throw 'Startup XML tests failed.' }
-    $prerequisitesTest = Join-Path $out 'prerequisites-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/setup/prerequisites_test.cpp') (Join-Path $taskRoot 'src/setup/prerequisites.cpp') (Join-Path $taskRoot 'src/setup/setup_common.cpp') @setupLibs '-o' $prerequisitesTest
-    if ($LASTEXITCODE -ne 0) { throw 'Prerequisite test compilation failed.' }
-    & $prerequisitesTest
-    if ($LASTEXITCODE -ne 0) { throw 'Prerequisite tests failed.' }
-    $setupHost = Join-Path $out 'setup-host-test.exe'
-    $setupSources = @($setup | ForEach-Object { Join-Path $taskRoot $_ })
-    & $compiler @common '-municode' '-DTAXI_SETUP_TEST' (Join-Path $taskRoot 'tests/setup/setup_host.cpp') @setupSources @setupLibs '-o' $setupHost
-    if ($LASTEXITCODE -ne 0) { throw 'Setup command test host compilation failed.' }
+    foreach ($copyAdapter in $adapters) {
+        foreach ($copyProfile in @('a380', 'a350')) {
+            $copyArgs = @('--prefer-copy') + @(Get-AdapterArgs $copyAdapter) + @(if ($copyProfile -eq 'a350') { '--a350' })
+            [void](Add-Run $gpu $copyArgs "PFD boundary-copy regression failed: $copyAdapter / $copyProfile")
+        }
+    }
+    [void](Add-Run $metadataTest @() 'Bridge metadata batching regression failed.')
+    [void](Add-Run $lateAttachTest @() 'Late-attach regression failed.')
+    if (-not $WarpOnly) { [void](Add-Run $sourceObservationTest @() 'Hardware source observation regression failed.') }
+    [void](Add-Run $sourceObservationTest @('--warp') 'WARP source observation regression failed.')
+    foreach ($grayAdapter in $adapters) {
+        [void](Add-Run $gpu (@('--textured-gray') + @(Get-AdapterArgs $grayAdapter)) "Textured gray PFD fallback regression failed: $grayAdapter")
+    }
+    if (-not $WarpOnly) { [void](Add-Run $frameOutputTest @() 'Hardware lazy patch replay validation failed.') }
+    [void](Add-Run $frameOutputTest @('--warp') 'WARP lazy patch replay validation failed.')
+    if (-not $WarpOnly) { [void](Add-Run $fontGpu @() 'Hardware GS font validation failed.') }
+    [void](Add-Run $fontGpu @('--warp') 'WARP GS font validation failed.')
+    $dynamicStateJobs = [ordered]@{}
+    $sampleJobs = [ordered]@{}
+    foreach ($adapter in $adapters) {
+        $dynamicStateJobs[$adapter] = Add-Run $dynamicGpu @(Get-AdapterArgs $adapter) "Dynamic graphics-state regression failed: $adapter" -Ok @(0, 77)
+        $sampleJobs[$adapter] = Add-Run $sampleGpu @(Get-AdapterArgs $adapter) "Sample-position graphics regression failed: $adapter" -Ok @(0, 77)
+        [void](Add-Run $encodingGpu @(Get-AdapterArgs $adapter) "Stamp encoding validation failed: $adapter")
+    }
+    [void](Add-Run $tailTest @('--submission-locks') 'Submission lock ordering regression failed.' -Timing)
+    foreach ($tailAdapter in $adapters) {
+        foreach ($tailOrigin in @('transition', 'creation')) {
+            $tailArgs = @(Get-AdapterArgs $tailAdapter) + @(if ($tailOrigin -eq 'creation') { '--born-render-target' })
+            [void](Add-Run $tailTest $tailArgs "Live capture regression failed: $tailAdapter / $tailOrigin" -Timing)
+        }
+    }
+    [void](Add-Run $runtimeContention @('--warp') 'WARP camera service contention regression failed.' -Timing)
+    if (-not $WarpOnly) { [void](Add-Run $runtimeContention @() 'Hardware camera service contention regression failed.' -Timing) }
+    foreach ($displayAdapter in @('warp','hardware')) {
+        if ($WarpOnly -and $displayAdapter -eq 'hardware') { continue }
+        $displayArgs = @(Get-AdapterArgs $displayAdapter)
+        [void](Add-Run $queuePatchTest $displayArgs "Queue patch snapshot failed: $displayAdapter" -Timing)
+        [void](Add-Run $queuePatchTest ($displayArgs + '--a350') "A350 queue patch snapshot failed: $displayAdapter" -Timing)
+        foreach ($displayProfile in @('ini','fbw','fbw-three')) {
+            foreach ($displayState in @('srv','common')) {
+                foreach ($displayPlacement in @('separate','mixed-exit','first-list')) {
+                    $splitArgs = $displayArgs + @(if ($displayProfile -ne 'ini') { "--$displayProfile" }) +
+                        @(if ($displayState -eq 'common') { '--common' }) + @(if ($displayPlacement -ne 'separate') { "--$displayPlacement" })
+                    [void](Add-Run $splitSubmissionTest $splitArgs "Display submission failed: $displayAdapter / $displayProfile / $displayState / $displayPlacement")
+                }
+            }
+        }
+        [void](Add-Run $displayPoolTest $displayArgs "Display submission pool failed: $displayAdapter")
+        [void](Add-Run $displayPoolTest ($displayArgs + '--common') "COMMON display submission pool failed: $displayAdapter")
+        [void](Add-Run $displayPoolTest ($displayArgs + '--before') "Before-list display submission pool failed: $displayAdapter")
+    }
+    if (-not $WarpOnly) { [void](Add-Run $compositor @() 'Hardware compositor validation failed.') }
+    [void](Add-Run $compositor @('--warp') 'WARP compositor validation failed.')
+    if (-not $WarpOnly) { [void](Add-Run $gpu @('--profile-switch') 'Hardware active-feed aircraft-switch validation failed.') }
+    [void](Add-Run $gpu @('--warp', '--profile-switch') 'WARP active-feed aircraft-switch validation failed.')
+    [void](Add-Run $smoke @((Join-Path $out 'taxi-camera-bridge.dll')) 'Exact native DLL smoke failed.')
+    [void](Add-Run $logTest @() 'Runtime log rotation regression failed.' -Timing)
+    foreach ($entry in $nativeTests) {
+        $testArgs = @(if ($entry.ContainsKey('Args')) { $entry.Args })
+        [void](Add-Run $entry.Exe $testArgs "Native test failed: $($entry.Name)" -Timing:($timingTests -contains $entry.Name))
+        if ($entry.Name -eq 'queue-submit') { [void](Add-Run $entry.Exe @('augment') 'Queue submission augmentation failed.') }
+    }
+    [void](Add-Run $diagnosticsTest @() 'Diagnostic controls validation failed.')
+    [void](Add-Run $hotkeysTest @() 'Camera shortcut controls validation failed.')
+    [void](Add-Run $buttonsTest @() 'Controller button bindings validation failed.')
+    [void](Add-Run $startupXmlTest @() 'Startup XML tests failed.')
+    [void](Add-Run $prerequisitesTest @() 'Prerequisite tests failed.')
+    [void](Add-Run $updaterTest @() 'Updater tests failed.')
+    [void](Add-Run $observerTest @() 'PFD state observer lifecycle tests failed.')
+    [void](Add-Run $observerTest @('--optional') 'PFD state observer optional callback tests failed.')
+    Invoke-TaxiJobs $runJobs $runThrottle
+    Invoke-TaxiJobs $timingJobs 1
+    $dynamicStateResults = @(foreach ($adapter in $dynamicStateJobs.Keys) {
+        [ordered]@{adapter=$adapter; result=$(if ($dynamicStateJobs[$adapter].ExitCode -eq 77) { 'unsupported; skipped' } else { 'passed' })}
+    })
+    $sampleResults = @(foreach ($adapter in $sampleJobs.Keys) {
+        [ordered]@{adapter=$adapter; result=$(if ($sampleJobs[$adapter].ExitCode -eq 77) { 'unsupported; skipped' } else { 'passed' })}
+    })
+    # These scripts change process-wide state or depend on each other, so they keep their order.
     & (Join-Path $taskRoot 'tests/installer/setup_commands_test.ps1') -SetupHost $setupHost
-    $updaterTest = Join-Path $out 'updater-test.exe'
-    & $compiler @common (Join-Path $taskRoot 'tests/app/updater_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lbcrypt' '-lshell32' '-lwinhttp' '-o' $updaterTest
-    if ($LASTEXITCODE -ne 0) { throw 'Updater test compilation failed.' }
-    & $updaterTest
-    if ($LASTEXITCODE -ne 0) { throw 'Updater tests failed.' }
-    $observerTest = Join-Path $out 'pfd-state-observer-test.exe'
-    & $compiler @common '-DTAXI_PFD_STATE_OBSERVER_VALIDATION' (Join-Path $taskRoot 'tests/hooks/pfd_state_observer_test.cpp') (Join-Path $taskRoot 'src/hooks/pfd_state_observer.cpp') '-o' $observerTest
-    if ($LASTEXITCODE -ne 0) { throw 'PFD state observer test compilation failed.' }
-    & $observerTest
-    if ($LASTEXITCODE -ne 0) { throw 'PFD state observer lifecycle tests failed.' }
-    & $observerTest --optional
-    if ($LASTEXITCODE -ne 0) { throw 'PFD state observer optional callback tests failed.' }
     & (Join-Path $taskRoot 'tests/hooks/render_boundary_test.ps1') -Compiler $compiler
     & (Join-Path $taskRoot 'tests/hooks/test.ps1')
     & (Join-Path $taskRoot 'tests/camera/test.ps1')
