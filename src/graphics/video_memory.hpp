@@ -37,6 +37,7 @@ class VideoMemoryProbe {
       return false;
     reset();
     attempted_ = true;
+    ++attempts_;
     luid_ = luid;
     IDXGIFactory4* factory{};
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
@@ -58,6 +59,9 @@ class VideoMemoryProbe {
     DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonlocal{};
     if (FAILED(adapter_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) ||
         FAILED(adapter_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal))) {
+      // Drop the adapter so the next open() tries again (device removal,
+      // driver restart); the record reports the failure, not stale figures.
+      reset();
       error_ = "query_failed";
       return out;
     }
@@ -66,6 +70,7 @@ class VideoMemoryProbe {
   }
 
   bool ready() const noexcept { return adapter_ != nullptr; }
+  unsigned attempts() const noexcept { return attempts_; }  // Adapter opens tried.
   const char* error() const noexcept { return error_; }
 
  private:
@@ -83,16 +88,19 @@ class VideoMemoryProbe {
   IDXGIAdapter3* adapter_ = nullptr;
   LUID luid_{};
   bool attempted_ = false;
+  unsigned attempts_ = 0;
   const char* error_ = "not_opened";
 };
 
-// Latest sample plus the peaks since the last log record.
+// Latest sample plus the peaks since the last log record. An invalid sample
+// (probe not open, query failed) makes the record report unavailable rather
+// than repeat the last good figures as current.
 class VideoMemoryRecord {
  public:
   void add(const VideoMemorySample& sample) noexcept {
+    latest_ = sample;
     if (!sample.valid)
       return;
-    latest_ = sample;
     peak_local_ = std::max(peak_local_, sample.local_usage);
     peak_nonlocal_ = std::max(peak_nonlocal_, sample.nonlocal_usage);
   }

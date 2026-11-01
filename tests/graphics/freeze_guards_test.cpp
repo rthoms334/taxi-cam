@@ -389,6 +389,46 @@ void watchdog_hold() {
     require(resumed.recover && !resumed.hold, "Spaced trips held the gate");
   }
 }
+
+// PR 149 review: only a known OFF releases a hold. Readiness is not an input,
+// and a stale button reading (the intent reports 0 after its 2 s grace, as in
+// a stall, pause or menu) is not an OFF.
+void hold_release() {
+  using taxi_camera::stall_hold_known_off;
+  // connected, enabled, scene_test, requested_mask, uses_buttons, buttons_valid
+  require(!stall_hold_known_off(true, true, false, 1, true, true), "Requested cameras read as OFF");
+  require(!stall_hold_known_off(true, true, false, 0, true, false), "Stale TAXI buttons read as OFF");
+  require(stall_hold_known_off(true, true, false, 0, true, true), "Fresh TAXI OFF not a known OFF");
+  require(stall_hold_known_off(true, true, false, 0, false, false), "Manual mask OFF needs no button reading");
+  require(!stall_hold_known_off(true, true, true, 0, true, true), "Scene test read as OFF");
+  require(stall_hold_known_off(false, true, false, 1, true, false) && stall_hold_known_off(true, false, false, 1, true, true),
+          "Disconnect or disabled not a known OFF");
+  taxi_camera::StallHoldRelease release;
+  require(!release.observe(false, true), "Released without a hold");
+  require(!release.observe(true, false), "Released while cameras stay requested");
+  require(release.observe(true, true), "Known OFF did not release the hold");
+  require(!release.observe(true, true), "Release requested twice for one hold");
+  require(!release.observe(false, true), "Released after the hold cleared");
+  require(release.observe(true, true), "Next hold could not be released");
+  // End to end: the watchdog holds, a stall-length stale reading does not
+  // release it, a fresh OFF does.
+  taxi_camera::FreezeWatchdog dog;
+  taxi_camera::StallHoldRelease worker;
+  std::uint64_t now = 500000, pulse = 10, frames = 10;
+  for (unsigned trip = 0; trip < taxi_camera::FreezeWatchdog::HoldTrips; ++trip) {
+    for (unsigned i = 0; i < 2; ++i)
+      dog.observe(sample(now += 250, ++pulse, ++frames));
+    for (unsigned i = 0; i < 14; ++i)
+      dog.observe(sample(now += 250, pulse, frames));
+    for (unsigned i = 0; i < 24; ++i)
+      dog.observe(sample(now += 250, ++pulse, ++frames));
+  }
+  require(dog.held(), "End-to-end hold not reached");
+  for (unsigned i = 0; i < 40; ++i)
+    require(!worker.observe(dog.held(), stall_hold_known_off(true, true, false, 0, true, false)), "Stale buttons released the hold");
+  require(worker.observe(dog.held(), stall_hold_known_off(true, true, false, 0, true, true)) && dog.release().recover && !dog.held(),
+          "Fresh OFF did not release the held gate");
+}
 }  // namespace
 
 int main() {
@@ -397,6 +437,7 @@ int main() {
     deferred_ring();
     watchdog();
     watchdog_hold();
+    hold_release();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "freeze guards: %s\n", error.what());
     return 1;

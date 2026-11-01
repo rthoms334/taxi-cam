@@ -37,8 +37,8 @@ std::atomic<std::uint64_t> worker_heartbeat_ms{};
 std::atomic<bool> bridge_connected{};
 std::atomic<unsigned> watchdog_trips{};
 std::atomic<std::uint64_t> watchdog_last_stall_ms{};
-// Repeated-stall hold: the watchdog publishes it; the worker counts fresh
-// camera requests while it is set and the watchdog releases on a new count.
+// Repeated-stall hold: the watchdog publishes it; the worker requests a
+// release on a known OFF and the watchdog releases on a new count.
 std::atomic<bool> watchdog_held{};
 std::atomic<unsigned> watchdog_release_requests{};
 // Cameras requested before the watchdog gate. Only trips while they are
@@ -1062,7 +1062,13 @@ DWORD run_impl() {
   std::uint64_t applied_connection{}, pending_connection{};
   win::Status last_logged{};
   bool logged = false, last_connected = false, last_requested = false, last_degraded = false, halted_logged = false;
-  bool last_wanted = false;
+  StallHoldRelease hold_release;
+  const auto request_hold_release = [&](bool known_off, const win::Status& at) {
+    if (!hold_release.observe(watchdog_held.load(std::memory_order_acquire), known_off))
+      return;
+    watchdog_release_requests.fetch_add(1, std::memory_order_acq_rel);
+    log_status(at, "Presentation watchdog: cameras turned off; releasing the repeated-stall hold.");
+  };
   VideoMemoryProbe video_probe;
   VideoMemoryRecord video_record;
   std::uint64_t next_video_sample{};
@@ -1148,14 +1154,13 @@ DWORD run_impl() {
     // watchdog's trip line reads the latest values from atomics.
     if (now >= next_video_sample && win::graphics_ready()) {
       next_video_sample = now + 1000;
-      if (video_probe.open(win::graphics_adapter_luid())) {
-        video_record.add(video_probe.sample());
-        const auto& latest = video_record.latest();
-        constexpr std::uint64_t MiB = 1024 * 1024;
-        video_local_mb.store(latest.local_usage / MiB, std::memory_order_relaxed);
-        video_local_budget_mb.store(latest.local_budget / MiB, std::memory_order_relaxed);
-        video_nonlocal_mb.store(latest.nonlocal_usage / MiB, std::memory_order_relaxed);
-      }
+      // A failed open or query records an invalid sample: zeros, reason logged.
+      video_record.add(video_probe.open(win::graphics_adapter_luid()) ? video_probe.sample() : VideoMemorySample{});
+      const auto& latest = video_record.latest();
+      constexpr std::uint64_t MiB = 1024 * 1024;
+      video_local_mb.store(latest.local_usage / MiB, std::memory_order_relaxed);
+      video_local_budget_mb.store(latest.local_budget / MiB, std::memory_order_relaxed);
+      video_nonlocal_mb.store(latest.nonlocal_usage / MiB, std::memory_order_relaxed);
     }
     const auto log_video_memory = [&](const win::Status& at) {
       char detail[256];
@@ -1484,10 +1489,10 @@ DWORD run_impl() {
         sim_inputs.degraded = degraded;
         sim_inputs.simulator_unsupported = transition.profile_transition_failed;
         announce_all(sim_inputs, now);
-        // Nothing is requested while the aircraft changes; a request after
-        // the transition counts as fresh for a repeated-stall hold.
-        last_wanted = false;
+        // Nothing is requested while the aircraft changes: no trip counts,
+        // and a repeated-stall hold from the previous aircraft is released.
         cameras_wanted.store(false, std::memory_order_release);
+        request_hold_release(true, status);
         Sleep(25);
         continue;
       }
@@ -1552,26 +1557,27 @@ DWORD run_impl() {
     const auto buttons = native_camera::get_taxi_buttons();
     const auto desired = intent.observe(now, buttons.valid, buttons.mask());
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
-    // What the pilot asks for, before the watchdog gate.
+    // The pilot's own request, before readiness and the watchdog gate.
+    const bool uses_buttons = settings.follow_taxi && (pmdg_dsp || !manual_only);
+    const unsigned requested_mask = (pmdg_dsp ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
+                                     : settings.follow_taxi && !manual_only ? desired.buttons
+                                                                            : settings.manual_mask) &
+                                    sides;
+    // What is requested and ready, before the watchdog gate.
     const unsigned wanted = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready()
-                                ? (pmdg_dsp ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
-                                   : settings.follow_taxi && !manual_only ? desired.buttons
-                                                                          : settings.manual_mask) &
-                                      sides
+                                ? requested_mask
                                 : 0;
     const unsigned mask = degraded ? 0u : wanted;
     const bool wanted_test_scene =
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test;
     const bool test_scene = wanted_test_scene && !degraded;
-    // After a repeated-stall hold, turning the cameras off and on again is the
-    // pilot's explicit retry; the watchdog thread re-arms on the new count.
-    const bool any_wanted = wanted || wanted_test_scene;
-    if (any_wanted && !last_wanted && watchdog_held.load(std::memory_order_acquire)) {
-      watchdog_release_requests.fetch_add(1, std::memory_order_acq_rel);
-      log_status(status, "Presentation watchdog: retry requested after a repeated-stall hold.");
-    }
-    last_wanted = any_wanted;
-    cameras_wanted.store(any_wanted, std::memory_order_release);
+    // Trips count toward a repeated-stall hold only while cameras are wanted;
+    // the hold lasts until the pilot turns them off (a known OFF, never a
+    // readiness lapse or a stale button reading).
+    cameras_wanted.store(wanted || wanted_test_scene, std::memory_order_release);
+    request_hold_release(
+        stall_hold_known_off(connected, settings.enabled != 0, settings.scene_test != 0, requested_mask, uses_buttons, buttons.valid),
+        status);
     const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene && !prewarm.active())
       failed = false;

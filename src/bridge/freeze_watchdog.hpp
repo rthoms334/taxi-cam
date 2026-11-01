@@ -19,9 +19,10 @@ namespace taxi_camera {
 // they stay requested (issue 97: one trip about every 8 s on an A350, every
 // 22-74 s on a PMDG 777). Only trips while cameras are requested count. After
 // HoldTrips of them within HoldWindowMs, resumed frames hold the gate closed
-// instead of re-arming while cameras are still requested, until the host calls
-// release() for a fresh request. Trips with nothing requested (flight loading)
-// neither count nor hold.
+// instead of re-arming while cameras are still requested. The hold lasts while
+// the pilot keeps them requested: the host calls release() on a known OFF (see
+// StallHoldRelease). Trips with nothing requested (flight loading) neither
+// count nor hold.
 class FreezeWatchdog {
  public:
   static constexpr std::uint64_t StallMs = 3000;
@@ -139,9 +140,10 @@ class FreezeWatchdog {
     return decision;
   }
 
-  // A fresh pilot request after a hold. Frames have already run for the
-  // recovery window, so the gate re-arms at once. Trip history is kept: one
-  // more stall inside the window holds again after that stall's recovery.
+  // The pilot turned the cameras off after a hold. Frames have already run
+  // for the recovery window, so the gate re-arms at once; the cameras stay off
+  // until requested again. Trip history is kept: one more stall inside the
+  // window holds again after that stall's recovery.
   Decision release() noexcept {
     Decision decision;
     if (!held_)
@@ -175,6 +177,41 @@ class FreezeWatchdog {
   bool wanted_at_progress_ = false;
   bool telemetry_noted_ = false;
   bool presentation_noted_ = false;
+};
+
+// The pilot's own camera request, independent of flight readiness, aircraft
+// match and the graphics gate. Only a known OFF releases a repeated-stall
+// hold: Disconnect, Taxi Cam disabled, an aircraft change (the host passes
+// connected=false), or nothing requested with a fresh reading of the buttons
+// that request depends on. A missing or stale button reading is not an OFF:
+// the TAXI-button intent reports 0 once a gap outlasts its grace, which a
+// pause, a menu or another stall would otherwise turn into a release.
+constexpr bool stall_hold_known_off(bool connected,
+                                    bool enabled,
+                                    bool scene_test,
+                                    unsigned requested_mask,
+                                    bool uses_buttons,
+                                    bool buttons_valid) noexcept {
+  return !connected || !enabled || (!scene_test && !requested_mask && (!uses_buttons || buttons_valid));
+}
+
+// Worker side of the hold: one release request per hold, on a known OFF.
+// The watchdog thread applies it and clears the hold.
+class StallHoldRelease {
+ public:
+  bool observe(bool held, bool known_off) noexcept {
+    if (!held) {
+      requested_ = false;
+      return false;
+    }
+    if (!known_off || requested_)
+      return false;
+    requested_ = true;
+    return true;
+  }
+
+ private:
+  bool requested_ = false;
 };
 
 }  // namespace taxi_camera
