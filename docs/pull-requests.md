@@ -91,13 +91,21 @@ The repository owner does these steps in GitHub's settings. They are not stored 
 
    Until an environment exists with a required reviewer, the gate refuses the tiers that need it rather than letting the approval pass with no one.
 3. **Branch ruleset for `main`.** Under **Settings → Rules → Rulesets**:
-   - Require a pull request before merging.
+   - Require a pull request before merging, with **Required approvals** set to 0 and **Require review from Code Owners** off. GitHub does not let you approve your own pull request, so any required review blocks every merge, auto-merge included. Your approval is the environment review in the risk gate.
    - Require status checks: **PR test build**, **AI review** and **Risk gate**, each with **GitHub Actions** as its source so that no other app can set it. Do not require **Owner approval** or **Live check**: a job skipped by its condition reports success, so those would pass on low-risk changes. **Risk gate** is the check that enforces them.
    - GitHub lists a check here only after it has run in the repository. **AI review** appears after its first run on any pull request. **Risk gate** runs from `main`, so it appears only after this workflow is merged and a later pull request has run it. Add it then: requiring it earlier blocks the pull request that adds it, because the gate cannot run there.
    - Require branches to be up to date before merging. GitHub's merge queue is only available to organization-owned repositories, so this setting is what makes the checks run again on the latest `main`.
    - Require conversation resolution before merging.
    - Block force pushes, and leave the bypass list empty. A bypass skips every gate above.
 4. **Other review bots (optional).** A review bot such as Codex can keep running alongside as a second opinion. Its threads also need resolving under the conversation-resolution rule.
+
+## Merging
+
+The session that opens a pull request turns on auto-merge (`gh pr merge <number> --auto --merge`) straight away, as [AGENTS.md](../AGENTS.md) asks, unless the pull request changes anything under `.github/`. GitHub then merges it as soon as the required checks pass and every thread is resolved; for medium and high risk, that includes your approvals in the risk gate.
+
+A pull request that changes `.github/` can add a workflow that fakes the **Risk gate** check (see [the unmitigated limit](#approving)). Auto-merge would merge it before you could check the real gate run, so you merge those yourself. GitHub keeps auto-merge on across later pushes, so whoever pushes a commit that touches `.github/` to a pull request with auto-merge on (you or any session) turns it off first with `gh pr merge <number> --disable-auto`, then pushes. Turning it off after the push races the faked checks and can lose.
+
+An auto-merge counts as yours, so the push to `main` starts the [release workflow](releases.md). No workflow turns auto-merge on: a merge made with the Actions token starts no other workflows, so `main` would get no release candidate.
 
 ## After merge
 
