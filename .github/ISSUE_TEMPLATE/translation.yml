@@ -35,7 +35,7 @@ body:
     id: english
     attributes:
       label: English text
-      description: Copy the English wording if you know it. To see it, choose **English** from the language list in the tray menu, then switch back. Otherwise, say which page, button or message it is.
+      description: Copy the English wording if you know it. For Taxi Cam text, choose **English** from the language list in the tray menu to see it, then switch back. Setup follows the Windows display language, so for Setup text, or if you are unsure, say which page, button or message it is.
     validations:
       required: true
 
