@@ -35,6 +35,15 @@ $jobs = @((New-ExitJob 'left' 4), (New-ExitJob 'right' 5))
 $message = $null
 try { $output = @(Invoke-TaxiJobs $jobs 2) } catch { $message = $_.Exception.Message }
 Assert-That ($message -match 'left failed\.' -and $message -match 'right failed\.') "Concurrent failures were not all reported: [$message]."
+# Jobs start in PowerShell's location, not the process directory that Set-Location leaves unchanged.
+$location = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+Push-Location $location
+try {
+    $job = New-TaxiJob -Name 'location' -File $cmd -Arguments @('/d', '/c', 'cd') -Failure 'location failed.'
+    $output = @(Invoke-TaxiJobs @($job) 1)
+} finally { Pop-Location }
+Assert-That ([Environment]::CurrentDirectory.TrimEnd('\') -ne $location) 'The process directory already matched the test location.'
+Assert-That (($output -join '').Trim() -eq $location) "Job started in [$($output -join '')], expected [$location]."
 # A missing executable is a job failure, not a crash of the pool.
 $message = $null
 try { Invoke-TaxiJobs @(New-TaxiJob -Name 'missing' -File (Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N') + '.exe')) -Failure 'missing failed.') 1 | Out-Null } catch { $message = $_.Exception.Message }
@@ -42,4 +51,4 @@ Assert-That ($message -like 'missing failed.*') "Missing executable was reported
 $message = $null
 try { Invoke-TaxiJobs @() 0 } catch { $message = $_.Exception.Message }
 Assert-That ($null -ne $message) 'A zero throttle was accepted.'
-Write-Output "PASS parallel job runner: $checks quoting, exit-code, output, fail-fast and missing-executable checks."
+Write-Output "PASS parallel job runner: $checks quoting, exit-code, output, fail-fast, working-directory and missing-executable checks."

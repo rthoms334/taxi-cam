@@ -25,12 +25,15 @@ function Invoke-TaxiJobs([object[]]$Jobs, [int]$Throttle) {
     foreach ($job in $Jobs) { $pending.Enqueue($job) }
     $running = New-Object System.Collections.Generic.List[object]
     $failures = New-Object System.Collections.Generic.List[string]
+    # Jobs start in PowerShell's location, as `& $exe` does; Set-Location never changes the process directory.
+    $directory = (Get-Location -PSProvider FileSystem).ProviderPath
     try {
         while ($running.Count -or ($pending.Count -and -not $failures.Count)) {
             while ($pending.Count -and -not $failures.Count -and $running.Count -lt $Throttle) {
                 $job = $pending.Dequeue()
                 $info = New-Object System.Diagnostics.ProcessStartInfo $job.File
                 $info.Arguments = @($job.Arguments | ForEach-Object { ConvertTo-TaxiProcessArgument $_ }) -join ' '
+                $info.WorkingDirectory = $directory
                 $info.UseShellExecute = $false
                 $info.CreateNoWindow = $true
                 $info.RedirectStandardOutput = $true
