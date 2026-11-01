@@ -4643,8 +4643,9 @@ void poll_updates() {
                                               L"changes.\nCancel: keep the app open."),
                                            tr(L"Unsaved settings"), MB_YESNOCANCEL | MB_ICONQUESTION);
             proceed = choice == IDNO || (choice == IDYES && apply());
-            // Cancel keeps the app open, so the quit with the simulator stands down.
-            stay_after_simulator = stay_after_simulator || choice == IDCANCEL;
+            // Cancel keeps the app open, as does a save that failed, so the quit
+            // with the simulator stands down.
+            stay_after_simulator = stay_after_simulator || choice == IDCANCEL || (choice == IDYES && !proceed);
           }
           if (proceed) {
             std::wstring error;
@@ -4937,6 +4938,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (update_prompt || updater.busy() || !IsWindowEnabled(hwnd))
         return 0;
+      // The camera adjustment window saves the whole draft when it closes;
+      // here it is discarded with the rest.
+      live_view.changed = false;
       PostMessageW(hwnd, WM_CLOSE, 1, 0);
       return 0;
     case WhatsNewMessage:
