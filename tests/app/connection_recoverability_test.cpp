@@ -105,9 +105,29 @@ int main() {
     queue.request(ConnectCommand::connect);
     require(queue.take() == ConnectCommand::connect, "A later explicit Connect supersedes Disconnect");
 
+    // Issue 137: an exe.xml start quits GraceMs after its simulator goes.
+    constexpr auto grace = ExitWithSimulator::GraceMs;
+    ExitWithSimulator manual(false);
+    require(!manual.observe(true, 1000) && !manual.observe(false, 2000) && !manual.observe(false, 2000 + 10 * grace),
+            "A manual start stays in the tray after the simulator exits");
+    ExitWithSimulator waiting(true);
+    require(!waiting.observe(false, 1000) && !waiting.observe(false, 1000 + 10 * grace),
+            "A background start waits for a simulator it has not seen yet");
+    ExitWithSimulator exe_xml(true);
+    require(!exe_xml.observe(true, 1000) && !exe_xml.observe(false, 2000) && !exe_xml.observe(false, 2000 + grace - 1),
+            "A background start quit inside the grace");
+    require(exe_xml.observe(false, 2000 + grace) && exe_xml.observe(false, 2200 + grace),
+            "A background start did not keep asking to quit once the grace passed");
+    ExitWithSimulator restart(true);
+    require(!restart.observe(true, 1000) && !restart.observe(false, 2000) && !restart.observe(true, 2000 + grace - 1),
+            "A quick simulator restart did not keep the companion");
+    require(
+        !restart.observe(false, 3000 + grace) && !restart.observe(false, 3000 + 2 * grace - 1) && restart.observe(false, 3000 + 2 * grace),
+        "The grace did not restart after the simulator came back");
+
     require(DeleteFileW((directory + L"\\settings.ini").c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND, "Remove preference file");
     require(RemoveDirectoryW(directory.c_str()), "Remove isolated fixture");
-    std::printf("PASS connection recoverability: %u preference, gate and command checks.\n", checks);
+    std::printf("PASS connection recoverability: %u preference, gate, command and exit checks.\n", checks);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL connection recoverability: %s\n", error.what());

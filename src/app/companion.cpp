@@ -41,7 +41,8 @@ namespace {
 using namespace taxi_camera;
 namespace win = standalone;
 using win::decimal, win::tr, win::tr_format;
-constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, WhatsNewImageMessage = WM_APP + 4;
+constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, WhatsNewImageMessage = WM_APP + 4,
+               ExitWithSimulatorMessage = WM_APP + 5;
 constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CAM_VERSION_MINOR, TAXI_CAM_VERSION_PATCH};
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
@@ -89,6 +90,10 @@ std::vector<win::CameraButton> button_capture_down;  // Went down while waiting;
 win::Updater updater;
 ULONGLONG next_update_check{};
 bool update_prompt{};
+// An update downloaded while the simulator blocked installing it.
+bool update_after_simulator{};
+// The pilot chose to keep the app open; it no longer quits with the simulator.
+bool stay_after_simulator{};
 win::ChangelogFetcher changelog_fetcher;
 bool whats_new{};  // The installed version's notes have not been read yet.
 int scale(int v) {
@@ -4350,6 +4355,7 @@ DWORD WINAPI connection_worker(void*) {
   constexpr std::uint64_t kDetachedRescanMs = 1000;
   win::SimulatorAttach attach;
   std::uint64_t last_scan_ms = 0;
+  win::ExitWithSimulator exit_with_simulator(background_start && !preview_ui);
   while (running.load()) {
     if (preview_ui) {
       Sleep(100);
@@ -4419,8 +4425,9 @@ DWORD WINAPI connection_worker(void*) {
                          : ui_text(L"Simulator closed. Waiting for the next session.");
       }
       PostMessageW(window, StatusMessage, 0, 0);
-      // Stay in the tray so a later manual or auto connect can attach without
-      // depending on MSFS auto-launch of Taxi Cam.
+      // A manual start stays in the tray so a later manual or auto connect can
+      // attach without depending on MSFS auto-launch of Taxi Cam. A start from
+      // exe.xml quits below once the simulator stays gone.
     }
     if (pid && pid != attached) {
       win::log_attach(win::settings_directory(), attach, expected_simulator);
@@ -4446,6 +4453,8 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       }
     }
+    if (exit_with_simulator.observe(attached != 0, now_ms))
+      PostMessageW(window, ExitWithSimulatorMessage, 0, 0);
     const bool want_connect =
         win::should_attempt_connect(auto_on, attempted, command, manual_armed, connection_disconnected.load(std::memory_order_acquire));
     if (attached && want_connect && startup_retry.ready(GetTickCount64())) {
@@ -4617,6 +4626,7 @@ void poll_updates() {
     } else {
       update_prompt = true;
       if (win::simulator_blocks_update()) {
+        update_after_simulator = true;
         notice = tr(L"Update downloaded. Close Microsoft Flight Simulator, then choose Check for updates to install.");
         if (result.manual)
           MessageBoxW(window, notice.c_str(), tr(L"Taxi Cam updates"), MB_OK | MB_ICONINFORMATION);
@@ -4633,6 +4643,12 @@ void poll_updates() {
                                               L"changes.\nCancel: keep the app open."),
                                            tr(L"Unsaved settings"), MB_YESNOCANCEL | MB_ICONQUESTION);
             proceed = choice == IDNO || (choice == IDYES && apply());
+            // Discarding includes the camera adjustment window, which saves when it closes.
+            if (choice == IDNO)
+              live_view.changed = false;
+            // Cancel keeps the app open, as does a save that failed, so the quit
+            // with the simulator stands down.
+            stay_after_simulator = stay_after_simulator || choice == IDCANCEL || (choice == IDYES && !proceed);
           }
           if (proceed) {
             std::wstring error;
@@ -4906,6 +4922,29 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         InvalidateRect(hwnd, nullptr, FALSE);
         invalidate_camera_mode_cards();
       }
+      return 0;
+    case ExitWithSimulatorMessage:
+      // The tray Quit path: unsaved edits are discarded, as by tray Quit, since
+      // the draft also holds previews and calibration takeovers nobody chose to
+      // keep. It never waits for Settings to close: a companion left running
+      // keeps Steam showing the simulator as running. The worker asks again on
+      // every loop, so the quit waits only for a modal dialog (it disables the
+      // window) or an update check. An update that downloaded while the
+      // simulator ran is offered first; a manual check reuses that download.
+      if (stay_after_simulator)
+        return 0;
+      if (update_after_simulator && !update_prompt && !updater.busy()) {
+        update_after_simulator = false;
+        check_updates(true);
+        poll_updates();
+        return 0;
+      }
+      if (update_prompt || updater.busy() || !IsWindowEnabled(hwnd))
+        return 0;
+      // The camera adjustment window saves the whole draft when it closes;
+      // here it is discarded with the rest.
+      live_view.changed = false;
+      PostMessageW(hwnd, WM_CLOSE, 1, 0);
       return 0;
     case WhatsNewMessage:
       show_whats_new();

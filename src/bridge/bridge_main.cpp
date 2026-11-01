@@ -921,7 +921,10 @@ DWORD WINAPI watchdog_run(void*) noexcept {
       watchdog_trips.fetch_add(1, std::memory_order_relaxed);
       watchdog_last_stall_ms.store(decision.stalled_ms, std::memory_order_relaxed);
       // Posted here so the notice does not depend on the worker being free.
-      announce(SimEvent::presentation_stalled, limiter, now);
+      // Issue 137: with no cameras requested (menus, flight loading, the
+      // simulator quitting) the trip costs the pilot nothing, so no notice.
+      if (decision.cameras_wanted)
+        announce(SimEvent::presentation_stalled, limiter, now);
     } else if (decision.recover) {
       win::set_graphics_armed(true);
     } else if (decision.hold) {

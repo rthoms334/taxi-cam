@@ -11,7 +11,8 @@
       ],
       "fixes": [
         "The cameras no longer switch off and on again and again when the simulator keeps stalling. After three stalls within five minutes while the cameras are on, they stay off and Taxi Cam says so; turn them off and on again to retry. bridge.log now records the simulator's graphics memory use, to help find what causes the stalls.",
-        "Settings no longer has First camera only. With it on, the cameras never started and the display only showed the waiting page; a saved setting is ignored."
+        "Settings no longer has First camera only. With it on, the cameras never started and the display only showed the waiting page; a saved setting is ignored.",
+        "When the simulator starts Taxi Cam, Taxi Cam now closes a few seconds after the simulator does, so Steam no longer shows the simulator as still running. Quitting the simulator no longer shows a frames-stalled warning when the cameras were off."
       ]
     },
     {
