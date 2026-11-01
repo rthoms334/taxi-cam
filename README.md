@@ -71,7 +71,7 @@ Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved 
 
 To use another language, choose **Language** in the tray menu or under **Menu** in Settings. **Follow Windows** returns to the Windows display language. Aircraft names, status messages from the simulator, logs and bug reports stay in English.
 
-The translations are new, and native speakers can help make them right. If a word is wrong or reads oddly, open a [Feature request](https://github.com/rthoms334/taxi-cam/issues/new?template=feature_request.yml) with the language, the English text, what Taxi Cam shows and your better wording; a screenshot helps. Pull requests that correct the catalogues in `src/app/translations/` (Taxi Cam) or `installer/messages/` (Setup) are welcome too.
+The translations are new, and native speakers can help make them right. If a word is wrong or reads oddly, open a [Translation correction](https://github.com/rthoms334/taxi-cam/issues/new?template=translation.yml) with the language, the English text, what Taxi Cam shows and your better wording; a screenshot helps. Pull requests that correct the catalogues in `src/app/translations/` (Taxi Cam) or `installer/messages/` (Setup) are welcome too.
 
 ### Camera views
 
