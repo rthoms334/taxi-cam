@@ -111,8 +111,9 @@ void reshade_present_gate() {
   void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
   Device device{device_table};
   auto queue_table = queue_vtable();
-  // Only a receipt on another queue than the last Signal's queues a Wait.
-  Queue queue{queue_table.data(), &device}, other_queue{queue_table.data(), &device};
+  // Every ordered receipt after the first queues a Wait; another queue's
+  // unfinished receipt would be escaped instead (cross_queue_escape).
+  Queue queue{queue_table.data(), &device};
   std::array<void*, 11> fence_table{};
   fence_table[8] = reinterpret_cast<void*>(&completed_value);
   fence_table[10] = reinterpret_cast<void*>(&cpu_signal);
@@ -147,9 +148,9 @@ void reshade_present_gate() {
     manager->after_submission(native_queue, receipt);
   };
   submit(queue);
-  submit(other_queue);
-  require(queue.signals == 1 && other_queue.signals == 1 && !queue.waits && other_queue.waits == 1 && other_queue.last_wait == 1 &&
-              manager->published_timelines_[0].waited.load() == 1 && timeline.completed.load() == 0 && timeline.cpu_signals.load() == 0,
+  submit(queue);
+  require(queue.signals == 2 && queue.waits == 1 && queue.last_wait == 1 && manager->published_timelines_[0].waited.load() == 1 &&
+              timeline.completed.load() == 0 && timeline.cpu_signals.load() == 0,
           "The queued Wait value was not published ahead of the ReShade flush");
   std::promise<void> locked;
   std::promise<void> release_holder;
@@ -193,6 +194,80 @@ void reshade_present_gate() {
   manager->set_submission_gate(true);
   manager->set_submission_gate(false);
   require(timeline.cpu_signals.load() == 2, "Closing the gate after the waited value completed signaled again");
+}
+// Issue 97: a receipt without in-list capture packets never Waits on another
+// simulator queue's unfinished receipt, directly or through private work
+// queued after it. It is escaped unordered instead; same-queue and
+// finished-receipt Waits stay, and a packet batch keeps its Wait.
+void cross_queue_escape() {
+  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
+  Device device{device_table};
+  auto queue_table = queue_vtable();
+  Queue queue{queue_table.data(), &device}, other_queue{queue_table.data(), &device}, private_queue{queue_table.data(), &device};
+  std::array<void*, 11> fence_table{};
+  fence_table[8] = reinterpret_cast<void*>(&completed_value);
+  fence_table[10] = reinterpret_cast<void*>(&cpu_signal);
+  Timeline timeline{fence_table.data()};
+  taxi_camera::SceneHandoff handoff;
+  auto manager = std::make_unique<Manager>(handoff);
+  auto& owner = manager->devices_[0];
+  owner.key = 7;
+  owner.native = reinterpret_cast<ID3D12Device*>(&device);
+  owner.timeline = reinterpret_cast<ID3D12Fence*>(&timeline);
+  owner.active = true;
+  manager->published_devices_[0].store(owner.native);
+  std::uintptr_t marker = 0;
+  auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&marker);
+  auto& recording = manager->lists_[0];
+  recording.native = known;
+  recording.device_key = 7;
+  recording.object_generation = 23;
+  recording.session_generation = owner.session_generation;
+  recording.consumer = true;
+  manager->list_indices_.emplace(known, 0);
+  manager->publish_list(recording);
+  ID3D12CommandList* batch[]{known};
+  const auto submit = [&](Queue& target) {
+    auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&target);
+    const auto receipt = manager->before_submission(native_queue, 1, batch);
+    if (receipt)
+      manager->after_submission(native_queue, receipt);
+    else
+      manager->forwarded_unordered(native_queue);
+    return receipt != 0;
+  };
+  require(submit(queue) && submit(queue) && queue.waits == 1 && owner.last_simulator_signal == 2, "Same-queue receipts were not ordered");
+  require(!submit(other_queue) && !other_queue.waits && !other_queue.signals && owner.last_signal == 2 &&
+              manager->statistics().cross_queue_escapes == 1 && manager->statistics().unordered_submissions == 1 && !owner.failed,
+          "A receipt waited on another queue's unfinished receipt");
+  timeline.completed.store(2);
+  require(submit(other_queue) && other_queue.waits == 1 && other_queue.last_wait == 2 && owner.last_simulator_signal == 3,
+          "A receipt behind another queue's finished receipt was not ordered");
+  // Private work after other_queue's unfinished receipt: queue would wait on
+  // it through the private Signal, so it escapes until that receipt finishes.
+  auto* private_native = reinterpret_cast<ID3D12CommandQueue*>(&private_queue);
+  const auto composed = manager->begin_private_submission(owner.key, private_native);
+  require(composed.receipt && manager->end_private_submission(composed.receipt) && private_queue.last_wait == 3 && owner.last_signal == 4 &&
+              owner.last_simulator_signal == 3,
+          "Private work changed the last simulator receipt");
+  require(!submit(queue) && manager->statistics().cross_queue_escapes == 2, "A receipt waited on private work behind another queue");
+  timeline.completed.store(3);
+  require(submit(queue) && queue.last_wait == 4 && owner.last_simulator_signal == 5 && manager->statistics().cross_queue_escapes == 2,
+          "A receipt behind private work after a finished receipt was not ordered");
+  require(manager->statistics().unordered_consumers == 2 && !owner.failed, "An escaped consumer failed the device");
+  // In-list capture packets: an escape would quarantine them for good, so the
+  // batch keeps its Wait on other_queue's unfinished receipt and is counted.
+  timeline.completed.store(5);
+  require(submit(other_queue) && owner.last_simulator_signal == 6, "Queue a receipt on the other queue");
+  auto& packet = manager->packets_[0];
+  packet.assigned = true;
+  recording.packets = 1;
+  manager->publish_list(recording);
+  const auto waits = other_queue.waits;
+  require(submit(queue) && queue.last_wait == 6 && !packet.quarantined && manager->statistics().cross_queue_waits == 1 &&
+              manager->statistics().cross_queue_escapes == 2 && !manager->statistics().quarantined,
+          "A batch carrying capture packets was escaped and lost them");
+  require(other_queue.waits == waits, "The packet batch changed the other queue's Waits");
 }
 // Plans one display copy for device 7 while active; the copy names no target
 // or source, so Pool::record refuses it.
@@ -1038,6 +1113,7 @@ void run() {
               !manager->classify_unobserved(helper_native, 1, helper_batch).unrelated,
           "Publication version exhaustion stays permanently conservative instead of wrapping to an ABA match");
   reshade_present_gate();
+  cross_queue_escape();
   receipts_without_source_work();
   clean_reset_fast_path();
   ordered_waits_name_their_lock();

@@ -64,8 +64,9 @@ constexpr std::uint32_t ConsumerEffect = 1u << 16, SourceEffect = 1u << 17, Unob
 constexpr unsigned DeviceShift = 24;
 constexpr std::uint64_t EscapedRecording = 1u << 28, RecordingVersion = 1ull << 32;
 constexpr std::uint64_t ExhaustedRecording = 1u << 29, RecordingVersionMask = 0xffffffff00000000ull;
-// Escaped because OUR wait budget expired or the watchdog gate was closed, not
-// because another submitter owned the queue. The same packets are quarantined,
+// Escaped because OUR wait budget expired, the watchdog gate was closed or the
+// batch would Wait on another queue's unfinished receipt, not because another
+// submitter owned the queue. The same packets are quarantined,
 // but a consumer recording invalidates the source model instead of failing the
 // device: the stable output it read is process-lifetime, so the worst case is
 // one torn camera frame, and the session must be able to continue.
@@ -2123,6 +2124,26 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
       }
   if (!owner || (!mask && !consumer && !source_work))
     return 0;
+  // Issue 97: a Wait on another simulator queue's unfinished receipt can close
+  // a cycle with the simulator's own cross-queue waits, freezing it until the
+  // watchdog releases the Wait (every trip in the reports released one). Escape
+  // like a contended batch instead: this frame's capture and display copy are
+  // lost, and the simulator does not wait on us. A Wait behind the same queue, or
+  // behind private work queued after a finished simulator receipt, cannot
+  // cycle. Read only in this case, so the fence call under mutex_ is rare.
+  // An escape quarantines in-list capture packets for good (16 in all), so a
+  // batch carrying them keeps its Wait, cycle risk included, and is counted.
+  const bool cross_queue_unfinished = owner->last_simulator_signal && owner->last_simulator_queue != queue &&
+                                      owner->timeline->GetCompletedValue() < owner->last_simulator_signal;
+  if (cross_queue_unfinished && mask)
+    cross_queue_waits_.fetch_add(1, std::memory_order_relaxed);
+  else if (cross_queue_unfinished) {
+    lock.unlock();
+    submission_lock.unlock();
+    cross_queue_escapes_.fetch_add(1, std::memory_order_relaxed);
+    escape_unordered(queue, count, native_lists);
+    return 0;
+  }
   const auto result = begin_transaction(*owner, queue, mask, false, compatible);
   if (result.receipt) {
     // Decided under mutex_, which reset_session and resume_session hold.
@@ -2229,8 +2250,13 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
     apply_deferred();
     auto& pending = transaction_;
     refused |= pending.device->failed;
-    if (success)
+    if (success) {
       pending.device->last_signal = pending.value;
+      if (!pending.private_work) {
+        pending.device->last_simulator_queue = pending.queue;
+        pending.device->last_simulator_signal = pending.value;
+      }
+    }
     if (!success || (refused && fatal))
       fail_device(*pending.device);
     else if (refused)
@@ -2454,6 +2480,8 @@ SceneCaptureManager::Statistics SceneCaptureManager::statistics() const noexcept
   result.deferred_retirements = deferred_retirement_count_.load(std::memory_order_relaxed);
   result.gated_submissions = gated_submissions_.load(std::memory_order_relaxed);
   result.released_waits = released_waits_.load(std::memory_order_relaxed);
+  result.cross_queue_escapes = cross_queue_escapes_.load(std::memory_order_relaxed);
+  result.cross_queue_waits = cross_queue_waits_.load(std::memory_order_relaxed);
   result.deferred_evidence = deferred_evidence_count_.load(std::memory_order_relaxed);
   for (const auto& counts : reset_counts_)
     result.fast_resets += counts.fast.load(std::memory_order_relaxed);

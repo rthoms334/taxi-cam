@@ -172,6 +172,11 @@ class SceneCaptureManager {
     // CPU signals of a timeline value already passed to queue Wait, issued when
     // the submission gate closes. One count per Signal that actually ran.
     std::uint64_t released_waits = 0;
+    // Batches forwarded unordered because they would Wait on another simulator
+    // queue's unfinished receipt (issue 97). Also counted in unordered.
+    // cross_queue_waits: such batches that still Waited because they carry
+    // in-list capture packets, which an escape would quarantine for good.
+    std::uint64_t cross_queue_escapes = 0, cross_queue_waits = 0;
     std::uint64_t deferred_evidence = 0, deferred_overflows = 0;
     // Consumer recordings forwarded without ordering by a bounded escape: the
     // source model was invalidated and the device kept, unlike a contended escape.
@@ -394,6 +399,11 @@ class SceneCaptureManager {
     ID3D12Device* native = nullptr;
     ID3D12Fence* timeline = nullptr;
     std::uint64_t last_signal = 0;
+    // The latest simulator-queue receipt (not private work) and its queue. The
+    // queue is compared, never dereferenced; a reused address only keeps the
+    // Wait, as before the cross-queue escape.
+    ID3D12CommandQueue* last_simulator_queue = nullptr;
+    std::uint64_t last_simulator_signal = 0;
     bool active = false, failed = false;
     std::uint64_t session_generation = 1;
     bool session_active = true;
@@ -650,6 +660,7 @@ class SceneCaptureManager {
   std::atomic<bool> submission_gate_{true};
   std::atomic<std::uint64_t> contended_evidence_{}, contended_lifecycle_{}, contended_submissions_{};
   std::atomic<std::uint64_t> unordered_submissions_{}, deferred_retirement_count_{}, gated_submissions_{}, released_waits_{};
+  std::atomic<std::uint64_t> cross_queue_escapes_{}, cross_queue_waits_{};
   std::atomic<std::uint64_t> deferred_evidence_count_{};
   std::unordered_map<ID3D12GraphicsCommandList*, std::size_t> list_indices_;
   std::array<Packet, MaximumPackets> packets_{};
