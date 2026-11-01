@@ -4916,17 +4916,24 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       return 0;
     case ExitWithSimulatorMessage:
-      // The tray Quit path, which saves nothing. The worker asks again on every
-      // loop, so the quit waits while Settings is open or holds unsaved edits,
-      // and while an update is being checked or offered. An update that
-      // downloaded while the simulator ran is offered first; a manual check
-      // reuses that download.
+      // The tray Quit path. It never waits for Settings to close: a companion
+      // left running keeps Steam showing the simulator as running. Valid unsaved
+      // edits are saved first, as the live view saves on close; the aircraft
+      // setup keeps its own Save, as when it is left. The worker asks again on
+      // every loop, so the quit waits only for a modal dialog (it disables the
+      // window) or an update check. An update that downloaded while the
+      // simulator ran is offered first; a manual check reuses that download.
       if (update_after_simulator && !update_prompt && !updater.busy()) {
         update_after_simulator = false;
         check_updates(true);
+        poll_updates();
+        return 0;
       }
-      if (!update_prompt && !updater.busy() && !dirty && !IsWindowVisible(hwnd))
-        PostMessageW(hwnd, WM_CLOSE, 1, 0);
+      if (update_prompt || updater.busy() || !IsWindowEnabled(hwnd))
+        return 0;
+      if (dirty && page != SetupPage)
+        apply();
+      PostMessageW(hwnd, WM_CLOSE, 1, 0);
       return 0;
     case WhatsNewMessage:
       show_whats_new();
