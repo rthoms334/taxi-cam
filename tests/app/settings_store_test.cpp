@@ -247,6 +247,31 @@ void saved_enabled_key_is_ignored() {
   }
 }
 
+// [bindings]: each bound action's L:var and trigger, per aircraft. A name that
+// is not a valid L:var leaves only its own action unbound.
+void lvar_bindings_persist() {
+  select_fixture(L"lvar-bindings");
+  auto saved = customized(profiles::A380);
+  std::strcpy(saved.lvar_bindings[1].name, "S_PED_COCKPIT_DOOR_VIDEO");
+  std::strcpy(saved.lvar_bindings[3].name, "I_OH_COCKPIT_DOOR_VIDEO");
+  saved.lvar_bindings[3].trigger = static_cast<std::uint32_t>(LvarTrigger::latched);
+  require(save_settings(saved), "Save a profile with L:var bindings");
+  const auto path = settings_path(saved);
+  require(ini(path, L"bindings", L"right") == L"S_PED_COCKPIT_DOOR_VIDEO" && ini(path, L"bindings", L"right_trigger") == L"momentary" &&
+              ini(path, L"bindings", L"sd_trigger") == L"latched" && ini(path, L"bindings", L"left") == L"<missing>",
+          "Only bound actions are written");
+  Settings loaded;
+  require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) &&
+              std::memcmp(&loaded.lvar_bindings, &saved.lvar_bindings, sizeof(saved.lvar_bindings)) == 0,
+          "Bindings survive a save");
+  patch(path, L"bindings", L"left", L"L:A32NX_TAXI");
+  patch(path, L"bindings", L"right", L"BAD NAME");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && std::strcmp(loaded.lvar_bindings[0].name, "A32NX_TAXI") == 0 &&
+              loaded.lvar_bindings[0].trigger == 0 && !loaded.lvar_bindings[1].name[0] &&
+              std::strcmp(loaded.lvar_bindings[3].name, "I_OH_COCKPIT_DOOR_VIDEO") == 0,
+          "A hand-edited L: prefix is dropped and an unsafe name unbinds only its action");
+}
+
 void rejected_preferences_are_left_unchanged() {
   select_fixture(L"invalid-preferences");
   const auto expected = customized(profiles::A359);
@@ -321,6 +346,7 @@ int main() {
     camera_brightness_persists_and_snaps();
     retired_lighting_keys_are_ignored();
     saved_enabled_key_is_ignored();
+    lvar_bindings_persist();
     rejected_preferences_are_left_unchanged();
     legacy_import_preserves_original();
     settings_override.clear();

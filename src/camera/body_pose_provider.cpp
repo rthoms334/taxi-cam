@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <utility>
@@ -28,6 +30,7 @@ using LastPacket = HRESULT(WINAPI*)(HANDLE, DWORD*);
 using MapEvent = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
 using SetData = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD, void*);
 using TransmitEvent = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD);
+using ClearDefinition = HRESULT(WINAPI*)(HANDLE, DWORD);
 // Public SDK SIMCONNECT_DATA_CAMERA is packed: XYZ24, references/object IDs,
 // XYZ24, FLOAT32 PBH12, references/object IDs, FOVdouble. Confirmed current
 // 1.8.16.0 CameraGet response ID40, total96 bytes, including SIMCONNECT_RECV12.
@@ -77,6 +80,20 @@ struct State {
   double ambient = 0, brightness = 0;
   std::uint64_t lighting_ms = 0;
   const char* lighting_error = "not_initialized";
+  // User L:var bindings. The control loop sets the names and lvar_request
+  // counts each change; lvar_restart asks for a new stream after a flight
+  // change. The worker streams them on definition lvar_define, 20 or 21 in
+  // turn, so a late packet for the previous names is never read as these.
+  standalone::LvarBindings lvar_names{};
+  std::uint32_t lvar_request = 0;
+  bool lvar_restart = false;
+  std::uint32_t lvar_generation = 0, lvar_stream = 0;  // lvar_stream: the running generation, 0 for none.
+  DWORD lvar_define = 0;
+  unsigned lvar_count = 0;
+  std::array<std::uint8_t, standalone::LvarBindingCount> lvar_slots{};  // Packet value index to binding.
+  std::array<bool, standalone::LvarBindingCount> lvar_was_on{};
+  standalone::LvarBindingStates lvar{};
+  const char* lvar_error = "not_initialized";
   bool calibrated = false;
   double correction = 0;
   Vector3 calibration_origin{};
@@ -119,6 +136,8 @@ void reset_session_locked() noexcept {
   state.taxi_left = state.taxi_right = state.taxi_sd = false;
   state.pmdg_dsp.reset();
   state.button_commands.reset_session();
+  // The new aircraft's first values start a new stream rather than reading as presses.
+  state.lvar_restart = true;
   state.calibrated = false;
   state.calibration_samples = 0;
   state.calibration_camera_ms = 0;
@@ -416,6 +435,73 @@ bool accept_lighting_packet(const void* raw, DWORD bytes, std::uint64_t sample_m
   ReleaseSRWLockExclusive(&state.lock);
   return true;
 }
+// User L:var bindings on definitions 20 and 21: request 20/21 streams changed
+// values every simulator frame, 22/23 reads the first values once.
+constexpr DWORD LvarFirstDefine = 20;
+void begin_lvar_stream_locked(DWORD define, const std::array<std::uint8_t, standalone::LvarBindingCount>& slots, unsigned count) noexcept {
+  state.lvar_define = define;
+  state.lvar_slots = slots;
+  state.lvar_count = count;
+  state.lvar = {};
+  state.lvar_was_on = {};
+  if (++state.lvar_generation == 0)
+    state.lvar_generation = 1;
+  state.lvar_stream = count ? state.lvar_generation : 0;
+  state.lvar_error = count ? "" : "lvar_unbound";
+}
+void end_lvar_stream_locked(const char* error) noexcept {
+  state.lvar_define = 0;
+  state.lvar_count = 0;
+  state.lvar = {};
+  state.lvar_stream = 0;
+  state.lvar_error = error;
+}
+void lvar_failure(const char* text) noexcept {
+  AcquireSRWLockExclusive(&state.lock);
+  state.lvar_error = text;
+  ReleaseSRWLockExclusive(&state.lock);
+}
+// True for a packet of the current stream (counted) or of a replaced one
+// (ignored); false for a current-stream packet with the wrong layout.
+bool accept_lvar_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) noexcept {
+  if (!raw || bytes < 40 || !sample_ms)
+    return false;
+  std::array<DWORD, 10> header{};
+  std::memcpy(header.data(), raw, sizeof(header));
+  AcquireSRWLockExclusive(&state.lock);
+  const DWORD define = state.lvar_define;
+  const unsigned count = state.lvar_count;
+  if (!define || header[5] != define) {
+    ReleaseSRWLockExclusive(&state.lock);
+    return true;
+  }
+  const DWORD expected = 40 + 8 * count;
+  if (!count || bytes != expected || header[0] != expected || header[2] != 8 || (header[3] != define && header[3] != define + 2) ||
+      header[6] > 1 || header[9] != count) {
+    ReleaseSRWLockExclusive(&state.lock);
+    return false;
+  }
+  std::array<double, standalone::LvarBindingCount> values{};
+  std::memcpy(values.data(), static_cast<const unsigned char*>(raw) + 40, 8 * count);
+  state.lvar_error = "";
+  for (unsigned k = 0; k < count; ++k) {
+    const auto binding = state.lvar_slots[k];
+    if (!std::isfinite(values[k]) || binding >= standalone::LvarBindingCount) {
+      state.lvar_error = "lvar_values";
+      continue;
+    }
+    const bool on = standalone::lvar_on(values[k]);
+    auto& read = state.lvar[binding];
+    // The stream's first value of each binding is where it starts, not a press.
+    if (read.read && on != state.lvar_was_on[binding])
+      ++(on ? read.rises : read.falls);
+    state.lvar_was_on[binding] = on;
+    read.value = static_cast<float>(values[k]);
+    read.read = 1;
+  }
+  ReleaseSRWLockExclusive(&state.lock);
+  return true;
+}
 DWORD WINAPI worker(void*) noexcept {
   const auto* bound = worker_profile.load();
   if (!bound) {
@@ -464,6 +550,7 @@ DWORD WINAPI worker(void*) noexcept {
   const auto map_event = reinterpret_cast<MapEvent>(GetProcAddress(dll, "SimConnect_MapClientEventToSimEvent"));
   const auto set_data = reinterpret_cast<SetData>(GetProcAddress(dll, "SimConnect_SetDataOnSimObject"));
   const auto transmit_event = reinterpret_cast<TransmitEvent>(GetProcAddress(dll, "SimConnect_TransmitClientEvent"));
+  const auto clear_definition = reinterpret_cast<ClearDefinition>(GetProcAddress(dll, "SimConnect_ClearDataDefinition"));
   if (!open || !close || !define || !request || !dispatch || !get || !system_state || !subscribe) {
     failure("simconnect_exports");
     FreeLibrary(dll);
@@ -614,6 +701,62 @@ DWORD WINAPI worker(void*) noexcept {
   remember_on_ground_packet();
   if (!on_ground_defined)
     on_ground_failure("on_ground_definition_unavailable");
+  std::array<DWORD, 16> lvar_packets{};
+  unsigned lvar_packet_cursor = 0;
+  const auto remember_lvar_packet = [&]() {
+    DWORD id = 0;
+    if (last_packet && SUCCEEDED(last_packet(session, &id)) && id)
+      lvar_packets[lvar_packet_cursor++ % lvar_packets.size()] = id;
+  };
+  // The definition this connection last used for the user's L:vars, 0 for none.
+  DWORD lvar_define = 0;
+  std::uint32_t lvar_subscribed = 0;
+  bool lvar_started = false;
+  const auto subscribe_lvars = [&]() {
+    AcquireSRWLockExclusive(&state.lock);
+    const auto names = state.lvar_names;
+    lvar_subscribed = state.lvar_request;
+    state.lvar_restart = false;
+    ReleaseSRWLockExclusive(&state.lock);
+    if (lvar_define) {
+      // Stop the old stream, then empty its definition for the turn after next.
+      request(session, lvar_define, lvar_define, 0, 0, 0, 0, 0, 0);
+      if (!clear_definition || FAILED(clear_definition(session, lvar_define))) {
+        AcquireSRWLockExclusive(&state.lock);
+        end_lvar_stream_locked("lvar_redefinition_unavailable");
+        ReleaseSRWLockExclusive(&state.lock);
+        return;
+      }
+    }
+    lvar_define = lvar_define == LvarFirstDefine ? LvarFirstDefine + 1 : LvarFirstDefine;
+    std::array<std::uint8_t, standalone::LvarBindingCount> slots{};
+    unsigned count = 0;
+    bool defined = true;
+    for (std::size_t i = 0; defined && i < names.size(); ++i) {
+      if (!standalone::valid_lvar_name(names[i].name))
+        continue;
+      char variable[standalone::LvarNameSize + 2];
+      std::snprintf(variable, sizeof(variable), "L:%s", names[i].name);
+      defined = SUCCEEDED(define(session, lvar_define, variable, "number", 4, 0, 0xffffffffu));
+      remember_lvar_packet();
+      if (defined)
+        slots[count++] = static_cast<std::uint8_t>(i);
+    }
+    // SIM_FRAME with CHANGED sends a value only when it moves, so a 0.1 s push
+    // is not missed; the single ONCE request supplies each starting value.
+    if (defined && count) {
+      defined = SUCCEEDED(request(session, lvar_define, lvar_define, 0, 3, 1, 0, 0, 0));
+      remember_lvar_packet();
+      defined = defined && SUCCEEDED(request(session, lvar_define + 2, lvar_define, 0, 1, 0, 0, 0, 0));
+      remember_lvar_packet();
+    }
+    AcquireSRWLockExclusive(&state.lock);
+    if (defined)
+      begin_lvar_stream_locked(lvar_define, slots, count);
+    else
+      end_lvar_stream_locked("lvar_definition_failed");
+    ReleaseSRWLockExclusive(&state.lock);
+  };
   std::uint64_t previous_on_ground = 0;
   std::uint64_t previous = 0;
   std::uint64_t previous_lighting = 0, previous_type = 0;
@@ -632,6 +775,13 @@ DWORD WINAPI worker(void*) noexcept {
     }
     const auto now = GetTickCount64();
     service_world_invalidation();
+    AcquireSRWLockShared(&state.lock);
+    const bool lvars_changed = !lvar_started || state.lvar_request != lvar_subscribed || state.lvar_restart;
+    ReleaseSRWLockShared(&state.lock);
+    if (lvars_changed) {
+      lvar_started = true;
+      subscribe_lvars();
+    }
     if (type_defined && now - previous_type >= 1000) {
       previous_type = now;
       if (identity_request > 0xfffffffcu)
@@ -684,6 +834,10 @@ DWORD WINAPI worker(void*) noexcept {
       std::array<DWORD, 10> header{};
       std::memcpy(header.data(), raw, bytes >= 40 ? 40 : 12);
       if (header[0] < 12 || header[0] > bytes) {
+        if (bytes >= 40 && header[2] == 8 && (header[5] == LvarFirstDefine || header[5] == LvarFirstDefine + 1)) {
+          lvar_failure("lvar_packet_bounds");
+          continue;
+        }
         if (bytes >= 40 && header[2] == 8 && (header[3] == 7 || header[5] == 7)) {
           on_ground_failure("on_ground_packet_bounds");
           continue;
@@ -712,7 +866,10 @@ DWORD WINAPI worker(void*) noexcept {
         if (reconnect)
           break;
       } else if (header[2] == 8) {
-        if (bytes >= 40 && (header[3] == 7 || header[5] == 7)) {
+        if (bytes >= 40 && (header[5] == LvarFirstDefine || header[5] == LvarFirstDefine + 1)) {
+          if (!accept_lvar_packet(raw, bytes, GetTickCount64()))
+            lvar_failure("lvar_packet_layout");
+        } else if (bytes >= 40 && (header[3] == 7 || header[5] == 7)) {
           if (!accept_on_ground_packet(raw, bytes, GetTickCount64()))
             on_ground_failure("on_ground_packet_layout");
         } else if (bytes >= 40 && (header[3] == 4 || header[5] == 4)) {
@@ -736,6 +893,9 @@ DWORD WINAPI worker(void*) noexcept {
         bool taxi_exception = false;
         bool lighting_exception = false;
         bool on_ground_exception = false;
+        bool lvar_exception = false;
+        for (const auto sent : lvar_packets)
+          lvar_exception = lvar_exception || (sent && sent == exception[4]);
         for (const auto sent : taxi_packets)
           taxi_exception = taxi_exception || (sent && sent == exception[4]);
         for (const auto sent : taxi_command_packets)
@@ -749,6 +909,9 @@ DWORD WINAPI worker(void*) noexcept {
           state.flow_subscribed = false;
           state.flow_error = "flow_simconnect_exception";
           ReleaseSRWLockExclusive(&state.lock);
+        } else if (lvar_exception) {
+          // A name the aircraft does not have reads 0; this is another refusal.
+          lvar_failure("lvar_simconnect_exception");
         } else if (on_ground_exception) {
           on_ground_defined = false;
           on_ground_failure("on_ground_simconnect_exception");
@@ -823,6 +986,9 @@ DWORD WINAPI worker(void*) noexcept {
   state.button_commands.reset_session();
   ReleaseSRWLockExclusive(&state.lock);
   lighting_failure("lighting_session_closed");
+  AcquireSRWLockExclusive(&state.lock);
+  end_lvar_stream_locked("lvar_session_closed");
+  ReleaseSRWLockExclusive(&state.lock);
   close(session);
   CloseHandle(notification);
   FreeLibrary(dll);
@@ -910,6 +1076,7 @@ bool stop_provider_locked() noexcept {
   state.taxi_left = state.taxi_right = state.taxi_sd = false;
   state.pmdg_dsp.reset();
   state.button_commands.reset_session();
+  end_lvar_stream_locked("not_initialized");
   state.calibrated = false;
   state.calibration_samples = 0;
   state.calibration_camera_ms = 0;
@@ -1210,8 +1377,49 @@ LightingSample get_lighting() noexcept {
   ReleaseSRWLockShared(&state.lock);
   return out;
 }
+void set_lvar_bindings(const standalone::LvarBindings& bindings) noexcept {
+  AcquireSRWLockExclusive(&state.lock);
+  bool changed = false;
+  for (std::size_t i = 0; i < bindings.size(); ++i)
+    changed = changed || std::memcmp(state.lvar_names[i].name, bindings[i].name, standalone::LvarNameSize) != 0;
+  if (changed) {
+    state.lvar_names = bindings;
+    ++state.lvar_request;
+  }
+  ReleaseSRWLockExclusive(&state.lock);
+}
+LvarBindingSample get_lvar_bindings() noexcept {
+  LvarBindingSample out;
+  AcquireSRWLockShared(&state.lock);
+  out.generation = state.lvar_stream;
+  if (out.generation)
+    out.states = state.lvar;
+  out.error = state.lvar_error;
+  ReleaseSRWLockShared(&state.lock);
+  return out;
+}
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
+std::uint32_t begin_lvar_stream(std::uint32_t define) noexcept {
+  AcquireSRWLockExclusive(&state.lock);
+  std::array<std::uint8_t, standalone::LvarBindingCount> slots{};
+  unsigned count = 0;
+  for (std::size_t i = 0; i < state.lvar_names.size(); ++i)
+    if (standalone::valid_lvar_name(state.lvar_names[i].name))
+      slots[count++] = static_cast<std::uint8_t>(i);
+  begin_lvar_stream_locked(define, slots, count);
+  const auto generation = state.lvar_stream;
+  ReleaseSRWLockExclusive(&state.lock);
+  return generation;
+}
+bool accept_lvar_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
+  return native_camera::accept_lvar_packet(packet, bytes, sample_ms);
+}
+void reset_lvar_session() noexcept {
+  AcquireSRWLockExclusive(&state.lock);
+  reset_session_locked();
+  ReleaseSRWLockExclusive(&state.lock);
+}
 bool install_worker(void* worker_handle, void* stop_handle) noexcept {
   AcquireSRWLockExclusive(&lifecycle);
   bool installed = false;

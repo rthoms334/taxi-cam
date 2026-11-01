@@ -1929,6 +1929,12 @@ DWORD run_impl() {
     status.taxi_request_retired = taxi_request_status.pending_mask ? 0 : taxi_request_status.serial;
     status.taxi_request_pending = taxi_request_status.pending_mask;
     status.taxi_request_failed = taxi_request_status.failed;
+    // Bound cockpit L:vars are only read here; the companion turns their
+    // presses into the same requests as the matching shortcuts.
+    native_camera::set_lvar_bindings(connected ? settings.lvar_bindings : win::LvarBindings{});
+    const auto lvars = native_camera::get_lvar_bindings();
+    status.lvar_generation = lvars.generation;
+    status.lvars = lvars.states;
     std::memcpy(status.aircraft_type, identity.type.data(), sizeof(status.aircraft_type));
     std::memcpy(status.aircraft_path, identity.path.data(), sizeof(status.aircraft_path));
     status.graphics_ready = graphics.ready;

@@ -7,6 +7,7 @@ namespace taxi_camera::standalone {
 // Camera actions: 0 left, 1 right, 2 both pilot displays, 3 lower ECAM (SD).
 // Both never changes the SD; the SD action needs a profile with that side.
 enum CameraAction : unsigned { CameraLeft, CameraRight, CameraBoth, CameraSd, CameraActions };
+static_assert(LvarBindingCount == CameraActions, "One L:var binding per camera action");
 // The sides an action toggles, or 0 when the selected profile lacks them.
 inline unsigned camera_action_sides(const profiles::AircraftProfile& profile, unsigned action) noexcept {
   const unsigned affected = action == CameraBoth ? PilotDisplaySides : action < CameraActions ? 1u << (action == CameraSd ? 2 : action) : 0u;
@@ -84,5 +85,20 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
   settings.manual_mask = target;
   settings.calibration_mask = settings.scene_test = 0;
   return CameraHotkeyResult::aircraft;
+}
+
+// Whether every display an action affects is requested now, read the way its
+// shortcut reads it: the cockpit buttons while they are followed on aircraft
+// Taxi Cam can command, otherwise the manual request (the PMDG 777's manual
+// layer). A latched L:var binding toggles only when this differs from it.
+inline bool camera_action_requested(const Settings& settings, const Status& status, unsigned action) noexcept {
+  const auto* profile = profiles::find(settings.profile);
+  const auto affected = profile ? camera_action_sides(*profile, action) : 0u;
+  if (!affected)
+    return false;
+  const bool cockpit = settings.follow_taxi && profile->taxi_control != profiles::TaxiControl::manual_only &&
+                       profile->taxi_control != profiles::TaxiControl::pmdg_dsp_cam;
+  const auto mask = cockpit ? status.taxi_buttons_mask : settings.manual_mask;
+  return (mask & affected) == affected;
 }
 }  // namespace taxi_camera::standalone

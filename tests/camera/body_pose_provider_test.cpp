@@ -645,6 +645,73 @@ int offline_tests() {
     refresh_taxi();
     check(testing::accept_taxi_packet(taxi_packet.data(), taxi_packet.size(), 11090) && !testing::taxi_buttons_at(11090).sd_on);
   }
+  // User L:var bindings on definition 20 (or 21): request 22 reads the first
+  // values once, request 20 streams changes with the CHANGED flag.
+  {
+    taxi_camera::standalone::LvarBindings bindings{};
+    std::strcpy(bindings[1].name, "S_PED_COCKPIT_DOOR_VIDEO");
+    std::strcpy(bindings[3].name, "I_OH_COCKPIT_DOOR_VIDEO");
+    set_lvar_bindings(bindings);
+    const auto generation = testing::begin_lvar_stream(20);
+    check(generation != 0 && get_lvar_bindings().generation == generation && !get_lvar_bindings().states[1].read);
+    constexpr DWORD bytes = 40 + 2 * 8;
+    std::array<unsigned char, bytes> lvar_packet{};
+    std::array<DWORD, 10> lvar_header{bytes, 0, 8, 22, 2883584, 20, 0, 0, 1, 2};
+    std::array<double, 2> lvar{0, 1};  // Bound bindings in order: right, then lower.
+    const auto send = [&]() {
+      std::memcpy(lvar_packet.data(), lvar_header.data(), sizeof(lvar_header));
+      std::memcpy(lvar_packet.data() + 40, lvar.data(), sizeof(lvar));
+      return testing::accept_lvar_packet(lvar_packet.data(), bytes, 12000);
+    };
+    check(send());
+    auto read = get_lvar_bindings();
+    // The first values are where the stream starts, never presses.
+    check(!read.states[0].read && read.states[1].read && read.states[1].value == 0 && read.states[3].read && read.states[3].value == 1 &&
+          !read.states[1].rises && !read.states[3].rises && !read.states[3].falls);
+    lvar_header[3] = 20;
+    lvar_header[6] = 1;
+    lvar[0] = 1;  // VIDEO pushed,
+    check(send());
+    lvar[0] = 0;  // released,
+    check(send());
+    lvar[1] = 0.003;  // and the latched lamp goes out (near zero counts as off).
+    check(send());
+    read = get_lvar_bindings();
+    check(read.states[1].rises == 1 && read.states[1].falls == 1 && !read.states[3].rises && read.states[3].falls == 1 &&
+          std::strcmp(read.error, "") == 0);
+    // A late packet of a replaced stream is ignored, not counted.
+    lvar_header[5] = lvar_header[3] = 21;
+    lvar[0] = 1;
+    check(send() && get_lvar_bindings().states[1].rises == 1);
+    lvar_header[5] = lvar_header[3] = 20;
+    for (unsigned field : {0u, 2u, 3u, 9u}) {
+      const auto saved = lvar_header[field];
+      lvar_header[field] = saved + 1;
+      check(!send());
+      lvar_header[field] = saved;
+    }
+    lvar_header[6] = 2;  // Unknown request flags.
+    check(!send());
+    lvar_header[6] = 1;
+    check(!testing::accept_lvar_packet(lvar_packet.data(), bytes - 8, 12000) && !testing::accept_lvar_packet(nullptr, bytes, 12000));
+    check(get_lvar_bindings().states[1].rises == 1);
+    lvar[0] = std::numeric_limits<double>::quiet_NaN();
+    check(send());
+    read = get_lvar_bindings();
+    check(std::strcmp(read.error, "lvar_values") == 0 && read.states[1].rises == 1 && read.states[1].value == 0);
+    lvar[0] = 100;  // An animation that reads 100 while pushed counts as on.
+    check(send() && get_lvar_bindings().states[1].rises == 2 && std::strcmp(get_lvar_bindings().error, "") == 0);
+    // A new stream (new names, a flight change) starts every counter again.
+    const auto next = testing::begin_lvar_stream(21);
+    read = get_lvar_bindings();
+    check(next != generation && read.generation == next && !read.states[1].read && !read.states[1].rises);
+    lvar_header[5] = lvar_header[3] = 20;  // The previous definition is ignored now.
+    check(send() && !get_lvar_bindings().states[1].read);
+    // No bound name: no stream.
+    set_lvar_bindings({});
+    check(!testing::begin_lvar_stream(20) && !get_lvar_bindings().generation &&
+          std::strcmp(get_lvar_bindings().error, "lvar_unbound") == 0);
+  }
   // Invalid TAXI values invalidate only the independent button cache. A
   // malformed/wrong-definition packet cannot be mistaken for body telemetry.
   values[6] = 12.75;

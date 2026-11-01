@@ -7,6 +7,9 @@
 #include "../shared/protocol.hpp"
 
 namespace taxi_camera::standalone {
+// [bindings] keys of Settings::lvar_bindings, in CameraAction order (the
+// hotkeys.ini names); each has a <key>_trigger of momentary or latched.
+inline constexpr std::array<const wchar_t*, LvarBindingCount> LvarBindingKeys{L"left", L"right", L"both", L"sd"};
 inline std::wstring settings_override;
 inline std::wstring legacy_settings_path(const std::wstring& path) {
   if (!settings_override.empty())
@@ -486,6 +489,17 @@ inline bool load_settings(Settings& s,
     if (!valid_settings(value))
       value.display_override = {};
   }
+  // [bindings]: cockpit L:vars bound to the camera actions. A name that is not
+  // a valid L:var leaves its action unbound.
+  for (std::size_t i = 0; i < LvarBindingKeys.size(); ++i) {
+    wchar_t text[96]{};
+    GetPrivateProfileStringW(L"bindings", LvarBindingKeys[i], L"", text, 96, path.c_str());
+    auto& binding = value.lvar_bindings[i];
+    if (!parse_lvar_name(text, binding.name) || !binding.name[0])
+      continue;
+    GetPrivateProfileStringW(L"bindings", (std::wstring(LvarBindingKeys[i]) + L"_trigger").c_str(), L"", text, 96, path.c_str());
+    binding.trigger = static_cast<std::uint32_t>(std::wcscmp(text, L"latched") == 0 ? LvarTrigger::latched : LvarTrigger::momentary);
+  }
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
   constexpr std::array<const wchar_t*, 3> sections{L"nose", L"tail", L"wing_right"};
   for (unsigned i = 0; i < 3; ++i)
@@ -569,8 +583,17 @@ inline bool save_settings(const Settings& s) {
       displays += line;
     }
   }
+  std::wstring bindings = L"[bindings]\r\n";
+  for (std::size_t i = 0; i < LvarBindingKeys.size(); ++i) {
+    const auto& binding = s.lvar_bindings[i];
+    if (!binding.name[0])
+      continue;
+    const bool latched = binding.trigger == static_cast<std::uint32_t>(LvarTrigger::latched);
+    bindings += std::wstring(LvarBindingKeys[i]) + L"=" + std::wstring(binding.name, binding.name + std::strlen(binding.name)) + L"\r\n" +
+                LvarBindingKeys[i] + L"_trigger=" + (latched ? L"latched" : L"momentary") + L"\r\n";
+  }
   if (!write(path, std::wstring(text, static_cast<std::size_t>(count)) + std::wstring(right, static_cast<std::size_t>(right_count)) +
-                       displays + layout))
+                       displays + bindings + layout))
     return false;
   // The airplane folder's latest layout lets its other presets start from it.
   const auto family = discovered ? discovered_layout_path(s.discovered.key) : std::wstring{};

@@ -779,6 +779,137 @@ void edit_camera_hotkeys() {
     InvalidateRect(window, nullptr, FALSE);
   }
 }
+// Cockpit L:vars for the selected aircraft (Overview > Flight-deck control):
+// a name and a trigger per camera action. Saving changes only the profile's
+// [bindings]; unfinished edits in Settings stay unsaved.
+constexpr int LvarOpenId = 648, LvarNameId = 760, LvarTriggerId = 770, LvarStatusId = 780, LvarMessageId = 790;
+bool save_lvar_bindings(const win::LvarBindings& bindings) {
+  auto s = draft();
+  win::Settings saved;
+  const std::string_view variant = s.profile == profiles::DiscoveredProfileId ? std::string_view(s.discovered.key) : std::string_view{};
+  if (!win::load_settings(saved, installation, s.profile, variant))
+    return false;
+  saved.lvar_bindings = bindings;
+  if (!win::valid_settings(saved) || !win::save_settings(saved))
+    return false;
+  s.lvar_bindings = bindings;
+  publish(s);
+  return true;
+}
+void refresh_lvar_status(HWND hwnd) {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto s = draft();
+  const auto* profile = profiles::find(s.profile);
+  for (unsigned i = 0; i < win::LvarBindingCount; ++i) {
+    const auto& read = sample.lvars[i];
+    std::wstring line;
+    if (!profile || !win::camera_action_sides(*profile, i)) {
+      line = tr(L"This aircraft has no lower ECAM (SD) camera.");
+    } else if (!s.lvar_bindings[i].name[0]) {
+      line = tr(L"Not bound");
+    } else if (!sample.heartbeat || !sample.lvar_generation || !read.read) {
+      line = tr(L"Not read yet. It is read while this aircraft is loaded and Taxi Cam is connected.");
+    } else {
+      wchar_t value[32];
+      std::swprintf(value, 32, L"%.4g", read.value);
+      line = tr_format(L"Reads {0}", {value});
+    }
+    SetDlgItemTextW(hwnd, LvarStatusId + static_cast<int>(i), line.c_str());
+  }
+}
+INT_PTR CALLBACK lvar_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
+  if (message == WM_INITDIALOG) {
+    const auto s = draft();
+    const auto* profile = profiles::find(s.profile);
+    place_dialog(hwnd, tr(L"Taxi Cam — Cockpit L:vars"), 700, 560);
+    const auto make = [&](const wchar_t* type, const wchar_t* label, int id, int x, int y, int width, int height, DWORD style = 0,
+                          HFONT font = nullptr) { return dialog_control(hwnd, type, label, id, x, y, width, height, style, font); };
+    make(L"STATIC", tr(L"Cockpit L:vars"), -1, 20, 17, 660, 28, 0, heading);
+    const auto intro = tr_format(
+        L"{0}: a bound L:var works like its action's shortcut. Momentary: each press turns the cameras on or off. "
+        L"Latched: the cameras are on while the variable is not 0. Taxi Cam only reads these variables.",
+        {profile ? profile->name : L""});
+    make(L"STATIC", intro.c_str(), -1, 20, 51, 660, 58, 0, small);
+    make(L"STATIC", tr(L"L:var name"), -1, 205, 116, 250, 22, 0, small);
+    make(L"STATIC", tr(L"Trigger"), -1, 470, 116, 210, 22, 0, small);
+    for (unsigned i = 0; i < win::LvarBindingCount; ++i) {
+      const int y = 142 + static_cast<int>(i) * 76;
+      const bool available = profile && win::camera_action_sides(*profile, i);
+      make(L"STATIC", tr(win::CameraHotkeyNames[i]), -1, 20, y + 5, 180, 26);
+      const auto& binding = s.lvar_bindings[i];
+      const std::wstring name(binding.name, binding.name + std::strlen(binding.name));
+      auto field = make(L"EDIT", name.c_str(), LvarNameId + i, 205, y, 255, 32, WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL);
+      SendMessageW(field, EM_SETLIMITTEXT, win::LvarNameSize + 1, 0);
+      auto trigger = make(L"COMBOBOX", L"", LvarTriggerId + i, 470, y, 210, 200, WS_TABSTOP | CBS_DROPDOWNLIST);
+      SendMessageW(trigger, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(tr(L"Momentary")));
+      SendMessageW(trigger, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(tr(L"Latched")));
+      SendMessageW(trigger, CB_SETCURSEL, binding.trigger == static_cast<std::uint32_t>(win::LvarTrigger::latched) ? 1 : 0, 0);
+      EnableWindow(field, available);
+      EnableWindow(trigger, available);
+      make(L"STATIC", L"", LvarStatusId + i, 205, y + 36, 475, 34, 0, small);
+    }
+    make(L"STATIC", L"", LvarMessageId, 20, 448, 660, 44, 0, small);
+    make(L"BUTTON", tr(L"Save changes"), IDOK, 420, 506, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", tr(L"Close"), IDCANCEL, 582, 506, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    refresh_lvar_status(hwnd);
+    SetTimer(hwnd, 1, 250, nullptr);
+    return TRUE;
+  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT)
+    return dialog_colors(w);
+  if (message == WM_TIMER) {
+    refresh_lvar_status(hwnd);
+    return TRUE;
+  }
+  if (message == WM_COMMAND) {
+    const int id = LOWORD(w);
+    if (id == IDOK) {
+      win::LvarBindings bindings{};
+      for (unsigned i = 0; i < win::LvarBindingCount; ++i) {
+        wchar_t text[96]{};
+        GetDlgItemTextW(hwnd, LvarNameId + static_cast<int>(i), text, 96);
+        if (!win::parse_lvar_name(text, bindings[i].name)) {
+          SetDlgItemTextW(hwnd, LvarMessageId,
+                          tr(L"Use letters, digits, underscores and dots for L:var names, for example S_PED_COCKPIT_DOOR_VIDEO."));
+          SetFocus(GetDlgItem(hwnd, LvarNameId + static_cast<int>(i)));
+          return TRUE;
+        }
+        const auto trigger = SendDlgItemMessageW(hwnd, LvarTriggerId + static_cast<int>(i), CB_GETCURSEL, 0, 0);
+        bindings[i].trigger = static_cast<std::uint32_t>(trigger == 1 ? win::LvarTrigger::latched : win::LvarTrigger::momentary);
+      }
+      if (!save_lvar_bindings(bindings)) {
+        SetDlgItemTextW(hwnd, LvarMessageId, tr(L"Could not save the L:vars. Check access to your local settings folder."));
+        return TRUE;
+      }
+      const auto* profile = profiles::find(draft().profile);
+      SetDlgItemTextW(hwnd, LvarMessageId, tr_format(L"L:vars saved for {0}.", {profile ? profile->name : L""}).c_str());
+      refresh_lvar_status(hwnd);
+      return TRUE;
+    }
+    if (id == IDCANCEL) {
+      EndDialog(hwnd, IDCANCEL);
+      return TRUE;
+    }
+  }
+  if (message == WM_CLOSE) {
+    EndDialog(hwnd, IDCANCEL);
+    return TRUE;
+  }
+  if (message == WM_DESTROY)
+    KillTimer(hwnd, 1);
+  return FALSE;
+}
+void edit_lvar_bindings() {
+  const DialogTemplate layout;
+  if (DialogBoxIndirectParamW(instance, &layout.dialog, window, lvar_dialog, 0) == -1) {
+    notice = tr(L"Could not open the cockpit L:var editor.");
+    InvalidateRect(window, nullptr, FALSE);
+  }
+}
 // The --preview UI reads What's new and its pictures from the repository
 // checkout it runs in, so notes not yet on main can be checked.
 std::wstring preview_notes_root() {
@@ -2517,6 +2648,27 @@ void toggle_camera_from_hotkey(unsigned action) {
   SetDlgItemTextW(window, 229, switch_label(tr(L"Scene test"), false).c_str());
   InvalidateRect(window, nullptr, FALSE);
 }
+// Bound cockpit L:vars act like their shortcuts: a momentary press toggles the
+// action, a latched variable turns its displays on or off when it changes.
+win::LvarBindingTracker lvar_tracker;
+void service_lvar_bindings() {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  std::array<win::LvarCommand, win::LvarBindingCount> commands{};
+  const auto count = lvar_tracker.update(draft().lvar_bindings, sample.heartbeat ? sample.lvar_generation : 0, sample.lvars, commands);
+  if (preview_ui)
+    return;
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto command = commands[i];
+    if (command.kind != win::LvarCommandKind::toggle &&
+        win::camera_action_requested(draft(), sample, command.action) == (command.kind == win::LvarCommandKind::on))
+      continue;
+    toggle_camera_from_hotkey(command.action);
+  }
+}
 // Whether a layout is saved for this variant, checked again every 5 s so one
 // saved while the flight runs is found.
 struct SavedVariant {
@@ -3824,6 +3976,7 @@ void build_controls() {
            180);
     EnableWindow(GetDlgItem(window, 221), !manual);
     button(tr(L"Shortcuts and buttons…"), 645, 597, 392, 205);
+    button(tr(L"Cockpit L:vars…"), LvarOpenId, 812, 436, 180, 34);
     button(tr(L"Refresh"), 409, 882, 499, 110);
     ShowWindow(button(tr(L"Set up this aircraft"), SetupOpenId, 787, 138, 205, 36), SW_HIDE);
     update_setup_buttons();
@@ -4146,7 +4299,7 @@ void draw_page(HDC dc) {
          manual ? tr(L"Use Shortcuts and buttons or PFD routing previews for this aircraft.")
          : cam  ? tr(L"Select L INBD, R INBD or LWR CTR, then press CAM. Press CAM again with that display selected to turn it off.")
                 : tr(L"Left and right EFIS TAXI buttons activate their own PFD."),
-         262, 436, 730, 36, small, Muted, DT_LEFT | DT_WORDBREAK);
+         262, 436, 535, 36, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 492, 766, 180);
     text(dc, tr(L"Cockpit displays"), 262, 502, 300, 30, heading);
     text(dc, tr(L"Where each camera is drawn. Select one to change it."), 436, 502, 436, 30, small, Muted);
@@ -4914,6 +5067,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       refresh_connection_button();
       sync_aircraft_session();
       auto_profile();
+      service_lvar_bindings();
       show_notifications();
       update_gallery_buttons();
       update_setup_buttons();
@@ -5014,6 +5168,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       if (id == 645) {
         edit_camera_hotkeys();
+        return 0;
+      }
+      if (id == LvarOpenId) {
+        edit_lvar_bindings();
         return 0;
       }
       if (id == SetupOpenId) {

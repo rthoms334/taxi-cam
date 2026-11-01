@@ -8,6 +8,7 @@
 #include "../profiles/discovered.hpp"
 #include "camera_brightness.hpp"
 #include "camera_rate.hpp"
+#include "lvar_binding.hpp"
 #include "sim_messages.hpp"
 #include "version.hpp"
 
@@ -35,7 +36,9 @@ namespace taxi_camera::standalone {
 // map (each textured cockpit panel with its paired texture) and lists up to 32
 // candidates (any panel can be a set-up aircraft's display); Settings gains
 // the discovered layout of an aircraft the user set up.
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 26;
+// Protocol 27: Settings lvar_bindings (cockpit L:vars bound to camera actions)
+// and Status lvar_generation/lvars (what the bridge reads from them).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 27;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
@@ -89,6 +92,9 @@ struct Settings {
   // Protocol 26: the user's display choices for this profile (discovered.hpp
   // DisplayOverride). All empty is the profile as it comes.
   profiles::DisplayOverride display_override{};
+  // Protocol 27: cockpit L:vars bound to the camera actions (lvar_binding.hpp),
+  // read by the bridge and acted on by the companion. Saved per aircraft profile.
+  LvarBindings lvar_bindings{};
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -171,6 +177,11 @@ struct Status {
   std::uint32_t panel_discovery{}, panel_state{}, panel_count{}, panel_clean{};
   std::int32_t panel_shift{-1};
   PanelTexture panels[MaxPanelTextures]{};
+  // Protocol 27: the bound L:vars as read, in Settings::lvar_bindings order.
+  // A new generation (new names, a reconnected worker, a flight change) starts
+  // the counters again; 0 while nothing is read.
+  std::uint32_t lvar_generation{};
+  LvarBindingStates lvars{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};
@@ -209,7 +220,7 @@ inline bool valid_settings(const Settings& s) noexcept {
       s.scene_test > 1 || s.panel_setup > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 ||
       s.calibration_budget > 16384)
     return false;
-  if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
+  if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides) || !valid_lvar_bindings(s.lvar_bindings))
     return false;
   if (s.lower_id && (!separate_lower || s.lower_id == s.left_id || s.lower_id == s.right_id))
     return false;

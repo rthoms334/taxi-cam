@@ -34,3 +34,18 @@ Controller buttons work while MSFS has focus and Taxi Cam is hidden, and behave 
 The status below each button shows **Ready** when its controller is connected, or **Controller not connected** when it is not. A binding names the controller by its USB vendor and product ID, so it keeps working after the controller is reconnected on another USB port. Two identical controllers share their bindings. Taxi Cam reads controller input only while at least one button is assigned or the editor is waiting for a press.
 
 Controller buttons apply to all aircraft and are saved in `%LOCALAPPDATA%\Taxi Cam\buttons.ini`, which is created when a button is first saved. If the file cannot be read, Taxi Cam disables every controller button and reports it; assign the buttons again to recover. The app's UI preview never acts on controller buttons.
+
+## Cockpit L:vars
+
+An aircraft's own cockpit switch can run a camera action too. In **Settings → Overview**, select **Cockpit L:vars…** in the **Flight-deck control** section, type the name of the cockpit variable (L:var) beside the action, choose its trigger and select **Save changes**. The `L:` prefix is optional. Names use letters, digits, underscores and dots. An empty field unbinds the action.
+
+| Trigger | Behaviour |
+| --- | --- |
+| Momentary | Each change from 0 to a value of 0.5 or more (a press) works like the action's shortcut. Releasing the switch does nothing |
+| Latched | A change to 0.5 or more turns the action's displays on; a change back below 0.5 turns them off |
+
+Lamps that read about 1.003 when lit and button animations that read 100 while pushed count as on. The value Taxi Cam reads is shown below each field. Only changes act: a switch already on when Taxi Cam connects, when the aircraft or flight changes or when its name is changed does nothing until it changes again. A bound action follows the same aircraft, session and speed rules as its shortcut. On the FBW A380 and iniBuilds A350 it also updates the aircraft's TAXI button, as the shortcut does.
+
+Taxi Cam only reads these variables; it never writes to them. They are saved per aircraft in the profile's `[bindings]` section (keys `left`, `right`, `both` and `sd`, each with a `_trigger` of `momentary` or `latched`), so each aircraft keeps its own. The bridge streams them through SimConnect every simulator frame, sending only changed values, so a short push is not missed; the companion acts on them within about a fifth of a second. A name the aircraft does not have reads 0 and never acts.
+
+For example, the Fenix A320's pedestal **VIDEO** button is `S_PED_COCKPIT_DOOR_VIDEO`, momentary, and the overhead **CKPT DOOR VIDEO** button is `S_OH_COCKPIT_DOOR_VIDEO`, latched (from the aircraft's `Cockpit_Behavior.xml`; not yet read live).

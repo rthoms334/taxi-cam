@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <limits>
+#include "../shared/lvar_binding.hpp"
 #include "aircraft_identity.hpp"
 #include "aircraft_mounts.hpp"
 #include "taxi_button_command.hpp"
@@ -38,6 +39,14 @@ struct TaxiButtonSample {
   bool sd_on = false;
   unsigned mask() const noexcept { return (left_on ? 1u : 0u) | (right_on ? 2u : 0u) | (sd_on ? 4u : 0u); }
   std::uint64_t sample_ms = 0;
+  const char* error = "not_initialized";
+};
+// The user's bound cockpit L:vars, in binding order. generation changes with
+// every new stream (new names, a new worker, a flight change) and is 0 while
+// none runs; the counters belong to one generation.
+struct LvarBindingSample {
+  std::uint32_t generation = 0;
+  standalone::LvarBindingStates states{};
   const char* error = "not_initialized";
 };
 struct LightingSample {
@@ -148,6 +157,11 @@ TaxiButtonRequestStatus get_taxi_button_request_status() noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;
+// Cache-only: the worker subscribes to changed names on its next pass, every
+// simulator frame with only changed values sent, so a short push is not
+// missed. Read only; nothing is ever written to these variables.
+void set_lvar_bindings(const standalone::LvarBindings& bindings) noexcept;
+LvarBindingSample get_lvar_bindings() noexcept;
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
 struct LifecycleSnapshot {
@@ -176,6 +190,11 @@ bool accept_pmdg_dsp_packet(const void* packet, std::uint32_t bytes, std::uint64
 TaxiButtonSample taxi_buttons_at(std::uint64_t now_ms) noexcept;
 bool accept_lighting_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 LightingSample lighting_at(std::uint64_t now_ms) noexcept;
+// Starts a stream as the worker does after defining it: bound bindings in
+// order on definition `define`. Returns that stream's generation.
+std::uint32_t begin_lvar_stream(std::uint32_t define) noexcept;
+bool accept_lvar_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
+void reset_lvar_session() noexcept;
 }  // namespace body_pose_provider_testing
 #endif
 }  // namespace taxi_camera::native_camera

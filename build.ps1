@@ -134,6 +134,7 @@ if ($Validate) {
         @{Name='discovered-aircraft'; Sources=@('tests/app/discovered_aircraft_test.cpp')},
         @{Name='profile-selection'; Sources=@('tests/app/profile_selection_test.cpp')},
         @{Name='waiting-page'; Sources=@('tests/app/waiting_page_test.cpp')},
+        @{Name='lvar-binding'; Sources=@('tests/app/lvar_binding_test.cpp')},
         @{Name='settings-store'; Sources=@('tests/app/settings_store_test.cpp')},
         @{Name='camera-rate-migration'; Sources=@('tests/app/camera_rate_migration_test.cpp')},
         @{Name='display-snapshot'; Sources=@('tests/app/display_snapshot_test.cpp')},
