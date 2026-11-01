@@ -96,6 +96,8 @@ $driver = @'
   KnownInstallation
 '@
 $driverSource = Join-Path $testRoot 'wizard-control-driver.iss'
+# [Languages] reads messages\<tag>.isl beside the script being compiled.
+Copy-Item -Recurse -LiteralPath (Join-Path $repoRoot 'installer/messages') -Destination (Join-Path $testRoot 'messages')
 $normalized.Replace($marker,$driver.Replace("`r`n","`n")) | Set-Content -LiteralPath $driverSource -Encoding utf8
 $driverFixture = Build-WizardFixture $driverSource 'wizard-control-driver'
 Invoke-WizardCase $driverFixture 'prepare-guard-simulator-change' @('/TESTLATESIM="' + $steam + '"') $steam $false

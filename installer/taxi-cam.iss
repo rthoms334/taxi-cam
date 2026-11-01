@@ -53,7 +53,9 @@ UsePreviousAppDir=no
 [Languages]
 ; Setup's own wording is in messages\<tag>.isl with the companion's language tags.
 ; Inno ships German, Spanish and French; installer/bootstrap.ps1 adds the pinned
-; Simplified Chinese message file to the compiler's Languages folder.
+; Simplified Chinese message file to the compiler's Languages folder. English is
+; listed first because it is the fallback: Inno never matches Simplified Chinese
+; to a Traditional Chinese display language, so those get English, as in the companion.
 Name: "english"; MessagesFile: "compiler:Default.isl,messages\en.isl"
 Name: "german"; MessagesFile: "compiler:Languages\German.isl,messages\de.isl"
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl,messages\es.isl"
