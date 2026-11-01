@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "../shared/ui_text.hpp"
 
 namespace taxi_camera::standalone {
 // "What's new" notes live in changelog.json at the repository root. The
@@ -427,12 +428,22 @@ struct WhatsNewBlock {
   } kind;
   std::wstring text, detail;
   std::string image;
+  // Interface wording around the notes, translated where it is shown; text is
+  // this English wording with {0} filled from value. Null for the notes.
+  const wchar_t* wording{};
+  std::wstring value{};
 };
 inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRelease>& shown, const ChangelogVersion& installed) {
   using Kind = WhatsNewBlock::Kind;
   std::vector<WhatsNewBlock> blocks;
+  const auto chrome = [](Kind kind, const wchar_t* wording, std::wstring value = {}) {
+    std::wstring text = wording;
+    if (const auto at = text.find(L"{0}"); at != std::wstring::npos)
+      text.replace(at, 3, value);
+    return WhatsNewBlock{kind, text, {}, {}, wording, std::move(value)};
+  };
   if (shown.empty()) {
-    blocks.push_back({Kind::note, L"No notes are listed for Taxi Cam " + changelog_version_text(installed) + L" yet.", {}, {}});
+    blocks.push_back(chrome(Kind::note, ui_text(L"No notes are listed for Taxi Cam {0} yet."), changelog_version_text(installed)));
     return blocks;
   }
   for (std::size_t i = 0; i < shown.size(); ++i) {
@@ -442,26 +453,27 @@ inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRe
     if (i == 0) {
       blocks.push_back({Kind::heading, version, date, {}});
       if (!release.features.empty())
-        blocks.push_back({Kind::section, L"New features", {}, {}});
+        blocks.push_back(chrome(Kind::section, ui_text(L"New features")));
       for (const auto& feature : release.features)
         blocks.push_back({Kind::feature, changelog_widen(feature.title), changelog_widen(feature.text), feature.image});
       if (!release.fixes.empty())
-        blocks.push_back({Kind::section, L"Fixes", {}, {}});
+        blocks.push_back(chrome(Kind::section, ui_text(L"Fixes")));
       for (const auto& fix : release.fixes)
         blocks.push_back({Kind::bullet, changelog_widen(fix), {}, {}});
       if (!release.changes.empty())
-        blocks.push_back({Kind::section, release.features.empty() && release.fixes.empty() ? L"Changes" : L"Other changes", {}, {}});
+        blocks.push_back(
+            chrome(Kind::section, release.features.empty() && release.fixes.empty() ? ui_text(L"Changes") : ui_text(L"Other changes")));
       for (const auto& change : release.changes)
         blocks.push_back({Kind::bullet, changelog_widen(change), {}, {}});
       continue;
     }
     if (i == 1)
-      blocks.push_back({Kind::section, L"Earlier versions", {}, {}});
+      blocks.push_back(chrome(Kind::section, ui_text(L"Earlier versions")));
     blocks.push_back({Kind::release, version, date, {}});
     for (const auto& feature : release.features)
       blocks.push_back({Kind::bullet, changelog_widen(feature.title) + L": " + changelog_widen(feature.text), {}, {}});
     for (const auto& fix : release.fixes)
-      blocks.push_back({Kind::bullet, L"Fixed: " + changelog_widen(fix), {}, {}});
+      blocks.push_back(chrome(Kind::bullet, ui_text(L"Fixed: {0}"), changelog_widen(fix)));
     for (const auto& change : release.changes)
       blocks.push_back({Kind::bullet, changelog_widen(change), {}, {}});
   }

@@ -4,6 +4,7 @@
 #include <array>
 #include <cwchar>
 #include <string>
+#include "../shared/ui_text.hpp"
 
 namespace taxi_camera::standalone {
 // App preferences, deliberately separate from the bridge protocol and aircraft calibration.
@@ -15,8 +16,8 @@ struct CameraHotkey {
 using CameraHotkeys = std::array<CameraHotkey, 4>;
 inline constexpr CameraHotkeys DefaultCameraHotkeys{
     {{'L', MOD_CONTROL | MOD_SHIFT}, {'R', MOD_CONTROL | MOD_SHIFT}, {'B', MOD_CONTROL | MOD_SHIFT}, {'D', MOD_CONTROL | MOD_SHIFT}}};
-inline constexpr std::array<const wchar_t*, 4> CameraHotkeyNames{L"Left camera", L"Right camera", L"Both cameras",
-                                                                 L"Lower ECAM (SD) camera"};
+inline constexpr std::array<const wchar_t*, 4> CameraHotkeyNames{ui_text(L"Left camera"), ui_text(L"Right camera"),
+                                                                 ui_text(L"Both cameras"), ui_text(L"Lower ECAM (SD) camera")};
 inline constexpr std::array<const wchar_t*, 4> CameraHotkeyKeys{L"left", L"right", L"both", L"sd"};
 // Shortcuts added after a hotkeys.ini was written take their default when that
 // key is absent, or stay disabled if the default is already in use.
@@ -52,13 +53,13 @@ inline bool valid_camera_hotkeys(const CameraHotkeys& chords, std::wstring* erro
   for (size_t i = 0; i < chords.size(); ++i) {
     if (!valid_camera_hotkey(chords[i])) {
       if (error)
-        *error = L"Use Ctrl or Alt with a letter, number or function key (except F12), or clear the shortcut.";
+        *error = ui_text(L"Use Ctrl or Alt with a letter, number or function key (except F12), or clear the shortcut.");
       return false;
     }
     for (size_t j = 0; j < i; ++j)
       if (chords[i].key && chords[i] == chords[j]) {
         if (error)
-          *error = L"Each camera action needs a different shortcut. Clear any shortcut you do not need.";
+          *error = ui_text(L"Each camera action needs a different shortcut. Clear any shortcut you do not need.");
         return false;
       }
   }
@@ -176,16 +177,24 @@ class CameraHotkeyRegistration {
     // Reject queued messages from bindings that have since been removed or changed.
     return registered_[i] && LOWORD(keys) == chords_[i].modifiers && HIWORD(keys) == chords_[i].key ? static_cast<int>(i) : -1;
   }
-  std::wstring status(size_t i) const {
+  // English status wording; {0} is the Windows error code, error(i).
+  const wchar_t* status_wording(size_t i) const noexcept {
     if (!chords_[i].key)
-      return L"Disabled";
+      return ui_text(L"Disabled");
     if (preview_)
-      return L"Preview only — shortcut not registered";
+      return ui_text(L"Preview only — shortcut not registered");
     if (registered_[i])
-      return L"Ready — works while Taxi Cam is hidden";
+      return ui_text(L"Ready — works while Taxi Cam is hidden");
     if (errors_[i] == ERROR_HOTKEY_ALREADY_REGISTERED)
-      return L"Unavailable — another app uses this shortcut";
-    return L"Unavailable — Windows error " + std::to_wstring(errors_[i]);
+      return ui_text(L"Unavailable — another app uses this shortcut");
+    return ui_text(L"Unavailable — Windows error {0}");
+  }
+  DWORD error(size_t i) const noexcept { return errors_[i]; }
+  std::wstring status(size_t i) const {
+    std::wstring text = status_wording(i);
+    if (const auto at = text.find(L"{0}"); at != std::wstring::npos)
+      text.replace(at, 3, std::to_wstring(errors_[i]));
+    return text;
   }
   bool conflicts() const noexcept {
     for (const auto error : errors_)

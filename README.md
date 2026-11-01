@@ -69,6 +69,8 @@ Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles th
 
 Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved separately for each aircraft profile.
 
+To use another language, choose **Language** in the tray menu or under **Menu** in Settings. **Follow Windows** returns to the Windows display language. Aircraft names, logs and bug reports stay in English.
+
 ### Camera views
 
 With the aircraft parked and the cameras on, open **Camera views**. Adjust each feed's position, angle and **Lens** (zoom). Most aircraft have nose and tail cameras; the PMDG 777 has nose, left-wing and right-wing feeds. A smaller lens value gives a closer view; a larger value shows more of the surroundings.

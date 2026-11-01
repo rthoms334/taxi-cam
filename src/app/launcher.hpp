@@ -9,6 +9,7 @@
 #include <cwctype>
 #include <string>
 #include <vector>
+#include "../shared/ui_text.hpp"
 #include "module_inventory.hpp"
 
 namespace taxi_camera::standalone {
@@ -454,15 +455,15 @@ inline LoaderWaitResult wait_for_loader(HANDLE thread, const std::atomic<bool>* 
 inline LaunchResult loader_wait_failure(const LoaderWaitResult& wait, bool starting_bridge) {
   if (wait.cancelled)
     return {false, ERROR_CANCELLED,
-            starting_bridge ? L"Stopped waiting for native bridge startup; startup may still finish."
-                            : L"Stopped waiting for bridge loading; the Windows load may still finish."};
+            starting_bridge ? ui_text(L"Stopped waiting for native bridge startup; startup may still finish.")
+                            : ui_text(L"Stopped waiting for bridge loading; the Windows load may still finish.")};
   if (wait.result == WAIT_TIMEOUT)
     return {false, WAIT_TIMEOUT,
-            starting_bridge ? L"Native bridge startup is pending."
-                            : L"Bridge loading is still pending; no second load will be attempted this session."};
+            starting_bridge ? ui_text(L"Native bridge startup is pending.")
+                            : ui_text(L"Bridge loading is still pending; no second load will be attempted this session.")};
   return {false, wait.error ? wait.error : ERROR_GEN_FAILURE,
-          starting_bridge ? L"Windows could not wait for native bridge startup. See launcher.log."
-                          : L"Windows could not wait for bridge loading. See launcher.log."};
+          starting_bridge ? ui_text(L"Windows could not wait for native bridge startup. See launcher.log.")
+                          : ui_text(L"Windows could not wait for bridge loading. See launcher.log.")};
 }
 inline LaunchResult load_bridge(DWORD pid,
                                 const std::wstring& expected_exe,
@@ -478,48 +479,49 @@ inline LaunchResult load_bridge(DWORD pid,
       PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | SYNCHRONIZE;
   HANDLE process = OpenProcess(rights, FALSE, pid);
   if (!process)
-    return {false, GetLastError(), L"Cannot open MSFS in this Windows session."};
+    return {false, GetLastError(), ui_text(L"Cannot open MSFS in this Windows session.")};
   struct Close {
     HANDLE p;
     ~Close() { CloseHandle(p); }
   } close{process};
   if (!same_user(process))
-    return {false, ERROR_ACCESS_DENIED, L"MSFS must run under the same Windows account."};
+    return {false, ERROR_ACCESS_DENIED, ui_text(L"MSFS must run under the same Windows account.")};
   wchar_t path[32768]{};
   DWORD n = 32768;
   if (!QueryFullProcessImageNameW(process, 0, path, &n) ||
       !accepted_simulator_image(path, expected_exe, discover_msfs2024_executables(expected_exe)))
-    return {false, ERROR_BAD_ENVIRONMENT, L"Simulator executable path changed; attach refused."};
+    return {false, ERROR_BAD_ENVIRONMENT, ui_text(L"Simulator executable path changed; attach refused.")};
   auto inventory = modules(pid, &trace.module_error, &trace.module_attempts);
   if (trace.module_error)
-    return {false, trace.module_error, L"Cannot read the simulator module list during startup.",
+    return {false, trace.module_error, ui_text(L"Cannot read the simulator module list during startup."),
             trace.module_error == ERROR_BAD_LENGTH || trace.module_error == ERROR_PARTIAL_COPY};
   Module main{}, bridge{};
   for (const auto& m : inventory) {
     if (!_wcsicmp(m.name.c_str(), L"FlightSimulator2024.exe") && same_path(m.path, path))
       main = m;
     if (!_wcsicmp(m.name.c_str(), L"taxi-camera-native.addon64"))
-      return {false, ERROR_ALREADY_EXISTS, L"The legacy taxi add-on is loaded. Run the native installer, then restart MSFS."};
+      return {false, ERROR_ALREADY_EXISTS, ui_text(L"The legacy taxi add-on is loaded. Run the native installer, then restart MSFS.")};
     if (same_path(m.path, dll))
       bridge = m;
   }
   if (!main.base || !amd64_image(process, main))
-    return {false, ERROR_BAD_EXE_FORMAT, L"Waiting for readable, valid MSFS executable headers.", true};
+    return {false, ERROR_BAD_EXE_FORMAT, ui_text(L"Waiting for readable, valid MSFS executable headers."), true};
   if (!bridge.base) {
     if (!allow_fresh_load)
-      return {false, ERROR_MOD_NOT_FOUND, L"Waiting for the previous bridge load to finish; no second Windows load will be started.", true};
+      return {false, ERROR_MOD_NOT_FOUND,
+              ui_text(L"Waiting for the previous bridge load to finish; no second Windows load will be started."), true};
     const auto loader = remote_export(process, pid, GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
     if (!loader)
-      return {false, ERROR_INVALID_ADDRESS, L"Waiting for the verified Windows DLL loader in MSFS.", true};
+      return {false, ERROR_INVALID_ADDRESS, ui_text(L"Waiting for the verified Windows DLL loader in MSFS."), true};
     const SIZE_T bytes = (dll.size() + 1) * sizeof(wchar_t);
     void* memory = VirtualAllocEx(process, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!memory)
-      return {false, GetLastError(), L"Could not allocate the bridge path."};
+      return {false, GetLastError(), ui_text(L"Could not allocate the bridge path.")};
     SIZE_T wrote{};
     if (!WriteProcessMemory(process, memory, dll.c_str(), bytes, &wrote) || wrote != bytes) {
       const DWORD e = GetLastError();
       VirtualFreeEx(process, memory, 0, MEM_RELEASE);
-      return {false, e, L"Could not write the bridge path."};
+      return {false, e, ui_text(L"Could not write the bridge path.")};
     }
     timing.phase(L"windows_loader_create", trace.load_create_ms);
     HANDLE thread =
@@ -527,7 +529,7 @@ inline LaunchResult load_bridge(DWORD pid,
     if (!thread) {
       const DWORD e = GetLastError();
       VirtualFreeEx(process, memory, 0, MEM_RELEASE);
-      return {false, e, L"Windows refused to load the camera bridge."};
+      return {false, e, ui_text(L"Windows refused to load the camera bridge.")};
     }
     trace.load_started = true;
     timing.phase(L"windows_loader", trace.load_wait_ms);
@@ -543,12 +545,14 @@ inline LaunchResult load_bridge(DWORD pid,
     timing.phase(L"after_load_module_scan", trace.post_load_ms);
     inventory = modules(pid, &trace.module_error, &trace.module_attempts);
     if (trace.module_error)
-      return {false, trace.module_error, L"Windows finished the load attempt, but the bridge module check failed. See launcher.log."};
+      return {false, trace.module_error,
+              ui_text(L"Windows finished the load attempt, but the bridge module check failed. See launcher.log.")};
     for (const auto& m : inventory)
       if (same_path(m.path, dll))
         bridge = m;
     if (!bridge.base)
-      return {false, ERROR_MOD_NOT_FOUND, L"The bridge was not found after Windows loading completed. See launcher.log for details."};
+      return {false, ERROR_MOD_NOT_FOUND,
+              ui_text(L"The bridge was not found after Windows loading completed. See launcher.log for details.")};
   }
   // LoadLibraryW returns an HMODULE; its thread exit code retains only the low
   // 32 bits. Record it as a diagnostic, never use it as a module address or a
@@ -556,17 +560,17 @@ inline LaunchResult load_bridge(DWORD pid,
   timing.phase(L"bridge_export", trace.export_ms);
   HMODULE local = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
   if (!local)
-    return {false, GetLastError(), L"Cannot read the bridge's exported entry point."};
+    return {false, GetLastError(), ui_text(L"Cannot read the bridge's exported entry point.")};
   const auto start = GetProcAddress(local, "TaxiCameraStart");
   const auto offset = start ? reinterpret_cast<std::uintptr_t>(start) - reinterpret_cast<std::uintptr_t>(local) : UINTPTR_MAX;
   FreeLibrary(local);
   if (offset >= bridge.bytes || !amd64_image(process, bridge))
-    return {false, ERROR_INVALID_ADDRESS, L"Invalid native bridge entry point."};
+    return {false, ERROR_INVALID_ADDRESS, ui_text(L"Invalid native bridge entry point.")};
   timing.phase(L"bridge_start_create", trace.start_create_ms);
   HANDLE thread = CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(bridge.base + offset), nullptr, 0,
                                      &trace.start_thread_id);
   if (!thread)
-    return {false, GetLastError(), L"Cannot start the loaded bridge."};
+    return {false, GetLastError(), ui_text(L"Cannot start the loaded bridge.")};
   timing.phase(L"bridge_start", trace.start_wait_ms);
   trace.start_wait = wait_for_loader(thread, running);
   DWORD result = ERROR_GEN_FAILURE;
@@ -579,10 +583,10 @@ inline LaunchResult load_bridge(DWORD pid,
   if (trace.start_wait.cancelled || !trace.start_wait.observed || trace.start_wait.result != WAIT_OBJECT_0)
     return loader_wait_failure(trace.start_wait, true);
   if (trace.start_result_error)
-    return {false, trace.start_result_error, L"Cannot read the native bridge startup result. See launcher.log."};
+    return {false, trace.start_result_error, ui_text(L"Cannot read the native bridge startup result. See launcher.log.")};
   if (result)
-    return {false, result, L"The native bridge refused startup."};
+    return {false, result, ui_text(L"The native bridge refused startup.")};
   trace.phase = L"complete";
-  return {true, 0, L"Native bridge loaded. Waiting for graphics and aircraft."};
+  return {true, 0, ui_text(L"Native bridge loaded. Waiting for graphics and aircraft.")};
 }
 }  // namespace taxi_camera::standalone

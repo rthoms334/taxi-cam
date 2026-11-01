@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "ui_text.hpp"
 
 namespace taxi_camera::standalone {
 // One-shot picture of a tracked display texture for PFD routing. The bridge
@@ -24,23 +25,23 @@ enum class DisplaySnapshotResult : std::uint32_t {
 inline const wchar_t* display_snapshot_text(DisplaySnapshotResult result) noexcept {
   switch (result) {
     case DisplaySnapshotResult::none:
-      return L"No snapshot taken.";
+      return ui_text(L"No snapshot taken.");
     case DisplaySnapshotResult::pending:
-      return L"Taking a snapshot at the next safe display copy...";
+      return ui_text(L"Taking a snapshot at the next safe display copy...");
     case DisplaySnapshotResult::ready:
-      return L"Snapshot ready.";
+      return ui_text(L"Snapshot ready.");
     case DisplaySnapshotResult::unavailable:
-      return L"That texture is no longer tracked. Refresh textures and try again.";
+      return ui_text(L"That texture is no longer tracked. Refresh pictures and try again.");
     case DisplaySnapshotResult::unsupported:
-      return L"This texture's format or size cannot be snapshotted.";
+      return ui_text(L"This texture's format or size cannot be snapshotted.");
     case DisplaySnapshotResult::timeout:
-      return L"No safe copy point within 5 s. The texture may not be drawn at the moment.";
+      return ui_text(L"No safe copy point within 5 s. The texture may not be drawn at the moment.");
     case DisplaySnapshotResult::lost:
-      return L"The texture was destroyed or the flight reset before the copy finished.";
+      return ui_text(L"The texture was destroyed or the flight reset before the copy finished.");
     case DisplaySnapshotResult::failed:
-      return L"The snapshot could not be copied or saved. See bridge.log.";
+      return ui_text(L"The snapshot could not be copied or saved. See bridge.log.");
   }
-  return L"Unknown snapshot result.";
+  return ui_text(L"Unknown snapshot result.");
 }
 inline const char* display_snapshot_name(DisplaySnapshotResult result) noexcept {
   switch (result) {

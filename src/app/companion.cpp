@@ -35,10 +35,12 @@
 #include "changelog.hpp"
 #include "changelog_fetch.hpp"
 #include "whats_new_image.hpp"
+#include "localization.hpp"
 
 namespace {
 using namespace taxi_camera;
 namespace win = standalone;
+using win::decimal, win::tr, win::tr_format;
 constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, WhatsNewImageMessage = WM_APP + 4;
 constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CAM_VERSION_MINOR, TAXI_CAM_VERSION_PATCH};
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
@@ -56,7 +58,8 @@ int page = 0;
 std::vector<HWND> controls;
 std::vector<HWND> navigation;
 native_camera::AutoProfileSelection profile_selection;
-std::wstring installation, expected_simulator, notice = L"Changes are saved for this aircraft.";
+std::wstring installation, expected_simulator, notice;
+std::wstring language_preference;  // Empty: follow the Windows display language.
 std::mutex app_mutex;
 win::Settings current;
 win::Status status;
@@ -66,7 +69,8 @@ bool received_bridge_status{};  // Guarded by app_mutex; retained across simulat
 // window thread only) and clears the queue.
 NotificationReader notification_reader;
 std::vector<SimEvent> pending_notifications;
-std::wstring connection = L"Waiting for Microsoft Flight Simulator 2024";
+// Guarded by app_mutex. English, so the connection worker can set it; shown with text().
+win::UiMessage connection{ui_text(L"Waiting for Microsoft Flight Simulator 2024")};
 std::atomic<bool> running{true};
 std::atomic<DWORD> simulator_pid{};
 HANDLE worker{}, show_event{}, singleton{};
@@ -162,17 +166,17 @@ void edit(double value, int id, int x, int y, int w = 110) {
   auto h = child(L"EDIT", buffer, id, x, y, w, 30, ES_AUTOHSCROLL | ES_LEFT | WS_BORDER);
   SendMessageW(h, EM_SETLIMITTEXT, 32, 0);
 }
-void toggle(const wchar_t* label, int id, bool enabled, int x, int y, int width = 125, int height = 36) {
-  const auto text = std::wstring(label) + (enabled ? L": On" : L": Off");
-  button(text.c_str(), id, x, y, width, height);
+// A toggle button's label: its translated name and state.
+std::wstring switch_label(const wchar_t* name, bool on) {
+  return on ? tr_format(L"{0}: On", {name}) : tr_format(L"{0}: Off", {name});
 }
 void make_fonts() {
   for (HFONT f : {normal, small, title_font, heading, version_font})
     if (f)
       DeleteObject(f);
   auto make = [](int size, int weight, bool underline = false) {
-    return CreateFontW(-scale(size), 0, 0, 0, weight, FALSE, underline, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                       CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable");
+    return CreateFontW(-scale(size), 0, 0, 0, weight, FALSE, underline, FALSE, win::active_language->charset, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, win::active_language->typeface);
   };
   normal = make(15, FW_NORMAL);
   small = make(13, FW_NORMAL);
@@ -213,7 +217,7 @@ void publish(const win::Settings& value) {
   current.snapshot_id = snapshot.snapshot_id;
 }
 void refresh_connection_button() {
-  SetDlgItemTextW(window, 241, win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
+  SetDlgItemTextW(window, 241, tr(win::connection_button_label(connection_requested.load(std::memory_order_acquire))));
 }
 // PMDG 777: the lower DU is a separate texture, chosen in the second list.
 bool separate_lower_profile(const win::Settings& s) noexcept {
@@ -226,15 +230,15 @@ bool pmdg_cam_control(const win::Settings& s) noexcept {
 }
 // Side 2 is the lower ECAM (SD) on Airbus aircraft and the lower DU on the 777.
 const wchar_t* side_toggle_name(const win::Settings& s, unsigned side) {
-  return side == 0 ? L"Left" : side == 1 ? L"Right" : pmdg_cam_control(s) ? L"Lower" : L"SD";
+  return side == 0 ? tr(L"Left") : side == 1 ? tr(L"Right") : pmdg_cam_control(s) ? tr(L"Lower") : tr(L"SD");
 }
 // PFD routing's Preview and Calibrate rows, from the current request.
 void refresh_side_toggles(const win::Settings& s) {
   constexpr int previews[]{224, 225, 232}, calibrations[]{226, 227, 233};
   for (unsigned side = 0; side < 3; ++side) {
-    const auto name = std::wstring(side_toggle_name(s, side));
-    SetDlgItemTextW(window, previews[side], (name + (s.manual_mask & (1u << side) ? L": On" : L": Off")).c_str());
-    SetDlgItemTextW(window, calibrations[side], (name + (s.calibration_mask & (1u << side) ? L": On" : L": Off")).c_str());
+    const auto name = side_toggle_name(s, side);
+    SetDlgItemTextW(window, previews[side], switch_label(name, s.manual_mask & (1u << side)).c_str());
+    SetDlgItemTextW(window, calibrations[side], switch_label(name, s.calibration_mask & (1u << side)).c_str());
   }
 }
 void request_connection(win::ConnectCommand command) {
@@ -242,7 +246,7 @@ void request_connection(win::ConnectCommand command) {
     const std::lock_guard lock(app_mutex);
     const bool disconnect = command == win::ConnectCommand::disconnect;
     if (!disconnect && !win::begin_connection(current)) {
-      notice = L"Restart Taxi Cam to begin a new connection.";
+      notice = tr(L"Restart Taxi Cam to begin a new connection.");
       InvalidateRect(window, nullptr, FALSE);
       return;
     }
@@ -252,7 +256,7 @@ void request_connection(win::ConnectCommand command) {
       win::apply_connection_command(current, command);
     if (disconnect) {
       status = {};
-      connection = L"Disconnected. Choose Connect to enable the cameras again.";
+      connection = ui_text(L"Disconnected. Choose Connect to enable the cameras again.");
       // Publish the stop immediately, including when the attach worker is still
       // waiting for a remote load. The worker uses the same settings lock.
       win::Mailbox mailbox;
@@ -264,11 +268,11 @@ void request_connection(win::ConnectCommand command) {
     }
   }
   connect_commands.request(command);
-  notice = command == win::ConnectCommand::disconnect ? L"Disconnected. Camera output and temporary requests are off."
-                                                      : L"Connect requested. Cameras will enable when the bridge is ready.";
+  notice = command == win::ConnectCommand::disconnect ? tr(L"Disconnected. Camera output and temporary requests are off.")
+                                                      : tr(L"Connect requested. Cameras will enable when the bridge is ready.");
   refresh_connection_button();
   if (command == win::ConnectCommand::disconnect) {
-    SetDlgItemTextW(window, 229, L"Scene test: Off");
+    SetDlgItemTextW(window, 229, switch_label(tr(L"Scene test"), false).c_str());
     refresh_side_toggles(draft());
   }
   InvalidateRect(window, nullptr, FALSE);
@@ -293,8 +297,8 @@ bool exchange_control(win::Mailbox& mailbox, win::Status* sample = nullptr) {
 void donate() {
   const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", DonationUrl, nullptr, nullptr, SW_SHOWNORMAL));
   if (result <= 32)
-    MessageBoxW(window, L"Could not open your browser. You can also find the PayPal donation link in the Taxi Cam README.",
-                L"Donate to Taxi Cam", MB_OK | MB_ICONWARNING);
+    MessageBoxW(window, tr(L"Could not open your browser. You can also find the PayPal donation link in the Taxi Cam README."),
+                tr(L"Donate to Taxi Cam"), MB_OK | MB_ICONWARNING);
 }
 void report_bug() {
   win::BugReportContext context;
@@ -312,17 +316,17 @@ void report_bug() {
   const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
   if (result <= 32) {
     MessageBoxW(window,
-                L"Could not open your browser. Open github.com/rthoms334/taxi-cam/issues and choose Bug report. "
-                L"Attach logs from Diagnostics > Open log folder and include your Taxi Cam version.",
-                L"Taxi Cam bug report", MB_OK | MB_ICONWARNING);
+                tr(L"Could not open your browser. Open github.com/rthoms334/taxi-cam/issues and choose Bug report. "
+                   L"Attach logs from Diagnostics > Open log folder and include your Taxi Cam version."),
+                tr(L"Taxi Cam bug report"), MB_OK | MB_ICONWARNING);
     return;
   }
-  notice = L"Bug report opened. Review the details and attach logs before submitting on GitHub.";
+  notice = tr(L"Bug report opened. Review the details and attach logs before submitting on GitHub.");
   InvalidateRect(window, nullptr, FALSE);
 }
 void dirty_notice() {
   dirty = true;
-  notice = L"Unsaved changes";
+  notice = tr(L"Unsaved changes");
   InvalidateRect(window, nullptr, FALSE);
 }
 bool apply_color_selection(const win::Settings& expected, bool markings, COLORREF color) {
@@ -357,8 +361,10 @@ bool single_display_profile(const win::Settings& s) noexcept {
   return profile && profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
 }
 // Indexed by CameraMode; CameraModeOrder is the left-to-right card order.
-constexpr const wchar_t* CameraModeNames[]{L"Performance", L"Balanced", L"Smooth", L"Custom", L"Auto"};
-constexpr const wchar_t* CameraModeHints[]{L"Lowest cost", L"Medium cost", L"Highest cost", L"Your target", L"Adapts to fps"};
+constexpr const wchar_t* CameraModeNames[]{ui_text(L"Performance"), ui_text(L"Balanced"), ui_text(L"Smooth"), ui_text(L"Custom"),
+                                           ui_text(L"Auto")};
+constexpr const wchar_t* CameraModeHints[]{ui_text(L"Lowest cost"), ui_text(L"Medium cost"), ui_text(L"Highest cost"),
+                                           ui_text(L"Your target"), ui_text(L"Adapts to fps")};
 constexpr CameraMode CameraModeOrder[]{CameraMode::automatic, CameraMode::performance, CameraMode::balanced, CameraMode::smooth,
                                        CameraMode::custom};
 static_assert(std::size(CameraModeNames) == kCameraModeCount && std::size(CameraModeHints) == kCameraModeCount &&
@@ -424,21 +430,17 @@ void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
     SetTextColor(dc, color);
     DrawTextW(dc, value, -1, &r, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   };
-  line(CameraModeNames[mode], 9, 26, heading, chosen ? Accent : Text);
-  wchar_t label[48];
-  if (auto_live)
-    std::swprintf(label, 48, per_frame >= feeds ? L"Every camera, every frame" : L"%u camera%ls per frame", per_frame,
-                  per_frame == 1 ? L"" : L"s");
-  else if (automatic)
-    std::swprintf(label, 48, L"Even frames");
-  else
-    std::swprintf(label, 48, L"%u fps", target);
-  line(label, 36, 20, small, Muted);
-  wchar_t now[48];
-  if (std::isfinite(reached))
-    std::swprintf(now, 48, reached < 9.95 ? L"≈ %.1f fps now" : L"≈ %.0f fps now", reached);
+  line(tr(CameraModeNames[mode]), 9, 26, heading, chosen ? Accent : Text);
+  const auto label = auto_live && per_frame >= feeds ? std::wstring(tr(L"Every camera, every frame"))
+                     : auto_live && per_frame == 1   ? std::wstring(tr(L"1 camera per frame"))
+                     : auto_live                     ? tr_format(L"{0} cameras per frame", {std::to_wstring(per_frame)})
+                     : automatic                     ? std::wstring(tr(L"Even frames"))
+                                                     : tr_format(L"{0} fps", {std::to_wstring(target)});
+  line(label.c_str(), 36, 20, small, Muted);
   const bool show_now = std::isfinite(reached) && (!automatic || auto_live);
-  line(show_now ? now : CameraModeHints[mode], 57, 22, normal, show_now ? Text : Muted);
+  const auto now =
+      show_now ? tr_format(L"≈ {0} fps now", {decimal(reached, reached < 9.95 ? 1 : 0)}) : std::wstring(tr(CameraModeHints[mode]));
+  line(now.c_str(), 57, 22, normal, show_now ? Text : Muted);
   // Frame cost follows the images rendered per second (Auto: per frame).
   const int bars = automatic                          ? static_cast<int>(auto_live ? std::min(per_frame, 3u) : 1u)
                    : target <= kPerformanceCameraRate ? 1
@@ -454,7 +456,7 @@ void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
   RECT cost{item.rcItem.left + scale(10), item.rcItem.bottom - scale(22), item.rcItem.right - scale(64), item.rcItem.bottom - scale(4)};
   SelectObject(dc, small);
   SetTextColor(dc, Muted);
-  DrawTextW(dc, L"Cost", -1, &cost, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  DrawTextW(dc, tr(L"Cost"), -1, &cost, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   if (item.itemState & ODS_FOCUS) {
     RECT focus = item.rcItem;
     InflateRect(&focus, -scale(4), -scale(4));
@@ -516,22 +518,28 @@ void refresh_shortcut_status() {
   if (!shortcut_window)
     return;
   for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
-    const auto state = hotkey_draft[i] != hotkey_saved[i] ? std::wstring(L"Unsaved — select Save changes to apply")
-                       : hotkey_editor_focused            ? std::wstring(L"Editing — shortcuts paused until you leave the field")
-                                                          : hotkey_registration.status(i);
+    const auto state = hotkey_draft[i] != hotkey_saved[i] ? std::wstring(tr(L"Unsaved — select Save changes to apply"))
+                       : hotkey_editor_focused
+                           ? std::wstring(tr(L"Editing — shortcuts paused until you leave the field"))
+                           : tr_format(hotkey_registration.status_wording(i), {std::to_wstring(hotkey_registration.error(i))});
     SetDlgItemTextW(shortcut_window, 650 + i, state.c_str());
     const auto binding = button_draft[i];
     const auto device = binding.button ? win::CameraButtonInput::device_name(binding.vendor, binding.product) : std::wstring();
     const bool capturing = button_capture == static_cast<int>(i);
-    SetDlgItemTextW(shortcut_window, 670 + i,
-                    capturing ? L"Press and release a controller button…" : win::describe_camera_button(binding, device).c_str());
-    const auto button_state = capturing                    ? std::wstring(L"Waiting — press and release the button, or Clear to cancel")
-                              : binding != button_saved[i] ? std::wstring(L"Unsaved — select Save changes to apply")
-                              : !binding.button            ? std::wstring(L"Disabled")
-                              : preview_ui                 ? std::wstring(L"Preview only — button not active")
-                              : !button_input.enabled()    ? L"Unavailable — Windows error " + std::to_wstring(button_input.error())
-                              : device.empty()             ? std::wstring(L"Controller not connected")
-                                                           : std::wstring(L"Ready — works while Taxi Cam is hidden");
+    // A controller without a product name is "Game controller", translated here.
+    const auto controller = win::camera_button_controller(binding, device);
+    const auto label =
+        capturing ? std::wstring(tr(L"Press and release a controller button…"))
+                  : tr_format(win::camera_button_wording(binding, device), {std::to_wstring(binding.button), tr(controller.c_str())});
+    SetDlgItemTextW(shortcut_window, 670 + i, label.c_str());
+    const auto button_state = capturing                    ? std::wstring(tr(L"Waiting — press and release the button, or Clear to cancel"))
+                              : binding != button_saved[i] ? std::wstring(tr(L"Unsaved — select Save changes to apply"))
+                              : !binding.button            ? std::wstring(tr(L"Disabled"))
+                              : preview_ui                 ? std::wstring(tr(L"Preview only — button not active"))
+                              : !button_input.enabled()
+                                  ? tr_format(L"Unavailable — Windows error {0}", {std::to_wstring(button_input.error())})
+                              : device.empty() ? std::wstring(tr(L"Controller not connected"))
+                                               : std::wstring(tr(L"Ready — works while Taxi Cam is hidden"));
     SetDlgItemTextW(shortcut_window, 675 + i, button_state.c_str());
   }
 }
@@ -637,37 +645,37 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     hotkey_draft = hotkey_saved;
     button_draft = button_saved;
     button_capture = -1;
-    place_dialog(hwnd, L"Taxi Cam — Flight-deck shortcuts and buttons", 940, 568);
+    place_dialog(hwnd, tr(L"Taxi Cam — Flight-deck shortcuts and buttons"), 940, 568);
     const auto make = [&](const wchar_t* type, const wchar_t* label, int id, int x, int y, int width, int height, DWORD style = 0,
                           HFONT font = nullptr) { return dialog_control(hwnd, type, label, id, x, y, width, height, style, font); };
-    make(L"STATIC", L"Flight-deck shortcuts and buttons", -1, 20, 17, 900, 28, 0, heading);
+    make(L"STATIC", tr(L"Flight-deck shortcuts and buttons"), -1, 20, 17, 900, 28, 0, heading);
     make(L"STATIC",
-         L"Use Ctrl or Alt with a letter, number or function key, or set a joystick, button box or gamepad button. "
-         L"Clear disables it.",
+         tr(L"Use Ctrl or Alt with a letter, number or function key, or set a joystick, button box or gamepad button. "
+            L"Clear disables it."),
          -1, 20, 51, 900, 27, 0, small);
-    make(L"STATIC", L"Keyboard", -1, 205, 86, 275, 22, 0, small);
-    make(L"STATIC", L"Controller button", -1, 500, 86, 420, 22, 0, small);
+    make(L"STATIC", tr(L"Keyboard"), -1, 205, 86, 275, 22, 0, small);
+    make(L"STATIC", tr(L"Controller button"), -1, 500, 86, 420, 22, 0, small);
     for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
       const int y = 112 + static_cast<int>(i) * 84;
-      make(L"STATIC", win::CameraHotkeyNames[i], -1, 20, y + 5, 180, 26);
+      make(L"STATIC", tr(win::CameraHotkeyNames[i]), -1, 20, y + 5, 180, 26);
       auto field = make(HOTKEY_CLASSW, L"", 620 + i, 205, y, 195, 32, WS_TABSTOP | WS_BORDER);
       SendMessageW(field, HKM_SETHOTKEY, win::hotkey_control_value(hotkey_draft[i]), 0);
       SetWindowSubclass(field, shortcut_editor, 1, 0);
-      make(L"BUTTON", L"Clear", 630 + i, 408, y, 72, 32, WS_TABSTOP | BS_PUSHBUTTON);
+      make(L"BUTTON", tr(L"Clear"), 630 + i, 408, y, 72, 32, WS_TABSTOP | BS_PUSHBUTTON);
       make(L"STATIC", L"", 650 + i, 205, y + 36, 275, 40, 0, small);
       make(L"STATIC", L"", 670 + i, 500, y, 240, 32, WS_BORDER | SS_CENTERIMAGE | SS_ENDELLIPSIS);
-      make(L"BUTTON", L"Set button", 680 + i, 748, y, 92, 32, WS_TABSTOP | BS_PUSHBUTTON);
-      make(L"BUTTON", L"Clear", 690 + i, 848, y, 72, 32, WS_TABSTOP | BS_PUSHBUTTON);
+      make(L"BUTTON", tr(L"Set button"), 680 + i, 748, y, 92, 32, WS_TABSTOP | BS_PUSHBUTTON);
+      make(L"BUTTON", tr(L"Clear"), 690 + i, 848, y, 72, 32, WS_TABSTOP | BS_PUSHBUTTON);
       make(L"STATIC", L"", 675 + i, 500, y + 36, 420, 40, 0, small);
     }
     make(L"STATIC",
-         L"Both turns the captain and first-officer displays on; press again to turn both off. SD is the lower ECAM or, on the PMDG 777, "
-         L"the lower DU. Shortcuts and buttons apply to all aircraft and work while Taxi Cam is hidden. MSFS also receives controller "
-         L"buttons, so leave a button you set here unassigned in the simulator.",
+         tr(L"Both turns the captain and first-officer displays on; press again to turn both off. SD is the lower ECAM or, on the "
+            L"PMDG 777, the lower DU. Shortcuts and buttons apply to all aircraft and work while Taxi Cam is hidden. MSFS also receives "
+            L"controller buttons, so leave a button you set here unassigned in the simulator."),
          660, 20, 450, 900, 56, 0, small);
-    make(L"BUTTON", L"Reset shortcuts", 640, 20, 514, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
-    make(L"BUTTON", L"Save changes", IDOK, 660, 514, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
-    make(L"BUTTON", L"Close", IDCANCEL, 822, 514, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"BUTTON", tr(L"Reset shortcuts"), 640, 20, 514, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"BUTTON", tr(L"Save changes"), IDOK, 660, 514, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", tr(L"Close"), IDCANCEL, 822, 514, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
     refresh_shortcut_status();
     return TRUE;
   }
@@ -695,7 +703,8 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       update_camera_button_input();
       if (!button_input.enabled()) {
         button_capture = -1;
-        const auto error = L"Could not listen for controller buttons (Windows error " + std::to_wstring(button_input.error()) + L").";
+        const auto error =
+            tr_format(L"Could not listen for controller buttons (Windows error {0}).", {std::to_wstring(button_input.error())});
         SetDlgItemTextW(hwnd, 660, error.c_str());
       }
       refresh_shortcut_status();
@@ -712,11 +721,11 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     if (id == IDOK) {
       std::wstring error;
       if (!win::valid_camera_hotkeys(hotkey_draft, &error) || !win::valid_camera_buttons(button_draft, &error)) {
-        SetDlgItemTextW(hwnd, 660, error.c_str());
+        SetDlgItemTextW(hwnd, 660, tr(error.c_str()));
         return TRUE;
       }
       if (!win::save_camera_hotkeys(hotkey_draft, win::settings_directory())) {
-        SetDlgItemTextW(hwnd, 660, L"Could not save shortcuts. Check access to the local settings folder.");
+        SetDlgItemTextW(hwnd, 660, tr(L"Could not save shortcuts. Check access to the local settings folder."));
         return TRUE;
       }
       hotkey_saved = hotkey_draft;
@@ -730,12 +739,12 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       refresh_shortcut_status();
       SetDlgItemTextW(hwnd, 660,
                       !buttons_saved
-                          ? L"Keyboard shortcuts saved. Could not save controller buttons. Check access to the local settings folder."
+                          ? tr(L"Keyboard shortcuts saved. Could not save controller buttons. Check access to the local settings folder.")
                       : hotkey_registration.conflicts()
-                          ? L"Saved. Unavailable shortcuts need a different combination. The other shortcuts remain active."
+                          ? tr(L"Saved. Unavailable shortcuts need a different combination. The other shortcuts remain active.")
                       : win::any_camera_button(button_saved) && !preview_ui && !button_input.enabled()
-                          ? L"Saved. Controller buttons are unavailable; see the status below each button."
-                          : L"Shortcuts and buttons saved for all aircraft. Camera settings and unfinished edits are unchanged.");
+                          ? tr(L"Saved. Controller buttons are unavailable; see the status below each button.")
+                          : tr(L"Shortcuts and buttons saved for all aircraft. Camera settings and unfinished edits are unchanged."));
       return TRUE;
     }
     if (id == IDCANCEL) {
@@ -761,7 +770,7 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
 void edit_camera_hotkeys() {
   const DialogTemplate layout;
   if (DialogBoxIndirectParamW(instance, &layout.dialog, window, shortcut_dialog, 0) == -1) {
-    notice = L"Could not open the shortcut and button editor.";
+    notice = tr(L"Could not open the shortcut and button editor.");
     InvalidateRect(window, nullptr, FALSE);
   }
 }
@@ -831,11 +840,13 @@ int layout_whats_new(HWND hwnd, HDC dc, bool draw) {
   };
   for (const auto& b : v.blocks) {
     using Kind = win::WhatsNewBlock::Kind;
+    // Headings and notes around the release notes are interface wording.
+    const auto label = b.wording ? tr_format(b.wording, {b.value}) : b.text;
     if (b.kind == Kind::heading) {
-      put(L"WHAT'S NEW", small, Accent, left, y, width, scale(18), DT_SINGLELINE);
+      put(tr(L"WHAT'S NEW"), small, Accent, left, y, width, scale(18), DT_SINGLELINE);
       y += scale(22);
-      const int h = measure(b.text, title_font, width);
-      put(b.text, title_font, Text, left, y, width, h);
+      const int h = measure(label, title_font, width);
+      put(label, title_font, Text, left, y, width, h);
       y += h;
       if (!b.detail.empty()) {
         put(b.detail, normal, Muted, left, y, width, scale(22), DT_SINGLELINE);
@@ -844,12 +855,12 @@ int layout_whats_new(HWND hwnd, HDC dc, bool draw) {
       y += scale(6);
     } else if (b.kind == Kind::section) {
       y += scale(20);
-      const int h = measure(b.text, heading, width);
-      put(b.text, heading, Accent, left, y, width, h);
+      const int h = measure(label, heading, width);
+      put(label, heading, Accent, left, y, width, h);
       y += h + scale(10);
     } else if (b.kind == Kind::feature) {
       // A card: title, text, then the picture at the card's width.
-      const int title_h = measure(b.text, heading, inner), text_h = measure(b.detail, normal, inner);
+      const int title_h = measure(label, heading, inner), text_h = measure(b.detail, normal, inner);
       const WhatsNewPicture* picture{};
       for (const auto& candidate : v.pictures)
         if (!b.image.empty() && candidate.path == b.image)
@@ -859,7 +870,7 @@ int layout_whats_new(HWND hwnd, HDC dc, bool draw) {
       box(left, y, width, card_h, Card, Border, scale(14));
       int top = y + scale(WhatsNewCardPad);
       const int x = left + scale(WhatsNewCardPad);
-      put(b.text, heading, Text, x, top, inner, title_h);
+      put(label, heading, Text, x, top, inner, title_h);
       top += title_h + scale(6);
       put(b.detail, normal, Muted, x, top, inner, text_h);
       top += text_h + scale(16);
@@ -880,12 +891,12 @@ int layout_whats_new(HWND hwnd, HDC dc, bool draw) {
           DeleteObject(pen);
         } else {
           box(x, top, inner, picture_h, Sidebar, Border, scale(8));
-          put(L"Loading picture…", small, Muted, x, top, inner, picture_h, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+          put(tr(L"Loading picture…"), small, Muted, x, top, inner, picture_h, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
       }
       y += card_h + scale(14);
     } else if (b.kind == Kind::bullet) {
-      const int indent = scale(20), h = measure(b.text, normal, width - indent);
+      const int indent = scale(20), h = measure(label, normal, width - indent);
       if (draw) {
         HBRUSH dot = CreateSolidBrush(Accent);
         const auto old_brush = SelectObject(dc, dot), old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
@@ -895,21 +906,21 @@ int layout_whats_new(HWND hwnd, HDC dc, bool draw) {
         SelectObject(dc, old_pen);
         DeleteObject(dot);
       }
-      put(b.text, normal, Text, left + indent, y, width - indent, h);
+      put(label, normal, Text, left + indent, y, width - indent, h);
       y += h + scale(8);
     } else if (b.kind == Kind::release) {
       y += scale(12);
-      put(b.text, heading, Text, left, y, width, scale(26), DT_SINGLELINE);
+      put(label, heading, Text, left, y, width, scale(26), DT_SINGLELINE);
       if (!b.detail.empty()) {
         RECT title{0, 0, width, 0};
         SelectObject(dc, heading);
-        DrawTextW(dc, b.text.c_str(), -1, &title, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(dc, label.c_str(), -1, &title, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
         put(b.detail, normal, Muted, left + title.right + scale(12), y + scale(3), width, scale(24), DT_SINGLELINE);
       }
       y += scale(32);
     } else {
-      const int h = measure(b.text, normal, width);
-      put(b.text, normal, Muted, left, y, width, h);
+      const int h = measure(label, normal, width);
+      put(label, normal, Muted, left, y, width, h);
       y += h;
     }
   }
@@ -982,7 +993,7 @@ LRESULT CALLBACK whats_new_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
       SetTextColor(memory, Background);
       SetBkMode(memory, TRANSPARENT);
       auto label = v.close;
-      DrawTextW(memory, L"Close", -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      DrawTextW(memory, tr(L"Close"), -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
       BitBlt(dc, 0, 0, client.right, client.bottom, memory, 0, 0, SRCCOPY);
       SelectObject(memory, old);
       DeleteObject(bitmap);
@@ -1116,7 +1127,7 @@ bool open_whats_new(std::vector<win::WhatsNewBlock> blocks) {
   constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VSCROLL;
   RECT frame{0, 0, scale(WhatsNewWidth), scale(WhatsNewHeight)};
   AdjustWindowRectEx(&frame, style, FALSE, 0);
-  v.window = CreateWindowExW(0, WhatsNewClass, L"Taxi Cam — What's new", style, CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left,
+  v.window = CreateWindowExW(0, WhatsNewClass, tr(L"Taxi Cam — What's new"), style, CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left,
                              frame.bottom - frame.top, window, nullptr, instance, nullptr);
   if (!v.window)
     return false;
@@ -1140,10 +1151,10 @@ void request_whats_new() {
   if (preview_ui)
     changelog_fetcher.set_local_root(preview_notes_root());
   if (!changelog_fetcher.begin(window, WhatsNewMessage)) {
-    notice = L"Could not start loading What's new. Try again.";
+    notice = tr(L"Could not start loading What's new. Try again.");
   } else {
-    SetDlgItemTextW(window, 515, L"Loading…");
-    notice = L"Loading What's new from GitHub…";
+    SetDlgItemTextW(window, 515, tr(L"Loading…"));
+    notice = tr(L"Loading What's new from GitHub…");
   }
   InvalidateRect(window, nullptr, FALSE);
 }
@@ -1177,7 +1188,7 @@ std::array<std::uint64_t, MaxDisplaySides> routed_texture_ids(const win::Status&
           profiles::separate_lower_texture(profile) ? sample.lower_id : sample.left_id};
 }
 const wchar_t* snapshot_side_name(const win::Settings& s, unsigned side) {
-  return side == 0 ? L"Left" : side == 1 ? L"Right" : pmdg_cam_control(s) ? L"Lower DU" : L"SD";
+  return side == 0 ? tr(L"Left") : side == 1 ? tr(L"Right") : pmdg_cam_control(s) ? tr(L"Lower DU") : tr(L"SD");
 }
 // Profile rectangles apply only when the texture has the profile's display
 // size; a set-up aircraft's sides fill whatever texture they use.
@@ -1206,17 +1217,20 @@ void update_snapshot_dialog(HWND hwnd) {
     }
     InvalidateRect(hwnd, nullptr, FALSE);
   }
-  wchar_t caption[320];
+  win::UiMessage message;
   if (!answered)
-    std::swprintf(caption, 320, L"Texture #%llu. %ls", static_cast<unsigned long long>(snapshot_view.id),
-                  GetTickCount64() - snapshot_view.requested_ms > 3000
-                      ? L"Waiting for the simulator. Connect Taxi Cam with a flight loaded."
-                      : L"Requesting a snapshot...");
+    message.add(ui_text(L"Texture #{0}."), {std::to_wstring(snapshot_view.id)})
+        .add(GetTickCount64() - snapshot_view.requested_ms > 3000
+                 ? ui_text(L"Waiting for the simulator. Connect Taxi Cam with a flight loaded.")
+                 : ui_text(L"Requesting a snapshot..."));
   else
-    std::swprintf(caption, 320, L"Texture #%llu | %u x %u | format %u. %ls", static_cast<unsigned long long>(sample.snapshot_id),
-                  sample.snapshot_width, sample.snapshot_height, sample.snapshot_format,
-                  result == win::DisplaySnapshotResult::ready && !snapshot_view.image ? L"The saved image could not be opened."
-                                                                                      : win::display_snapshot_text(result));
+    message
+        .add(ui_text(L"Texture #{0} | {1} x {2} | format {3}."),
+             {std::to_wstring(sample.snapshot_id), std::to_wstring(sample.snapshot_width), std::to_wstring(sample.snapshot_height),
+              std::to_wstring(sample.snapshot_format)})
+        .add(result == win::DisplaySnapshotResult::ready && !snapshot_view.image ? ui_text(L"The saved image could not be opened.")
+                                                                                 : win::display_snapshot_text(result));
+  const auto caption = message.text();
   std::wstring legend;
   if (answered && result == win::DisplaySnapshotResult::ready) {
     const auto* profile = snapshot_profile(s, sample);
@@ -1227,12 +1241,14 @@ void update_snapshot_dialog(HWND hwnd) {
         if (routed[side] == sample.snapshot_id)
           bound += (bound.empty() ? L"" : L", ") + std::wstring(snapshot_side_name(s, side));
     }
+    // Only a profile the catalog does not know has no name to show.
     const auto* named = profiles::find(s.profile);
-    const std::wstring name = named ? named->name : L"the selected profile";
-    legend = !profile ? L"This texture is not the size of a " + name + L" display texture, so no display rectangles are drawn."
+    const std::wstring name = named ? named->name : L"";
+    legend = !named     ? tr(L"This texture is not the size of the selected profile's display texture, so no display rectangles are drawn.")
+             : !profile ? tr_format(L"This texture is not the size of a {0} display texture, so no display rectangles are drawn.", {name})
              : bound.empty()
-                 ? L"Not routed to a display on " + name + L". Dotted outlines show where its displays would be drawn."
-                 : L"Routed to " + bound + L" on " + name + L". Solid outlines are routed display rectangles; dotted ones are not.";
+                 ? tr_format(L"Not routed to a display on {0}. Dotted outlines show where its displays would be drawn.", {name})
+                 : tr_format(L"Routed to {0} on {1}. Solid outlines are routed display rectangles; dotted ones are not.", {bound, name});
   }
   if (legend != snapshot_view.legend) {
     snapshot_view.legend = legend;
@@ -1240,7 +1256,7 @@ void update_snapshot_dialog(HWND hwnd) {
   }
   if (caption != snapshot_view.caption) {
     snapshot_view.caption = caption;
-    SetDlgItemTextW(hwnd, 701, caption);
+    SetDlgItemTextW(hwnd, 701, caption.c_str());
     InvalidateRect(hwnd, nullptr, FALSE);
   }
 }
@@ -1297,12 +1313,12 @@ void paint_snapshot(HDC dc) {
 }
 INT_PTR CALLBACK snapshot_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   if (message == WM_INITDIALOG) {
-    place_dialog(hwnd, L"Taxi Cam — Display texture snapshot", 900, 760);
-    dialog_control(hwnd, L"STATIC", L"Display texture snapshot", -1, 20, 17, 860, 28, 0, heading);
+    place_dialog(hwnd, tr(L"Taxi Cam — Display texture snapshot"), 900, 760);
+    dialog_control(hwnd, L"STATIC", tr(L"Display texture snapshot"), -1, 20, 17, 860, 28, 0, heading);
     dialog_control(hwnd, L"STATIC", L"", 701, 20, 54, 860, 30);
     dialog_control(hwnd, L"STATIC", L"", 702, 20, 662, 860, 44, 0, small);
-    dialog_control(hwnd, L"BUTTON", L"Take again", 703, 652, 714, 120, 34, WS_TABSTOP);
-    const auto close = dialog_control(hwnd, L"BUTTON", L"Close", IDCANCEL, 782, 714, 98, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    dialog_control(hwnd, L"BUTTON", tr(L"Take again"), 703, 652, 714, 120, 34, WS_TABSTOP);
+    const auto close = dialog_control(hwnd, L"BUTTON", tr(L"Close"), IDCANCEL, 782, 714, 98, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
     SetTimer(hwnd, 1, 200, nullptr);
     update_snapshot_dialog(hwnd);
     SetFocus(close);
@@ -1350,7 +1366,7 @@ void show_display_snapshot(std::uint64_t id) {
   snapshot_dialog_open = true;
   const DialogTemplate layout;
   if (DialogBoxIndirectParamW(instance, &layout.dialog, window, snapshot_dialog, 0) == -1) {
-    notice = L"Could not open the display snapshot.";
+    notice = tr(L"Could not open the display snapshot.");
     InvalidateRect(window, nullptr, FALSE);
   }
   snapshot_dialog_open = false;
@@ -1444,18 +1460,22 @@ unsigned side_list(const win::Settings& s, unsigned side) {
   return separate_lower_profile(s) ? side == 2 : routing_lists(s) == 2 && side == 1;
 }
 const wchar_t* list_title(const win::Settings& s, unsigned list) {
-  return separate_lower_profile(s) ? (list ? L"Lower DU" : L"Navigation displays")
-         : routing_lists(s) == 1   ? L"Display texture"
-         : list                    ? L"Right PFD"
-                                   : L"Left PFD";
+  return separate_lower_profile(s) ? (list ? tr(L"Lower DU") : tr(L"Navigation displays"))
+         : routing_lists(s) == 1   ? tr(L"Display texture")
+         : list                    ? tr(L"Right PFD")
+                                   : tr(L"Left PFD");
 }
 const wchar_t* list_action(const win::Settings& s, unsigned list) {
-  return separate_lower_profile(s) ? (list ? L"Lower" : L"NDs") : routing_lists(s) == 1 ? L"Use" : list ? L"Right" : L"Left";
+  return separate_lower_profile(s) ? (list ? tr(L"Lower") : tr(L"NDs"))
+         : routing_lists(s) == 1   ? tr(L"Use")
+         : list                    ? tr(L"Right")
+                                   : tr(L"Left");
 }
 const wchar_t* display_side_title(const win::Settings& s, unsigned side) {
+  // The PMDG 777 display select panel's own labels.
   if (pmdg_cam_control(s))
     return side == 0 ? L"L INBD" : side == 1 ? L"R INBD" : L"LWR CTR";
-  return side == 0 ? L"Left PFD" : side == 1 ? L"Right PFD" : L"SD";
+  return side == 0 ? tr(L"Left PFD") : side == 1 ? tr(L"Right PFD") : tr(L"SD");
 }
 enum class RouteSource { none, detected, named, chosen };
 RouteSource route_source(const win::Settings& s, const win::Status& sample, unsigned side, std::uint64_t id) {
@@ -1476,13 +1496,10 @@ std::wstring candidate_name(const win::Candidate* candidate) {
                                          : std::wstring();
 }
 std::wstring candidate_details(std::uint64_t id, const win::Candidate* candidate) {
-  wchar_t details[96];
-  if (candidate)
-    std::swprintf(details, 96, L"#%llu · %u × %u · %u mips", static_cast<unsigned long long>(id), candidate->width, candidate->height,
-                  candidate->mips);
-  else
-    std::swprintf(details, 96, L"#%llu", static_cast<unsigned long long>(id));
-  return details;
+  if (!candidate)
+    return L"#" + std::to_wstring(id);
+  return tr_format(L"#{0} · {1} × {2} · {3} mips", {std::to_wstring(id), std::to_wstring(candidate->width),
+                                                    std::to_wstring(candidate->height), std::to_wstring(candidate->mips)});
 }
 // Gallery order: routed textures, then named ones, then the rest; by ID
 // within each group so cards do not move as draw counts change.
@@ -1547,9 +1564,9 @@ bool choose_routes(std::array<std::uint64_t, 2> choice) {
     choice[1] = 0;
   const auto result = win::update_target_assignment(s.left_id, s.right_id, s.route_request, choice[0], choice[1], s.lower_id, lower);
   if (result == win::TargetAssignmentResult::duplicate || result == win::TargetAssignmentResult::sequence_exhausted) {
-    notice = result != win::TargetAssignmentResult::duplicate ? L"Display assignment request limit reached. Restart Taxi Cam."
-             : separate ? L"Choose a lower DU texture different from the navigation display texture, or Automatic."
-                        : L"Choose different textures for left and right, or Automatic.";
+    notice = result != win::TargetAssignmentResult::duplicate ? tr(L"Display assignment request limit reached. Restart Taxi Cam.")
+             : separate ? tr(L"Choose a lower DU texture different from the navigation display texture, or Automatic.")
+                        : tr(L"Choose different textures for left and right, or Automatic.");
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
@@ -1572,8 +1589,8 @@ void choose_texture(unsigned list, std::uint64_t id) {
     choice[1 - list] = routed[list] != id ? routed[list] : 0;
   choice[list] = id;
   if (choose_routes(choice))
-    notice = std::wstring(list_title(s, list)) + L" uses #" + std::to_wstring(id) +
-             L" for this flight. Clear choices goes back to automatic selection.";
+    notice = tr_format(L"{0} uses #{1} for this flight. Clear choices goes back to automatic selection.",
+                       {list_title(s, list), std::to_wstring(id)});
 }
 // Aircraft setup (SetupPage): an aircraft no profile matches is set up by
 // picking, by picture, the cockpit panel each camera side draws on. The layout
@@ -1662,35 +1679,36 @@ void sync_setup(const win::Status& sample) {
   }
 }
 const wchar_t* setup_side_title(unsigned side) {
-  return side == 0 ? L"Left display" : side == 1 ? L"Right display" : L"Lower display";
+  return side == 0 ? tr(L"Left display") : side == 1 ? tr(L"Right display") : tr(L"Lower display");
 }
 const wchar_t* setup_side_action(unsigned side) {
-  return side == 0 ? L"Left" : side == 1 ? L"Right" : L"Lower";
+  return side == 0 ? tr(L"Left") : side == 1 ? tr(L"Right") : tr(L"Lower");
 }
 // What stops the setup now; empty when the picks can be saved.
 std::wstring setup_blocker(const win::Status& sample) {
   // Pictures and the panel list need the bridge connection.
   if (!fresh_status(sample) || !sample.graphics_ready || !draft().enabled)
-    return L"Choose Connect on Overview with this aircraft loaded in a flight.";
+    return tr(L"Choose Connect on Overview with this aircraft loaded in a flight.");
   if (!setup.key[0])
-    return L"Waiting for the simulator to report which aircraft is loaded.";
+    return tr(L"Waiting for the simulator to report which aircraft is loaded.");
   if (!sample.panel_discovery)
-    return L"Waiting for the bridge to track this cockpit's panels.";
+    return tr(L"Waiting for the bridge to track this cockpit's panels.");
   switch (static_cast<win::PanelMapState>(sample.panel_state)) {
     case win::PanelMapState::waiting:
-      return L"Reading this cockpit's panels. This takes a few seconds after the flight has loaded.";
+      return tr(L"Reading this cockpit's panels. This takes a few seconds after the flight has loaded.");
     case win::PanelMapState::unavailable:
     case win::PanelMapState::unresolved:
-      return L"Taxi Cam cannot read this cockpit's panel list in this simulator version, so this aircraft cannot be set up yet.";
+      return tr(L"Taxi Cam cannot read this cockpit's panel list in this simulator version, so this aircraft cannot be set up yet.");
     case win::PanelMapState::incomplete:
-      return L"This cockpit's panel list is not complete. Wait a few seconds after the cockpit has loaded.";
+      return tr(L"This cockpit's panel list is not complete. Wait a few seconds after the cockpit has loaded.");
     case win::PanelMapState::paired:
       break;
   }
   // A built-in profile's names are its own, so no clean load is needed.
   if (!sample.panel_clean && !setup.built_in)
-    return L"Another aircraft was loaded before this one in this simulator session, so panel names can be one texture off. "
-           L"Restart the simulator, load this aircraft first, then set it up.";
+    return tr(
+        L"Another aircraft was loaded before this one in this simulator session, so panel names can be one texture off. "
+        L"Restart the simulator, load this aircraft first, then set it up.");
   return {};
 }
 // A built-in profile's choices from the picks: a pick that is the profile's
@@ -1749,13 +1767,13 @@ void apply_setup_trial() {
     route_picks(s, setup_items(sample));
     if (!win::valid_settings(s)) {
       setup.testing = 0;
-      notice = L"The cockpit test could not start.";
+      notice = tr(L"The cockpit test could not start.");
       InvalidateRect(window, nullptr, FALSE);
       return;
     }
     publish(s);
     setup.trial = true;
-    notice = L"Test bars show on the tested panels in the cockpit after a few seconds.";
+    notice = tr(L"Test bars show on the tested panels in the cockpit after a few seconds.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
@@ -1769,7 +1787,7 @@ void apply_setup_trial() {
   profiles::DiscoveredLayout layout;
   if (!fallback || win::learn_layout(sample, names, setup.sides, layout, false) != win::LayoutLearning::learned) {
     setup.testing = 0;
-    notice = fallback ? L"The cockpit test needs the panel list. Wait for the pictures, then try again." : L"Pick a panel first.";
+    notice = fallback ? tr(L"The cockpit test needs the panel list. Wait for the pictures, then try again.") : tr(L"Pick a panel first.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
@@ -1784,13 +1802,13 @@ void apply_setup_trial() {
   s.panel_setup = 1;
   if (!win::valid_settings(s)) {
     setup.testing = 0;
-    notice = L"The cockpit test could not start.";
+    notice = tr(L"The cockpit test could not start.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
   publish(s);
   setup.trial = true;
-  notice = L"Test bars show on the tested panels in the cockpit after a few seconds.";
+  notice = tr(L"Test bars show on the tested panels in the cockpit after a few seconds.");
   InvalidateRect(window, nullptr, FALSE);
 }
 // Leaving the setup without saving: the settings from before the test.
@@ -1833,7 +1851,7 @@ void update_setup_buttons() {
     const bool set_up = s.profile && sample.detected_profile == s.profile && fresh_status(sample);
     // The UI preview shows it too, so the setup page can be reviewed.
     const bool visible = unsupported_aircraft(sample) || set_up || preview_ui;
-    const wchar_t* label = set_up ? L"Change displays" : L"Set up this aircraft";
+    const wchar_t* label = set_up ? tr(L"Change displays") : tr(L"Set up this aircraft");
     wchar_t current_label[64]{};
     GetWindowTextW(open, current_label, 64);
     if (std::wcscmp(current_label, label) != 0)
@@ -2152,13 +2170,13 @@ void chip(HDC dc, int x, int y, const wchar_t* label, COLORREF color) {
 void route_chip(HDC dc, int x, int y, RouteSource source) {
   switch (source) {
     case RouteSource::named:
-      return chip(dc, x, y, L"Named", Accent);
+      return chip(dc, x, y, tr(L"Named"), Accent);
     case RouteSource::chosen:
-      return chip(dc, x, y, L"Your choice", RGB(126, 176, 255));
+      return chip(dc, x, y, tr(L"Your choice"), RGB(126, 176, 255));
     case RouteSource::detected:
-      return chip(dc, x, y, L"Detected", Muted);
+      return chip(dc, x, y, tr(L"Detected"), Muted);
     case RouteSource::none:
-      return chip(dc, x, y, L"Not found", RGB(236, 182, 92));
+      return chip(dc, x, y, tr(L"Not found"), RGB(236, 182, 92));
   }
 }
 // Draws a texture's picture, or the part `crop` (texture pixels) of it,
@@ -2170,10 +2188,10 @@ RECT draw_thumbnail(HDC dc, const RECT& box, std::uint64_t id, const wchar_t* mi
   const auto* t = find_thumbnail(id);
   if (!id || !t || !t->image || t->width <= 0 || t->height <= 0) {
     const wchar_t* label = !id                                                   ? missing
-                           : thumbnails.serial && thumbnails.id == id            ? L"Taking a picture…"
-                           : t && t->failed                                      ? L"Not being drawn"
-                           : t && t->tried_ms && !t->image && !thumbnails.serial ? L"No picture"
-                                                                                 : L"Waiting…";
+                           : thumbnails.serial && thumbnails.id == id            ? tr(L"Taking a picture…")
+                           : t && t->failed                                      ? tr(L"Not being drawn")
+                           : t && t->tried_ms && !t->image && !thumbnails.serial ? tr(L"No picture")
+                                                                                 : tr(L"Waiting…");
     auto r = box;
     SelectObject(dc, small);
     SetTextColor(dc, Muted);
@@ -2220,13 +2238,13 @@ void draw_display_strip(HDC dc, const win::Status& sample) {
     // A set-up aircraft's side is the whole texture: nothing to crop.
     const bool fits = t && !profile->fit_texture && t->texture_width == profile->width && t->texture_height == profile->height;
     const auto crop = profiles::display_rect(*profile, static_cast<unsigned>(side));
-    draw_thumbnail(dc, rectangle(x + 8, y + 8, 96, 96), id, L"No display", fits ? &crop : nullptr);
+    draw_thumbnail(dc, rectangle(x + 8, y + 8, 96, 96), id, tr(L"No display"), fits ? &crop : nullptr);
     hit_areas.push_back({rectangle(x, y, width, 112), 0});
     const int tx = x + 116, tw = width - 124;
     text(dc, display_side_title(s, static_cast<unsigned>(side)), tx, y + 8, tw, 26, heading);
     const auto* candidate = find_candidate(sample, id);
     const auto name = candidate_name(candidate);
-    text(dc, id ? (name.empty() ? (L"#" + std::to_wstring(id)).c_str() : name.c_str()) : L"Waiting for detection", tx, y + 38, tw, 22,
+    text(dc, id ? (name.empty() ? (L"#" + std::to_wstring(id)).c_str() : name.c_str()) : tr(L"Waiting for detection"), tx, y + 38, tw, 22,
          small, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     route_chip(dc, tx, y + 74, route_source(s, sample, static_cast<unsigned>(side), id));
   }
@@ -2243,7 +2261,7 @@ void draw_routing_slots(HDC dc, const win::Status& sample) {
     const auto id = routed[list];
     panel(dc, x, y, width, 120, Background);
     const auto box = rectangle(x + 7, y + 7, 106, 106);
-    const auto drawn = draw_thumbnail(dc, box, id, L"Not found");
+    const auto drawn = draw_thumbnail(dc, box, id, tr(L"Not found"));
     const auto* t = find_thumbnail(id);
     if (id && drawn.right > drawn.left && profile && t && t->texture_width && t->texture_height &&
         (profile->fit_texture || (t->texture_width == profile->width && t->texture_height == profile->height))) {
@@ -2271,8 +2289,8 @@ void draw_routing_slots(HDC dc, const win::Status& sample) {
     const auto* candidate = find_candidate(sample, id);
     const auto name = candidate_name(candidate);
     text(dc,
-         !id            ? L"Choose a texture below, or wait for detection."
-         : name.empty() ? L"Unnamed texture"
+         !id            ? tr(L"Choose a texture below, or wait for detection.")
+         : name.empty() ? tr(L"Unnamed texture")
                         : name.c_str(),
          tx, y + 38, tw, 24, normal, id && !name.empty() ? Text : Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (id)
@@ -2289,8 +2307,8 @@ void draw_gallery(HDC dc, const win::Status& sample) {
   const bool any_named = std::any_of(items.begin(), items.end(), [](const auto& c) { return c.name[0] != 0; });
   if (items.empty()) {
     text(dc,
-         sample.graphics_ready ? L"Waiting for cockpit displays to be drawn. Restart Flight only if this stays empty."
-                               : L"Connect Taxi Cam with a flight loaded to see the display textures.",
+         sample.graphics_ready ? tr(L"Waiting for cockpit displays to be drawn. Restart Flight only if this stays empty.")
+                               : tr(L"Connect Taxi Cam with a flight loaded to see the display textures."),
          262, 440, 730, 60, normal, Muted, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
     return;
   }
@@ -2310,9 +2328,9 @@ void draw_gallery(HDC dc, const win::Status& sample) {
     draw_thumbnail(dc, box, id, L"");
     hit_areas.push_back({box, id});
     if (in_use)
-      chip(dc, x + 12, y + 12, routing_lists(s) == 1 ? L"In use" : list_action(s, id == routed[0] ? 0 : 1), Accent);
+      chip(dc, x + 12, y + 12, routing_lists(s) == 1 ? tr(L"In use") : list_action(s, id == routed[0] ? 0 : 1), Accent);
     const auto name = candidate_name(candidate);
-    text(dc, name.empty() ? L"Unnamed" : name.c_str(), x + 10, y + 130, 155, 22, normal, name.empty() && any_named ? Muted : Text,
+    text(dc, name.empty() ? tr(L"Unnamed") : name.c_str(), x + 10, y + 130, 155, 22, normal, name.empty() && any_named ? Muted : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     wchar_t details[64];
     std::swprintf(details, 64, L"#%llu · %u × %u · m%u", static_cast<unsigned long long>(id), candidate->width, candidate->height,
@@ -2327,13 +2345,13 @@ void draw_setup(HDC dc, const win::Status& sample) {
   const auto* built_in = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr;
   const auto name = built_in       ? std::wstring(built_in->name)
                     : setup.key[0] ? widen(std::string(profiles::variant_name(setup.key.data())).c_str())
-                                   : std::wstring(L"No aircraft reported yet");
+                                   : std::wstring(tr(L"No aircraft reported yet"));
   text(dc, name.c_str(), 262, 134, 730, 30, heading, Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   const auto blocker = setup_blocker(sample);
   text(dc,
        !blocker.empty() ? blocker.c_str()
-       : built_in       ? L"Pick the panel each camera draws on, from this profile's displays. Use built-in displays returns to its own."
-                        : L"Pick the panel each camera draws on. It is saved for this aircraft variant only.",
+       : built_in ? tr(L"Pick the panel each camera draws on, from this profile's displays. Use built-in displays returns to its own.")
+                  : tr(L"Pick the panel each camera draws on. It is saved for this aircraft variant only."),
        262, 166, 730, 36, small, blocker.empty() ? Muted : RGB(236, 182, 92), DT_LEFT | DT_WORDBREAK);
   const int sides = static_cast<int>(setup.sides), gap = 10, width = (730 - gap * (sides - 1)) / sides;
   for (int side = 0; side < sides; ++side) {
@@ -2346,14 +2364,14 @@ void draw_setup(HDC dc, const win::Status& sample) {
       hit_areas.push_back({box, id});
     text(dc, setup_side_title(static_cast<unsigned>(side)), x + 100, y + 8, width - 108, 28, heading);
     const auto& picked = setup.names[static_cast<unsigned>(side)];
-    text(dc, picked.empty() ? L"Pick a panel below" : widen(picked.c_str()).c_str(), x + 100, y + 36, width - 108, 22, normal,
+    text(dc, picked.empty() ? tr(L"Pick a panel below") : widen(picked.c_str()).c_str(), x + 100, y + 36, width - 108, 22, normal,
          picked.empty() ? Muted : Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
   panel(dc, 244, 334, 766, 280);
-  text(dc, L"Cockpit panels", 262, 344, 180, 32, heading);
-  text(dc, L"Select a picture to enlarge it.", 446, 344, 190, 32, small, Muted);
+  text(dc, tr(L"Cockpit panels"), 262, 344, 180, 32, heading);
+  text(dc, tr(L"Select a picture to enlarge it."), 446, 344, 190, 32, small, Muted);
   if (items.empty()) {
-    text(dc, L"No panel pictures yet. Panels appear once the cockpit has been drawn.", 262, 445, 730, 60, normal, Muted,
+    text(dc, tr(L"No panel pictures yet. Panels appear once the cockpit has been drawn."), 262, 445, 730, 60, normal, Muted,
          DT_CENTER | DT_VCENTER | DT_WORDBREAK);
   } else {
     const unsigned pages = static_cast<unsigned>((items.size() + GalleryColumns - 1) / GalleryColumns);
@@ -2389,45 +2407,45 @@ void show_whats_new() {
   win::ChangelogFetchResult result;
   if (!changelog_fetcher.take(result))
     return;
-  SetDlgItemTextW(window, 515, L"What's new");
+  SetDlgItemTextW(window, 515, tr(L"What's new"));
   std::vector<win::ChangelogRelease> releases;
   if (!result.ok || !win::parse_changelog(result.body, releases, nullptr, win::ChangelogParse::lenient)) {
-    notice = result.ok ? L"What's new could not be read. Try again later."
-                       : L"Could not load What's new from GitHub. Check your connection and try again.";
+    notice = result.ok ? tr(L"What's new could not be read. Try again later.")
+                       : tr(L"Could not load What's new from GitHub. Check your connection and try again.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
   if (!open_whats_new(win::whats_new_blocks(win::releases_up_to(releases, InstalledVersion), InstalledVersion))) {
-    notice = L"Could not open What's new.";
+    notice = tr(L"Could not open What's new.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
   // Opened by itself once per installed version; the link stays.
   whats_new = false;
   if (!preview_ui && !win::record_whats_new_seen(win::settings_directory(), InstalledVersion))
-    notice = L"Could not remember that What's new was read. It will show again next launch.";
+    notice = tr(L"Could not remember that What's new was read. It will show again next launch.");
   InvalidateRect(window, nullptr, FALSE);
 }
 bool apply(bool save = true) {
   auto settings = draft();
   const wchar_t* field_error{};
   if (!read_fields(settings, &field_error)) {
-    notice = field_error ? field_error
-             : page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
-                         : L"Check the values: brightness −4 to +2 EV in 0.25 steps, lens 0.05–1.55.";
+    notice = field_error ? tr(field_error)
+             : page == 5 ? tr(L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers.")
+                         : tr(L"Check the values: brightness −4 to +2 EV in 0.25 steps, lens 0.05–1.55.");
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
   if (save && !win::save_settings(settings)) {
-    notice = L"Could not save settings. Check access to your local settings folder.";
+    notice = tr(L"Could not save settings. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
   publish(settings);
   dirty = false;
-  notice = save ? L"Saved. Adjustments apply while the cameras are running." : L"Settings updated.";
+  notice = save ? tr(L"Saved. Adjustments apply while the cameras are running.") : tr(L"Settings updated.");
   if (save && hotkey_registration.conflicts())
-    notice = L"Saved. Some shortcuts are unavailable; check Overview > Flight-deck control.";
+    notice = tr(L"Saved. Some shortcuts are unavailable; check Overview > Flight-deck control.");
   InvalidateRect(window, nullptr, FALSE);
   return true;
 }
@@ -2447,7 +2465,7 @@ void sync_aircraft_session() {
   publish(s);
   profile_selection = {};
   // Do not rebuild numeric edits when a flight changes in the background.
-  SetDlgItemTextW(window, 229, L"Scene test: Off");
+  SetDlgItemTextW(window, 229, switch_label(tr(L"Scene test"), false).c_str());
   refresh_side_toggles(s);
   update_gallery_buttons();
 }
@@ -2463,33 +2481,35 @@ void toggle_camera_from_hotkey(unsigned action) {
   }
   const auto now = GetTickCount64();
   if (const auto* profile = profiles::find(s.profile); profile && !win::camera_action_sides(*profile, action)) {
-    notice = L"This aircraft has no lower ECAM (SD) camera.";
+    notice = tr(L"This aircraft has no lower ECAM (SD) camera.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
   const auto result = win::request_camera_hotkey(s, action, sample, now);
   if (result == win::CameraHotkeyResult::unavailable) {
-    notice = s.enabled ? L"Waiting for current aircraft TAXI-button state. Try the shortcut again when connected."
-                       : L"Choose Connect before using aircraft camera shortcuts.";
+    notice = s.enabled ? tr(L"Waiting for current aircraft TAXI-button state. Try the shortcut again when connected.")
+                       : tr(L"Choose Connect before using aircraft camera shortcuts.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
   publish(s);
   dirty_notice();
-  notice = L"Camera request: left " + std::wstring(s.manual_mask & 1 ? L"on" : L"off") + L", right " +
-           (s.manual_mask & 2 ? L"on" : L"off") + L".";
-  if (const auto* profile = profiles::find(s.profile); profile && profile->sides > 2)
-    notice.insert(notice.size() - 1, std::wstring(pmdg_cam_control(s) ? L", lower DU " : L", SD ") + (s.manual_mask & 4 ? L"on" : L"off"));
+  // One whole sentence per camera, so its state is never a lone word.
+  win::UiMessage request;
+  request.add(s.manual_mask & 1 ? ui_text(L"Left camera requested on.") : ui_text(L"Left camera requested off."));
+  request.add(s.manual_mask & 2 ? ui_text(L"Right camera requested on.") : ui_text(L"Right camera requested off."));
+  if (const auto* profile = profiles::find(s.profile); profile && profile->sides > 2) {
+    if (pmdg_cam_control(s))
+      request.add(s.manual_mask & 4 ? ui_text(L"Lower DU camera requested on.") : ui_text(L"Lower DU camera requested off."));
+    else
+      request.add(s.manual_mask & 4 ? ui_text(L"SD camera requested on.") : ui_text(L"SD camera requested off."));
+  }
   if (pmdg_cam_control(s) && s.follow_taxi)
-    notice += L" Displays selected with CAM stay on until CAM is pressed again.";
-  if (!s.enabled)
-    notice = L"Camera request updated. Choose Connect to enable camera output.";
+    request.add(ui_text(L"Displays selected with CAM stay on until CAM is pressed again."));
+  notice = s.enabled ? request.text() : std::wstring(tr(L"Camera request updated. Choose Connect to enable camera output."));
   refresh_side_toggles(s);
-  SetDlgItemTextW(window, 221,
-                  pmdg_cam_control(s) ? (s.follow_taxi ? L"CAM button: On" : L"CAM button: Off")
-                  : s.follow_taxi     ? L"TAXI buttons: On"
-                                      : L"TAXI buttons: Off");
-  SetDlgItemTextW(window, 229, L"Scene test: Off");
+  SetDlgItemTextW(window, 221, switch_label(pmdg_cam_control(s) ? tr(L"CAM button") : tr(L"TAXI buttons"), s.follow_taxi).c_str());
+  SetDlgItemTextW(window, 229, switch_label(tr(L"Scene test"), false).c_str());
   InvalidateRect(window, nullptr, FALSE);
 }
 // Whether a layout is saved for this variant, checked again every 5 s so one
@@ -2555,8 +2575,8 @@ void auto_profile() {
   if (!win::prepare_profile_selection(next, s, true) || !win::save_settings(next))
     return;
   publish(next);
-  notice = set_up ? L"Set-up aircraft detected. Its saved displays and calibration are active."
-                  : L"Aircraft detected. Its saved calibration is active.";
+  notice = set_up ? tr(L"Set-up aircraft detected. Its saved displays and calibration are active.")
+                  : tr(L"Aircraft detected. Its saved calibration is active.");
   build_controls();
 }
 // Camera adjustment window. Everything is painted here and hit-tested, so
@@ -2568,7 +2588,8 @@ constexpr wchar_t LiveViewClass[] = L"TaxiCamLiveView";
 // live_view.step: fine x0.2, normal x1, coarse x5.
 constexpr std::array<double, 6> LiveSteps{0.1, 0.1, 0.5, 0.5, 0.5, 0.02};
 constexpr std::array<double, 3> LiveStepScale{0.2, 1, 5};
-constexpr std::array<const wchar_t*, 6> LiveFieldNames{L"Right", L"Up", L"Forward", L"Pitch", L"Yaw", L"Lens"};
+constexpr std::array<const wchar_t*, 6> LiveFieldNames{ui_text(L"Right"), ui_text(L"Up"),  ui_text(L"Forward"),
+                                                       ui_text(L"Pitch"), ui_text(L"Yaw"), ui_text(L"Lens")};
 constexpr std::array<const wchar_t*, 6> LiveFieldUnits{L"m", L"m", L"m", L"°", L"°", L"rad"};
 enum LiveAction : int {
   live_none = 0,
@@ -2722,7 +2743,12 @@ void live_text(HDC dc, const wchar_t* value, RECT r, HFONT font, COLORREF color,
   DrawTextW(dc, value, -1, &r, flags | DT_END_ELLIPSIS);
 }
 const wchar_t* live_feed_name(unsigned feeds, unsigned feed) {
-  return feed == 0 ? L"Nose" : feeds == 3 ? (feed == 1 ? L"Left wing" : L"Right wing") : L"Tail";
+  return feed == 0 ? tr(L"Nose") : feeds == 3 ? (feed == 1 ? tr(L"Left wing") : tr(L"Right wing")) : tr(L"Tail");
+}
+const wchar_t* live_camera_title(unsigned feeds, unsigned feed) {
+  return feed == 0    ? tr(L"Nose camera")
+         : feeds == 3 ? (feed == 1 ? tr(L"Left wing camera") : tr(L"Right wing camera"))
+                      : tr(L"Tail camera");
 }
 // Corner and edge handles of the area: 0-3 corners, 4-7 edge midpoints.
 std::array<POINT, 8> live_area_handles(const LiveLayout& l, const profiles::DisplayRect& a) {
@@ -2790,27 +2816,27 @@ void paint_live_view(HWND hwnd, HDC dc) {
                 feed == live_view.feed);
     x += scale(126);
   }
-  const wchar_t* steps[]{L"Step: Fine", L"Step: Normal", L"Step: Coarse"};
+  const wchar_t* steps[]{tr(L"Step: Fine"), tr(L"Step: Normal"), tr(L"Step: Coarse")};
   live_button(dc, {x + scale(8), scale(14), x + scale(160), scale(50)}, steps[live_view.step], live_step);
-  live_button(dc, {x + scale(168), scale(14), x + scale(320), scale(50)}, L"Display area", live_area, live_view.area_mode);
+  live_button(dc, {x + scale(168), scale(14), x + scale(320), scale(50)}, tr(L"Display area"), live_area, live_view.area_mode);
   // Changes apply live and are saved when the window closes. Undo returns to
   // the saved settings from when it opened; Defaults to the profile's.
-  live_button(dc, {client.right - scale(166), scale(14), client.right - scale(16), scale(50)}, L"Undo changes", live_undo, false,
+  live_button(dc, {client.right - scale(166), scale(14), client.right - scale(16), scale(50)}, tr(L"Undo changes"), live_undo, false,
               live_view.changed);
-  live_button(dc, {client.right - scale(306), scale(14), client.right - scale(176), scale(50)}, L"Defaults", live_defaults);
+  live_button(dc, {client.right - scale(306), scale(14), client.right - scale(176), scale(50)}, tr(L"Defaults"), live_defaults);
   // Caption: which display, and how fresh its picture is.
   const auto now = GetTickCount64();
   std::wstring caption;
   if (!profile)
-    caption = L"No aircraft profile selected.";
+    caption = tr(L"No aircraft profile selected.");
   else if (!fresh_status(sample) || !sample.graphics_ready)
-    caption = L"Choose Connect with a flight loaded to see the cameras.";
+    caption = tr(L"Choose Connect with a flight loaded to see the cameras.");
   else if (!live_view.id)
-    caption = L"Waiting for a display to be found for this aircraft.";
+    caption = tr(L"Waiting for a display to be found for this aircraft.");
   else {
-    caption = std::wstring(display_side_title(s, live_view.side)) +
-              (live_view.area_mode ? L" · drag a white handle to resize the camera area, or its frame to move it"
-                                   : L" · drag in a camera picture to aim it, wheel to zoom");
+    const auto side = display_side_title(s, live_view.side);
+    caption = live_view.area_mode ? tr_format(L"{0} · drag a white handle to resize the camera area, or its frame to move it", {side})
+                                  : tr_format(L"{0} · drag in a camera picture to aim it, wheel to zoom", {side});
     // Without a fresh picture, say what the bridge is doing (cameras starting,
     // waiting for the display) rather than showing a blank view.
     const bool stale = !live_view.image || (live_view.taken_ms && now - live_view.taken_ms > 3000);
@@ -2818,7 +2844,7 @@ void paint_live_view(HWND hwnd, HDC dc) {
     if (stale && !bridge.empty())
       caption = bridge;
     else if (live_view.taken_ms && now - live_view.taken_ms > 3000)
-      caption += L" · picture " + std::to_wstring((now - live_view.taken_ms) / 1000) + L" s old";
+      caption = tr_format(L"{0} · picture {1} s old", {caption, std::to_wstring((now - live_view.taken_ms) / 1000)});
   }
   if (!live_view.note.empty() && now - live_view.note_ms < 5000)
     caption = live_view.note;
@@ -2859,9 +2885,9 @@ void paint_live_view(HWND hwnd, HDC dc) {
   if (!shown) {
     auto r = l.picture;
     live_text(dc,
-              !live_view.id         ? L"No picture"
-              : live_view.area_mode ? L"Waiting for the display picture…"
-                                    : L"Waiting for the camera picture…",
+              !live_view.id         ? tr(L"No picture")
+              : live_view.area_mode ? tr(L"Waiting for the display picture…")
+                                    : tr(L"Waiting for the camera picture…"),
               r, normal, Muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   }
   if (profile) {
@@ -2950,7 +2976,7 @@ void paint_live_view(HWND hwnd, HDC dc) {
   const int px = client.right - scale(320), pw = scale(304);
   int y = scale(92);
   if (live_view.area_mode) {
-    live_text(dc, L"Display area", {px, y, px + pw, y + scale(30)}, heading, Text);
+    live_text(dc, tr(L"Display area"), {px, y, px + pw, y + scale(30)}, heading, Text);
     const unsigned sides = profile ? std::min<unsigned>(profile->sides, MaxDisplaySides) : 0;
     const int width = sides ? (pw - static_cast<int>(sides - 1) * scale(8)) / static_cast<int>(sides) : pw;
     for (unsigned side = 0; side < sides; ++side) {
@@ -2960,22 +2986,22 @@ void paint_live_view(HWND hwnd, HDC dc) {
     }
     if (area) {
       const auto a = live_area_now(*profile);
-      wchar_t value[96];
-      std::swprintf(value, 96, L"From %u, %u · %u × %u of %u × %u", a.left, a.top, a.right - a.left, a.bottom - a.top,
-                    live_view.texture_width, live_view.texture_height);
-      live_text(dc, value, {px, y + scale(74), px + pw, y + scale(100)}, small, Text);
+      const auto value =
+          tr_format(L"From {0}, {1} · {2} × {3} of {4} × {5}",
+                    {std::to_wstring(a.left), std::to_wstring(a.top), std::to_wstring(a.right - a.left), std::to_wstring(a.bottom - a.top),
+                     std::to_wstring(live_view.texture_width), std::to_wstring(live_view.texture_height)});
+      live_text(dc, value.c_str(), {px, y + scale(74), px + pw, y + scale(100)}, small, Text);
     }
-    live_button(dc, {px, y + scale(104), px + pw, y + scale(138)}, L"Reset area", live_area_reset);
+    live_button(dc, {px, y + scale(104), px + pw, y + scale(138)}, tr(L"Reset area"), live_area_reset);
     y += scale(152);
   }
-  live_text(dc, (std::wstring(live_feed_name(l.feeds, live_view.feed)) + L" camera").c_str(), {px, y, px + pw, y + scale(30)}, heading,
-            Text);
+  live_text(dc, live_camera_title(l.feeds, live_view.feed), {px, y, px + pw, y + scale(30)}, heading, Text);
   const auto& mount = s.mounts[live_view.feed];
   for (int j = 0; j < 6; ++j) {
     const int row = y + scale(40 + j * 44);
     wchar_t value[48];
     std::swprintf(value, 48, L"%.2f %ls", mount[j], LiveFieldUnits[j]);
-    live_text(dc, LiveFieldNames[j], {px, row, px + scale(90), row + scale(40)}, normal, Muted);
+    live_text(dc, tr(LiveFieldNames[j]), {px, row, px + scale(90), row + scale(40)}, normal, Muted);
     live_text(dc, value, {px + scale(90), row, px + scale(200), row + scale(40)}, normal, Text);
     live_button(dc, {px + scale(204), row + scale(2), px + scale(250), row + scale(38)}, L"−", live_adjust + j * 2);
     live_button(dc, {px + scale(256), row + scale(2), px + pw, row + scale(38)}, L"+", live_adjust + j * 2 + 1);
@@ -2983,14 +3009,14 @@ void paint_live_view(HWND hwnd, HDC dc) {
   y += scale(40 + 6 * 44 + 8);
   live_text(dc,
             live_view.area_mode
-                ? L"The white rectangle is where this display's camera is drawn on its texture. Drag a handle to resize it or "
-                  L"its frame to move it; it applies when you let go. A new shape renders the cameras at that shape, which "
-                  L"takes a few seconds; the other display shows them at that shape too."
-                : L"Drag a camera picture to aim it; the wheel zooms. Arrows move right and forward, Page Up/Down up and down, "
-                  L"Ctrl+arrows aim, + and − zoom, Tab changes camera, Shift is fine. Drag the white points to move the guides; "
-                  L"a tail point snaps level with the other side's, and to the same distance from its edge (hold Alt to place "
-                  L"it freely).\n\nChanges show live and are saved when you close this window. Undo changes returns to how they "
-                  L"were saved; Defaults restores this camera's and the guides' starting values.",
+                ? tr(L"The white rectangle is where this display's camera is drawn on its texture. Drag a handle to resize it or "
+                     L"its frame to move it; it applies when you let go. A new shape renders the cameras at that shape, which "
+                     L"takes a few seconds; the other display shows them at that shape too.")
+                : tr(L"Drag a camera picture to aim it; the wheel zooms. Arrows move right and forward, Page Up/Down up and down, "
+                     L"Ctrl+arrows aim, + and − zoom, Tab changes camera, Shift is fine. Drag the white points to move the guides; "
+                     L"a tail point snaps level with the other side's, and to the same distance from its edge (hold Alt to place "
+                     L"it freely).\n\nChanges show live and are saved when you close this window. Undo changes returns to how they "
+                     L"were saved; Defaults restores this camera's and the guides' starting values."),
             {px, y, px + pw, client.bottom - scale(16)}, small, Muted, DT_LEFT | DT_WORDBREAK | DT_TOP);
 }
 // Applies a live change: in bounds, published, marked unsaved, and shown in
@@ -3056,7 +3082,7 @@ void live_commit_area(const profiles::DisplayRect& area) {
   const bool same = area.left == own.left && area.top == own.top && area.right == own.right && area.bottom == own.bottom;
   s.display_override.areas[live_view.side] = same ? profiles::DisplayRect{} : area;
   if (!live_apply(s)) {
-    live_view.note = L"That area leaves no room for the camera, so it was not applied.";
+    live_view.note = tr(L"That area leaves no room for the camera, so it was not applied.");
     live_view.note_ms = GetTickCount64();
   }
   if (live_view.window)
@@ -3426,11 +3452,11 @@ void open_live_view() {
             ? saved
             : current;
   }
-  live_view.window = registered ? CreateWindowExW(0, LiveViewClass, L"Taxi Cam — Camera adjustment", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+  live_view.window = registered ? CreateWindowExW(0, LiveViewClass, tr(L"Taxi Cam — Camera adjustment"), WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                                   CW_USEDEFAULT, CW_USEDEFAULT, scale(1100), scale(760), window, nullptr, instance, nullptr)
                                 : nullptr;
   if (!live_view.window) {
-    notice = L"Could not open the camera adjustment window.";
+    notice = tr(L"Could not open the camera adjustment window.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
@@ -3480,7 +3506,7 @@ void save_built_in_displays(bool built_in_only) {
   }
   s.panel_setup = 0;
   if (!win::valid_settings(s) || !win::save_settings(s)) {
-    notice = L"Could not save these displays. Check access to your local settings folder.";
+    notice = tr(L"Could not save these displays. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
@@ -3488,7 +3514,8 @@ void save_built_in_displays(bool built_in_only) {
   dirty = false;
   page = 0;
   build_controls();
-  notice = built_in_only ? L"The profile's own displays are back." : L"Saved. These displays are used for this aircraft from now on.";
+  notice =
+      built_in_only ? tr(L"The profile's own displays are back.") : tr(L"Saved. These displays are used for this aircraft from now on.");
   InvalidateRect(window, nullptr, FALSE);
 }
 // Learns the layout from the picks and the bridge's panel map, saves it for
@@ -3518,11 +3545,11 @@ void save_aircraft_setup() {
     case win::LayoutLearning::learned:
       break;
     case win::LayoutLearning::unknown_panel:
-      notice = L"Pick a panel for every display.";
+      notice = tr(L"Pick a panel for every display.");
       InvalidateRect(window, nullptr, FALSE);
       return;
     default:
-      notice = L"These panels cannot be saved for this aircraft. Pick other panels.";
+      notice = tr(L"These panels cannot be saved for this aircraft. Pick other panels.");
       InvalidateRect(window, nullptr, FALSE);
       return;
   }
@@ -3534,13 +3561,13 @@ void save_aircraft_setup() {
   const auto s = draft();
   win::Settings next;
   if (!win::load_settings(next, installation, profiles::DiscoveredProfileId, layout.key, &layout)) {
-    notice = L"Could not prepare this aircraft's settings.";
+    notice = tr(L"Could not prepare this aircraft's settings.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
   next.enabled = s.enabled;
   if (!win::prepare_profile_selection(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
-    notice = L"Could not save this aircraft. Check access to your local settings folder.";
+    notice = tr(L"Could not save this aircraft. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
@@ -3558,7 +3585,7 @@ void save_aircraft_setup() {
   page = 1;
   build_controls();
   open_live_view();
-  notice = L"Saved. Position each camera in the camera adjustment window, then choose Save.";
+  notice = tr(L"Saved. Position each camera in the camera adjustment window, then choose Save.");
   InvalidateRect(window, nullptr, FALSE);
 }
 // Set-up aircraft (Overview): every saved variant, with Remove.
@@ -3575,11 +3602,11 @@ void fill_setup_list(HWND hwnd) {
       family.remove_prefix(prefix.size());
     auto label = widen(std::string(profiles::variant_name(key)).c_str()) + L"   ·   " + widen(std::string(family).c_str());
     if (s.profile == profiles::DiscoveredProfileId && profiles::same_variant(key, s.discovered.key))
-      label += L"   (in use)";
+      label = tr_format(L"{0}   (in use)", {label});
     SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
   }
   EnableWindow(GetDlgItem(hwnd, 802), !setup_list.empty());
-  SetDlgItemTextW(hwnd, 803, setup_list.empty() ? L"No aircraft has been set up yet." : L"");
+  SetDlgItemTextW(hwnd, 803, setup_list.empty() ? tr(L"No aircraft has been set up yet.") : L"");
   // The aircraft loaded now, which Copy to this aircraft sets up.
   win::Status sample;
   {
@@ -3587,26 +3614,26 @@ void fill_setup_list(HWND hwnd) {
     sample = status;
   }
   const auto loaded = loaded_variant(sample);
-  const auto line = loaded[0] ? L"Loaded now: " + widen(std::string(profiles::variant_name(loaded.data())).c_str())
-                              : std::wstring(L"Load an aircraft to copy a setup to it.");
+  const auto line = loaded[0] ? tr_format(L"Loaded now: {0}", {widen(std::string(profiles::variant_name(loaded.data())).c_str())})
+                              : std::wstring(tr(L"Load an aircraft to copy a setup to it."));
   SetDlgItemTextW(hwnd, 805, line.c_str());
   EnableWindow(GetDlgItem(hwnd, 804), !setup_list.empty() && loaded[0]);
 }
 void remove_setup_variant(HWND hwnd) {
   const auto index = SendDlgItemMessageW(hwnd, 801, LB_GETCURSEL, 0, 0);
   if (index < 0 || static_cast<std::size_t>(index) >= setup_list.size()) {
-    SetDlgItemTextW(hwnd, 803, L"Select an aircraft to remove.");
+    SetDlgItemTextW(hwnd, 803, tr(L"Select an aircraft to remove."));
     return;
   }
   const auto key = setup_list[static_cast<std::size_t>(index)];
   const auto name = widen(std::string(profiles::variant_name(key)).c_str());
-  const auto question = L"Remove " + name + L"? Its displays and camera positions are deleted. You can set it up again.";
-  if (MessageBoxW(hwnd, question.c_str(), L"Remove set-up aircraft", MB_OKCANCEL | MB_ICONWARNING) != IDOK)
+  const auto question = tr_format(L"Remove {0}? Its displays and camera positions are deleted. You can set it up again.", {name});
+  if (MessageBoxW(hwnd, question.c_str(), tr(L"Remove set-up aircraft"), MB_OKCANCEL | MB_ICONWARNING) != IDOK)
     return;
   const auto s = draft();
   const bool in_use = s.profile == profiles::DiscoveredProfileId && profiles::same_variant(key, s.discovered.key);
   if (!win::remove_discovered_variant(key)) {
-    SetDlgItemTextW(hwnd, 803, L"Could not remove it. Check access to your local settings folder.");
+    SetDlgItemTextW(hwnd, 803, tr(L"Could not remove it. Check access to your local settings folder."));
     return;
   }
   saved_variant = {};  // Automatic selection must not find it in its cache.
@@ -3619,14 +3646,14 @@ void remove_setup_variant(HWND hwnd) {
       publish(next);
   }
   fill_setup_list(hwnd);
-  SetDlgItemTextW(hwnd, 803, (name + L" removed.").c_str());
+  SetDlgItemTextW(hwnd, 803, tr_format(L"{0} removed.", {name}).c_str());
 }
 // Copies the selected set-up aircraft to the aircraft loaded now (another
 // preset of it, say), saves it and selects it, so it does not start again.
 void copy_setup_variant(HWND hwnd) {
   const auto index = SendDlgItemMessageW(hwnd, 801, LB_GETCURSEL, 0, 0);
   if (index < 0 || static_cast<std::size_t>(index) >= setup_list.size()) {
-    SetDlgItemTextW(hwnd, 803, L"Select the aircraft to copy from.");
+    SetDlgItemTextW(hwnd, 803, tr(L"Select the aircraft to copy from."));
     return;
   }
   win::Status sample;
@@ -3637,11 +3664,11 @@ void copy_setup_variant(HWND hwnd) {
   const auto source = setup_list[static_cast<std::size_t>(index)];
   const auto target = loaded_variant(sample);
   if (!target[0]) {
-    SetDlgItemTextW(hwnd, 803, L"Load the aircraft to copy to first.");
+    SetDlgItemTextW(hwnd, 803, tr(L"Load the aircraft to copy to first."));
     return;
   }
   if (profiles::same_variant(target.data(), source)) {
-    SetDlgItemTextW(hwnd, 803, L"That is the aircraft loaded now. Select another one to copy from.");
+    SetDlgItemTextW(hwnd, 803, tr(L"That is the aircraft loaded now. Select another one to copy from."));
     return;
   }
   const auto from = widen(std::string(profiles::variant_name(source)).c_str());
@@ -3649,13 +3676,14 @@ void copy_setup_variant(HWND hwnd) {
   const bool replaces =
       std::any_of(setup_list.begin(), setup_list.end(), [&](const auto& key) { return profiles::same_variant(target.data(), key); });
   const bool other = profiles::variant_family(source) != profiles::variant_family(target.data());
-  auto question = L"Copy " + from + L"'s displays, cameras and guides to " + to + L"?";
+  win::UiMessage question;
+  question.add(ui_text(L"Copy {0}'s displays, cameras and guides to {1}?"), {from, to});
   if (replaces)
-    question += L" This replaces " + to + L"'s own setup.";
+    question.add(ui_text(L"This replaces {0}'s own setup."), {to});
   if (other)
-    question += L" It is a different aircraft, so its panel names may not match: check the displays with Test in cockpit.";
-  if (MessageBoxW(hwnd, question.c_str(), L"Copy set-up aircraft", MB_OKCANCEL | (replaces || other ? MB_ICONWARNING : MB_ICONQUESTION)) !=
-      IDOK)
+    question.add(ui_text(L"It is a different aircraft, so its panel names may not match: check the displays with Test in cockpit."));
+  if (MessageBoxW(hwnd, question.text().c_str(), tr(L"Copy set-up aircraft"),
+                  MB_OKCANCEL | (replaces || other ? MB_ICONWARNING : MB_ICONQUESTION)) != IDOK)
     return;
   // Keep edits to the profile in use before it changes.
   if (!apply())
@@ -3663,7 +3691,7 @@ void copy_setup_variant(HWND hwnd) {
   const auto s = draft();
   win::Settings next;
   if (!win::copy_discovered_variant(source, target.data(), installation, next)) {
-    SetDlgItemTextW(hwnd, 803, L"Could not copy it. Check access to your local settings folder.");
+    SetDlgItemTextW(hwnd, 803, tr(L"Could not copy it. Check access to your local settings folder."));
     return;
   }
   next.enabled = s.enabled;
@@ -3671,22 +3699,22 @@ void copy_setup_variant(HWND hwnd) {
     publish(next);
   saved_variant = {};
   fill_setup_list(hwnd);
-  SetDlgItemTextW(hwnd, 803, (to + L" now starts from " + from + L"'s setup and is selected.").c_str());
+  SetDlgItemTextW(hwnd, 803, tr_format(L"{0} now starts from {1}'s setup and is selected.", {to, from}).c_str());
 }
 INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   if (message == WM_INITDIALOG) {
-    place_dialog(hwnd, L"Taxi Cam — Set-up aircraft", 640, 460);
-    dialog_control(hwnd, L"STATIC", L"Set-up aircraft", -1, 20, 17, 600, 28, 0, heading);
+    place_dialog(hwnd, tr(L"Taxi Cam — Set-up aircraft"), 640, 460);
+    dialog_control(hwnd, L"STATIC", tr(L"Set-up aircraft"), -1, 20, 17, 600, 28, 0, heading);
     dialog_control(hwnd, L"STATIC",
-                   L"Aircraft you set up, one per variant. Copy to this aircraft starts the aircraft loaded now from the "
-                   L"selected one; Remove deletes a variant's displays and camera positions.",
+                   tr(L"Aircraft you set up, one per variant. Copy to this aircraft starts the aircraft loaded now from the "
+                      L"selected one; Remove deletes a variant's displays and camera positions."),
                    -1, 20, 50, 600, 44, 0, small);
     dialog_control(hwnd, L"LISTBOX", L"", 801, 20, 100, 600, 210, WS_BORDER | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP);
     dialog_control(hwnd, L"STATIC", L"", 805, 20, 318, 600, 24);
     dialog_control(hwnd, L"STATIC", L"", 803, 20, 346, 600, 44, 0, small);
-    dialog_control(hwnd, L"BUTTON", L"Copy to this aircraft", 804, 20, 406, 220, 34, WS_TABSTOP);
-    dialog_control(hwnd, L"BUTTON", L"Remove", 802, 400, 406, 110, 34, WS_TABSTOP);
-    const auto close = dialog_control(hwnd, L"BUTTON", L"Close", IDCANCEL, 520, 406, 100, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    dialog_control(hwnd, L"BUTTON", tr(L"Copy to this aircraft"), 804, 20, 406, 220, 34, WS_TABSTOP);
+    dialog_control(hwnd, L"BUTTON", tr(L"Remove"), 802, 400, 406, 110, 34, WS_TABSTOP);
+    const auto close = dialog_control(hwnd, L"BUTTON", tr(L"Close"), IDCANCEL, 520, 406, 100, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
     fill_setup_list(hwnd);
     SetFocus(close);
     return FALSE;
@@ -3710,7 +3738,7 @@ INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
 void show_setup_list() {
   const DialogTemplate layout;
   if (DialogBoxIndirectParamW(instance, &layout.dialog, window, setup_list_dialog, 0) == -1)
-    notice = L"Could not open the set-up aircraft list.";
+    notice = tr(L"Could not open the set-up aircraft list.");
   build_controls();
 }
 void build_controls() {
@@ -3726,7 +3754,8 @@ void build_controls() {
   const auto s = draft();
   // Pages by id (100 + page), listed top to bottom in the order they are used:
   // the displays are routed before the cameras are set.
-  const wchar_t* names[]{L"Overview", L"Camera views", L"Display", L"PFD routing", L"Diagnostics", L"Reference guides"};
+  const wchar_t* names[]{tr(L"Overview"),    tr(L"Camera views"), tr(L"Display"),
+                         tr(L"PFD routing"), tr(L"Diagnostics"),  tr(L"Reference guides")};
   constexpr int order[]{0, 3, 1, 2, 4, 5};
   for (int slot = 0; slot < 6; ++slot)
     navigation.push_back(button(names[order[slot]], 100 + order[slot], 20, 156 + slot * 49, 166, 40));
@@ -3735,11 +3764,11 @@ void build_controls() {
   const bool guides_enabled = !nav_profile || nav_profile->reference_guides;
   EnableWindow(guides_nav, guides_enabled);
   InvalidateRect(guides_nav, nullptr, FALSE);
-  const auto donate_button = button(L"Donate", 513, 24, 590, 110, 40);
-  const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
+  const auto donate_button = button(tr(L"Donate"), 513, 24, 590, 110, 40);
+  const auto report_button = button(tr(L"Report a bug"), 512, 24, 638, 40, 40);
   const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 155, 22);
   SendMessageW(version_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
-  const HWND whats_new_link = button(changelog_fetcher.busy() ? L"Loading…" : L"What's new", 515, 76, 647, 110, 22);
+  const HWND whats_new_link = button(changelog_fetcher.busy() ? tr(L"Loading…") : tr(L"What's new"), 515, 76, 647, 110, 22);
   SendMessageW(whats_new_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
   sidebar_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
                                     CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
@@ -3749,24 +3778,24 @@ void build_controls() {
     tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     tip.hwnd = window;
     tip.uId = reinterpret_cast<UINT_PTR>(report_button);
-    tip.lpszText = const_cast<wchar_t*>(L"Report a bug");
+    tip.lpszText = const_cast<wchar_t*>(tr(L"Report a bug"));
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     tip.uId = reinterpret_cast<UINT_PTR>(donate_button);
-    tip.lpszText = const_cast<wchar_t*>(L"Donate via PayPal");
+    tip.lpszText = const_cast<wchar_t*>(tr(L"Donate via PayPal"));
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     tip.uId = reinterpret_cast<UINT_PTR>(version_link);
-    tip.lpszText = const_cast<wchar_t*>(L"Open Taxi Cam on GitHub");
+    tip.lpszText = const_cast<wchar_t*>(tr(L"Open Taxi Cam on GitHub"));
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     tip.uId = reinterpret_cast<UINT_PTR>(whats_new_link);
-    tip.lpszText = const_cast<wchar_t*>(L"See what changed in this version and earlier ones");
+    tip.lpszText = const_cast<wchar_t*>(tr(L"See what changed in this version and earlier ones"));
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
   }
-  button(L"Menu", 602, 930, 37, 80, 34);
+  button(tr(L"Menu"), 602, 930, 37, 80, 34);
   // The aircraft setup saves with its own button in Save changes' place:
   // Save changes would keep the settings but not the picks.
   if (page != SetupPage)
-    button(L"Save changes", 500, 835, 686, 175, 42);
-  button(L"Hide to tray", 501, page == SetupPage ? 515 : 650, 686, 165, 42);
+    button(tr(L"Save changes"), 500, 835, 686, 175, 42);
+  button(tr(L"Hide to tray"), 501, page == SetupPage ? 515 : 650, 686, 165, 42);
   if (page == 0) {
     HWND combo = child(L"COMBOBOX", L"", 210, 262, 310, 425, 220, CBS_DROPDOWNLIST | WS_VSCROLL);
     for (const auto* profile : profiles::Catalog)
@@ -3776,21 +3805,22 @@ void build_controls() {
         SendMessageW(combo, CB_SETCURSEL, i, 0);
     // The set-up aircraft in use follows the catalog.
     if (const auto* set_up = s.profile == profiles::DiscoveredProfileId ? profiles::find(s.profile) : nullptr) {
-      const auto label = std::wstring(set_up->name) + L" (set up)";
+      const auto label = tr_format(L"{0} (set up)", {set_up->name});
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
       SendMessageW(combo, CB_SETCURSEL, profiles::Catalog.size(), 0);
     }
-    toggle(L"Auto aircraft", 230, s.auto_profile, 697, 306, 140);
-    button(L"Set-up aircraft", 646, 847, 306, 145);
-    toggle(L"Auto-connect", 240, auto_connect.load(std::memory_order_acquire), 427, 210, 155);
-    button(win::connection_button_label(connection_requested.load(std::memory_order_acquire)), 241, 262, 210, 155);
+    button(switch_label(tr(L"Auto aircraft"), s.auto_profile).c_str(), 230, 697, 306, 140);
+    button(tr(L"Set-up aircraft"), 646, 847, 306, 145);
+    button(switch_label(tr(L"Auto-connect"), auto_connect.load(std::memory_order_acquire)).c_str(), 240, 427, 210, 155);
+    button(tr(win::connection_button_label(connection_requested.load(std::memory_order_acquire))), 241, 262, 210, 155);
     const auto* profile = profiles::find(s.profile);
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
-    toggle(pmdg_cam_control(s) ? L"CAM button" : L"TAXI buttons", 221, s.follow_taxi && !manual, 812, 392, 180);
+    button(switch_label(pmdg_cam_control(s) ? tr(L"CAM button") : tr(L"TAXI buttons"), s.follow_taxi && !manual).c_str(), 221, 812, 392,
+           180);
     EnableWindow(GetDlgItem(window, 221), !manual);
-    button(L"Shortcuts and buttons…", 645, 597, 392, 205);
-    button(L"Refresh", 409, 882, 499, 110);
-    ShowWindow(button(L"Set up this aircraft", SetupOpenId, 787, 138, 205, 36), SW_HIDE);
+    button(tr(L"Shortcuts and buttons…"), 645, 597, 392, 205);
+    button(tr(L"Refresh"), 409, 882, 499, 110);
+    ShowWindow(button(tr(L"Set up this aircraft"), SetupOpenId, 787, 138, 205, 36), SW_HIDE);
     update_setup_buttons();
   } else if (page == 1) {
     const auto* profile = profiles::find(s.profile);
@@ -3802,18 +3832,18 @@ void build_controls() {
       const int field = (inner - 20) / 3, half = (inner - 10) / 2;
       for (int j = 0; j < 6; ++j)
         edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * (field + 10), 222 + (j / 3) * 64, field);
-      button(L"Lower 0.25 m", 330 + i * 10, x, 358, half);
-      button(L"Raise 0.25 m", 331 + i * 10, x + half + 10, 358, half);
-      button(L"Aft 1 m", 332 + i * 10, x, 404, half);
-      button(L"Forward 1 m", 333 + i * 10, x + half + 10, 404, half);
+      button(tr(L"Lower 0.25 m"), 330 + i * 10, x, 358, half);
+      button(tr(L"Raise 0.25 m"), 331 + i * 10, x + half + 10, 358, half);
+      button(tr(L"Aft 1 m"), 332 + i * 10, x, 404, half);
+      button(tr(L"Forward 1 m"), 333 + i * 10, x + half + 10, 404, half);
     }
-    button(L"Reset camera mounts", 359, 244, 472, 240);
-    button(L"Adjust with live view…", 358, 494, 472, 250);
+    button(tr(L"Reset camera mounts"), 359, 244, 472, 240);
+    button(tr(L"Adjust with live view…"), 358, 494, 472, 250);
   } else if (page == 2) {
     pending_camera_mode = s.camera_mode < kCameraModeCount ? s.camera_mode : static_cast<unsigned>(kDefaultCameraMode);
     for (unsigned slot = 0; slot < kCameraModeCount; ++slot) {
       const auto mode = static_cast<unsigned>(CameraModeOrder[slot]);
-      button(CameraModeNames[mode], CameraModeCardId + static_cast<int>(mode), 262 + static_cast<int>(slot) * 148, 196, 138, 102);
+      button(tr(CameraModeNames[mode]), CameraModeCardId + static_cast<int>(mode), 262 + static_cast<int>(slot) * 148, 196, 138, 102);
     }
     HWND target = child(TRACKBAR_CLASSW, L"", CameraTargetId, 420, 308, 462, 32, TBS_HORZ | TBS_NOTICKS);
     SendMessageW(target, TBM_SETRANGE, FALSE, MAKELPARAM(kMinimumCameraRate, kMaximumCameraRate));
@@ -3822,15 +3852,15 @@ void build_controls() {
     EnableWindow(target, pending_camera_mode == static_cast<unsigned>(CameraMode::custom));
     edit(s.day_brightness, 201, 872, 440, 120);
     edit(s.night_brightness, 202, 872, 536, 120);
-    button(L"Ground-speed colour", 231, 244, 606, 235);
+    button(tr(L"Ground-speed colour"), 231, 244, 606, 235);
     const auto* display_profile = profiles::find(s.profile);
     EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
   } else if (page == 3) {
-    button(L"Clear choices", 406, 522, 133, 120);
-    button(L"Swap left / right", 403, 652, 133, 165);
+    button(tr(L"Clear choices"), 406, 522, 133, 120);
+    button(tr(L"Swap left / right"), 403, 652, 133, 165);
     EnableWindow(GetDlgItem(window, 403), !single_display_profile(s));
-    toggle(L"Auto select", 223, s.auto_detect, 827, 133, 165);
-    button(L"Refresh pictures", 402, 640, 336, 160);
+    button(switch_label(tr(L"Auto select"), s.auto_detect).c_str(), 223, 827, 133, 165);
+    button(tr(L"Refresh pictures"), 402, 640, 336, 160);
     button(L"‹", 407, 872, 336, 56);
     button(L"›", 408, 936, 336, 56);
     const unsigned lists = routing_lists(s);
@@ -3843,18 +3873,18 @@ void build_controls() {
     const unsigned sides = side_profile && side_profile->sides > 2 ? 3 : 2;
     constexpr int previews[]{224, 225, 232}, calibrations[]{226, 227, 233};
     for (unsigned side = 0; side < sides; ++side) {
-      toggle(side_toggle_name(s, side), previews[side], (s.manual_mask & (1u << side)) != 0,
+      button(switch_label(side_toggle_name(s, side), s.manual_mask & (1u << side)).c_str(), previews[side],
              side_toggle_x(0, sides) + static_cast<int>(side) * 100, 622, 96);
-      toggle(side_toggle_name(s, side), calibrations[side], (s.calibration_mask & (1u << side)) != 0,
+      button(switch_label(side_toggle_name(s, side), s.calibration_mask & (1u << side)).c_str(), calibrations[side],
              side_toggle_x(1, sides) + static_cast<int>(side) * 100, 622, 96);
     }
     update_gallery_buttons();
   } else if (page == 4) {
-    toggle(L"Scene test", 229, s.scene_test, 262, 318, 200);
-    toggle(L"First camera only", 228, s.single_camera, 472, 318, 200);
+    button(switch_label(tr(L"Scene test"), s.scene_test).c_str(), 229, 262, 318, 200);
+    button(switch_label(tr(L"First camera only"), s.single_camera).c_str(), 228, 472, 318, 200);
     edit(s.calibration_budget, 203, 872, 392, 120);
-    button(L"Open log folder", 510, 244, 454, 210);
-    button(L"Stop camera tests", 511, 464, 454, 210);
+    button(tr(L"Open log folder"), 510, 244, 454, 210);
+    button(tr(L"Stop camera tests"), 511, 464, 454, 210);
   } else if (page == 5) {
     const auto* guide_profile = profiles::find(s.profile);
     const bool draw_guides = !guide_profile || guide_profile->reference_guides;
@@ -3874,14 +3904,14 @@ void build_controls() {
       EnableWindow(GetDlgItem(window, 380 + static_cast<int>((i - 1) * 2)), draw_guides);
       EnableWindow(GetDlgItem(window, 381 + static_cast<int>((i - 1) * 2)), draw_guides);
     }
-    button(L"Apply live", 370, 244, 586, 200);
-    button(L"Reset guides", 371, 454, 586, 200);
-    button(L"Marking colour", 372, 664, 586, 200);
+    button(tr(L"Apply live"), 370, 244, 586, 200);
+    button(tr(L"Reset guides"), 371, 454, 586, 200);
+    button(tr(L"Marking colour"), 372, 664, 586, 200);
     EnableWindow(GetDlgItem(window, 370), draw_guides);
     EnableWindow(GetDlgItem(window, 371), draw_guides);
     EnableWindow(GetDlgItem(window, 372), draw_guides);
   } else if (page == SetupPage) {
-    button(L"Refresh pictures", SetupRefreshId, 640, 342, 160);
+    button(tr(L"Refresh pictures"), SetupRefreshId, 640, 342, 160);
     button(L"‹", SetupPreviousId, 872, 342, 56);
     button(L"›", SetupNextId, 936, 342, 56);
     const int width = setup.sides == 3 ? 51 : 79;
@@ -3891,14 +3921,14 @@ void build_controls() {
                           268 + static_cast<int>(slot) * 185 + static_cast<int>(side) * (width + 5), 562, width, 28),
                    SW_HIDE);
     if (setup.built_in)
-      button(L"Use built-in displays", SetupBuiltInId, 244, 628, 240);
+      button(tr(L"Use built-in displays"), SetupBuiltInId, 244, 628, 240);
     else
-      toggle(L"Lower display", SetupSidesId, setup.sides == 3, 244, 628, 210);
+      button(switch_label(tr(L"Lower display"), setup.sides == 3).c_str(), SetupSidesId, 244, 628, 210);
     const int slot_width = (730 - 10 * (static_cast<int>(setup.sides) - 1)) / static_cast<int>(setup.sides);
     for (unsigned side = 0; side < setup.sides; ++side)
-      toggle(setup.sides == 3 ? L"Test" : L"Test in cockpit", SetupTestId + static_cast<int>(side), (setup.testing >> side) & 1,
-             362 + static_cast<int>(side) * (slot_width + 10), 266, setup.sides == 3 ? 120 : 200, 28);
-    button(setup.built_in ? L"Save displays" : L"Save and position cameras", SetupSaveId, 700, 686, 310, 42);
+      button(switch_label(setup.sides == 3 ? tr(L"Test") : tr(L"Test in cockpit"), (setup.testing >> side) & 1).c_str(),
+             SetupTestId + static_cast<int>(side), 362 + static_cast<int>(side) * (slot_width + 10), 266, setup.sides == 3 ? 120 : 200, 28);
+    button(setup.built_in ? tr(L"Save displays") : tr(L"Save and position cameras"), SetupSaveId, 700, 686, 310, 42);
     update_setup_buttons();
   }
   refreshing = false;
@@ -3917,7 +3947,7 @@ void tray(bool add) {
   data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
   data.uCallbackMessage = TrayMessage;
   data.hIcon = icon;
-  wcscpy_s(data.szTip, L"Taxi Cam — Settings");
+  wcscpy_s(data.szTip, tr(L"Taxi Cam — Settings"));
   Shell_NotifyIconW(add ? NIM_ADD : NIM_DELETE, &data);
   if (add) {
     data.uVersion = NOTIFYICON_VERSION_4;
@@ -3964,9 +3994,8 @@ void surface_notification(const std::wstring& body, bool alert) {
   }
 }
 void update_balloon() {
-  surface_notification(
-      L"Update downloaded. Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.",
-      false);
+  surface_notification(tr(L"Update downloaded. Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install."),
+                       false);
 }
 // Bridge events as tray notifications. Events from one sample share a balloon
 // while they fit; a later balloon replaces an earlier one on screen, and the
@@ -4021,6 +4050,34 @@ void show() {
   SetForegroundWindow(window);
   offer_whats_new();
 }
+// Tray and Menu: Language. Unfinished fields are kept as a page change keeps
+// them, then the controls are made again in the new language. Open windows
+// other than Settings change when they are next opened or painted.
+constexpr UINT LanguageMenuId = 610;  // Follow Windows; the languages follow it.
+void choose_language(const wchar_t* preference) {
+  auto s = draft();
+  const wchar_t* field_error{};
+  if (!read_fields(s, &field_error)) {
+    notice = field_error ? tr(field_error) : tr(L"Finish the current values before changing pages.");
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
+  publish(s);
+  language_preference = preference;
+  const bool saved = win::save_language(win::settings_directory(), language_preference);
+  win::select_language(win::resolve_language(language_preference, win::windows_display_languages()));
+  make_fonts();
+  build_controls();
+  NOTIFYICONDATAW data{};
+  data.cbSize = sizeof(data);
+  data.hWnd = window;
+  data.uID = 1;
+  data.uFlags = NIF_TIP;
+  wcscpy_s(data.szTip, tr(L"Taxi Cam — Settings"));
+  Shell_NotifyIconW(NIM_MODIFY, &data);
+  notice = saved ? tr(L"Interface language updated.") : tr(L"Could not save the language preference.");
+  InvalidateRect(window, nullptr, FALSE);
+}
 void draw_page(HDC dc) {
   hit_areas.clear();
   RECT client{};
@@ -4032,19 +4089,19 @@ void draw_page(HDC dc) {
   DeleteObject(b);
   DrawIconEx(dc, scale(24), scale(35), icon, scale(32), scale(32), 0, nullptr, DI_NORMAL);
   text(dc, L"TAXI CAM", 68, 33, 134, 22, heading);
-  text(dc, L"Native taxi cameras", 24, 84, 176, 22, small, Muted);
-  text(dc, L"WINDOWS COMPANION", 24, 120, 182, 22, small, Muted);
-  const wchar_t* titles[]{L"Taxi camera", L"Camera views",     L"Display",        L"PFD routing",
-                          L"Diagnostics", L"Reference guides", L"Set up aircraft"};
-  const wchar_t* subtitles[]{L"Your taxi cameras, controlled from the flight deck.",
-                             setup.positioning ? L"Step 2 of 2: the cameras start from default positions. Move each one, then save."
-                                               : L"Fine-tune each camera independently. Changes stay with this aircraft.",
-                             L"Balance visibility, colour and camera update rate.",
-                             L"Connect each TAXI button to the correct display.",
-                             L"Live status and the controls used during camera testing.",
-                             L"Move the guide points, preview them live, then save for this aircraft.",
-                             setup.built_in ? L"Pick the cockpit display each camera is drawn on."
-                                            : L"Step 1 of 2: pick the cockpit display each camera is drawn on."};
+  text(dc, tr(L"Native taxi cameras"), 24, 84, 176, 22, small, Muted);
+  text(dc, tr(L"WINDOWS COMPANION"), 24, 120, 182, 22, small, Muted);
+  const wchar_t* titles[]{tr(L"Taxi camera"), tr(L"Camera views"),     tr(L"Display"),        tr(L"PFD routing"),
+                          tr(L"Diagnostics"), tr(L"Reference guides"), tr(L"Set up aircraft")};
+  const wchar_t* subtitles[]{tr(L"Your taxi cameras, controlled from the flight deck."),
+                             setup.positioning ? tr(L"Step 2 of 2: the cameras start from default positions. Move each one, then save.")
+                                               : tr(L"Fine-tune each camera independently. Changes stay with this aircraft."),
+                             tr(L"Balance visibility, colour and camera update rate."),
+                             tr(L"Connect each TAXI button to the correct display."),
+                             tr(L"Live status and the controls used during camera testing."),
+                             tr(L"Move the guide points, preview them live, then save for this aircraft."),
+                             setup.built_in ? tr(L"Pick the cockpit display each camera is drawn on.")
+                                            : tr(L"Step 1 of 2: pick the cockpit display each camera is drawn on.")};
   text(dc, titles[page], 244, 30, 740, 48, title_font);
   text(dc, subtitles[page], 247, 84, 758, 30, normal, setup.positioning && page == 1 ? Accent : Muted);
   win::Status sample;
@@ -4052,7 +4109,7 @@ void draw_page(HDC dc) {
   {
     const std::lock_guard lock(app_mutex);
     sample = status;
-    live = connection;
+    live = connection.text();
   }
   const bool has_displays = sample.candidate_count != 0 || sample.left_id != 0 || sample.right_id != 0 || sample.lower_id != 0;
   // Every page's cards share one grid: the content column 244-1010, cards
@@ -4062,42 +4119,41 @@ void draw_page(HDC dc) {
     panel(dc, 244, 124, 766, 140);
     const bool unsupported = unsupported_aircraft(sample);
     text(dc,
-         connection_disconnected.load(std::memory_order_acquire) ? L"Disconnected"
-         : !sample.graphics_ready                                ? L"Waiting for the simulator"
-         : unsupported                                           ? L"This aircraft is not set up yet"
-         : has_displays                                          ? L"Native bridge connected"
-                                                                 : L"Native bridge connected — waiting for cockpit displays",
+         connection_disconnected.load(std::memory_order_acquire) ? tr(L"Disconnected")
+         : !sample.graphics_ready                                ? tr(L"Waiting for the simulator")
+         : unsupported                                           ? tr(L"This aircraft is not set up yet")
+         : has_displays                                          ? tr(L"Native bridge connected")
+                                                                 : tr(L"Native bridge connected — waiting for cockpit displays"),
          262, 140, 510, 30, heading, unsupported || (sample.graphics_ready && has_displays) ? Accent : Text);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
-    const auto line = late_empty_pfds    ? std::wstring(
-                                               L"Waiting for cockpit displays to be drawn. "
-                                               L"Restart Flight only if the list stays empty.")
+    const auto line = late_empty_pfds    ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
+                                                           L"Restart Flight only if the list stays empty."))
                       : sample.heartbeat ? widen(sample.message)
                                          : live;
     text(dc, line.c_str(), 262, 172, 730, 36, normal, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 278, 766, 90);
-    text(dc, L"Aircraft profile", 262, 286, 350, 22, small, Muted);
+    text(dc, tr(L"Aircraft profile"), 262, 286, 350, 22, small, Muted);
     panel(dc, 244, 382, 766, 96);
-    text(dc, L"Flight-deck control", 262, 395, 300, 30, heading);
+    text(dc, tr(L"Flight-deck control"), 262, 395, 300, 30, heading);
     const auto* profile = profiles::find(draft().profile);
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     const bool cam = profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
     text(dc,
-         manual ? L"Use Shortcuts and buttons or PFD routing previews for this aircraft."
-         : cam  ? L"Select L INBD, R INBD or LWR CTR, then press CAM. Press CAM again with that display selected to turn it off."
-                : L"Left and right EFIS TAXI buttons activate their own PFD.",
+         manual ? tr(L"Use Shortcuts and buttons or PFD routing previews for this aircraft.")
+         : cam  ? tr(L"Select L INBD, R INBD or LWR CTR, then press CAM. Press CAM again with that display selected to turn it off.")
+                : tr(L"Left and right EFIS TAXI buttons activate their own PFD."),
          262, 436, 730, 36, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 492, 766, 180);
-    text(dc, L"Cockpit displays", 262, 502, 300, 30, heading);
-    text(dc, L"Where each camera is drawn. Select one to change it.", 436, 502, 436, 30, small, Muted);
+    text(dc, tr(L"Cockpit displays"), 262, 502, 300, 30, heading);
+    text(dc, tr(L"Where each camera is drawn. Select one to change it."), 436, 502, 436, 30, small, Muted);
     draw_display_strip(dc, sample);
   } else if (page == 1) {
-    constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
+    const wchar_t* labels[]{tr(L"Right (m)"), tr(L"Up (m)"), tr(L"Forward (m)"), tr(L"Pitch (deg)"), tr(L"Yaw (deg)"), tr(L"Lens (rad)")};
     const auto* profile = profiles::find(draft().profile);
     const bool split = profile && profile->composition.split_bottom != 0;
     const int feed_count = split ? 3 : 2;
-    const wchar_t* titles[]{L"Nose-wheel camera", split ? L"Left wing camera" : L"Tail camera", L"Right wing camera"};
-    const wchar_t* views[]{L"UPPER VIEW", split ? L"LOWER LEFT" : L"LOWER VIEW", L"LOWER RIGHT"};
+    const wchar_t* titles[]{tr(L"Nose-wheel camera"), split ? tr(L"Left wing camera") : tr(L"Tail camera"), tr(L"Right wing camera")};
+    const wchar_t* views[]{tr(L"UPPER VIEW"), split ? tr(L"LOWER LEFT") : tr(L"LOWER VIEW"), tr(L"LOWER RIGHT")};
     for (int i = 0; i < feed_count; ++i) {
       const int card = split ? 246 : 376, x = 244 + i * (card + 14), inner = card - 36, field = (inner - 20) / 3;
       panel(dc, x, 124, card, 334);
@@ -4108,43 +4164,51 @@ void draw_page(HDC dc) {
       text(dc, view_label, x + 18, 172, inner, 20, small, Muted);
       for (int j = 0; j < 6; ++j)
         text(dc, labels[j], x + 18 + (j % 3) * (field + 10), 200 + (j / 3) * 64, field, 20, small, Muted);
-      text(dc, L"Position relative to the aircraft datum", x + 18, 328, inner, 20, small, Muted);
+      text(dc, tr(L"Position relative to the aircraft datum"), x + 18, 328, inner, 20, small, Muted);
     }
   } else if (page == 2) {
     // The camera images take the main view's lighting; brightness is the
     // user's offset on top of it.
     const bool custom = selected_camera_mode() == static_cast<unsigned>(CameraMode::custom);
     panel(dc, 244, 124, 766, 276);
-    text(dc, L"Camera frame rate", 262, 136, 400, 29, heading);
-    text(dc, L"Frames per second for each taxi camera, parked or moving. Auto keeps the simulator within 10% of its frame rate.", 262, 166,
-         730, 22, small, Muted, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    text(dc, L"Custom target", 262, 312, 150, 24, normal, custom ? Text : Muted);
-    wchar_t target_label[32];
-    std::swprintf(target_label, 32, L"%u fps", selected_camera_target());
-    text(dc, target_label, 892, 312, 100, 24, normal, custom ? Text : Muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    text(dc, tr(L"Camera frame rate"), 262, 136, 400, 29, heading);
+    text(dc, tr(L"Frames per second for each taxi camera, parked or moving. Auto keeps the simulator within 10% of its frame rate."), 262,
+         166, 730, 22, small, Muted, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text(dc, tr(L"Custom target"), 262, 312, 150, 24, normal, custom ? Text : Muted);
+    const auto target_label = tr_format(L"{0} fps", {std::to_wstring(selected_camera_target())});
+    text(dc, target_label.c_str(), 892, 312, 100, 24, normal, custom ? Text : Muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     if (sample.heartbeat) {
-      wchar_t rate_line[256];
-      if (sample.reachable_rate > 0)
-        std::swprintf(rate_line, 256, L"Now: each camera about %.1f fps (target %u fps%ls), simulator %.0f fps.", sample.reachable_rate,
-                      sample.effective_rate, camera_rate_limit_text(sample.rate_limits), sample.update_hz);
-      else
-        std::swprintf(rate_line, 256, L"Now: target %u fps per camera%ls. Measuring the simulator's frame rate.", sample.effective_rate,
-                      camera_rate_limit_text(sample.rate_limits));
-      std::wstring line = rate_line;
-      // Saved Auto: the update rate it keeps the simulator above.
-      if (draft().camera_mode == static_cast<std::uint32_t>(CameraMode::automatic) && sample.auto_floor > 0) {
-        wchar_t auto_line[96];
-        std::swprintf(auto_line, 96, L" Auto keeps the simulator above %.0f fps.", sample.auto_floor);
-        line += auto_line;
+      // Whole sentences for each limit, so no clause is added in English order.
+      const auto target = std::to_wstring(sample.effective_rate);
+      const bool capped = sample.rate_limits & kRateLimitPfdRefresh, limited = !capped && (sample.rate_limits & kRateLimitSimulator);
+      win::UiMessage rate;
+      if (sample.reachable_rate > 0) {
+        std::vector<std::wstring> values{decimal(sample.reachable_rate, 1), target, decimal(sample.update_hz, 0)};
+        rate.add(capped ? ui_text(L"Now: each camera about {0} fps (target {1} fps, capped at the PFD refresh rate), simulator {2} fps.")
+                 : limited
+                     ? ui_text(L"Now: each camera about {0} fps (target {1} fps, limited by the simulator frame rate), simulator {2} fps.")
+                     : ui_text(L"Now: each camera about {0} fps (target {1} fps), simulator {2} fps."),
+                 std::move(values));
+      } else {
+        rate.add(
+            capped ? ui_text(L"Now: target {0} fps per camera (capped at the PFD refresh rate). Measuring the simulator's frame rate.")
+            : limited
+                ? ui_text(L"Now: target {0} fps per camera (limited by the simulator frame rate). Measuring the simulator's frame rate.")
+                : ui_text(L"Now: target {0} fps per camera. Measuring the simulator's frame rate."),
+            {target});
       }
+      // Saved Auto: the update rate it keeps the simulator above.
+      if (draft().camera_mode == static_cast<std::uint32_t>(CameraMode::automatic) && sample.auto_floor > 0)
+        rate.add(ui_text(L"Auto keeps the simulator above {0} fps."), {decimal(sample.auto_floor, 0)});
+      const auto line = rate.text();
       text(dc, line.c_str(), 262, 350, 730, 36, small, Muted, DT_LEFT | DT_WORDBREAK);
     }
     // The camera images take the main view's lighting; brightness is the
     // user's offset on top of it.
     const int ys[]{414, 510};
-    const wchar_t* names[]{L"Daytime brightness", L"Night brightness"};
-    const wchar_t* descriptions[]{L"EV added to the main view's exposure in daylight, −4 to +2 in 0.25 steps. 0 matches the main view.",
-                                  L"EV added at night, −4 to +2 in 0.25 steps. Dusk blends the two with the ambient light."};
+    const wchar_t* names[]{tr(L"Daytime brightness"), tr(L"Night brightness")};
+    const wchar_t* descriptions[]{tr(L"EV added to the main view's exposure in daylight, −4 to +2 in 0.25 steps. 0 matches the main view."),
+                                  tr(L"EV added at night, −4 to +2 in 0.25 steps. Dusk blends the two with the ambient light.")};
     for (int i = 0; i < 2; ++i) {
       panel(dc, 244, ys[i], 766, 82);
       text(dc, names[i], 262, ys[i] + 12, 515, 29, heading);
@@ -4152,73 +4216,81 @@ void draw_page(HDC dc) {
     }
   } else if (page == 3) {
     panel(dc, 244, 124, 766, 190);
-    text(dc, L"Assigned displays", 262, 134, 255, 34, heading);
+    text(dc, tr(L"Assigned displays"), 262, 134, 255, 34, heading);
     draw_routing_slots(dc, sample);
     panel(dc, 244, 328, 766, 280);
-    text(dc, L"Display textures", 262, 338, 180, 32, heading);
-    text(dc, L"Select a picture to enlarge it.", 446, 338, 190, 32, small, Muted);
+    text(dc, tr(L"Display textures"), 262, 338, 180, 32, heading);
+    text(dc, tr(L"Select a picture to enlarge it."), 446, 338, 190, 32, small, Muted);
     draw_gallery(dc, sample);
     const auto s = draft();
     const auto* profile = profiles::find(s.profile);
     const unsigned sides = profile && profile->sides > 2 ? 3 : 2;
-    text(dc, L"Preview", 244, 622, 60, 36, small, Muted);
-    text(dc, L"Calibrate", side_toggle_x(1, sides) - 76, 622, 72, 36, small, Muted);
+    text(dc, tr(L"Preview"), 244, 622, 60, 36, small, Muted);
+    text(dc, tr(L"Calibrate"), side_toggle_x(1, sides) - 76, 622, 72, 36, small, Muted);
     text(dc,
-         pmdg_cam_control(s) ? L"Previews add displays on top of the CAM button. Calibration bars identify each screen and turn CAM off."
+         pmdg_cam_control(s)
+             ? tr(L"Previews add displays on top of the CAM button. Calibration bars identify each screen and turn CAM off.")
          : profile && profile->taxi_control == profiles::TaxiControl::manual_only
-             ? L"Previews are this aircraft's camera control. Calibration bars identify each screen."
-             : L"Previews and calibration turn off TAXI-button control. Calibration bars identify each screen.",
+             ? tr(L"Previews are this aircraft's camera control. Calibration bars identify each screen.")
+             : tr(L"Previews and calibration turn off TAXI-button control. Calibration bars identify each screen."),
          244, 662, 766, 20, small, Muted);
   } else if (page == 4) {
     panel(dc, 244, 124, 766, 166);
-    wchar_t data[1024];
-    std::swprintf(data, 1024,
-                  L"Bridge                 %s\nCamera pair         %s\nLeft / right PFD    %llu / %llu\nCaptured frames  "
-                  L"%llu\nCompositions       %llu\nPFD writes            %llu\nHook failures        %llu",
-                  sample.graphics_ready ? (has_displays ? L"Connected" : L"Waiting for displays") : L"Waiting",
-                  sample.scene_ready ? L"Ready" : L"Waiting", static_cast<unsigned long long>(sample.left_id),
-                  static_cast<unsigned long long>(sample.right_id), static_cast<unsigned long long>(sample.captures),
-                  static_cast<unsigned long long>(sample.composed), static_cast<unsigned long long>(sample.stamps),
-                  static_cast<unsigned long long>(sample.hook_failures));
-    text(dc, data, 262, 140, 360, 136, normal, Text, DT_LEFT | DT_WORDBREAK);
-    std::swprintf(data, 1024,
-                  L"Probe CPU: %.2f ms (max %.2f)\nManager %.3f   Pool %.3f\nLifecycle %.3f   Entries %.3f\nView 1 %.3f   View 2 "
-                  L"%.3f\nHandoff %.3f   Pose %.3f\nActivation %.3f   Publish %.3f\n\nExcludes engine rendering and GPU time.",
-                  sample.probe_cpu_ms, sample.probe_max_ms, sample.stage_ms[0], sample.stage_ms[1], sample.stage_ms[2], sample.stage_ms[3],
-                  sample.stage_ms[4], sample.stage_ms[5], sample.stage_ms[6], sample.stage_ms[7], sample.stage_ms[8], sample.stage_ms[9]);
-    text(dc, data, 637, 140, 355, 136, small, Muted, DT_LEFT | DT_WORDBREAK);
+    // The spaces align the values in the proportional font; translations realign them.
+    const auto counts = tr_format(
+        L"Bridge                 {0}\n"
+        L"Camera pair         {1}\n"
+        L"Left / right PFD    {2} / {3}\n"
+        L"Captured frames  {4}\n"
+        L"Compositions       {5}\n"
+        L"PFD writes            {6}\n"
+        L"Hook failures        {7}",
+        {sample.graphics_ready ? (has_displays ? tr(L"Connected") : tr(L"Waiting for displays")) : tr(L"Waiting"),
+         sample.scene_ready ? tr(L"Ready") : tr(L"Waiting"), std::to_wstring(sample.left_id), std::to_wstring(sample.right_id),
+         std::to_wstring(sample.captures), std::to_wstring(sample.composed), std::to_wstring(sample.stamps),
+         std::to_wstring(sample.hook_failures)});
+    text(dc, counts.c_str(), 262, 140, 360, 136, normal, Text, DT_LEFT | DT_WORDBREAK);
+    const auto stage = [&](unsigned i) { return decimal(sample.stage_ms[i], 3); };
+    const auto timing = tr_format(L"Probe CPU: {0} ms (max {1})", {decimal(sample.probe_cpu_ms, 2), decimal(sample.probe_max_ms, 2)}) +
+                        L"\n" +
+                        tr_format(
+                            L"Manager {0}   Pool {1}\nLifecycle {2}   Entries {3}\nView 1 {4}   View 2 {5}\nHandoff {6}   Pose {7}\n"
+                            L"Activation {8}   Publish {9}",
+                            {stage(0), stage(1), stage(2), stage(3), stage(4), stage(5), stage(6), stage(7), stage(8), stage(9)}) +
+                        L"\n\n" + tr(L"Excludes engine rendering and GPU time.");
+    text(dc, timing.c_str(), 637, 140, 355, 136, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 304, 766, 136);
-    text(dc, L"Scene test renders without PFD delivery.", 262, 362, 730, 22, small, Muted, DT_LEFT | DT_WORDBREAK);
+    text(dc, tr(L"Scene test renders without PFD delivery."), 262, 362, 730, 22, small, Muted, DT_LEFT | DT_WORDBREAK);
     const auto line = sample.heartbeat ? widen(sample.message) : live;
-    text(dc, L"Calibration batches per 50 ms (64–16384)", 262, 395, 550, 24, small, Muted);
+    text(dc, tr(L"Calibration batches per 50 ms (64–16384)"), 262, 395, 550, 24, small, Muted);
     text(dc, line.c_str(), 244, 504, 766, 38, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == SetupPage) {
     draw_setup(dc, sample);
   } else if (page == 5) {
     panel(dc, 244, 124, 766, 118);
     panel(dc, 244, 256, 766, 259);
-    text(dc, L"Nose-wheel view", 262, 136, 250, 30, heading);
+    text(dc, tr(L"Nose-wheel view"), 262, 136, 250, 30, heading);
     const auto* guide_profile = profiles::find(draft().profile);
     const bool draw_guides = !guide_profile || guide_profile->reference_guides;
     const bool nose_squares = (guide_profile ? guide_profile : &profiles::A380)->composition.square_nose_markers != 0;
-    text(dc, nose_squares ? L"Nose squares" : L"Nose dot", 262, 191, 225, 28, normal);
-    text(dc, L"Tail view", 262, 267, 250, 30, heading);
-    const wchar_t* labels[]{L"Upper endpoint", L"Outside corner", L"Inner endpoint"};
+    text(dc, nose_squares ? tr(L"Nose squares") : tr(L"Nose dot"), 262, 191, 225, 28, normal);
+    text(dc, tr(L"Tail view"), 262, 267, 250, 30, heading);
+    const wchar_t* labels[]{tr(L"Upper endpoint"), tr(L"Outside corner"), tr(L"Inner endpoint")};
     for (int i = 0; i < 3; ++i)
       text(dc, labels[i], 262, 316 + i * 64, 185, 30, normal);
     text(dc, L"X (%)", 452, 162, 80, 23, small, Muted);
     text(dc, L"Y (%)", 540, 162, 80, 23, small, Muted);
-    text(dc, L"Left X (%)", 452, 289, 80, 23, small, Muted);
-    text(dc, L"Left Y (%)", 540, 289, 80, 23, small, Muted);
-    text(dc, L"Right X (%)", 632, 289, 80, 23, small, Muted);
-    text(dc, L"Right Y (%)", 720, 289, 80, 23, small, Muted);
+    text(dc, tr(L"Left X (%)"), 452, 289, 80, 23, small, Muted);
+    text(dc, tr(L"Left Y (%)"), 540, 289, 80, 23, small, Muted);
+    text(dc, tr(L"Right X (%)"), 632, 289, 80, 23, small, Muted);
+    text(dc, tr(L"Right Y (%)"), 720, 289, 80, 23, small, Muted);
     text(dc,
-         draw_guides ? L"X from the nearest side, 0–50%; Y from the top, 0–100% of each camera view. The nose guide mirrors."
-                     : L"This aircraft does not use alignment markers.",
+         draw_guides ? tr(L"X from the nearest side, 0–50%; Y from the top, 0–100% of each camera view. The nose guide mirrors.")
+                     : tr(L"This aircraft does not use alignment markers."),
          244, 529, 766, 26, small, Muted);
     text(dc,
-         draw_guides ? L"Preview is temporary until saved. Reset restores guide positions and colour."
-                     : L"No marker calibration is required for this profile.",
+         draw_guides ? tr(L"Preview is temporary until saved. Reset restores guide positions and colour.")
+                     : tr(L"No marker calibration is required for this profile."),
          244, 554, 766, 23, small, Muted);
     if (draw_guides) {
       auto preview = draft();
@@ -4235,7 +4307,7 @@ void draw_page(HDC dc) {
       const auto dot = [&](POINT p, int radius) {
         Ellipse(dc, p.x - scale(radius), p.y - scale(radius), p.x + scale(radius), p.y + scale(radius));
       };
-      text(dc, L"Preview", 811, 141, 181, 23, small, Muted);
+      text(dc, tr(L"Preview"), 811, 141, 181, 23, small, Muted);
       for (const bool right : {false, true}) {
         if (nose_squares) {
           const auto nose = point(preview.nose_dot, right, 177, 45);
@@ -4307,8 +4379,8 @@ DWORD WINAPI connection_worker(void*) {
       {
         const std::lock_guard lock(app_mutex);
         if (!connection_disconnected.load(std::memory_order_acquire))
-          connection =
-              attached ? L"Connect requested. Retrying bridge attach." : L"Connect requested. Waiting for Microsoft Flight Simulator 2024.";
+          connection = attached ? ui_text(L"Connect requested. Retrying bridge attach.")
+                                : ui_text(L"Connect requested. Waiting for Microsoft Flight Simulator 2024.");
       }
       PostMessageW(window, StatusMessage, 0, 0);
     }
@@ -4343,8 +4415,9 @@ DWORD WINAPI connection_worker(void*) {
         status = {};
         current.enabled = 0;
         connection_requested.store(false, std::memory_order_release);
-        connection = connection_disconnected.load(std::memory_order_acquire) ? L"Disconnected. Choose Connect to enable the cameras again."
-                                                                             : L"Simulator closed. Waiting for the next session.";
+        connection = connection_disconnected.load(std::memory_order_acquire)
+                         ? ui_text(L"Disconnected. Choose Connect to enable the cameras again.")
+                         : ui_text(L"Simulator closed. Waiting for the next session.");
       }
       PostMessageW(window, StatusMessage, 0, 0);
       // Stay in the tray so a later manual or auto connect can attach without
@@ -4369,7 +4442,7 @@ DWORD WINAPI connection_worker(void*) {
       if (!auto_on && !manual_armed) {
         {
           const std::lock_guard lock(app_mutex);
-          connection = L"MSFS detected. Auto-connect is off — choose Connect when ready.";
+          connection = ui_text(L"MSFS detected. Auto-connect is off — choose Connect when ready.");
         }
         PostMessageW(window, StatusMessage, 0, 0);
       }
@@ -4383,7 +4456,7 @@ DWORD WINAPI connection_worker(void*) {
           continue;
         if (!connection_requested.load(std::memory_order_acquire) && !win::begin_connection(current)) {
           attempted = true;
-          connection = L"Restart Taxi Cam to begin a new connection.";
+          connection = ui_text(L"Restart Taxi Cam to begin a new connection.");
           continue;
         }
         connection_requested.store(true, std::memory_order_release);
@@ -4400,11 +4473,8 @@ DWORD WINAPI connection_worker(void*) {
         {
           const std::lock_guard lock(app_mutex);
           if (!connection_disconnected.load(std::memory_order_acquire)) {
-            connection = L"Could not open the camera control channel.";
-            if (retrying)
-              connection += L" Retrying.";
-            else
-              connection += L" Choose Disconnect, then Connect to try again.";
+            connection = ui_text(L"Could not open the camera control channel.");
+            connection.add(retrying ? ui_text(L"Retrying.") : ui_text(L"Choose Disconnect, then Connect to try again."));
           }
         }
         PostMessageW(window, StatusMessage, 0, 0);
@@ -4433,17 +4503,18 @@ DWORD WINAPI connection_worker(void*) {
         {
           const std::lock_guard lock(app_mutex);
           if (!connection_disconnected.load(std::memory_order_acquire)) {
-            connection = loaded.message;
+            connection = {};
+            connection.add(loaded.message);
             if (!loaded.ok)
-              connection += L" (Windows " + std::to_wstring(loaded.error) + L")";
+              connection.add(ui_text(L"(Windows {0})"), {std::to_wstring(loaded.error)});
             if (retrying && loaded.retry_before_load && startup_retry.retries() == 0)
-              connection += L" Automatic recovery scheduled.";
+              connection.add(ui_text(L"Automatic recovery scheduled."));
             else if (retrying)
-              connection += L" Retrying startup preflight.";
+              connection.add(ui_text(L"Retrying startup preflight."));
             else if (loaded.retry_before_load && !loaded.ok)
-              connection += L" Automatic retries paused; choose Disconnect, then Connect to retry.";
+              connection.add(ui_text(L"Automatic retries paused; choose Disconnect, then Connect to retry."));
             else if (!loaded.ok)
-              connection += L" Choose Disconnect, then Connect to try again.";
+              connection.add(ui_text(L"Choose Disconnect, then Connect to try again."));
           }
         }
         PostMessageW(window, StatusMessage, 0, 0);
@@ -4470,7 +4541,7 @@ DWORD WINAPI connection_worker(void*) {
             // Retry through the existing authorization, preserving the stale
             // heartbeat watermark and any newer explicit Disconnect command.
             status.heartbeat = 0;
-            connection = L"Bridge status went stale. Retrying attach automatically.";
+            connection = ui_text(L"Bridge status went stale. Retrying attach automatically.");
           }
         }
         PostMessageW(window, StatusMessage, 0, 0);
@@ -4529,7 +4600,7 @@ void check_updates(bool manual) {
   if (updater.begin(installation, manual)) {
     next_update_check = GetTickCount64() + 24ULL * 60 * 60 * 1000;
     if (manual) {
-      notice = L"Checking for updates in the background...";
+      notice = tr(L"Checking for updates in the background...");
       InvalidateRect(window, nullptr, FALSE);
     }
   }
@@ -4541,27 +4612,27 @@ void poll_updates() {
   if (updater.take(result)) {
     if (!result.available) {
       if (result.manual) {
-        notice = result.error.empty() ? L"Taxi Cam is up to date." : result.error;
-        MessageBoxW(window, notice.c_str(), L"Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
+        notice = result.error.empty() ? tr(L"Taxi Cam is up to date.") : tr(result.error.c_str());
+        MessageBoxW(window, notice.c_str(), tr(L"Taxi Cam updates"), MB_OK | MB_ICONINFORMATION);
       }
     } else {
       update_prompt = true;
       if (win::simulator_blocks_update()) {
-        notice = L"Update downloaded. Close Microsoft Flight Simulator, then choose Check for updates to install.";
+        notice = tr(L"Update downloaded. Close Microsoft Flight Simulator, then choose Check for updates to install.");
         if (result.manual)
-          MessageBoxW(window, notice.c_str(), L"Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
+          MessageBoxW(window, notice.c_str(), tr(L"Taxi Cam updates"), MB_OK | MB_ICONINFORMATION);
         else
           update_balloon();
       } else {
         const auto prompt =
-            L"Taxi Cam " + result.tag + L" has been downloaded and verified.\n\nClose Taxi Cam and start the installer now?";
-        if (MessageBoxW(window, prompt.c_str(), L"Taxi Cam update ready", MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) {
+            tr_format(L"Taxi Cam {0} has been downloaded and verified.\n\nClose Taxi Cam and start the installer now?", {result.tag});
+        if (MessageBoxW(window, prompt.c_str(), tr(L"Taxi Cam update ready"), MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) {
           bool proceed = true;
           if (dirty) {
             const int choice = MessageBoxW(window,
-                                           L"Save your unsaved settings before installing?\n\nYes: save and continue.\nNo: discard "
-                                           L"changes.\nCancel: keep the app open.",
-                                           L"Unsaved settings", MB_YESNOCANCEL | MB_ICONQUESTION);
+                                           tr(L"Save your unsaved settings before installing?\n\nYes: save and continue.\nNo: discard "
+                                              L"changes.\nCancel: keep the app open."),
+                                           tr(L"Unsaved settings"), MB_YESNOCANCEL | MB_ICONQUESTION);
             proceed = choice == IDNO || (choice == IDYES && apply());
           }
           if (proceed) {
@@ -4572,7 +4643,7 @@ void poll_updates() {
               update_prompt = false;
               return;
             }
-            MessageBoxW(window, error.c_str(), L"Taxi Cam updates", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window, tr(error.c_str()), tr(L"Taxi Cam updates"), MB_OK | MB_ICONWARNING);
           }
         }
       }
@@ -4638,9 +4709,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       register_camera_hotkeys();
       update_camera_button_input();
       if (hotkey_registration.conflicts())
-        notice = L"Some shortcuts are unavailable. Check Overview > Flight-deck control.";
+        notice = tr(L"Some shortcuts are unavailable. Check Overview > Flight-deck control.");
       else if (win::any_camera_button(button_saved) && !preview_ui && !button_input.enabled())
-        notice = L"Controller buttons are unavailable. Check Overview > Flight-deck control.";
+        notice = tr(L"Controller buttons are unavailable. Check Overview > Flight-deck control.");
       build_controls();
       tray(true);
       SetTimer(hwnd, 1, 250, nullptr);
@@ -4809,7 +4880,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         SetTextColor(item->hDC, disabled ? Muted : primary ? Background : selected ? Accent : Text);
         SetBkMode(item->hDC, TRANSPARENT);
         InflateRect(&r, -scale(10), 0);
-        DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        // A translation can outgrow a button sized for English: step down to the
+        // small font with less padding, and shorten with an ellipsis only after that.
+        RECT extent{};
+        DrawTextW(item->hDC, label, -1, &extent, DT_CALCRECT | DT_SINGLELINE);
+        if (extent.right > r.right - r.left) {
+          SelectObject(item->hDC, small);
+          InflateRect(&r, scale(6), 0);
+        }
+        DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
       }
       if (!disabled && (item->itemState & ODS_FOCUS)) {
         if (id != 512)
@@ -4840,15 +4919,25 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case TrayMessage:
       if (LOWORD(l) == WM_CONTEXTMENU || LOWORD(l) == WM_RBUTTONUP) {
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, 600, L"Settings");
+        AppendMenuW(menu, MF_STRING, 600, tr(L"Settings"));
         AppendMenuW(menu, MF_STRING | (preview_ui ? MF_GRAYED : 0), 604,
-                    win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
+                    tr(win::connection_button_label(connection_requested.load(std::memory_order_acquire))));
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
-                    updater.busy() ? L"Checking for updates..." : L"Check for updates");
-        AppendMenuW(menu, MF_STRING | (draft().notifications ? MF_CHECKED : MF_UNCHECKED), 605, L"Show notifications");
-        AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
+                    updater.busy() ? tr(L"Checking for updates...") : tr(L"Check for updates"));
+        AppendMenuW(menu, MF_STRING | (draft().notifications ? MF_CHECKED : MF_UNCHECKED), 605, tr(L"Show notifications"));
+        // Native language names are not translated. Not while a dialog is open
+        // over Settings: its controls would lose their fonts.
+        HMENU languages = CreatePopupMenu();
+        AppendMenuW(languages, MF_STRING, LanguageMenuId, tr(L"Follow Windows"));
+        for (UINT i = 0; i < std::size(win::UiLanguages); ++i)
+          AppendMenuW(languages, MF_STRING, LanguageMenuId + 1 + i, win::UiLanguages[i].native_name);
+        const auto* chosen = win::find_language(language_preference);
+        CheckMenuRadioItem(languages, LanguageMenuId, LanguageMenuId + static_cast<UINT>(std::size(win::UiLanguages)),
+                           chosen ? LanguageMenuId + 1 + static_cast<UINT>(chosen - win::UiLanguages) : LanguageMenuId, MF_BYCOMMAND);
+        AppendMenuW(menu, MF_POPUP | (IsWindowEnabled(hwnd) ? 0 : MF_GRAYED), reinterpret_cast<UINT_PTR>(languages), tr(L"Language"));
+        AppendMenuW(menu, MF_STRING, 512, tr(L"Report a bug"));
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, 601, L"Exit");
+        AppendMenuW(menu, MF_STRING, 601, tr(L"Exit"));
         POINT p;
         GetCursorPos(&p);
         SetForegroundWindow(hwnd);
@@ -4867,9 +4956,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           s.notifications = s.notifications ? 0u : 1u;
           publish(s);
           if (!win::save_settings(draft()))
-            notice = L"Could not save settings. Check access to your local settings folder.";
+            notice = tr(L"Could not save settings. Check access to your local settings folder.");
           InvalidateRect(hwnd, nullptr, FALSE);
         }
+        if (selected >= LanguageMenuId && selected <= LanguageMenuId + std::size(win::UiLanguages))
+          choose_language(selected == LanguageMenuId ? L"" : win::UiLanguages[selected - LanguageMenuId - 1].tag);
         if (selected == 512)
           report_bug();
         if (selected == 601) {
@@ -4956,7 +5047,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 406) {
         if (choose_routes({0, 0}))
-          notice = L"Your choices are cleared. Named and detected displays apply again.";
+          notice = tr(L"Your choices are cleared. Named and detected displays apply again.");
         update_gallery_buttons();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -4996,7 +5087,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         const wchar_t* field_error{};
         if (!read_fields(s, &field_error)) {
-          notice = field_error ? field_error : L"Finish the current values before changing pages.";
+          notice = field_error ? tr(field_error) : tr(L"Finish the current values before changing pages.");
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
@@ -5030,7 +5121,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (id == 514) {
         const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", GithubUrl, nullptr, nullptr, SW_SHOWNORMAL));
         if (result <= 32)
-          MessageBoxW(hwnd, L"Could not open your browser. Visit https://github.com/rthoms334/taxi-cam.", L"Taxi Cam on GitHub",
+          MessageBoxW(hwnd, tr(L"Could not open your browser. Visit https://github.com/rthoms334/taxi-cam."), tr(L"Taxi Cam on GitHub"),
                       MB_OK | MB_ICONWARNING);
         return 0;
       }
@@ -5045,18 +5136,18 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         win::Settings next;
         if (!win::load_settings(next, installation, set_up ? profiles::DiscoveredProfileId : profiles::Catalog[index]->id,
                                 set_up ? std::string_view(selected.discovered.key) : std::string_view{})) {
-          notice = L"Could not load that aircraft profile.";
+          notice = tr(L"Could not load that aircraft profile.");
           return 0;
         }
         next.enabled = draft().enabled;
         if (!win::prepare_profile_selection(next, draft(), false) || !win::save_settings(next)) {
-          notice = L"Could not apply that aircraft profile.";
+          notice = tr(L"Could not apply that aircraft profile.");
           InvalidateRect(hwnd, nullptr, FALSE);
           return 0;
         }
         publish(next);
         dirty = false;
-        notice = L"Aircraft profile selected. Reconnecting its cameras and displays.";
+        notice = tr(L"Aircraft profile selected. Reconnecting its cameras and displays.");
         build_controls();
         return 0;
       }
@@ -5106,10 +5197,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         const bool next = !auto_connect.load(std::memory_order_acquire);
         auto_connect.store(next, std::memory_order_release);
         if (!win::save_auto_connect(win::settings_directory(), next))
-          notice = L"Could not save the Auto-connect preference.";
+          notice = tr(L"Could not save the Auto-connect preference.");
         else
-          notice = next ? L"Auto-connect on. Taxi Cam will connect when the simulator is available."
-                        : L"Auto-connect off. Use Connect whenever you are ready, including in a loaded flight.";
+          notice = next ? tr(L"Auto-connect on. Taxi Cam will connect when the simulator is available.")
+                        : tr(L"Auto-connect off. Use Connect whenever you are ready, including in a loaded flight.");
         if (next)
           request_connection(win::ConnectCommand::connect);
         build_controls();
@@ -5193,7 +5284,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           return 0;
         if (apply(false)) {
           dirty_notice();
-          notice = L"Preview applied. Save changes to keep these guides.";
+          notice = tr(L"Preview applied. Save changes to keep these guides.");
         }
         return 0;
       }
@@ -5205,7 +5296,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           win::reset_guide_settings(s, *profile);
           publish(s);
           dirty_notice();
-          notice = L"Profile guide positions and colour restored. Save changes to keep them.";
+          notice = tr(L"Profile guide positions and colour restored. Save changes to keep them.");
           build_controls();
         }
         return 0;
@@ -5219,7 +5310,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
             sample = status;
           }
           if (sample.graphics_ready && sample.candidate_count == 0 && sample.left_id == 0 && sample.right_id == 0) {
-            notice = L"Waiting for cockpit displays to be drawn. Restart Flight only if the list stays empty.";
+            notice = tr(L"Waiting for cockpit displays to be drawn. Restart Flight only if the list stays empty.");
             InvalidateRect(hwnd, nullptr, FALSE);
           }
           build_controls();
@@ -5236,7 +5327,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         const auto routed = routed_lists(draft(), sample);
         if (routed[0] && routed[1] && choose_routes({routed[1], routed[0]}))
-          notice = L"Left and right swapped for this flight. Clear choices goes back to automatic selection.";
+          notice = tr(L"Left and right swapped for this flight. Clear choices goes back to automatic selection.");
         build_controls();
         return 0;
       }
@@ -5329,9 +5420,13 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   installation.resize(installation.find_last_of(L"\\/"));
   if (preview_ui)
     win::settings_override = installation + L"\\preview-settings";
+  // Before any wording is shown, and before the fonts are made for its script.
+  language_preference = win::load_language(win::settings_directory());
+  win::select_language(win::resolve_language(language_preference, win::windows_display_languages()));
+  notice = tr(L"Changes are saved for this aircraft.");
   win::migrate_saved_camera_rate();
   if (!win::load_settings(current, installation))
-    notice = L"Saved settings were invalid; profile defaults loaded.";
+    notice = tr(L"Saved settings were invalid; profile defaults loaded.");
   if (current.profile == profiles::DiscoveredProfileId)
     profiles::publish_discovered(current.discovered);
   profiles::publish_override(profiles::base_profile(current.profile), current.display_override);
@@ -5341,10 +5436,10 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   current.enabled = 0;
   auto_connect.store(win::load_auto_connect(win::settings_directory()), std::memory_order_release);
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
-    notice = L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.";
+    notice = tr(L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.");
   hotkey_draft = hotkey_saved;
   if (!win::load_camera_buttons(button_saved, win::settings_directory()))
-    notice = L"Saved controller buttons were invalid and disabled. Configure them in Overview > Flight-deck control.";
+    notice = tr(L"Saved controller buttons were invalid and disabled. Configure them in Overview > Flight-deck control.");
   button_draft = button_saved;
   INITCOMMONCONTROLSEX common{sizeof(common), ICC_STANDARD_CLASSES | ICC_HOTKEY_CLASS | ICC_BAR_CLASSES};
   InitCommonControlsEx(&common);
@@ -5370,7 +5465,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   if (startup.should_show()) {
     ShowWindow(main, SW_SHOW);
     if (!startup.record_shown(IsWindowVisible(main) != FALSE, worker != nullptr)) {
-      notice = L"Could not remember the first launch. Settings may reopen next time.";
+      notice = tr(L"Could not remember the first launch. Settings may reopen next time.");
       InvalidateRect(main, nullptr, FALSE);
     }
     offer_whats_new();
