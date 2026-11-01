@@ -105,6 +105,11 @@ class WorkflowTest(unittest.TestCase):
             for denied in ('"Read(//proc/**)"', '"Read(//sys/**)"', '"Read(./.git/config)"'):
                 self.assertIn(denied, claude, name)
             self.assertEqual(len(re.findall(r"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'", text)), 1, name)
+            # Scrubbing needs bubblewrap; without it Claude Code refuses to start.
+            install = step(text, "Install subprocess isolation for the reviewer")
+            self.assertIn("apt-get install -y --no-install-recommends bubblewrap", install, name)
+            self.assertIn("apparmor_restrict_unprivileged_userns=0", install, name)
+            self.assertLess(text.index("Install subprocess isolation"), text.index("- name: Review with Claude"), name)
             save = step(text, "Validate the ranked findings and refuse any credential")
             for secret in ("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}", "CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", "GITHUB_TOKEN: ${{ github.token }}"):
                 self.assertIn(secret, save, name)

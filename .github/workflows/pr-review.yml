@@ -79,6 +79,17 @@ jobs:
           python3 .github/review/review.py stage --out build/review --base "$BASE_SHA" --head "$HEAD_SHA" \
             --reviewer-from "$BASE_SHA" --bootstrap-fallback --comments "$RUNNER_TEMP/comments.json" --github-output "$GITHUB_OUTPUT"
 
+      - name: Install subprocess isolation for the reviewer
+        # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 needs bubblewrap. This is the setup the
+        # action itself performs for untrusted input (allowed_non_write_users).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       # Keep this step identical in review-evals.yml (checked by test_workflows.py).
       - name: Review with Claude
         id: claude
