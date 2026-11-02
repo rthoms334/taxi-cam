@@ -494,6 +494,58 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   execute();
   require(win::graphics_status().shadow_restores >= baseline.shadow_restores + 2, "The baseline went back when the camera stopped");
   restored(false, !common, "The baseline came back with the instrument's repaint, without the camera");
+  // A dropped first save proves nothing about the display: a packet
+  // quarantined after it was forwarded may have run. Another queue's
+  // unfinished receipt (a snapshot copy held behind a fence) makes the next
+  // display batch escape like issue 97, so the first saves of a clean camera
+  // period are planned and dropped. The save after them must be a baseline,
+  // not a clean save, and the restore must still bring back no camera pixel.
+  runtime::service();
+  win::service_display_patches();  // The completed restore ends that shadow.
+  Reference<ID3D12CommandQueue> other_queue;
+  check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(other_queue.put())), "Second application queue");
+  Reference<ID3D12Fence> queue_hold;
+  check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(queue_hold.put())), "Second queue blocker");
+  Recording exit_list;
+  exit_list.create(device.get());
+  exit_list.close();
+  exit_list.reset();
+  const auto first_selected = static_cast<unsigned>(std::find(selected.begin(), selected.end(), true) - selected.begin());
+  transition(exit_list.list.get(), targets[first_selected].get(), display_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  transition(exit_list.list.get(), targets[first_selected].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, display_state);
+  exit_list.close();
+  require(win::request_display_snapshot(inventory[first_selected].id, GetTickCount64()) == win::DisplaySnapshotResult::pending,
+          "Snapshot for the second queue accepted");
+  check(other_queue->Wait(queue_hold.get(), 1), "Hold the second queue");
+  ID3D12CommandList* held_batch[]{exit_list.list.get()};
+  other_queue->ExecuteCommandLists(1, held_batch);
+  win::set_target_mask(3);
+  win::service_display_patches();
+  runtime::service();
+  const auto escapes = runtime::snapshot(key).capture.cross_queue_escapes;
+  const auto before_drop = win::graphics_status();
+  record_frame(false, false);
+  execute();
+  require(runtime::snapshot(key).capture.cross_queue_escapes > escapes && win::graphics_status().shadow_saves > before_drop.shadow_saves,
+          "The first saves were planned in a batch that escaped");
+  check(queue_hold->Signal(1), "Release the second queue");
+  require(drain_copy_queue(other_queue.get(), device.get()), "Second queue completed");
+  runtime::service();
+  record_frame(false, false);
+  execute();
+  const auto after_drop = win::graphics_status();
+  require(after_drop.shadow_baselines >= before_drop.shadow_baselines + 2 && after_drop.shadow_modes[0] == 'q' &&
+              after_drop.shadow_modes[1] == 'q',
+          "After a dropped first save the next save was not a baseline");
+  pixels(false, false);
+  runtime::service();
+  win::poll_display_snapshot(GetTickCount64());
+  win::set_target_mask(0);
+  win::service_display_patches();
+  record_frame(false, false, &after, after_colour);
+  execute();
+  require(win::graphics_status().shadow_restores >= after_drop.shadow_restores + 2, "The shadow went back after a dropped first save");
+  restored(false, !common, "After a dropped first save the display came back without the camera");
   runtime::service();
   win::service_display_patches();
   handoff.stop_scene();
