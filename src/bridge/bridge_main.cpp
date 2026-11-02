@@ -2139,6 +2139,9 @@ DWORD run_impl() {
                   "Camera images ready, but another graphics hook (%s) is in front of Direct3D command-list Close, so PFD writes are "
                   "refused. Test with ReShade and overlays disabled.",
                   graphics.close_endpoint_module);
+    // A sentence for the Overview, which shows this message; the code stays for reports.
+    char taxi_message[sizeof(status.message)];
+    std::snprintf(taxi_message, sizeof(taxi_message), "Waiting for the aircraft's TAXI buttons (%s).", buttons.error);
     const char* message =
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : degraded && graphics.admission_halted
@@ -2150,7 +2153,7 @@ DWORD run_impl() {
         : failed            ? scene.message.c_str()
         : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
-        : !manual_only && !buttons.valid                                                                ? buttons.error
+        : !manual_only && !buttons.valid                                                                ? taxi_message
         : commandable && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
         : (single_display ? !targets[0] || ((mask & 4u) && !targets[2]) : (!targets[0] || !targets[1])) ? target_message
