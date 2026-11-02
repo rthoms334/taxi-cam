@@ -36,6 +36,7 @@
       ],
       "fixes": [
         "Setup → Displays now lists every cockpit display on built-in aircraft too, not only panels the size of their PFDs.",
+        "When an aircraft replaces its display textures during a flight, as the FlyByWire A380X does after loading, Setup → Displays keeps each display's picture and name. It used to show the old ones as unavailable and leave the new ones unnamed.",
         "Dragging a camera in the live view now turns it the way you drag, like the simulator's mouse look: drag right to look right, down to look down. It used to turn the other way.",
         "Taxi Cam no longer makes the simulator wait for camera work it has not finished on another graphics queue, the cause found in logs of freezes of several seconds on the PMDG 777, except on frames where it is also capturing a camera picture. On the other frames, the camera picture is skipped for that frame instead.",
         "The cameras no longer switch off and on again and again when the simulator keeps stalling. After three stalls within five minutes while the cameras are on, they stay off and Taxi Cam says so; turn them off and on again to retry. bridge.log now records the simulator's graphics memory use, to help find what causes the stalls.",
