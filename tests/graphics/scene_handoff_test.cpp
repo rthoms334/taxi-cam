@@ -195,7 +195,7 @@ void streaming_lifecycle() {
 }
 
 void invalid_requests_and_multiple_devices() {
-  for (unsigned invalid = 0; invalid < 9; ++invalid) {
+  for (unsigned invalid = 0; invalid < 12; ++invalid) {
     Fixture test;
     test.start();
     require(test.publish(), "Invalid-refresh prior publication failed");
@@ -216,11 +216,21 @@ void invalid_requests_and_multiple_devices() {
       handles[1] = handles[0];
     if (invalid == 6)
       handles[1] = 999;
-    if (invalid >= 7) {
+    if (invalid == 7 || invalid == 8) {
       require(test.handoff.register_device(22) != 0 && test.handoff.register_resource(22, kTail, 2), "Secondary device setup failed");
       if (invalid == 8)
         test.handoff.unregister_resource(kDevice, kTail);
     }
+    // The door feed (index 3) follows the third feed's rules: an id without
+    // a handle, the nose's handle again, a handle without an id.
+    if (invalid == 9)
+      ids[3] = 403;
+    if (invalid == 10) {
+      ids[3] = 403;
+      handles[3] = kNose;
+    }
+    if (invalid == 11)
+      handles[3] = kTail;
     require(!test.handoff.publish(test.handoff.begin_capture(), manager, ids, handles) && !test.nose().matched,
             "Malformed/unknown/ambiguous/mixed-device resources published");
     require(!test.handoff.may_match_resource(kNose) && !test.handoff.may_match_resource(kTail),

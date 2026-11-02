@@ -461,6 +461,8 @@ bool SceneFrameOutput::submit() noexcept {
   ID3D12CommandList* lists[]{list_};
   queue_->ExecuteCommandLists(1, lists);
   prepared_ = false;
+  if (compositor_)
+    compositor_->recording_submitted();
   ++submitted_;
   if (FAILED(queue_->Signal(fence_, submitted_)))
     return fail("Signaling the private composition completion fence failed.");
@@ -481,6 +483,9 @@ bool SceneFrameOutput::discard_prepared() noexcept {
   gpu_timing_.discard_unsubmitted();
   for (auto& patch : patches_)
     patch.recorded = false;
+  // A tone-table copy in the discarded list never ran: record it again.
+  if (compositor_)
+    compositor_->recording_discarded();
   prepared_ = false;
   return true;
 }

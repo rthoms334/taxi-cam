@@ -345,6 +345,28 @@ void learning() {
 
 // The user's display choices for a built-in profile: another panel or a
 // display area per side, as a copy of the profile that find() returns.
+// A Fenix set up with its own lower display on another panel (as 1.2.0 could)
+// and no door camera saved takes the door camera there, but keeps that
+// display's whole area: the template's area belongs to its lower ECAM.
+void fenix_template_other_lower(const std::wstring& root) {
+  settings_override = root + L"\\other-lower";
+  Settings s;
+  s.profile = profiles::DiscoveredProfileId;
+  s.discovered = fenix_layout();
+  s.discovered.sides = 3;
+  std::strcpy(s.discovered.textures[2], "$A320_ECAM_Upper");
+  s.discovered.shapes[2] = {768, 768, 5};
+  s.mounts = profiles::DiscoveredMounts;
+  require(valid_settings(s) && save_settings(s), "A Fenix with its upper ECAM as the lower display saves");
+  const auto variant = settings_override + L"\\profiles\\discovered\\Airplanes\\FNX_32X\\presets\\fnx\\FNX_320_CFM_SL\\variant.ini";
+  require(WritePrivateProfileStringW(L"door_camera", nullptr, nullptr, variant.c_str()), "Remove its door camera");
+  Settings loaded;
+  require(load_settings(loaded, L"missing", profiles::DiscoveredProfileId, Fenix320Key) &&
+              std::strcmp(loaded.discovered.textures[2], "$A320_ECAM_Upper") == 0 && loaded.door_side == 2 &&
+              profiles::empty_area(loaded.display_override.areas[2]) && valid_settings(loaded),
+          "The user's lower display keeps its whole area under the Fenix template");
+}
+
 void display_choices(const std::wstring& root) {
   profiles::DisplayOverride none{};
   require(profiles::valid_override(2, false, profiles::A380.camera_padding, none), "No choices is valid");
@@ -564,6 +586,7 @@ int main() {
     publish_and_detect();
     settings_validation();
     settings_files(root);
+    fenix_template_other_lower(root);
     selection();
     learning();
     trimming();

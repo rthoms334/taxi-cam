@@ -377,6 +377,15 @@ void door_camera_persists() {
               loaded.display_override.areas[2].right == 2279 && loaded.display_override.areas[2].bottom == 1873 &&
               loaded.mounts[3] == profiles::A346DoorMount && !loaded.lvar_bindings[CameraDoor].name[0] && valid_settings(loaded),
           "The Aerosoft A340-600 starts its door camera on its lower ECAM above the bottom strip, with no cockpit switch");
+  {
+    // That area is the lower ECAM's display area: its lower taxi camera draws
+    // above the strip too.
+    profiles::publish_override(profiles::base_profile(loaded.profile), loaded.display_override, loaded.door_side);
+    const auto* published = profiles::find(loaded.profile);
+    require(published && published->display_regions[2].bottom == 1873 && published->display_regions[2].top == 1230,
+            "The A340-600's lower taxi camera shares the door camera's area above the strip");
+    profiles::publish_override(profiles::base_profile(loaded.profile), {}, DoorSideNone);
+  }
   require(profiles::A380.mounts[3] == profiles::A380XDoorMount && profiles::IniA380.mounts[3] == profiles::IniA380DoorMount &&
               std::strcmp(profiles::IniA380.door_lvar, "INI_ECAM_ACTIVE_PAGE") == 0,
           "The two A380s ship their own door cameras");

@@ -726,6 +726,14 @@ int offline_tests() {
     check(send());
     read = get_lvar_bindings();
     check(read.states[1].rises == 2 && read.states[1].falls == 2 && read.states[3].rises == 1 && !read.states[3].falls);
+    // A trigger changed before the worker's next stream is not applied to this
+    // stream's packets: VIDEO at 16 under Latched would be a phantom press.
+    auto latched = bindings;
+    latched[1].trigger = static_cast<std::uint32_t>(taxi_camera::standalone::LvarTrigger::latched);
+    set_lvar_bindings(latched);
+    check(send());
+    read = get_lvar_bindings();
+    check(read.states[1].rises == 2 && read.states[1].falls == 2 && read.states[3].rises == 1 && !read.states[3].falls);
     // No bound name: no stream.
     set_lvar_bindings({});
     check(!testing::begin_lvar_stream(20) && !get_lvar_bindings().generation &&

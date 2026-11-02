@@ -2212,9 +2212,12 @@ struct LiveView {
   bool camera_taken{};
   decltype(win::Settings::follow_taxi) follow_before{};
   decltype(win::Settings::manual_mask) manual_before{}, manual_set{};
-  // The door camera, turned on live while it is selected, as it was before.
+  // The door camera, turned on live while it is selected, as it was before,
+  // and the aircraft and flight it was taken in.
   bool door_taken{};
   decltype(win::Settings::door_on) door_on_before{}, door_live_before{};
+  decltype(win::Settings::profile) door_profile{};
+  decltype(win::Settings::aircraft_session_epoch) door_session{};
   // The aircraft's saved settings when the window opened: Undo returns there.
   // Changes are saved when the window closes.
   win::Settings saved{};
@@ -2300,6 +2303,8 @@ void live_keep_door(const win::Settings& s) {
     live_view.door_taken = true;
     live_view.door_on_before = s.door_on;
     live_view.door_live_before = s.door_live;
+    live_view.door_profile = s.profile;
+    live_view.door_session = s.aircraft_session_epoch;
   }
   publish(next);
   InvalidateRect(window, nullptr, FALSE);
@@ -4106,13 +4111,20 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
         live_view.camera_taken = false;
       }
       // The door camera too: closing never saves the live picture it was
-      // given while selected.
+      // given while selected. Only what the window still holds goes back, on
+      // the same aircraft: its saved Live or Snapshot, and its on state only
+      // in the same flight. A door camera turned off meanwhile (a shortcut, an
+      // L:var, a flight change) stays off.
       if (live_view.door_taken) {
         auto s = draft();
-        s.door_on = live_view.door_on_before;
-        s.door_live = live_view.door_live_before;
-        if (win::valid_settings(s))
-          publish(s);
+        if (s.profile == live_view.door_profile) {
+          if (s.door_live)
+            s.door_live = live_view.door_live_before;
+          if (s.door_on && s.aircraft_session_epoch == live_view.door_session)
+            s.door_on = live_view.door_on_before;
+          if (win::valid_settings(s))
+            publish(s);
+        }
         live_view.door_taken = false;
       }
       // Closing saves what was adjusted, like Save changes.

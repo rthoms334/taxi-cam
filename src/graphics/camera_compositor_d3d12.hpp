@@ -139,6 +139,17 @@ class CameraCompositorD3D12 {
     return true;
   }
   void clear_tone_curve() noexcept { tone_exposure_ = 0; }
+  // The caller's recording was submitted, or discarded without running: a
+  // tone-table copy it held is then pending again, and the table counts as
+  // written only if it was before.
+  void recording_submitted() noexcept { tone_recorded_ = false; }
+  void recording_discarded() noexcept {
+    if (!tone_recorded_)
+      return;
+    tone_pending_ = true;
+    tone_ready_ = tone_was_ready_;
+    tone_recorded_ = false;
+  }
   bool tone_curve_active() const noexcept { return tone_exposure_ > 0 && (tone_ready_ || tone_pending_); }
 
   // Compiles the five shaders into the process cache without a device, so a
@@ -325,6 +336,9 @@ class CameraCompositorD3D12 {
       hdr |= 16u << index;
     }
     if (tone_pending_) {
+      // Taken back if this recording is discarded unsubmitted (recording_discarded).
+      tone_recorded_ = true;
+      tone_was_ready_ = tone_ready_;
       transition(private_list, tone_table_.get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
       D3D12_TEXTURE_COPY_LOCATION destination{}, source{};
       destination.pResource = tone_table_.get();
@@ -405,7 +419,7 @@ class CameraCompositorD3D12 {
     tone_upload_.reset();
     tone_table_.reset();
     tone_exposure_ = 0;
-    tone_pending_ = tone_ready_ = false;
+    tone_pending_ = tone_ready_ = tone_recorded_ = tone_was_ready_ = false;
     device_.reset();
     formats_ = {};
     input_descriptions_ = {};
@@ -1452,6 +1466,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   float tone_exposure_ = 0;
   bool tone_pending_ = false;
   bool tone_ready_ = false;
+  bool tone_recorded_ = false, tone_was_ready_ = false;
   Reference<ID3D12DescriptorHeap> srv_heap_;
   Reference<ID3D12DescriptorHeap> rtv_heap_;
   Reference<ID3D12Resource> output_;

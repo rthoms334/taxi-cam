@@ -1705,9 +1705,10 @@ DWORD run_impl() {
         log_status(status, detail);
       }
     }
-    // A snapshot stops rendering once taken; its page stays on the display.
+    // A snapshot stops rendering once taken; its page stays on the display, and
+    // is taken again if a reset dropped it.
     const auto door_page = scene_runtime::door_page(key);
-    const bool door_render = door_snapshot.observe(door != 0, settings.door_live != 0, door_page.pages);
+    const bool door_render = door_snapshot.observe(door != 0, settings.door_live != 0, door_page.pages, door_page.ready);
     const auto demand =
         win::scene_demand(mask | (door_render ? door : 0u), test_scene, assigned, requested, failed, background_warmup && !degraded);
     unsigned active = demand.stamp_mask | (failed ? 0u : door & assigned);
@@ -1715,7 +1716,8 @@ DWORD run_impl() {
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && !degraded ? settings.calibration_mask : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
-    win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending);
+    // A taken door snapshot renders nothing but its page is still drawn.
+    win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending || (door & active) != 0);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
     win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));

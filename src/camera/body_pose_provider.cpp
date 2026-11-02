@@ -91,6 +91,9 @@ struct State {
   DWORD lvar_define = 0;
   unsigned lvar_count = 0;
   std::array<std::uint8_t, standalone::LvarBindingCount> lvar_slots{};  // Packet value index to binding.
+  // Each binding's trigger when the stream was subscribed: a changed trigger
+  // takes effect with the next stream, not on this one's packets.
+  std::array<std::uint32_t, standalone::LvarBindingCount> lvar_triggers{};
   std::array<bool, standalone::LvarBindingCount> lvar_was_on{};
   standalone::LvarBindingStates lvar{};
   const char* lvar_error = "not_initialized";
@@ -438,10 +441,15 @@ bool accept_lighting_packet(const void* raw, DWORD bytes, std::uint64_t sample_m
 // User L:var bindings on definitions 20 and 21: request 20/21 streams changed
 // values every simulator frame, 22/23 reads the first values once.
 constexpr DWORD LvarFirstDefine = 20;
-void begin_lvar_stream_locked(DWORD define, const std::array<std::uint8_t, standalone::LvarBindingCount>& slots, unsigned count) noexcept {
+void begin_lvar_stream_locked(DWORD define,
+                              const std::array<std::uint8_t, standalone::LvarBindingCount>& slots,
+                              unsigned count,
+                              const standalone::LvarBindings& bindings) noexcept {
   state.lvar_define = define;
   state.lvar_slots = slots;
   state.lvar_count = count;
+  for (std::size_t i = 0; i < bindings.size(); ++i)
+    state.lvar_triggers[i] = bindings[i].trigger;
   state.lvar = {};
   state.lvar_was_on = {};
   if (++state.lvar_generation == 0)
@@ -494,7 +502,8 @@ bool accept_lvar_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) n
     // The stream's first value of each binding is where it starts, not a
     // press. A momentary button's presses (lvar_presses: press counts too), a
     // latched variable's on and off.
-    if (state.lvar_names[binding].trigger == static_cast<std::uint32_t>(standalone::LvarTrigger::momentary)) {
+    const auto trigger = state.lvar_triggers[binding];
+    if (trigger == static_cast<std::uint32_t>(standalone::LvarTrigger::momentary)) {
       if (!read.read) {
         state.lvar_was_on[binding] = standalone::lvar_held(values[k]);
       } else {
@@ -505,7 +514,7 @@ bool accept_lvar_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) n
       }
     } else {
       // Latched: non-zero; equals: its value, such as a display's page.
-      const bool on = standalone::lvar_active(state.lvar_names[binding].trigger, values[k]);
+      const bool on = standalone::lvar_active(trigger, values[k]);
       if (read.read && on != state.lvar_was_on[binding])
         ++(on ? read.rises : read.falls);
       state.lvar_was_on[binding] = on;
@@ -766,7 +775,7 @@ DWORD WINAPI worker(void*) noexcept {
     }
     AcquireSRWLockExclusive(&state.lock);
     if (defined)
-      begin_lvar_stream_locked(lvar_define, slots, count);
+      begin_lvar_stream_locked(lvar_define, slots, count, names);
     else
       end_lvar_stream_locked("lvar_definition_failed");
     ReleaseSRWLockExclusive(&state.lock);
@@ -1423,7 +1432,7 @@ std::uint32_t begin_lvar_stream(std::uint32_t define) noexcept {
   for (std::size_t i = 0; i < state.lvar_names.size(); ++i)
     if (standalone::valid_lvar_name(state.lvar_names[i].name))
       slots[count++] = static_cast<std::uint8_t>(i);
-  begin_lvar_stream_locked(define, slots, count);
+  begin_lvar_stream_locked(define, slots, count, state.lvar_names);
   const auto generation = state.lvar_stream;
   ReleaseSRWLockExclusive(&state.lock);
   return generation;

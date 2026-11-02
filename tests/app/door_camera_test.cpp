@@ -48,6 +48,11 @@ int main() {
   DoorSnapshot reset;
   require(reset.observe(true, false, 10) && !reset.observe(true, false, 13), "Pages counted from the turn-on");
   require(reset.observe(true, false, 0) && !reset.observe(true, false, 3), "A restarted page count starts a new snapshot");
+  DoorSnapshot dropped;
+  require(dropped.observe(true, false, 5, false) && dropped.observe(true, false, 7, true) && !dropped.observe(true, false, 8, true),
+          "A page not ready yet while it renders changes nothing");
+  require(dropped.observe(true, false, 8, false) && dropped.observe(true, false, 10, false) && !dropped.observe(true, false, 11, true),
+          "A taken snapshot whose page a reset dropped is taken again");
   require(door_state(false, true, true) == DoorState::off && door_state(true, false, false) == DoorState::waiting &&
               door_state(true, true, true) == DoorState::live && door_state(true, false, true) == DoorState::snapshot,
           "Door states");

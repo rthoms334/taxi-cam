@@ -773,6 +773,15 @@ void tone_case(ID3D12Device* device, Result& result) {
   check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                         IID_PPV_ARGS(readback.put())),
         "Create tone-test readback");
+  {
+    // A recording discarded before it runs (a deferred submission) holds the
+    // table's first copy: the table is copied again by the next recording.
+    PrivateSubmission discarded(device);
+    check(compositor.record(discarded.list(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET),
+          compositor.last_error());
+    check(discarded.list()->Close(), "Close the discarded tone-test list");
+    compositor.recording_discarded();
+  }
   PrivateSubmission submission(device);
   ID3D12GraphicsCommandList* list = submission.list();
   // Exactly representable R11G11B10 values from deep shadow to a bright light.

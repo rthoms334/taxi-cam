@@ -179,10 +179,15 @@ bool SceneHandoff::publish(SceneCaptureTicket ticket,
   if (manager.identity == 0 || manager.generation == 0 || ids[0] == 0 || ids[1] == 0 || ids[0] == ids[1] || handles[0] == 0 ||
       handles[1] == 0 || handles[0] == handles[1])
     return refuse_latest();
-  if ((ids[2] == 0) != (handles[2] == 0))
-    return refuse_latest();
-  if (ids[2] && (ids[2] == ids[0] || ids[2] == ids[1] || handles[2] == 0 || handles[2] == handles[0] || handles[2] == handles[1]))
-    return refuse_latest();
+  // The optional feeds (the third view, the door camera): an id and a handle
+  // together or neither, each distinct from every feed before it.
+  for (std::size_t feed = 2; feed < ids.size(); ++feed) {
+    if ((ids[feed] == 0) != (handles[feed] == 0))
+      return refuse_latest();
+    for (std::size_t before = 0; ids[feed] && before < feed; ++before)
+      if (ids[feed] == ids[before] || handles[feed] == handles[before])
+        return refuse_latest();
+  }
   if (owner_bound_ && (owner_ != manager || owned_ids_ != ids)) {
     // A new manager/pair requires a new authorized scene epoch.
     active_ = false;

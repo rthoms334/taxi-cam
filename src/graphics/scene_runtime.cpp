@@ -666,6 +666,12 @@ bool service_door(Device& item) {
   }
   if (!item.door_output.idle())
     return true;
+  // A door image kept across service calls (output busy, submission
+  // deferred) may belong to a scene the handoff has moved on from.
+  if (frame.token && !scene_handoff().is_current(frame.match)) {
+    manager().discard_frame(frame.token);
+    frame = {};
+  }
   const bool compose = frame.token != 0;
   if (!compose && !(item.door_ready && item.door_output.patches_pending()))
     return true;

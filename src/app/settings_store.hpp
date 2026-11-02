@@ -379,7 +379,10 @@ inline bool load_settings(Settings& s,
     profiles::build_discovered(discovered);
     profile = &discovered.profile;
     value.door_side = MaxDisplaySides - 1;
-    if (auto& area = value.display_override.areas[value.door_side]; profiles::empty_area(area)) {
+    // The template's area belongs to its panel: a lower display the user
+    // placed on another panel keeps its own area.
+    if (auto& area = value.display_override.areas[value.door_side];
+        profiles::empty_area(area) && std::strcmp(value.discovered.textures[value.door_side], door->panel) == 0) {
       area = door->area;
       if (!valid_settings(value))
         area = {};

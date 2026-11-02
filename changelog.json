@@ -6,7 +6,7 @@
       "features": [
         {
           "title": "Door camera",
-          "text": "Every aircraft, the PMDG 777 included, gets a door camera: a view into the cabin on a cockpit display of its own, the lower display by default. Ctrl + Shift + V, a controller button or a cockpit L:var turns it on and off. The Fenix A320s, both A380s and the iniBuilds A340-300 are ready to go: their VIDEO buttons show the cabin on the lower ECAM or system display.",
+          "text": "Every aircraft, the PMDG 777 included, gets a door camera: a view into the cabin on a cockpit display of its own, the lower display by default. Ctrl + Shift + V, a controller button or a cockpit L:var turns it on and off. Both A380s, the iniBuilds A340-300 and, once set up in Setup, the Fenix A320 are ready to go: their VIDEO buttons show the cabin. The Fenix A319 and A321 are not checked yet.",
           "image": "docs/whats-new/1.3.0/door-camera.jpg"
         },
         {
