@@ -444,8 +444,8 @@ void augmentation() {
   run(0);
   context->insertion_count = qs::kMaximumInsertions + 1;
   run(0);
-  // One copy per display side: captain, first officer and the A340-600 lower ECAM.
-  static_assert(qs::kMaximumInsertions == 3);
+  // Per display side a shadow restore and a camera copy, plus a display snapshot.
+  static_assert(qs::kMaximumInsertions == 7);
   context->insertion_count = 3;
   context->insertions = {{{0, x, true}, {0, y}, {1, z}}};
   context->expected_lists = {x, a, y, b, z};

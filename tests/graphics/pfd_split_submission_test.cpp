@@ -121,7 +121,9 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   win::set_graphics_observation_demand(true);
   const auto key = win::graphics_status().device;
   std::array<bool, 8> selected{};
-  const auto record_frame = [&](bool discover_all, bool overwrite) {
+  // partial: the selected displays repaint only this rectangle, in this
+  // colour, like an instrument that redraws what changed.
+  const auto record_frame = [&](bool discover_all, bool overwrite, const D3D12_RECT* partial = nullptr, const float* colour = nullptr) {
     for (auto& recording : recordings)
       recording.reset();
     if (mixed_exit) {
@@ -131,7 +133,10 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
     const unsigned active = fbw_count == 3 && !discover_all ? 2 : count;
     for (unsigned i = 0; i < active; ++i) {
       transition(recordings[0].list.get(), targets[i].get(), display_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-      generator.record(recordings[1].list.get(), rtvs[i], 768, 1024, false, 0, 0);
+      if (partial && selected[i])
+        recordings[1].list->ClearRenderTargetView(rtvs[i], colour, 1, partial);
+      else
+        generator.record(recordings[1].list.get(), rtvs[i], 768, 1024, false, 0, 0);
       transition(recordings[mixed_exit ? 3 : 2].list.get(), targets[i].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, display_state);
     }
     for (unsigned i = 0; i < count; ++i) {
@@ -354,7 +359,55 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   runtime::service();
   execute();
   pixels(false, false);
+  // Display shadow. Under the camera the instrument repaints one rectangle
+  // only; the shadow goes back under that repaint and is saved again before
+  // the camera copy. When the camera stops, the shadow goes back before the
+  // instrument's next partial repaint: the display shows the instrument with
+  // both repaints and no camera pixel. A COMMON display has no state to copy
+  // in before the instrument's first write, so both repaints land on the
+  // camera and the shadow they miss comes back over them.
+  const D3D12_RECT under{40, 40, 80, 80}, after{600, 600, 640, 640};
+  const float under_colour[]{.1f, .8f, .3f, 1}, after_colour[]{.9f, .5f, .2f, 1};
+  record_frame(false, false, &under, under_colour);
+  execute();
+  pixels(false, false);
+  runtime::service();
+  const auto shadow = win::graphics_status();
+  require(shadow.shadow_saves && shadow.shadow_modes[0] == 'q' && shadow.shadow_modes[1] == 'q' && !shadow.shadow_fallbacks,
+          "Camera sides ran on queue copies and saved their shadows");
+  require(common || shadow.shadow_entry_restores, "The shadow went back under the instrument's writes");
   win::set_target_mask(0);
+  win::service_display_patches();
+  record_frame(false, false, &after, after_colour);
+  execute();
+  require(win::graphics_status().shadow_restores >= 2, "Both sides restored their shadows when the camera stopped");
+  for (unsigned i = 0; i < count; ++i) {
+    if (!selected[i])
+      continue;
+    void* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes[i])};
+    check(readbacks[i]->Map(0, &range, &mapped), "Read restored display");
+    bool correct = true;
+    for (unsigned y = 0; y < 1024; ++y)
+      for (unsigned x = 0; x < 768; ++x) {
+        const auto* pixel = static_cast<unsigned char*>(mapped) + SIZE_T{footprints[i].Footprint.RowPitch} * y + x * 4;
+        const auto inside = [&](const D3D12_RECT& rect) {
+          return LONG(x) >= rect.left && LONG(x) < rect.right && LONG(y) >= rect.top && LONG(y) < rect.bottom;
+        };
+        if (!common && inside(under))
+          correct &= matches_pixel(pixel, {26, 204, 77, 255});
+        else if (!common && inside(after))
+          correct &= matches_pixel(pixel, {230, 128, 51, 255});
+        else
+          correct &= matches_pixel(pixel, {static_cast<unsigned char>(std::lround(255.f * x / 767)),
+                                           static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
+        ++checked;
+      }
+    const D3D12_RANGE none{0, 0};
+    readbacks[i]->Unmap(0, &none);
+    require(correct, "The display came back as the instrument left it, without the camera");
+  }
+  runtime::service();
   win::service_display_patches();
   handoff.stop_scene();
   runtime::reset_feed(key);

@@ -50,7 +50,9 @@ void Pool::release_resources(Packet& packet) noexcept {
     packet.target->Release();
   if (packet.source)
     packet.source->Release();
-  packet.target = packet.source = nullptr;
+  if (packet.save)
+    packet.save->Release();
+  packet.target = packet.source = packet.save = nullptr;
   packet.completed = nullptr;
   packet.completed_value = 0;
   packet.covering_value = 0;
@@ -121,15 +123,34 @@ bool Pool::valid_copy(const Copy& copy) const noexcept {
       footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 || copy.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 ||
       copy.x > target.Width || copy.width > target.Width - copy.x || copy.y > target.Height || copy.height > target.Height - copy.y)
     return false;
-  if (copy.completed && (!copy.readback || !copy.completed_value))
+  if (copy.completed && !copy.completed_value)
     return false;
-  if (copy.readback) {
+  if (copy.readback && (copy.save || copy.shadow_source))
+    return false;
+  const auto heap_type = [](ID3D12Resource* buffer) noexcept {
     D3D12_HEAP_PROPERTIES heap{};
-    if (FAILED(copy.source->GetHeapProperties(&heap, nullptr)) || heap.Type != D3D12_HEAP_TYPE_READBACK)
+    return SUCCEEDED(buffer->GetHeapProperties(&heap, nullptr)) ? heap.Type : D3D12_HEAP_TYPE{};
+  };
+  if (copy.readback && heap_type(copy.source) != D3D12_HEAP_TYPE_READBACK)
+    return false;
+  if (copy.shadow_source && heap_type(copy.source) != D3D12_HEAP_TYPE_DEFAULT)
+    return false;
+  const auto fits = [&](ID3D12Resource* buffer, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& placed) noexcept {
+    const std::uint64_t width = buffer->GetDesc().Width;
+    const std::uint64_t bytes = std::uint64_t{copy.height - 1} * placed.Footprint.RowPitch + std::uint64_t{copy.width} * 4;
+    return placed.Offset <= width && bytes <= width - placed.Offset;
+  };
+  if (copy.save) {
+    const auto& saved = copy.save_footprint.Footprint;
+    if (copy.save == copy.target || copy.save == copy.source || !same_native_device(copy.save, device_) ||
+        copy.save->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || heap_type(copy.save) != D3D12_HEAP_TYPE_DEFAULT ||
+        !typed_format(saved.Format) || format_family(target.Format) != format_family(saved.Format) || saved.Width != copy.width ||
+        saved.Height != copy.height || saved.Depth != 1 || saved.RowPitch < copy.width * 4 ||
+        saved.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 ||
+        copy.save_footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 || !fits(copy.save, copy.save_footprint))
       return false;
   }
-  const std::uint64_t bytes = std::uint64_t{copy.height - 1} * footprint.RowPitch + std::uint64_t{copy.width} * 4;
-  return copy.footprint.Offset <= source.Width && bytes <= source.Width - copy.footprint.Offset;
+  return fits(copy.source, copy.footprint);
 }
 
 Pool::Recording Pool::record(const Copy& copy) noexcept {
@@ -142,32 +163,62 @@ Pool::Recording Pool::record(const Copy& copy) noexcept {
       continue;
     copy.target->AddRef();
     copy.source->AddRef();
+    if (copy.save)
+      copy.save->AddRef();
     packet.target = copy.target;
     packet.source = copy.source;
+    packet.save = copy.save;
     packet.completed = copy.completed;
     packet.completed_value = copy.completed_value;
     packet.state = State::recorded;
-    const auto copy_state = copy.readback ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition = {copy.target, 0, copy.state, copy_state};
-    packet.list->ResourceBarrier(1, &barrier);
+    const auto transition = [](ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept {
+      D3D12_RESOURCE_BARRIER barrier{};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition = {resource, 0, before, after};
+      return barrier;
+    };
     D3D12_TEXTURE_COPY_LOCATION buffer{}, texture{};
     buffer.pResource = copy.source;
     buffer.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     buffer.PlacedFootprint = copy.footprint;
     texture.pResource = copy.target;
     texture.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    const D3D12_BOX region{copy.x, copy.y, 0, copy.x + copy.width, copy.y + copy.height, 1};
     if (copy.readback) {
-      const D3D12_BOX box{copy.x, copy.y, 0, copy.x + copy.width, copy.y + copy.height, 1};
-      packet.list->CopyTextureRegion(&buffer, 0, 0, 0, &texture, &box);
+      auto barrier = transition(copy.target, copy.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      packet.list->ResourceBarrier(1, &barrier);
+      packet.list->CopyTextureRegion(&buffer, 0, 0, 0, &texture, &region);
+      barrier = transition(copy.target, D3D12_RESOURCE_STATE_COPY_SOURCE, copy.state);
+      packet.list->ResourceBarrier(1, &barrier);
     } else {
+      // The save reads the panel's pixels before the source replaces them.
+      auto target_state = copy.state;
+      if (copy.save) {
+        const D3D12_RESOURCE_BARRIER enter[]{transition(copy.target, target_state, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                                             transition(copy.save, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST)};
+        packet.list->ResourceBarrier(2, enter);
+        D3D12_TEXTURE_COPY_LOCATION saved{};
+        saved.pResource = copy.save;
+        saved.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        saved.PlacedFootprint = copy.save_footprint;
+        packet.list->CopyTextureRegion(&saved, 0, 0, 0, &texture, &region);
+        const auto leave = transition(copy.save, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        packet.list->ResourceBarrier(1, &leave);
+        target_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      }
+      D3D12_RESOURCE_BARRIER enter[2]{transition(copy.target, target_state, D3D12_RESOURCE_STATE_COPY_DEST)};
+      UINT entering = 1;
+      if (copy.shadow_source)
+        enter[entering++] = transition(copy.source, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      packet.list->ResourceBarrier(entering, enter);
       const D3D12_BOX box{0, 0, 0, copy.width, copy.height, 1};
       packet.list->CopyTextureRegion(&texture, copy.x, copy.y, 0, &buffer, &box);
+      D3D12_RESOURCE_BARRIER leave[2]{transition(copy.target, D3D12_RESOURCE_STATE_COPY_DEST, copy.state)};
+      UINT leaving = 1;
+      if (copy.shadow_source)
+        leave[leaving++] = transition(copy.source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+      packet.list->ResourceBarrier(leaving, leave);
     }
-    barrier.Transition.StateBefore = copy_state;
-    barrier.Transition.StateAfter = copy.state;
-    packet.list->ResourceBarrier(1, &barrier);
     if (FAILED(packet.list->Close())) {
       packet.state = State::quarantined;
       return {};

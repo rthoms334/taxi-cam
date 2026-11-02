@@ -334,12 +334,17 @@ class SceneCaptureManager {
       UINT after_list = 0;
       pfd_submission::Pool::Copy copy;
       bool before = false;
+      // Index of an earlier item this item's save relies on (a shadow restore
+      // ahead of the instrument's draws). When that item is not recorded, this
+      // one is recorded without its save; NoItem when there is none.
+      UINT save_after = NoItem;
     };
+    static constexpr UINT NoItem = ~UINT{0};
     std::uint64_t device_key = 0, generation = 0;
     const std::atomic<std::uint64_t>* current_generation = nullptr;
     std::array<Item, engine_hook::queue_submit::kMaximumInsertions> items{};
     UINT count = 0;
-    // Planner transfers one reference per nonnull source/target. Releases
+    // Planner transfers one reference per nonnull source/target/save. Releases
     // happen after manager locks; the pool takes independent GPU leases.
     ~DisplaySubmissionPlan();
     bool current() const noexcept;

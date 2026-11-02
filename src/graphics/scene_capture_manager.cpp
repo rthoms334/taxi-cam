@@ -339,6 +339,8 @@ SceneCaptureManager::DisplaySubmissionPlan::~DisplaySubmissionPlan() {
       item.copy.target->Release();
     if (item.copy.source)
       item.copy.source->Release();
+    if (item.copy.save)
+      item.copy.save->Release();
   }
 }
 bool SceneCaptureManager::DisplaySubmissionPlan::current() const noexcept {
@@ -2191,20 +2193,33 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     lock.unlock();
     if (!queue_transaction_wait(*owner, queue))
       return 0;
-    if (record_display)
+    if (record_display) {
+      std::array<bool, engine_hook::queue_submit::kMaximumInsertions> recorded_items{};
       for (UINT i = 0; i < display_plan.count; ++i) {
         const auto& planned = display_plan.items[i];
         if (planned.after_list >= count)
           continue;
-        const auto recorded = owner->display_copies.record(planned.copy);
+        // Without the restore before the instrument's draws, the display holds
+        // the camera under them: saving it would put the camera back later.
+        // The copy then confirms nothing about the shadow either.
+        auto copy = planned.copy;
+        if (copy.save && planned.save_after != DisplaySubmissionPlan::NoItem &&
+            (planned.save_after >= i || !recorded_items[planned.save_after])) {
+          copy.save = nullptr;
+          copy.completed = nullptr;
+          copy.completed_value = 0;
+        }
+        const auto recorded = owner->display_copies.record(copy);
         if (!recorded) {
           ++transaction_.display_unrecorded;  // Counted by finish_transaction under mutex_.
           continue;
         }
+        recorded_items[i] = true;
         const auto slot = transaction_.display_count++;
         transaction_.display_slots[slot] = recorded.slot;
         transaction_.display_insertions[slot] = {planned.after_list, recorded.list, planned.before};
       }
+    }
     submission_lock.release();  // Same native wrapper thread must complete it.
   }
   return result.receipt;
