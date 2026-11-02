@@ -23,14 +23,14 @@ struct DoorTemplate {
 // S_PED_COCKPIT_DOOR_VIDEO, momentary) shows the cabin on the lower ECAM
 // ($A320_ECAM_Lower, 768 x 768, five mips in the 2026-11-01 setup). The area
 // leaves the ECAM's bottom status lines (TAT, SAT, time, GW) showing below
-// the picture, as set on the user's A320 on 2026-11-02. The mount starts on
-// the centreline about where the aircraft's cameras.cfg puts its cabin,
-// looking aft; adjust it with the live view.
+// the picture, as set on the user's A320 on 2026-11-02. The mount is Robert's
+// live A320 door camera (2026-11-02), behind the cockpit door looking aft and
+// down; the A319 and A321 start from it too (not checked live).
 inline constexpr std::array<DoorTemplate, 1> DoorTemplates{{{"SimObjects/Airplanes/FNX_32X",
                                                              "$A320_ECAM_Lower",
                                                              {768, 768, 5},
                                                              {0, 0, 768, 666},
-                                                             {0, 2, 9, -10, 180, 1.2},
+                                                             {-0.4, 2.84, 9.4, -52.93, 166.49, 1.55},
                                                              "S_PED_COCKPIT_DOOR_VIDEO"}}};
 inline const DoorTemplate* door_template(std::string_view variant) noexcept {
   const auto family = variant_family(variant);

@@ -216,9 +216,10 @@ void settings_files(const std::wstring& root) {
   // display and the pedestal VIDEO button turns the door camera on.
   const auto* door = profiles::door_template(Fenix321Key);
   require(door && profiles::add_door_display(expected, *door), "The Fenix has a door camera template");
-  require(profiles::same_layout(sibling.discovered, expected) && sibling.mounts == profiles::DiscoveredMounts &&
-              sibling.mounts[profiles::DoorFeed] == door->mount,
-          "It takes the family's displays and the starting camera mounts");
+  require(profiles::same_layout(sibling.discovered, expected) && sibling.mounts[0] == profiles::DiscoveredMounts[0] &&
+              sibling.mounts[1] == profiles::DiscoveredMounts[1] && sibling.mounts[2] == profiles::DiscoveredMounts[2] &&
+              sibling.mounts[profiles::DoorFeed] == door->mount && door->mount != profiles::DoorMount,
+          "It takes the family's displays, the starting taxi camera mounts and the template's door camera");
   require(sibling.door_side == 2 && !sibling.door_live &&
               std::strcmp(sibling.lvar_bindings[CameraDoor].name, "S_PED_COCKPIT_DOOR_VIDEO") == 0 &&
               sibling.lvar_bindings[CameraDoor].trigger == static_cast<std::uint32_t>(LvarTrigger::momentary),
