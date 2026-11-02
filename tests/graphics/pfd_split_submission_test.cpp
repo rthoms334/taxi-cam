@@ -419,32 +419,81 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   record_frame(false, false, &after, after_colour);
   execute();
   require(win::graphics_status().shadow_restores >= 2, "Both sides restored their shadows when the camera stopped");
-  for (unsigned i = 0; i < count; ++i) {
-    if (!selected[i])
-      continue;
-    void* mapped = nullptr;
-    const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes[i])};
-    check(readbacks[i]->Map(0, &range, &mapped), "Read restored display");
-    bool correct = true;
-    for (unsigned y = 0; y < 1024; ++y)
-      for (unsigned x = 0; x < 768; ++x) {
-        const auto* pixel = static_cast<unsigned char*>(mapped) + SIZE_T{footprints[i].Footprint.RowPitch} * y + x * 4;
-        const auto inside = [&](const D3D12_RECT& rect) {
-          return LONG(x) >= rect.left && LONG(x) < rect.right && LONG(y) >= rect.top && LONG(y) < rect.bottom;
-        };
-        if (!common && inside(under))
-          correct &= matches_pixel(pixel, {26, 204, 77, 255});
-        else if (!common && inside(after))
-          correct &= matches_pixel(pixel, {230, 128, 51, 255});
-        else
-          correct &= matches_pixel(pixel, {static_cast<unsigned char>(std::lround(255.f * x / 767)),
-                                           static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
-        ++checked;
-      }
-    const D3D12_RANGE none{0, 0};
-    readbacks[i]->Unmap(0, &none);
-    require(correct, "The display came back as the instrument left it, without the camera");
-  }
+  // The selected displays as the original consumer read them: the native
+  // gradient, with the instrument's repaints of `under` and `after` where
+  // those were kept, and no camera pixel anywhere.
+  const auto restored = [&](bool under_kept, bool after_kept, const char* message) {
+    for (unsigned i = 0; i < count; ++i) {
+      if (!selected[i])
+        continue;
+      void* mapped = nullptr;
+      const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes[i])};
+      check(readbacks[i]->Map(0, &range, &mapped), "Read restored display");
+      bool correct = true;
+      for (unsigned y = 0; y < 1024; ++y)
+        for (unsigned x = 0; x < 768; ++x) {
+          const auto* pixel = static_cast<unsigned char*>(mapped) + SIZE_T{footprints[i].Footprint.RowPitch} * y + x * 4;
+          const auto inside = [&](const D3D12_RECT& rect) {
+            return LONG(x) >= rect.left && LONG(x) < rect.right && LONG(y) >= rect.top && LONG(y) < rect.bottom;
+          };
+          if (under_kept && inside(under))
+            correct &= matches_pixel(pixel, {26, 204, 77, 255});
+          else if (after_kept && inside(after))
+            correct &= matches_pixel(pixel, {230, 128, 51, 255});
+          else
+            correct &= matches_pixel(pixel, {static_cast<unsigned char>(std::lround(255.f * x / 767)),
+                                             static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
+          ++checked;
+        }
+      const D3D12_RANGE none{0, 0};
+      readbacks[i]->Unmap(0, &none);
+      require(correct, message);
+    }
+  };
+  restored(!common, !common, "The display came back as the instrument left it, without the camera");
+  // A camera period whose first save never completes puts nothing back: the
+  // pool is not serviced before the camera stops, and a second later the
+  // shadow is forgotten with the camera possibly still on the display. The
+  // next period there saves the area as it is (a baseline) and restores it
+  // again when it stops, instead of never saving on that display again.
+  runtime::service();
+  win::service_display_patches();  // The completed restore ends that shadow.
+  const auto before_dirty = win::graphics_status();
+  win::set_target_mask(3);
+  win::service_display_patches();
+  runtime::service();  // Publishes this generation's camera patches.
+  record_frame(false, false);
+  execute();
+  win::set_target_mask(0);
+  win::service_display_patches();
+  Sleep(1100);
+  record_frame(false, false);
+  execute();
+  const auto forgotten = win::graphics_status();
+  if (forgotten.shadow_restores != before_dirty.shadow_restores || forgotten.shadow_modes[0] != '-')
+    std::fprintf(stderr, "Forgotten shadow: modes=%s saves=%llu->%llu restores=%llu->%llu baselines=%llu\n", forgotten.shadow_modes,
+                 static_cast<unsigned long long>(before_dirty.shadow_saves), static_cast<unsigned long long>(forgotten.shadow_saves),
+                 static_cast<unsigned long long>(before_dirty.shadow_restores), static_cast<unsigned long long>(forgotten.shadow_restores),
+                 static_cast<unsigned long long>(forgotten.shadow_baselines));
+  require(forgotten.shadow_saves > before_dirty.shadow_saves && forgotten.shadow_restores == before_dirty.shadow_restores &&
+              forgotten.shadow_modes[0] == '-' && forgotten.shadow_modes[1] == '-',
+          "A shadow whose first save never completed was put back");
+  win::set_target_mask(3);
+  win::service_display_patches();
+  runtime::service();
+  record_frame(false, false);
+  execute();
+  pixels(false, false);
+  runtime::service();  // The baseline save completes.
+  const auto baseline = win::graphics_status();
+  require(baseline.shadow_baselines >= forgotten.shadow_baselines + 2 && baseline.shadow_modes[0] == 'q' && baseline.shadow_modes[1] == 'q',
+          "A camera on a display that may hold the camera took a baseline");
+  win::set_target_mask(0);
+  win::service_display_patches();
+  record_frame(false, false, &after, after_colour);
+  execute();
+  require(win::graphics_status().shadow_restores >= baseline.shadow_restores + 2, "The baseline went back when the camera stopped");
+  restored(false, !common, "The baseline came back with the instrument's repaint, without the camera");
   runtime::service();
   win::service_display_patches();
   handoff.stop_scene();
