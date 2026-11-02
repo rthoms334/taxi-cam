@@ -11,8 +11,10 @@ namespace taxi_camera::engine_hook::queue_submit {
 
 inline constexpr unsigned kMaximumQueues = 8;
 inline constexpr unsigned kMaximumCommandLists = 256;
-// One display copy per side: captain, first officer and the A340-600 lower ECAM.
-inline constexpr unsigned kMaximumInsertions = 3;
+// Per display side (captain, first officer, lower display): a shadow restore
+// before the instrument's draws and the camera copy after them, plus one
+// display snapshot.
+inline constexpr unsigned kMaximumInsertions = 7;
 
 struct Insertion {
   // Original list index. before=false preserves the original after-list API.

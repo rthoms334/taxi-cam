@@ -123,7 +123,6 @@ Texture routing choices apply immediately and belong to the current flight; text
 ## Known issues and limitations
 
 - **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. The camera views draw as far as the main view at every speed, so taxiing can cost more than with the 1,000 m distance of earlier versions. Choose the **Performance** camera frame rate on the **Options** page if needed.
-- **Door camera picture left on the FlyByWire A380X system display:** the A380X redraws only the parts of its system display that change, so when the door camera turns off, its last picture stays until a page with something in that area is shown. Press another ECAM page key to clear it.
 - **Aircraft you set up:** Taxi Cam works out which cockpit panel name belongs to which display from the order the simulator creates them, so on some aircraft a panel's name may not match its picture. Pick by the picture and check with **Test in cockpit**; the panel you pick is used for that flight either way. If the names stay wrong, or the cameras do not appear on a later flight, please report the aircraft with **Report a bug**.
 
 Please report unexpected behaviour using **Report a bug**.

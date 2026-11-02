@@ -17,7 +17,9 @@ namespace taxi_camera::pfd_submission {
 // retained permanently, never recycled based on a later unrelated Signal.
 class Pool {
  public:
-  static constexpr unsigned Capacity = 8;
+  // Two per display side (a shadow restore and the camera copy) plus a
+  // snapshot, with room for the earlier receipts still in flight.
+  static constexpr unsigned Capacity = 16;
   struct Copy {
     ID3D12Resource* target = nullptr;
     ID3D12Resource* source = nullptr;
@@ -28,13 +30,27 @@ class Pool {
     UINT x = 0, y = 0, width = 0, height = 0;
     // Readback: copy the target's base-mip region into the source buffer, which
     // must be in a READBACK heap, instead of writing the buffer into the target.
+    bool readback = false;
     // When the covering fence passes, completed is raised to completed_value
     // (never lowered, so an older request finishing later cannot mark a newer
     // one done). A cancelled or quarantined packet never raises it. The
     // counter must outlive the packet.
-    bool readback = false;
     std::atomic<std::uint64_t>* completed = nullptr;
     std::uint64_t completed_value = 0;
+    // Raised to completed_value, like completed, when the packet will not run:
+    // cancelled before submission, or quarantined (uncertain work counts as
+    // not run). The caller's plan reports copies that were never recorded.
+    std::atomic<std::uint64_t>* dropped = nullptr;
+    // Display shadow: before writing the source, copy the same target region
+    // into this DEFAULT-heap buffer at save_footprint (same size and format
+    // family). Not with readback.
+    ID3D12Resource* save = nullptr;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT save_footprint{};
+    // The source is a DEFAULT-heap shadow buffer rather than a promoted patch.
+    // Shadow buffers stay in COMMON between packets: every packet that uses one
+    // transitions it explicitly and returns it to COMMON, so a save and a
+    // restore of one shadow may share an Execute.
+    bool shadow_source = false;
   };
   struct Recording {
     unsigned slot = Capacity;
@@ -70,12 +86,15 @@ class Pool {
     ID3D12GraphicsCommandList* list = nullptr;
     ID3D12Resource* target = nullptr;
     ID3D12Resource* source = nullptr;
+    ID3D12Resource* save = nullptr;
     std::atomic<std::uint64_t>* completed = nullptr;
+    std::atomic<std::uint64_t>* dropped = nullptr;
     std::uint64_t completed_value = 0;
     std::uint64_t covering_value = 0;
     State state = State::empty;
   };
   static void release_resources(Packet&) noexcept;
+  static void report_dropped(Packet&) noexcept;
   bool valid_copy(const Copy&) const noexcept;
   ID3D12Device* device_ = nullptr;
   std::array<Packet, Capacity> packets_{};
