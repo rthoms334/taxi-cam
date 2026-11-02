@@ -156,6 +156,9 @@ class UpdateRateMeter {
 //   on resumes the last level that fitted.
 // - The first window after a level change or activation spans both states
 //   and is discarded.
+// - Paused (requested, but the main view is outside the cockpit): the window
+//   measures neither rate. It is skipped, and the first window after the pause
+//   is discarded like one after activation.
 // - Below the floor: back off one level at once and keep the level just left
 //   off for kCooldownMs, doubling per failure up to kMaximumCooldownMs, so a
 //   level that does not fit is not retried every few seconds.
@@ -180,6 +183,7 @@ class AutoCameraPolicy {
     std::uint64_t window = 0;  // UpdateRateMeter::windows()
     double fps = std::numeric_limits<double>::quiet_NaN();
     bool cameras_active = false;
+    bool paused = false;
     bool next_helps = true;
   };
 
@@ -187,6 +191,12 @@ class AutoCameraPolicy {
     if (in.window == window_)
       return level_;
     window_ = in.window;
+    if (in.paused) {
+      off_settled_ = false;
+      settled_ = false;
+      held_ = 0;
+      return level_;
+    }
     if (!std::isfinite(in.fps) || in.fps <= 0)
       return level_;
     if (!in.cameras_active) {

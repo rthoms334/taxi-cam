@@ -68,6 +68,9 @@ struct State {
   bool on_ground = false;
   std::uint64_t on_ground_ms = 0;
   const char* on_ground_error = "not_initialized";
+  unsigned camera_state = 0;
+  std::uint64_t camera_state_ms = 0;
+  const char* camera_state_error = "not_initialized";
   bool taxi_left = false, taxi_right = false, taxi_sd = false;
   PmdgDisplaySelect pmdg_dsp;
   AircraftIdentityCache identity;
@@ -135,6 +138,8 @@ void reset_session_locked() noexcept {
   state.invalid_camera_samples = 0;
   state.on_ground_ms = 0;
   state.on_ground_error = "aircraft_session_changed";
+  state.camera_state_ms = 0;
+  state.camera_state_error = "aircraft_session_changed";
   state.timing.last_sample_ms = state.timing.last_interval_ms = 0;
   state.taxi_left = state.taxi_right = state.taxi_sd = false;
   state.pmdg_dsp.reset();
@@ -283,6 +288,36 @@ bool accept_on_ground_packet(const void* raw, DWORD bytes, std::uint64_t sample_
   ReleaseSRWLockExclusive(&state.lock);
   return true;
 }
+void camera_state_failure(const char* text) noexcept {
+  AcquireSRWLockExclusive(&state.lock);
+  state.camera_state_ms = 0;
+  state.camera_state_error = text;
+  ReleaseSRWLockExclusive(&state.lock);
+}
+// Request and definition 9: one FLOAT64 CAMERA STATE, same layout as SIM ON GROUND.
+bool accept_camera_state_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) noexcept {
+  if (!raw || bytes != 48 || !sample_ms)
+    return false;
+  std::array<DWORD, 10> header{};
+  std::memcpy(header.data(), raw, sizeof(header));
+  if (header[0] != bytes || header[2] != 8 || header[3] != 9 || header[5] != 9 || header[6] != 0 || header[9] != 1)
+    return false;
+  double value{};
+  std::memcpy(&value, static_cast<const unsigned char*>(raw) + 40, sizeof(value));
+  AcquireSRWLockExclusive(&state.lock);
+  // A whole enum value. The documented list ends at 33; a larger value is kept
+  // too, as some camera that is not the cockpit.
+  if (std::isfinite(value) && value >= 0 && value <= 255 && value == std::floor(value)) {
+    state.camera_state = static_cast<unsigned>(value);
+    state.camera_state_ms = sample_ms;
+    state.camera_state_error = "";
+  } else {
+    state.camera_state_ms = 0;
+    state.camera_state_error = "camera_state_values";
+  }
+  ReleaseSRWLockExclusive(&state.lock);
+  return true;
+}
 void lighting_failure(const char* text) noexcept {
   AcquireSRWLockExclusive(&state.lock);
   state.lighting_ms = 0;
@@ -303,6 +338,8 @@ void failure(const char* text, bool invalidate_ground_speed = true) noexcept {
   if (invalidate_ground_speed) {
     state.on_ground_ms = 0;
     state.on_ground_error = text;
+    state.camera_state_ms = 0;
+    state.camera_state_error = text;
     state.ground_speed_ms = 0;
     state.ground_speed_error = text;
     state.taxi_ms = 0;
@@ -783,7 +820,21 @@ DWORD WINAPI worker(void*) noexcept {
       end_lvar_stream_locked("lvar_definition_failed");
     ReleaseSRWLockExclusive(&state.lock);
   };
-  std::uint64_t previous_on_ground = 0;
+  // Optional too: the main view's camera, which pauses camera rendering while it
+  // is outside the cockpit. Official SimVar: CAMERA STATE, Enum (2 = Cockpit).
+  // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simvars/camera-variables/
+  std::array<DWORD, 16> camera_state_packets{};
+  unsigned camera_state_packet_cursor = 0;
+  const auto remember_camera_state_packet = [&]() {
+    DWORD id = 0;
+    if (last_packet && SUCCEEDED(last_packet(session, &id)) && id)
+      camera_state_packets[camera_state_packet_cursor++ % camera_state_packets.size()] = id;
+  };
+  bool camera_state_defined = last_packet && SUCCEEDED(define(session, 9, "CAMERA STATE", "number", 4, 0, 0xffffffffu));
+  remember_camera_state_packet();
+  if (!camera_state_defined)
+    camera_state_failure("camera_state_definition_unavailable");
+  std::uint64_t previous_on_ground = 0, previous_camera_state = 0;
   std::uint64_t previous = 0;
   std::uint64_t previous_lighting = 0, previous_type = 0;
   DWORD identity_request = 1000;
@@ -828,6 +879,15 @@ DWORD WINAPI worker(void*) noexcept {
         on_ground_failure("on_ground_request_failed");
       }
     }
+    if (camera_state_defined && now - previous_camera_state >= 250) {
+      previous_camera_state = now;
+      const auto camera_state_hr = request(session, 9, 9, 0, 1, 0, 0, 0, 0);
+      remember_camera_state_packet();
+      if (FAILED(camera_state_hr)) {
+        camera_state_defined = false;
+        camera_state_failure("camera_state_request_failed");
+      }
+    }
     if (lighting_defined && now - previous_lighting >= 500) {
       previous_lighting = now;
       const auto lighting_hr = request(session, 4, 4, 0, 1, 0, 0, 0, 0);
@@ -868,6 +928,10 @@ DWORD WINAPI worker(void*) noexcept {
           on_ground_failure("on_ground_packet_bounds");
           continue;
         }
+        if (bytes >= 40 && header[2] == 8 && (header[3] == 9 || header[5] == 9)) {
+          camera_state_failure("camera_state_packet_bounds");
+          continue;
+        }
         if (bytes >= 40 && header[2] == 8 && (header[3] == 4 || header[5] == 4)) {
           lighting_failure("lighting_packet_bounds");
           continue;
@@ -898,6 +962,9 @@ DWORD WINAPI worker(void*) noexcept {
         } else if (bytes >= 40 && (header[3] == 7 || header[5] == 7)) {
           if (!accept_on_ground_packet(raw, bytes, GetTickCount64()))
             on_ground_failure("on_ground_packet_layout");
+        } else if (bytes >= 40 && (header[3] == 9 || header[5] == 9)) {
+          if (!accept_camera_state_packet(raw, bytes, GetTickCount64()))
+            camera_state_failure("camera_state_packet_layout");
         } else if (bytes >= 40 && (header[3] == 4 || header[5] == 4)) {
           if (!accept_lighting_packet(raw, bytes, GetTickCount64()))
             lighting_failure("lighting_packet_layout");
@@ -922,6 +989,7 @@ DWORD WINAPI worker(void*) noexcept {
         bool lvar_exception = false;
         for (const auto sent : lvar_packets)
           lvar_exception = lvar_exception || (sent && sent == exception[4]);
+        bool camera_state_exception = false;
         for (const auto sent : taxi_packets)
           taxi_exception = taxi_exception || (sent && sent == exception[4]);
         for (const auto sent : taxi_command_packets)
@@ -930,6 +998,8 @@ DWORD WINAPI worker(void*) noexcept {
           lighting_exception = lighting_exception || (sent && sent == exception[4]);
         for (const auto sent : on_ground_packets)
           on_ground_exception = on_ground_exception || (sent && sent == exception[4]);
+        for (const auto sent : camera_state_packets)
+          camera_state_exception = camera_state_exception || (sent && sent == exception[4]);
         if (flow_packet && flow_packet == exception[4]) {
           AcquireSRWLockExclusive(&state.lock);
           state.flow_subscribed = false;
@@ -941,6 +1011,9 @@ DWORD WINAPI worker(void*) noexcept {
         } else if (on_ground_exception) {
           on_ground_defined = false;
           on_ground_failure("on_ground_simconnect_exception");
+        } else if (camera_state_exception) {
+          camera_state_defined = false;
+          camera_state_failure("camera_state_simconnect_exception");
         } else if (lighting_exception) {
           lighting_failure("lighting_simconnect_exception");
         } else if (taxi_exception) {
@@ -1007,6 +1080,7 @@ DWORD WINAPI worker(void*) noexcept {
     }
   }
   on_ground_failure("on_ground_session_closed");
+  camera_state_failure("camera_state_session_closed");
   taxi_failure("taxi_session_closed");
   AcquireSRWLockExclusive(&state.lock);
   state.button_commands.reset_session();
@@ -1032,6 +1106,18 @@ OnGroundSample on_ground_locked(std::uint64_t now) noexcept {
     out.error = "";
   } else {
     out.error = out.sample_ms ? "on_ground_telemetry_stale" : state.on_ground_error;
+  }
+  return out;
+}
+CameraStateSample camera_state_locked(std::uint64_t now) noexcept {
+  CameraStateSample out;
+  out.sample_ms = state.camera_state_ms;
+  if (fresh(out.sample_ms, now)) {
+    out.valid = true;
+    out.state = state.camera_state;
+    out.error = "";
+  } else {
+    out.error = out.sample_ms ? "camera_state_telemetry_stale" : state.camera_state_error;
   }
   return out;
 }
@@ -1095,6 +1181,8 @@ bool stop_provider_locked() noexcept {
   state.ground_speed_error = "not_initialized";
   state.on_ground_ms = 0;
   state.on_ground_error = "not_initialized";
+  state.camera_state_ms = 0;
+  state.camera_state_error = "not_initialized";
   state.taxi_ms = 0;
   state.taxi_error = "not_initialized";
   state.lighting_ms = 0;
@@ -1364,6 +1452,12 @@ OnGroundSample get_on_ground() noexcept {
   ReleaseSRWLockShared(&state.lock);
   return out;
 }
+CameraStateSample get_camera_state() noexcept {
+  AcquireSRWLockShared(&state.lock);
+  const auto out = camera_state_locked(GetTickCount64());
+  ReleaseSRWLockShared(&state.lock);
+  return out;
+}
 GroundSpeedSample get_ground_speed() noexcept {
   AcquireSRWLockShared(&state.lock);
   const auto out = ground_speed_locked(GetTickCount64());
@@ -1480,6 +1574,15 @@ bool accept_on_ground_packet(const void* packet, std::uint32_t bytes, std::uint6
 OnGroundSample on_ground_at(std::uint64_t now_ms) noexcept {
   AcquireSRWLockShared(&state.lock);
   const auto out = on_ground_locked(now_ms);
+  ReleaseSRWLockShared(&state.lock);
+  return out;
+}
+bool accept_camera_state_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
+  return ::taxi_camera::native_camera::accept_camera_state_packet(packet, bytes, sample_ms);
+}
+CameraStateSample camera_state_at(std::uint64_t now_ms) noexcept {
+  AcquireSRWLockShared(&state.lock);
+  const auto out = camera_state_locked(now_ms);
   ReleaseSRWLockShared(&state.lock);
   return out;
 }

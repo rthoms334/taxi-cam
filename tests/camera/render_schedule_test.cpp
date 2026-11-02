@@ -232,7 +232,7 @@ struct AutoDrive {
     step(fps, false);
     step(fps, false);
   }
-  unsigned step(double fps, bool active = true, bool helps = true) {
+  unsigned step(double fps, bool active = true, bool helps = true, bool paused = false) {
     now += 2000;
     ++window;
     taxi_camera::AutoCameraPolicy::Input in;
@@ -240,6 +240,7 @@ struct AutoDrive {
     in.window = window;
     in.fps = fps;
     in.cameras_active = active;
+    in.paused = paused;
     in.next_helps = helps;
     const auto next = policy.update(in);
     require(next < taxi_camera::kAutoCameraLevels && (next == level || next + 1 == level || next == level + 1),
@@ -349,6 +350,26 @@ void auto_camera_policy() {
     settle.off(60);
     require(settle.step(10) == 0, "The activation window was not discarded");
     require(settle.policy.floor() == 54, "The discarded window changed the reference");
+  }
+  // Paused outside the cockpit (issue 97): the slow outside view is neither the
+  // camera-off rate nor a camera cost. The level and reference hold, and the
+  // first window back in the cockpit spans the switch and is discarded.
+  {
+    AutoDrive drive;
+    drive.off(60);
+    drive.run(90, 60, cheap);
+    require(drive.level == 2, "Pause fixture did not reach the top level");
+    const double floor_before = drive.policy.floor();
+    for (int i = 0; i < 20; ++i)
+      require(drive.step(15, true, true, true) == 2, "A paused window moved the level");
+    require(drive.policy.floor() == floor_before, "A paused window changed the camera-off reference");
+    require(drive.step(15) == 2 && drive.policy.floor() == floor_before, "The first window after the pause was judged");
+    require(drive.step(15) < 2, "Auto stopped judging windows after the pause");
+    AutoDrive paused_off;
+    paused_off.off(60);
+    paused_off.step(20, false, true, true);
+    require(paused_off.step(20, false) == 0 && paused_off.policy.floor() == 54,
+            "The first camera-off window after a pause set the reference");
   }
 }
 }  // namespace
