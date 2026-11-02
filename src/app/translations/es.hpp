@@ -4,7 +4,7 @@
 namespace taxi_camera::standalone {
 // Español (es). Keep keys identical to the English source wording.
 inline constexpr Translation SpanishTranslations[]{
-    {L"Equals {0}", L"Igual a {0}"},
+    {L"Equals", L"Igual a"},
     {L"Language", L"Idioma"},
     {L"#{0} · {1} × {2} · {3} mips", L"#{0} · {1} × {2} · {3} mips"},
     {L"(Windows {0})", L"(error de Windows {0})"},
@@ -184,7 +184,9 @@ inline constexpr Translation SpanishTranslations[]{
     {L"Marking colour", L"Color de marcas"},
     {L"Medium cost", L"Carga media"},
     {L"Menu", L"Menú"},
-    {L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the value it read when you chose Equals, such as a display's page: select that page first.", L"Momentáneo: cada pulsación. Enclavado: encendido mientras está activo. Igual a: encendido mientras lee el valor que leía al elegir Igual a, como la página de una pantalla: selecciona primero esa página."},
+    {L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the number in the field beside it, such as a display's page. The line below shows what it reads now.", L"Momentáneo: cada pulsación. Enclavado: encendido mientras está activo. Igual a: encendido mientras lee el número del campo de al lado, como la página de una pantalla. La línea de abajo muestra lo que lee ahora."},
+    {L"The value it turns on at, such as a page number", L"El valor con el que se enciende, como un número de página"},
+    {L"Equals takes a whole number from 0 to 16777215, such as the page number the line under it reads.", L"Igual a necesita un número entero de 0 a 16777215, como el número de página que lee la línea de abajo."},
     {L"NDs", L"ND"},
     {L"Named", L"Por nombre"},
     {L"Native bridge connected", L"Puente nativo conectado"},
@@ -345,8 +347,10 @@ inline constexpr Translation SpanishTranslations[]{
     {L"This texture's format or size cannot be snapshotted.", L"No se puede tomar una instantánea de esta textura por su formato o tamaño."},
     {L"Turn the door camera on or off", L"Encender o apagar la cámara de la puerta"},
     {L"Turn the left and right cameras on or off", L"Encender o apagar las cámaras izquierda y derecha"},
-    {L"Film grain: grain and darker edges, like a camera", L"Grano de película: grano y bordes más oscuros, como una cámara"},
-    {L"Black and white", L"Blanco y negro"},
+    {L"Film grain: On. Grain and darker edges, like a camera. Click to turn it off.", L"Grano de película: sí. Grano y bordes más oscuros, como una cámara. Haz clic para quitarlo."},
+    {L"Film grain: Off. Click to add grain and darker edges, like a camera.", L"Grano de película: no. Haz clic para añadir grano y bordes más oscuros, como una cámara."},
+    {L"Black and white: On. Click to bring the colour back.", L"Blanco y negro: sí. Haz clic para recuperar el color."},
+    {L"Black and white: Off. Click to take the colour out.", L"Blanco y negro: no. Haz clic para quitar el color."},
     {L"UPPER VIEW", L"VISTA SUPERIOR"},
     {L"Windows error {0}", L"Error de Windows {0}"},
     {L"In use by another app", L"En uso por otra aplicación"},

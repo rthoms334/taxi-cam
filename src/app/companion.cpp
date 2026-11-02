@@ -480,8 +480,11 @@ void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
   DrawTextW(dc, tr(L"Cost"), -1, &cost, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 }
 // Cockpit L:vars for the selected aircraft (Taxi cameras and Door camera): a
-// name and a trigger per camera action, saved in the profile's [bindings].
-constexpr int LvarNameId = 760, LvarTriggerId = 770, LvarStatusId = 780;
+// name and a trigger per camera action, and an Equals trigger's value, saved
+// in the profile's [bindings].
+constexpr int LvarNameId = 760, LvarTriggerId = 770, LvarStatusId = 780, LvarValueId = 870;
+// The trigger button's width, and its width beside the Equals value field.
+constexpr int LvarTriggerWidth = 100, LvarEqualsWidth = 56, LvarValueWidth = 40;
 bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
   if (error)
     *error = nullptr;
@@ -528,10 +531,24 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
         *error = ui_text(L"Use letters, digits, underscores and dots for L:var names, for example S_PED_COCKPIT_DOOR_VIDEO.");
       continue;
     }
-    // The trigger button's user data is the whole trigger, an equals value too.
+    // The trigger button's user data is the trigger; an equals value is the
+    // whole number typed beside it.
     const auto trigger =
         static_cast<std::uint32_t>(GetWindowLongPtrW(GetDlgItem(window, LvarTriggerId + static_cast<int>(i)), GWLP_USERDATA));
     binding.trigger = win::valid_lvar_trigger(trigger) ? trigger : static_cast<std::uint32_t>(win::LvarTrigger::momentary);
+    if (win::lvar_trigger_kind(binding.trigger) == win::LvarTrigger::equals) {
+      wchar_t digits[16]{};
+      GetDlgItemTextW(window, LvarValueId + static_cast<int>(i), digits, 16);
+      wchar_t* end{};
+      const auto value = std::wcstoul(digits, &end, 10);
+      if (!digits[0] || *end || value > win::LvarEqualsMax) {
+        ok = false;
+        if (error)
+          *error = ui_text(L"Equals takes a whole number from 0 to 16777215, such as the page number the line under it reads.");
+        continue;
+      }
+      binding.trigger = win::lvar_equals_trigger(static_cast<std::uint32_t>(value));
+    }
     settings.lvar_bindings[i] = binding;
   }
   const auto* guide_profile = profiles::find(settings.profile);
@@ -796,13 +813,14 @@ INT_PTR dialog_colors(WPARAM w) {
 bool lvar_action_available(const profiles::AircraftProfile* profile, unsigned action) {
   return profile && (action == win::CameraDoor || win::camera_action_sides(*profile, action) != 0);
 }
-// A trigger button's label: Momentary, Latched, or Equals and its value.
-std::wstring lvar_trigger_label(std::uint32_t trigger) {
+// A trigger button's label: Momentary, Latched or Equals (its value in the
+// field beside it).
+const wchar_t* lvar_trigger_label(std::uint32_t trigger) {
   switch (win::lvar_trigger_kind(trigger)) {
     case win::LvarTrigger::latched:
       return tr(L"Latched");
     case win::LvarTrigger::equals:
-      return tr_format(L"Equals {0}", {std::to_wstring(win::lvar_equals_value(trigger))});
+      return tr(L"Equals");
     default:
       return tr(L"Momentary");
   }
@@ -4592,10 +4610,17 @@ void control_row(const win::Settings& s,
   SendMessageW(lvar, EM_SETLIMITTEXT, win::LvarNameSize + 1, 0);
   frame_field(lvar);
   // The trigger: a button that steps through Momentary, Latched and Equals
-  // (its user data, the whole trigger).
-  auto trigger =
-      button(lvar_trigger_label(binding.trigger).c_str(), LvarTriggerId + i, lvar_place.x + lvar_place.w - 100, lvar_place.y, 100, 30);
+  // (its user data, the trigger), narrower with Equals' value field beside it.
+  const bool equals = win::lvar_trigger_kind(binding.trigger) == win::LvarTrigger::equals;
+  const int trigger_x = lvar_place.x + lvar_place.w - LvarTriggerWidth;
+  auto trigger = button(lvar_trigger_label(binding.trigger), LvarTriggerId + i, trigger_x, lvar_place.y,
+                        equals ? LvarEqualsWidth : LvarTriggerWidth, 30);
   SetWindowLongPtrW(trigger, GWLP_USERDATA, static_cast<LONG_PTR>(binding.trigger));
+  auto value = child(L"EDIT", equals ? std::to_wstring(win::lvar_equals_value(binding.trigger)).c_str() : L"", LvarValueId + i,
+                     trigger_x + LvarTriggerWidth - LvarValueWidth, lvar_place.y, LvarValueWidth, 30, ES_NUMBER | ES_CENTER);
+  SendMessageW(value, EM_SETLIMITTEXT, 8, 0);
+  frame_field(value);
+  ShowWindow(value, equals ? SW_SHOW : SW_HIDE);
   if (sidebar_tooltip) {
     TOOLINFOW tip{};
     tip.cbSize = sizeof(tip);
@@ -4603,12 +4628,16 @@ void control_row(const win::Settings& s,
     tip.hwnd = window;
     tip.uId = reinterpret_cast<UINT_PTR>(trigger);
     tip.lpszText =
-        const_cast<wchar_t*>(tr(L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the value it "
-                                L"read when you chose Equals, such as a display's page: select that page first."));
+        const_cast<wchar_t*>(tr(L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the number in "
+                                L"the field beside it, such as a display's page. The line below shows what it reads now."));
+    SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    tip.uId = reinterpret_cast<UINT_PTR>(value);
+    tip.lpszText = const_cast<wchar_t*>(tr(L"The value it turns on at, such as a page number"));
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
   }
   EnableWindow(lvar, available);
   EnableWindow(trigger, available);
+  EnableWindow(value, available);
   status(LvarStatusId + i, lvar_place);
 }
 // The taxi camera actions this aircraft has: Left, Right and Both, and Lower
@@ -4680,7 +4709,13 @@ bool handle_controls_command(int id, int code) {
     if (win::lvar_trigger_kind(current) == win::LvarTrigger::momentary) {
       next = static_cast<std::uint32_t>(win::LvarTrigger::latched);
     } else if (win::lvar_trigger_kind(current) == win::LvarTrigger::latched) {
-      // Equals what the L:var reads now (a page selected first), else 1.
+      next = win::lvar_equals_trigger(0);
+    }
+    // Equals shows its value field: what the L:var reads now, else what was
+    // typed there before, else 1.
+    const auto value = GetDlgItem(window, LvarValueId + (id - LvarTriggerId));
+    const bool equals = win::lvar_trigger_kind(next) == win::LvarTrigger::equals;
+    if (equals && value) {
       win::Status sample;
       {
         const std::lock_guard lock(app_mutex);
@@ -4689,11 +4724,22 @@ bool handle_controls_command(int id, int code) {
       const auto& read = sample.lvars[static_cast<unsigned>(id - LvarTriggerId)];
       const bool known = sample.heartbeat && sample.lvar_generation && read.read && std::isfinite(read.value) && read.value >= 0 &&
                          read.value <= static_cast<float>(win::LvarEqualsMax);
-      next = win::lvar_equals_trigger(known ? static_cast<std::uint32_t>(std::lround(read.value)) : 1u);
+      if (known)
+        SetWindowTextW(value, std::to_wstring(std::lround(read.value)).c_str());
+      else if (!GetWindowTextLengthW(value))
+        SetWindowTextW(value, L"1");
     }
+    if (value)
+      ShowWindow(value, equals ? SW_SHOW : SW_HIDE);
+    SetWindowPos(trigger, nullptr, 0, 0, scale(equals ? LvarEqualsWidth : LvarTriggerWidth), scale(30), SWP_NOMOVE | SWP_NOZORDER);
     SetWindowLongPtrW(trigger, GWLP_USERDATA, static_cast<LONG_PTR>(next));
-    SetWindowTextW(trigger, lvar_trigger_label(next).c_str());
+    SetWindowTextW(trigger, lvar_trigger_label(next));
     dirty_notice();
+    return true;
+  }
+  if (id >= LvarValueId && id < LvarValueId + actions) {
+    if (code == EN_CHANGE)
+      dirty_notice();
     return true;
   }
   if (id >= LvarNameId && id < LvarNameId + actions) {
@@ -4759,11 +4805,24 @@ void icon_tooltip(int id, const RECT& bounds, const wchar_t* tip) {
 void power_tooltip(int id, int x, int y, int w, int h, const wchar_t* tip) {
   icon_tooltip(id, power_icon_rect(rectangle(x, y, w, h)), tip);
 }
+bool camera_look_on(int id) {
+  const auto s = draft();
+  return id >= LookMonoId ? (s.black_and_white >> (id - LookMonoId) & 1u) != 0 : (s.film_grain >> (id - LookGrainId) & 1u) != 0;
+}
+// A look icon's tooltip: the option, whether it is on, and what a click does.
+const wchar_t* look_tooltip_text(int id) {
+  const bool on = camera_look_on(id);
+  if (id >= LookMonoId)
+    return on ? tr(L"Black and white: On. Click to bring the colour back.") : tr(L"Black and white: Off. Click to take the colour out.");
+  return on ? tr(L"Film grain: On. Grain and darker edges, like a camera. Click to turn it off.")
+            : tr(L"Film grain: Off. Click to add grain and darker edges, like a camera.");
+}
 // The look icons' tooltips, for camera view `view`'s picture well.
 void look_tooltips(unsigned view, int x, int y, int w, int h) {
   const auto well = rectangle(x, y, w, h);
-  icon_tooltip(LookGrainId + static_cast<int>(view), look_icon_rect(well, 1), tr(L"Film grain: grain and darker edges, like a camera"));
-  icon_tooltip(LookMonoId + static_cast<int>(view), look_icon_rect(well, 0), tr(L"Black and white"));
+  const int grain = LookGrainId + static_cast<int>(view), mono = LookMonoId + static_cast<int>(view);
+  icon_tooltip(grain, look_icon_rect(well, 1), look_tooltip_text(grain));
+  icon_tooltip(mono, look_icon_rect(well, 0), look_tooltip_text(mono));
 }
 // On for the taxi cameras when the left and right cameras both are, as the
 // Both action turns them off then; for the door camera while it is on.
@@ -4815,12 +4874,8 @@ void draw_power_icon(HDC dc, const RECT& well, int id) {
   }
   SelectObject(dc, old_brush);
 }
-bool camera_look_on(int id) {
-  const auto s = draft();
-  return id >= LookMonoId ? (s.black_and_white >> (id - LookMonoId) & 1u) != 0 : (s.film_grain >> (id - LookGrainId) & 1u) != 0;
-}
 // A look icon flips its camera's film grain or black and white at once; it
-// saves with the step's other values (Next).
+// saves with the step's other values (Next). Its tooltip follows.
 void toggle_camera_look(int id) {
   if (!apply(false))
     return;
@@ -4831,6 +4886,14 @@ void toggle_camera_look(int id) {
     s.film_grain ^= 1u << (id - LookGrainId);
   publish(s);
   dirty_notice();
+  if (sidebar_tooltip) {
+    TOOLINFOW info{};
+    info.cbSize = sizeof(info);
+    info.hwnd = window;
+    info.uId = static_cast<UINT_PTR>(id);
+    info.lpszText = const_cast<wchar_t*>(look_tooltip_text(id));
+    SendMessageW(sidebar_tooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&info));
+  }
 }
 // Camera view `view`'s look icons in its picture's top right corner, drawn
 // like the power icon: scattered grain, and a circle half filled for black

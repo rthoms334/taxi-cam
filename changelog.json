@@ -16,7 +16,8 @@
         },
         {
           "title": "Film grain and black and white",
-          "text": "Any camera can look more like a real camera: the two icons at the top right of its picture in Setup add film grain with darker edges, and take its colour out. The door camera starts with film grain, in colour; the taxi cameras start with neither. Both are saved for each aircraft."
+          "text": "The cameras now look more like real cameras: every camera has film grain with darker edges, on by default. The two icons at the top right of a camera's picture in Setup turn its grain off or take its colour out, as on this iniBuilds A380 VIDEO page; hover over them to see which is which. Both are saved for each aircraft.",
+          "image": "docs/whats-new/1.3.0/camera-look.jpg"
         },
         {
           "title": "Guided setup",
@@ -30,7 +31,7 @@
         },
         {
           "title": "Cockpit L:vars",
-          "text": "Setup → Taxi cameras and Door camera let a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press), Latched (on while set) or Equals (on at one value, such as the A380X's ECAM video page). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads these variables."
+          "text": "Setup → Taxi cameras and Door camera let a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press), Latched (on while set) or Equals (on at a number you type, such as 16 for INI_ECAM_ACTIVE_PAGE, the iniBuilds A380's VIDEO page). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads them."
         }
       ],
       "fixes": [

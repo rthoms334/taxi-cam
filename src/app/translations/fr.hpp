@@ -4,7 +4,7 @@
 namespace taxi_camera::standalone {
 // Français (fr). Keep keys identical to the English source wording.
 inline constexpr Translation FrenchTranslations[]{
-    {L"Equals {0}", L"Égal à {0}"},
+    {L"Equals", L"Égal à"},
     {L"Language", L"Langue"},
     {L"#{0} · {1} × {2} · {3} mips", L"#{0} · {1} × {2} · {3} mips"},
     {L"(Windows {0})", L"(Windows {0})"},
@@ -184,7 +184,9 @@ inline constexpr Translation FrenchTranslations[]{
     {L"Marking colour", L"Couleur des repères"},
     {L"Medium cost", L"Coût moyen"},
     {L"Menu", L"Menu"},
-    {L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the value it read when you chose Equals, such as a display's page: select that page first.", L"Momentané : chaque appui. Maintenu : actif tant qu'il est enclenché. Égal à : actif tant qu'il lit la valeur lue au moment de choisir Égal à, comme la page d'un écran : sélectionnez d'abord cette page."},
+    {L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the number in the field beside it, such as a display's page. The line below shows what it reads now.", L"Momentané : chaque appui. Maintenu : actif tant qu'il est enclenché. Égal à : actif tant qu'il lit le nombre du champ à côté, comme la page d'un écran. La ligne en dessous montre ce qu'il lit maintenant."},
+    {L"The value it turns on at, such as a page number", L"La valeur à laquelle il s'active, comme un numéro de page"},
+    {L"Equals takes a whole number from 0 to 16777215, such as the page number the line under it reads.", L"Égal à attend un nombre entier de 0 à 16777215, comme le numéro de page que lit la ligne en dessous."},
     {L"NDs", L"ND"},
     {L"Named", L"Nommé"},
     {L"Native bridge connected", L"Pont natif connecté"},
@@ -345,8 +347,10 @@ inline constexpr Translation FrenchTranslations[]{
     {L"This texture's format or size cannot be snapshotted.", L"Le format ou la taille de cette texture empêche tout instantané."},
     {L"Turn the door camera on or off", L"Allumer ou éteindre la caméra de porte"},
     {L"Turn the left and right cameras on or off", L"Allumer ou éteindre les caméras gauche et droite"},
-    {L"Film grain: grain and darker edges, like a camera", L"Grain de film : grain et bords plus sombres, comme une caméra"},
-    {L"Black and white", L"Noir et blanc"},
+    {L"Film grain: On. Grain and darker edges, like a camera. Click to turn it off.", L"Grain de film : oui. Grain et bords plus sombres, comme une caméra. Cliquez pour le retirer."},
+    {L"Film grain: Off. Click to add grain and darker edges, like a camera.", L"Grain de film : non. Cliquez pour ajouter du grain et des bords plus sombres, comme une caméra."},
+    {L"Black and white: On. Click to bring the colour back.", L"Noir et blanc : oui. Cliquez pour retrouver la couleur."},
+    {L"Black and white: Off. Click to take the colour out.", L"Noir et blanc : non. Cliquez pour retirer la couleur."},
     {L"UPPER VIEW", L"VUE HAUTE"},
     {L"Windows error {0}", L"Erreur Windows {0}"},
     {L"In use by another app", L"Utilisé par une autre application"},

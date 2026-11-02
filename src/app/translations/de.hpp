@@ -4,7 +4,7 @@
 namespace taxi_camera::standalone {
 // Deutsch (de). Keep keys identical to the English source wording.
 inline constexpr Translation GermanTranslations[]{
-    {L"Equals {0}", L"Gleich {0}"},
+    {L"Equals", L"Gleich"},
     {L"Language", L"Sprache"},
     {L"#{0} · {1} × {2} · {3} mips", L"#{0} · {1} × {2} · {3} mips"},
     {L"(Windows {0})", L"(Windows {0})"},
@@ -184,7 +184,9 @@ inline constexpr Translation GermanTranslations[]{
     {L"Marking colour", L"Markierungsfarbe"},
     {L"Medium cost", L"Mittlere Last"},
     {L"Menu", L"Menü"},
-    {L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the value it read when you chose Equals, such as a display's page: select that page first.", L"Tastend: jeder Druck. Rastend: an, solange gesetzt. Gleich: an, solange es den Wert liest, den es beim Wählen von Gleich las, etwa die Seite einer Anzeige: diese Seite zuerst wählen."},
+    {L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the number in the field beside it, such as a display's page. The line below shows what it reads now.", L"Tastend: jeder Druck. Rastend: an, solange gesetzt. Gleich: an, solange es die Zahl im Feld daneben liest, etwa die Seite einer Anzeige. Die Zeile darunter zeigt, was es gerade liest."},
+    {L"The value it turns on at, such as a page number", L"Der Wert, bei dem es einschaltet, etwa eine Seitennummer"},
+    {L"Equals takes a whole number from 0 to 16777215, such as the page number the line under it reads.", L"Gleich braucht eine ganze Zahl von 0 bis 16777215, etwa die Seitennummer, die die Zeile darunter liest."},
     {L"NDs", L"NDs"},
     {L"Named", L"Benannt"},
     {L"Native bridge connected", L"Native Bridge verbunden"},
@@ -345,8 +347,10 @@ inline constexpr Translation GermanTranslations[]{
     {L"This texture's format or size cannot be snapshotted.", L"Für Format oder Größe dieser Textur ist keine Momentaufnahme möglich."},
     {L"Turn the door camera on or off", L"Türkamera ein- oder ausschalten"},
     {L"Turn the left and right cameras on or off", L"Linke und rechte Kamera ein- oder ausschalten"},
-    {L"Film grain: grain and darker edges, like a camera", L"Filmkorn: Körnung und dunklere Ränder wie bei einer Kamera"},
-    {L"Black and white", L"Schwarzweiß"},
+    {L"Film grain: On. Grain and darker edges, like a camera. Click to turn it off.", L"Filmkorn: Ein. Körnung und dunklere Ränder wie bei einer Kamera. Zum Ausschalten klicken."},
+    {L"Film grain: Off. Click to add grain and darker edges, like a camera.", L"Filmkorn: Aus. Klicken für Körnung und dunklere Ränder wie bei einer Kamera."},
+    {L"Black and white: On. Click to bring the colour back.", L"Schwarzweiß: Ein. Klicken, um die Farbe zurückzuholen."},
+    {L"Black and white: Off. Click to take the colour out.", L"Schwarzweiß: Aus. Klicken, um die Farbe herauszunehmen."},
     {L"UPPER VIEW", L"OBERE ANSICHT"},
     {L"Windows error {0}", L"Windows-Fehler {0}"},
     {L"In use by another app", L"Von einer anderen App belegt"},

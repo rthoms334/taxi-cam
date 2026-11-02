@@ -47,6 +47,8 @@ constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 inline constexpr std::uint32_t DoorSideNone = MaxDisplaySides;
 // Status::door_state.
 enum class DoorState : std::uint32_t { off, waiting, live, snapshot };
+// Every camera view's look bit (Settings::film_grain, black_and_white).
+inline constexpr std::uint32_t CameraLookMask = (1u << profiles::CameraViews) - 1;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
   std::uint64_t route_request{}, left_id{}, right_id{};
@@ -108,12 +110,10 @@ struct Settings {
   // Both are saved per aircraft profile. door_on, session-only, turns it on.
   std::uint32_t door_side = DoorSideNone, door_live = 0, door_on = 0;
   // Protocol 28: the cameras' looks, a bit per camera view (nose, tail, third
-  // view, door): film grain with darker edges, and black and white. The door
+  // view, door): film grain with darker edges, and black and white. Every
   // camera starts with film grain, in colour. Saved per aircraft profile.
-  std::uint32_t film_grain = 1u << profiles::DoorFeed, black_and_white = 0;
+  std::uint32_t film_grain = CameraLookMask, black_and_white = 0;
 };
-// Every camera view's look bit.
-inline constexpr std::uint32_t CameraLookMask = (1u << profiles::CameraViews) - 1;
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
   settings.nose_dot = profile.composition.nose_dot;

@@ -573,7 +573,7 @@ inline bool load_settings(Settings& s,
     for (unsigned j = 0; j < 6; ++j)
       value.mounts[i][j] = read(sections[i], names[j], value.mounts[i][j]);
   // Each camera's look (film_grain, black_and_white: 1 or 0); a camera without
-  // the key keeps its default, film grain on the door camera.
+  // the key keeps its default, film grain in colour.
   for (unsigned i = 0; i < sections.size(); ++i)
     for (auto* mask : {&value.film_grain, &value.black_and_white}) {
       const std::uint32_t bit = 1u << i;

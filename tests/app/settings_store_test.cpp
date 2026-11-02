@@ -282,14 +282,13 @@ void lvar_bindings_persist() {
           "An equals binding without a whole value falls back to momentary");
 }
 
-// Each camera's look sits with its mount: film grain on the door camera by
+// Each camera's look sits with its mount: film grain on every camera by
 // default, black and white nowhere; a saved choice is kept and a bad value
 // keeps that camera's default.
 void camera_looks_persist() {
   select_fixture(L"camera-looks");
   auto saved = customized(profiles::Pmdg777);
-  require(saved.film_grain == 1u << profiles::DoorFeed && saved.black_and_white == 0,
-          "A fresh profile gives the door camera film grain, in colour, and the taxi cameras neither");
+  require(saved.film_grain == CameraLookMask && saved.black_and_white == 0, "A fresh profile gives every camera film grain, in colour");
   saved.film_grain = 1u << 0;
   saved.black_and_white = 1u << 1 | 1u << profiles::DoorFeed;
   require(save_settings(saved), "Save a profile with camera looks");
