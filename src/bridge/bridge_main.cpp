@@ -1296,9 +1296,12 @@ DWORD run_impl() {
                                  !connection.started && connection.generation == applied_connection &&
                                  settings.profile == applied_profile && settings.profile_request == applied_profile_request &&
                                  session_epoch == applied_session_epoch && native_camera::aircraft_matches_profile();
-    native_camera::update_taxi_button_request(
-        {settings.taxi_request, settings.aircraft_session_epoch, settings.profile, settings.taxi_selected_mask, settings.taxi_desired_mask},
-        command_context);
+    // Only sides with a TAXI button of their own are commanded.
+    const auto* request_profile = profiles::find(settings.profile);
+    const unsigned button_sides = request_profile ? profiles::taxi_button_sides(*request_profile) : PilotDisplaySides;
+    native_camera::update_taxi_button_request({settings.taxi_request, settings.aircraft_session_epoch, settings.profile,
+                                               settings.taxi_selected_mask & button_sides, settings.taxi_desired_mask & button_sides},
+                                              command_context);
     // A flight or aircraft change keeps the native camera pair (and with it the
     // GPU capture session) when the pair already has a camera for every feed
     // the aircraft renders: the same profile, another profile with the same
@@ -1650,8 +1653,11 @@ DWORD run_impl() {
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
     // The pilot's own request, before readiness and the watchdog gate.
     const bool uses_buttons = settings.follow_taxi && (pmdg_dsp || !manual_only);
+    // A side without a TAXI button (a placed lower display) is the manual
+    // layer on top of the buttons.
+    const unsigned manual_layer = profile ? settings.manual_mask & ~profiles::taxi_button_sides(*profile) : 0u;
     const unsigned requested_mask = (pmdg_dsp ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
-                                     : settings.follow_taxi && !manual_only ? desired.buttons
+                                     : settings.follow_taxi && !manual_only ? desired.buttons | manual_layer
                                                                             : settings.manual_mask) &
                                     sides;
     // What is requested and ready, before the watchdog gate.
@@ -2172,6 +2178,9 @@ DWORD run_impl() {
                   "Camera images ready, but another graphics hook (%s) is in front of Direct3D command-list Close, so PFD writes are "
                   "refused. Test with ReShade and overlays disabled.",
                   graphics.close_endpoint_module);
+    // A sentence for the Overview, which shows this message; the code stays for reports.
+    char taxi_message[sizeof(status.message)];
+    std::snprintf(taxi_message, sizeof(taxi_message), "Waiting for the aircraft's TAXI buttons (%s).", buttons.error);
     const char* message =
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : degraded && graphics.admission_halted
@@ -2183,7 +2192,7 @@ DWORD run_impl() {
         : failed            ? scene.message.c_str()
         : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
-        : !manual_only && !buttons.valid                                                                ? buttons.error
+        : !manual_only && !buttons.valid                                                                ? taxi_message
         : commandable && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
         : (single_display ? !targets[0] || ((mask & 4u) && !targets[2]) : (!targets[0] || !targets[1])) ? target_message
