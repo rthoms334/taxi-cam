@@ -418,8 +418,10 @@ void service_panel_identity(PanelIdentityLog& state,
     if (std::any_of(state.map.begin(), state.map.end(), [](const auto& panel) { return !panel.id; })) {
       auto entries = state.map_creations;
       win::resolve_creation_ids(entries.data(), entries.size());
+      // Only the missing ones: a followed replacement keeps its ID.
       for (std::size_t i = 0; i < entries.size() && i < state.map.size(); ++i)
-        state.map[i].id = entries[i].id;
+        if (!state.map[i].id)
+          state.map[i].id = entries[i].id;
     }
   } catch (...) {
   }
@@ -447,18 +449,10 @@ void service_panel_identity(PanelIdentityLog& state,
       const auto& shape = state.locked_shapes[side];
       // The simulator copies a display into its replacement (FlyByWire
       // A380: #1522 -> #1528); follow that chain to a live texture first.
-      std::uint64_t replacement = 0, successor = destroyed;
       const auto feeds = win::display_feed_pairs();
-      for (unsigned step = 0; step < 8; ++step) {
-        const auto next = std::find_if(feeds.begin(), feeds.end(), [&](const auto& feed) { return feed.first == successor; });
-        if (next == feeds.end())
-          break;
-        successor = next->second;
-        if (alive(successor) && !paired_elsewhere(successor) && std::find(named.begin(), named.end(), successor) == named.end()) {
-          replacement = successor;
-          break;
-        }
-      }
+      std::uint64_t replacement = display_identity::follow_copies(destroyed, feeds.data(), feeds.size(), alive, [&](std::uint64_t id) {
+        return !paired_elsewhere(id) && std::find(named.begin(), named.end(), id) == named.end();
+      });
       // Otherwise the newest live texture of the same shape created later.
       for (std::size_t i = 0; !replacement && i < n; ++i) {
         const auto& e = entries[n - 1 - i];
@@ -478,10 +472,47 @@ void service_panel_identity(PanelIdentityLog& state,
   const auto rename_recreated = [&](const std::array<std::uint64_t, MaxDisplaySides>& from,
                                     const std::array<std::uint64_t, MaxDisplaySides>& to) {
     for (unsigned side = 0; side < MaxDisplaySides; ++side)
-      if (from[side] && to[side] != from[side])
+      if (from[side] && to[side] != from[side]) {
         for (auto& panel : state.map)
           if (panel.id == from[side])
             panel.id = to[side];
+        for (auto& name : state.names)
+          if (name.first == from[side])
+            name.first = to[side];
+      }
+  };
+  // Every other paired panel follows its copies too (the FlyByWire A380X
+  // moved all six of its displays on 2026-11-02 and the setup showed their
+  // destroyed textures), so the aircraft setup's pictures and names stay on
+  // live textures. Copies only: a same-shape guess could swap twin displays.
+  // A routed texture is left to follow_recreated, even one that died since
+  // its check: moving its names entry here would make that check refuse the
+  // routed side's own copy as paired elsewhere.
+  const auto follow_panels = [&](const std::array<std::uint64_t, MaxDisplaySides>& routed) {
+    const auto records = win::display_resource_records();
+    const auto alive = [&](std::uint64_t id) {
+      return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
+    };
+    const auto feeds = win::display_feed_pairs();
+    std::vector<std::string> moved;
+    for (auto& panel : state.map) {
+      if (!panel.id || alive(panel.id) || std::find(routed.begin(), routed.end(), panel.id) != routed.end())
+        continue;
+      const auto next = display_identity::follow_copies(panel.id, feeds.data(), feeds.size(), alive, [&](std::uint64_t id) {
+        return std::none_of(state.map.begin(), state.map.end(), [&](const auto& other) { return other.id == id; });
+      });
+      if (!next)
+        continue;
+      for (auto& name : state.names)
+        if (name.first == panel.id)
+          name.first = next;
+      panel.id = next;
+      char item[96];
+      std::snprintf(item, sizeof(item), " %s=#%llu", panel.name, static_cast<unsigned long long>(next));
+      moved.emplace_back(item);
+    }
+    if (!moved.empty())
+      log_chunks(status, "Display panels recreated", moved);
   };
   if (state.locked && profile == state.named_profile) {
     // Keep the frozen mapping, following recreated textures.
@@ -498,6 +529,7 @@ void service_panel_identity(PanelIdentityLog& state,
                       static_cast<unsigned long long>(named[1]), static_cast<unsigned long long>(named[2]));
         log_status(status, detail);
       }
+      follow_panels(named);
     } catch (...) {
     }
     return;
@@ -676,6 +708,7 @@ void service_panel_identity(PanelIdentityLog& state,
       const auto paired = named;
       named = follow_recreated(named);
       rename_recreated(paired, named);
+      follow_panels(named);
     }
     win::set_named_targets(named);
     if (named != state.named || profile != state.named_profile) {
@@ -1263,9 +1296,12 @@ DWORD run_impl() {
                                  !connection.started && connection.generation == applied_connection &&
                                  settings.profile == applied_profile && settings.profile_request == applied_profile_request &&
                                  session_epoch == applied_session_epoch && native_camera::aircraft_matches_profile();
-    native_camera::update_taxi_button_request(
-        {settings.taxi_request, settings.aircraft_session_epoch, settings.profile, settings.taxi_selected_mask, settings.taxi_desired_mask},
-        command_context);
+    // Only sides with a TAXI button of their own are commanded.
+    const auto* request_profile = profiles::find(settings.profile);
+    const unsigned button_sides = request_profile ? profiles::taxi_button_sides(*request_profile) : PilotDisplaySides;
+    native_camera::update_taxi_button_request({settings.taxi_request, settings.aircraft_session_epoch, settings.profile,
+                                               settings.taxi_selected_mask & button_sides, settings.taxi_desired_mask & button_sides},
+                                              command_context);
     // A flight or aircraft change keeps the native camera pair (and with it the
     // GPU capture session) when the pair already has a camera for every feed
     // the aircraft renders: the same profile, another profile with the same
@@ -1617,8 +1653,11 @@ DWORD run_impl() {
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
     // The pilot's own request, before readiness and the watchdog gate.
     const bool uses_buttons = settings.follow_taxi && (pmdg_dsp || !manual_only);
+    // A side without a TAXI button (a placed lower display) is the manual
+    // layer on top of the buttons.
+    const unsigned manual_layer = profile ? settings.manual_mask & ~profiles::taxi_button_sides(*profile) : 0u;
     const unsigned requested_mask = (pmdg_dsp ? (settings.follow_taxi ? desired.buttons : 0u) | settings.manual_mask
-                                     : settings.follow_taxi && !manual_only ? desired.buttons
+                                     : settings.follow_taxi && !manual_only ? desired.buttons | manual_layer
                                                                             : settings.manual_mask) &
                                     sides;
     // What is requested and ready, before the watchdog gate.
@@ -2139,6 +2178,9 @@ DWORD run_impl() {
                   "Camera images ready, but another graphics hook (%s) is in front of Direct3D command-list Close, so PFD writes are "
                   "refused. Test with ReShade and overlays disabled.",
                   graphics.close_endpoint_module);
+    // A sentence for the Overview, which shows this message; the code stays for reports.
+    char taxi_message[sizeof(status.message)];
+    std::snprintf(taxi_message, sizeof(taxi_message), "Waiting for the aircraft's TAXI buttons (%s).", buttons.error);
     const char* message =
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : degraded && graphics.admission_halted
@@ -2150,7 +2192,7 @@ DWORD run_impl() {
         : failed            ? scene.message.c_str()
         : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
-        : !manual_only && !buttons.valid                                                                ? buttons.error
+        : !manual_only && !buttons.valid                                                                ? taxi_message
         : commandable && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
         : (single_display ? !targets[0] || ((mask & 4u) && !targets[2]) : (!targets[0] || !targets[1])) ? target_message

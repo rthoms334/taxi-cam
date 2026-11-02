@@ -283,6 +283,37 @@ void aircraft_hotkey_intent_checks() {
               next.taxi_request == 12 && next.taxi_selected_mask == 2 && next.taxi_desired_mask == 2,
           "Older local intent is not replayed when backend acknowledgement has advanced");
   sample.taxi_request_pending = 0;
+  // A lower display placed on the A380X has no TAXI button: its shortcut is a
+  // manual layer on top of the cockpit buttons, and no aircraft command.
+  {
+    profiles::DisplayOverride lower{};
+    std::strcpy(lower.textures[2], "SCREEN_DU_SD");
+    const auto* placed = profiles::publish_override(&profiles::A380, lower);
+    require(placed && placed->sides == 3 && profiles::taxi_button_sides(*placed) == 3, "The placed lower display has no TAXI button");
+    Status buttons = sample;
+    buttons.active_profile = buttons.detected_profile = placed->id;
+    buttons.taxi_buttons_mask = 1;
+    buttons.taxi_request_seen = buttons.taxi_request_pending = 0;
+    Settings lower_settings;
+    lower_settings.profile = placed->id;
+    lower_settings.follow_taxi = 1;
+    lower_settings.aircraft_session_epoch = 7;
+    require(request_camera_hotkey(lower_settings, CameraSd, buttons, 1000) == CameraHotkeyResult::manual &&
+                lower_settings.manual_mask == 4 && lower_settings.follow_taxi && !lower_settings.taxi_request &&
+                camera_action_requested(lower_settings, buttons, CameraSd) && camera_action_requested(lower_settings, buttons, CameraLeft),
+            "The lower display's shortcut adds a manual layer and sends nothing to the aircraft");
+    require(request_camera_hotkey(lower_settings, CameraLeft, buttons, 1001) == CameraHotkeyResult::aircraft &&
+                lower_settings.taxi_request && (lower_settings.manual_mask & 4) &&
+                camera_action_requested(lower_settings, buttons, CameraSd),
+            "A pilot display's shortcut commands its TAXI button and keeps the lower layer");
+    require(request_camera_hotkey(lower_settings, CameraBoth, buttons, 1002) == CameraHotkeyResult::aircraft &&
+                (lower_settings.manual_mask & 4),
+            "Both keeps the lower layer too");
+    require(request_camera_hotkey(lower_settings, CameraSd, buttons, 1003) == CameraHotkeyResult::manual &&
+                !(lower_settings.manual_mask & 4) && !camera_action_requested(lower_settings, buttons, CameraSd),
+            "The lower display's shortcut turns its layer off again");
+    profiles::publish_override(&profiles::A380, {});
+  }
   Settings manual;
   manual.profile = 4;
   manual.follow_taxi = 0;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
+#include <utility>
 
 namespace taxi_camera::display_identity {
 // The panel.cfg reader creates one 0x690-byte panel per [VCockpitNN]/
@@ -274,6 +275,30 @@ bool resolve_by_shape(const Panels& panels,
     if (names[k] && names[k][0] && !ids[k])
       return false;
   return true;
+}
+// The simulator moves display textures, copying each into its replacement
+// (FlyByWire A380X, 2026-11-02: each of its six 768 x 1024 displays 2 to 7
+// times in 20 s, each copy from one texture into one other). Follows id
+// along those copies (source, destination) to the first live texture
+// usable() accepts, or returns 0.
+template <class Alive, class Usable>
+std::uint64_t follow_copies(std::uint64_t id,
+                            const std::pair<std::uint64_t, std::uint64_t>* copies,
+                            std::size_t count,
+                            Alive alive,
+                            Usable usable,
+                            unsigned max_steps = 8) noexcept {
+  for (unsigned step = 0; id && step < max_steps; ++step) {
+    std::size_t i = 0;
+    while (i < count && copies[i].first != id)
+      ++i;
+    if (i == count)
+      return 0;
+    id = copies[i].second;
+    if (alive(id) && usable(id))
+      return id;
+  }
+  return 0;
 }
 // Pairing with no profile names (aircraft discovery). Every cockpit panel
 // texture logged so far has 5 mips; UI textures (EFB, toolbar: 10-12 mips)

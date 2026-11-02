@@ -432,6 +432,11 @@ void placed_lower_display() {
               !chosen->taxi_lvars[2][0] && chosen->taxi_events[2] && !chosen->taxi_events[2][0] &&
               chosen->camera_panes == profiles::A380.camera_panes,
           "The lower display takes side 0's region, no cockpit control, and the same cameras");
+  // TAXI telemetry reads one latch per TAXI button: the A380X's two, not one
+  // per display (its packet was refused as taxi_packet_layout with three).
+  require(profiles::taxi_latches(*chosen) == 2 && profiles::taxi_latches(profiles::A380) == 2 &&
+              profiles::taxi_latches(profiles::AerosoftA346) == 3 && profiles::taxi_latches(profiles::IniA380) == 0,
+          "A placed lower display adds no TAXI latch");
   // It may be any cockpit panel, such as the A380X's 1646 x 1024 MFD; the
   // pilot displays and automatic detection keep the display shape.
   require(profiles::lower_any_panel(*chosen) && !profiles::lower_any_panel(profiles::A380) &&
@@ -452,6 +457,12 @@ void placed_lower_display() {
   fit_door_camera(s);
   require(s.door_side == DoorSideNone && valid_settings(s), "Removing the lower display leaves the door camera without one");
   profiles::publish_override(&profiles::A380, {});
+  // The A350s' $SD lower display keeps their two TAXI latches too.
+  profiles::DisplayOverride sd{};
+  std::strcpy(sd.textures[2], "$SD");
+  const auto* a350 = profiles::publish_override(&profiles::A359, sd);
+  require(a350 && a350->sides == 3 && profiles::taxi_latches(*a350) == 2, "The A350's lower display adds no TAXI latch");
+  profiles::publish_override(&profiles::A359, {});
 }
 // The cameras render at the shape of side 0's camera area (shape_cameras).
 void camera_shapes() {
