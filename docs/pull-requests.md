@@ -6,7 +6,7 @@ Every pull request to `main` goes through the same path. Automated checks run fi
 pull request ─► PR test build ─► AI review ─────────────► findings answered ─► risk gate ─► merge
                 (build, validate,  hunt ► vote ► rank      fixed, or resolved     low: none
                  smoke test)       (reviewer from main)    with a reason          medium: owner approval
-                                                                                  high: owner approval + live check
+                                                                                  high: live check + owner approval
 ```
 
 | Check | Workflow | Runs on |
@@ -60,7 +60,7 @@ The [risk gate](../.github/workflows/pr-risk-gate.yml) sets a tier from every pa
 
 | Tier | Paths | Approvals needed |
 | --- | --- | --- |
-| **High** | `src/hooks`, `src/bridge`, `src/graphics`, `src/camera`, `src/shared`, `src/profiles` and `tools/diagnostics/image_inventory.*` (code compiled into the bridge, inside the simulator's process); `src/app/launcher.*` (writes into the simulator and starts the bridge there); `src/setup`, `src/app/updater.*`, `src/app/json_value.hpp`, `installer/` (the user's system); `build.ps1`, `bootstrap.ps1`, `smoke-test.ps1`, `dependencies.json` (the shipped binaries and toolchain) | Owner approval, then a live check |
+| **High** | `src/hooks`, `src/bridge`, `src/graphics`, `src/camera`, `src/shared`, `src/profiles` and `tools/diagnostics/image_inventory.*` (code compiled into the bridge, inside the simulator's process); `src/app/launcher.*` (writes into the simulator and starts the bridge there); `src/setup`, `src/app/updater.*`, `src/app/json_value.hpp`, `installer/` (the user's system); `build.ps1`, `bootstrap.ps1`, `smoke-test.ps1`, `dependencies.json` (the shipped binaries and toolchain) | Live check, then owner approval |
 | **Medium** | The rest of `src/app/`, `tests/`, `changelog.json` and `docs/whats-new/` (installed companions read them from `main`), `.github/`, `ci/`, `REVIEW.md`, `AGENTS.md`, licences, and anything not listed | Owner approval |
 | **Low** | Documentation (`docs/`, `*.md`), the rest of `tools/` (outside the shipped build), issue forms | None, once the other checks pass and threads are resolved |
 
@@ -68,10 +68,10 @@ The change sets the tier, not its author. The gate runs from `main`'s copy of it
 
 ### Approving
 
-Approvals are GitHub [environment reviews](https://docs.github.com/actions/managing-workflow-runs-and-deployments/managing-deployments/reviewing-deployments). On the pull request, the **Risk gate** run shows **Waiting**. Open it, select **Review deployments**, tick the environment and choose **Approve and deploy**. The gate records who approved each environment and accepts only approvals made by a person.
+Approvals are GitHub [environment reviews](https://docs.github.com/actions/managing-workflow-runs-and-deployments/managing-deployments/reviewing-deployments). On the pull request, the **Risk gate** run's **Approval stage** shows **Waiting**. Open it, select **Review deployments**, tick the environments and choose **Approve and deploy**. The stage waits on every environment the tier needs at the same time, so a high-risk run lists two checkboxes in the one dialog. The gate records who approved each environment and accepts only approvals made by a person.
 
-- **`pr-approval`** (medium and high): you have read the change, its AI review and the answers to every thread.
-- **`pr-live-check`** (high only, offered after `pr-approval`): you ran this commit's PR test build in MSFS. Record the result in the pull request's **Live result** section. Local and WARP validation do not establish simulator behaviour, so changes inside the simulator's process need a live check before they merge.
+- **`pr-live-check`** (high only): you ran this commit's PR test build in MSFS. Record the result in the pull request's **Live result** section. Local and WARP validation do not establish simulator behaviour, so changes inside the simulator's process need a live check before they merge.
+- **`pr-approval`** (medium and high): you have read the change, its AI review and the answers to every thread. For high risk, this is the final approval: tick it after the live check, either in a later visit to the dialog or together with it. GitHub does not enforce that order; the gate needs both before it passes.
 
 An approval covers one commit. Each push starts a new gate run that needs approving again, and the old run is cancelled.
 
@@ -92,7 +92,7 @@ The repository owner does these steps in GitHub's settings. They are not stored 
    Until an environment exists with a required reviewer, the gate refuses the tiers that need it rather than letting the approval pass with no one.
 3. **Branch ruleset for `main`.** Under **Settings → Rules → Rulesets**:
    - Require a pull request before merging, with **Required approvals** set to 0 and **Require review from Code Owners** off. GitHub does not let you approve your own pull request, so any required review blocks every merge, auto-merge included. Your approval is the environment review in the risk gate.
-   - Require status checks: **PR test build**, **AI review** and **Risk gate**, each with **GitHub Actions** as its source so that no other app can set it. Do not require **Owner approval** or **Live check**: a job skipped by its condition reports success, so those would pass on low-risk changes. **Risk gate** is the check that enforces them.
+   - Require status checks: **PR test build**, **AI review** and **Risk gate**, each with **GitHub Actions** as its source so that no other app can set it. Do not require **Approval stage**: a job skipped by its condition reports success, so it would pass on low-risk changes. **Risk gate** is the check that enforces them.
    - GitHub lists a check here only after it has run in the repository. **AI review** appears after its first run on any pull request. **Risk gate** runs from `main`, so it appears only after this workflow is merged and a later pull request has run it. Add it then: requiring it earlier blocks the pull request that adds it, because the gate cannot run there.
    - Require branches to be up to date before merging. GitHub's merge queue is only available to organization-owned repositories, so this setting is what makes the checks run again on the latest `main`.
    - Require conversation resolution before merging.

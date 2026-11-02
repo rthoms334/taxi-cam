@@ -5,7 +5,7 @@
 ## Live result
 
 <!-- What was observed in MSFS with this commit's PR test build: simulator build, aircraft, what was checked and what was seen.
-     Write "Not run" with the reason if there is no live result. High-risk pull requests need a live check before merging (docs/pull-requests.md). -->
+     Write "Not run" with the reason if there is no live result. High-risk pull requests need a live check before the owner's final approval (docs/pull-requests.md). -->
 
 ## Tests
 

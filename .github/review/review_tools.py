@@ -22,7 +22,7 @@ TIERS = ("low", "medium", "high")
 APPROVALS = {
     "low": "No human approval. Merge once the PR test build and AI review pass and every review conversation is resolved.",
     "medium": "Owner approval of this exact commit (environment `pr-approval`).",
-    "high": "Owner approval of this exact commit (`pr-approval`), then a live check of this commit's PR test build in MSFS (`pr-live-check`).",
+    "high": "A live check of this commit's PR test build in MSFS (`pr-live-check`), then owner approval of this exact commit (`pr-approval`), both in one approval stage.",
 }
 
 # Ordered: the first rule matching a path sets that path's tier. A pull
