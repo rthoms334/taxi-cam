@@ -3087,7 +3087,13 @@ bool apply(bool save = true) {
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
-  if (save && !win::save_settings(settings)) {
+  // While the live view holds the door camera on this aircraft, the file
+  // keeps the aircraft's own Live or Snapshot, not the view's forced Live
+  // (an aircraft switch saves before the hold is released).
+  auto saved = settings;
+  if (door_hold_aircraft(saved))
+    saved.door_live = live_view.door_live_before;
+  if (save && !win::save_settings(saved)) {
     notice = tr(L"Could not save settings. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
     return false;
