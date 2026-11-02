@@ -61,6 +61,13 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
     settings.follow_taxi = follow;
     return CameraHotkeyResult::manual;
   }
+  // A display with no TAXI button of its own (a lower display placed on a
+  // two-display aircraft) is a manual layer, as on the PMDG 777: nothing is
+  // sent to the aircraft for it.
+  if (camera_action_sides(*profile, action) & ~profiles::taxi_button_sides(*profile)) {
+    toggle_manual_layer(settings, action);
+    return CameraHotkeyResult::manual;
+  }
   // A requested camera frame can be absent while the physical button is ON.
   // Use fresh button telemetry, with outstanding commands overlaid, instead
   // of guessing button state from delivered frames.
@@ -116,7 +123,9 @@ inline bool camera_action_requested(const Settings& settings, const Status& stat
     return false;
   const bool cockpit = settings.follow_taxi && profile->taxi_control != profiles::TaxiControl::manual_only &&
                        profile->taxi_control != profiles::TaxiControl::pmdg_dsp_cam;
-  const auto mask = cockpit ? status.taxi_buttons_mask : settings.manual_mask;
+  // A side without a TAXI button is always the manual layer.
+  const auto buttons = profiles::taxi_button_sides(*profile);
+  const auto mask = cockpit ? (status.taxi_buttons_mask & buttons) | (settings.manual_mask & ~buttons) : settings.manual_mask;
   return (mask & affected) == affected;
 }
 }  // namespace taxi_camera::standalone

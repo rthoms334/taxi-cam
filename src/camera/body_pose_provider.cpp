@@ -358,7 +358,8 @@ bool accept_aircraft_packet(const void* raw, DWORD bytes, std::uint64_t sample_m
 bool accept_taxi_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms, unsigned sides) noexcept {
   // Definition3 is deliberately separate from the existing seven-field body
   // packet. USER(0) is a request alias, not the returned aircraft object ID.
-  // One FLOAT64 latch per display side: 56 bytes for two, 64 for three.
+  // One FLOAT64 latch per TAXI button (profiles::taxi_latches), not per
+  // display: 56 bytes for two, 64 for three.
   const DWORD expected = 40 + 8 * sides;
   if (!raw || sides < 2 || sides > MaxDisplaySides || bytes != expected || !sample_ms)
     return false;

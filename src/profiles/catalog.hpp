@@ -218,6 +218,11 @@ inline constexpr unsigned taxi_latches(const AircraftProfile& p) noexcept {
     ++count;
   return count;
 }
+// The sides with a TAXI button of their own. On aircraft Taxi Cam commands,
+// any other side is a manual layer on top of the cockpit buttons.
+inline constexpr unsigned taxi_button_sides(const AircraftProfile& p) noexcept {
+  return (1u << taxi_latches(p)) - 1u;
+}
 // Minimum PLEASE WAIT time after a side starts drawing, and the camera-image
 // age that brings the page back while the side stays on.
 inline constexpr std::uint64_t WaitingPageMinimumMs = 750;
