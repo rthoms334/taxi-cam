@@ -485,7 +485,10 @@ void service_panel_identity(PanelIdentityLog& state,
   // moved all six of its displays on 2026-11-02 and the setup showed their
   // destroyed textures), so the aircraft setup's pictures and names stay on
   // live textures. Copies only: a same-shape guess could swap twin displays.
-  const auto follow_panels = [&] {
+  // A routed texture is left to follow_recreated, even one that died since
+  // its check: moving its names entry here would make that check refuse the
+  // routed side's own copy as paired elsewhere.
+  const auto follow_panels = [&](const std::array<std::uint64_t, MaxDisplaySides>& routed) {
     const auto records = win::display_resource_records();
     const auto alive = [&](std::uint64_t id) {
       return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
@@ -493,7 +496,7 @@ void service_panel_identity(PanelIdentityLog& state,
     const auto feeds = win::display_feed_pairs();
     std::vector<std::string> moved;
     for (auto& panel : state.map) {
-      if (!panel.id || alive(panel.id))
+      if (!panel.id || alive(panel.id) || std::find(routed.begin(), routed.end(), panel.id) != routed.end())
         continue;
       const auto next = display_identity::follow_copies(panel.id, feeds.data(), feeds.size(), alive, [&](std::uint64_t id) {
         return std::none_of(state.map.begin(), state.map.end(), [&](const auto& other) { return other.id == id; });
@@ -526,7 +529,7 @@ void service_panel_identity(PanelIdentityLog& state,
                       static_cast<unsigned long long>(named[1]), static_cast<unsigned long long>(named[2]));
         log_status(status, detail);
       }
-      follow_panels();
+      follow_panels(named);
     } catch (...) {
     }
     return;
@@ -705,7 +708,7 @@ void service_panel_identity(PanelIdentityLog& state,
       const auto paired = named;
       named = follow_recreated(named);
       rename_recreated(paired, named);
-      follow_panels();
+      follow_panels(named);
     }
     win::set_named_targets(named);
     if (named != state.named || profile != state.named_profile) {

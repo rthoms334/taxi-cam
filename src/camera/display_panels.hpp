@@ -277,10 +277,10 @@ bool resolve_by_shape(const Panels& panels,
   return true;
 }
 // The simulator moves display textures, copying each into its replacement
-// (FlyByWire A380X, 2026-11-02: all six 768 x 1024 displays five times in
-// 20 s, each copy from one texture into one other). Follows id along those
-// copies (source, destination) to the first live texture usable() accepts,
-// or returns 0.
+// (FlyByWire A380X, 2026-11-02: each of its six 768 x 1024 displays 2 to 7
+// times in 20 s, each copy from one texture into one other). Follows id
+// along those copies (source, destination) to the first live texture
+// usable() accepts, or returns 0.
 template <class Alive, class Usable>
 std::uint64_t follow_copies(std::uint64_t id,
                             const std::pair<std::uint64_t, std::uint64_t>* copies,
