@@ -2218,6 +2218,7 @@ struct LiveView {
   decltype(win::Settings::door_on) door_on_before{}, door_live_before{};
   decltype(win::Settings::profile) door_profile{};
   decltype(win::Settings::aircraft_session_epoch) door_session{};
+  decltype(win::Settings::discovered.key) door_variant{};  // A set-up aircraft's.
   // The aircraft's saved settings when the window opened: Undo returns there.
   // Changes are saved when the window closes.
   win::Settings saved{};
@@ -2291,10 +2292,41 @@ bool live_door(const profiles::AircraftProfile& profile) {
   (void)profile;
   return live_view.feed == profiles::DoorFeed;
 }
+// The aircraft and flight the door camera was taken in are still the ones
+// loaded (a set-up aircraft by its variant too).
+bool door_hold_aircraft(const win::Settings& s) {
+  return live_view.door_taken && s.profile == live_view.door_profile &&
+         std::memcmp(s.discovered.key, live_view.door_variant, sizeof(live_view.door_variant)) == 0;
+}
+bool door_hold_current(const win::Settings& s) {
+  return door_hold_aircraft(s) && s.aircraft_session_epoch == live_view.door_session;
+}
+// Ends the window's hold on the door camera, giving back what it still holds:
+// on the aircraft it was taken on, its saved Live or Snapshot, and in the same
+// flight its on state. A door camera turned off meanwhile (a shortcut, an
+// L:var, a flight change) stays off. Returns the settings to publish.
+win::Settings release_door_hold(win::Settings s) {
+  if (door_hold_aircraft(s)) {
+    if (s.door_live)
+      s.door_live = live_view.door_live_before;
+    if (s.door_on && door_hold_current(s))
+      s.door_on = live_view.door_on_before;
+  }
+  live_view.door_taken = false;
+  return s;
+}
 // While it is selected the door camera is on, rendering live, on its display.
-void live_keep_door(const win::Settings& s) {
-  if (!win::door_camera_set_up(s) || (s.door_on && s.door_live))
+// Another aircraft or flight ends the hold on the previous one, which is then
+// taken afresh from the values loaded now.
+void live_keep_door(const win::Settings& loaded) {
+  auto s = loaded;
+  if (live_view.door_taken && !door_hold_current(s))
+    s = release_door_hold(s);
+  if (!win::door_camera_set_up(s) || (s.door_on && s.door_live)) {
+    if (s.door_live != loaded.door_live && win::valid_settings(s))
+      publish(s);
     return;
+  }
   auto next = s;
   next.door_on = next.door_live = 1;
   if (!win::valid_settings(next))
@@ -2305,6 +2337,7 @@ void live_keep_door(const win::Settings& s) {
     live_view.door_live_before = s.door_live;
     live_view.door_profile = s.profile;
     live_view.door_session = s.aircraft_session_epoch;
+    std::memcpy(live_view.door_variant, s.discovered.key, sizeof(live_view.door_variant));
   }
   publish(next);
   InvalidateRect(window, nullptr, FALSE);
@@ -4111,21 +4144,11 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
         live_view.camera_taken = false;
       }
       // The door camera too: closing never saves the live picture it was
-      // given while selected. Only what the window still holds goes back, on
-      // the same aircraft: its saved Live or Snapshot, and its on state only
-      // in the same flight. A door camera turned off meanwhile (a shortcut, an
-      // L:var, a flight change) stays off.
+      // given while selected (release_door_hold).
       if (live_view.door_taken) {
-        auto s = draft();
-        if (s.profile == live_view.door_profile) {
-          if (s.door_live)
-            s.door_live = live_view.door_live_before;
-          if (s.door_on && s.aircraft_session_epoch == live_view.door_session)
-            s.door_on = live_view.door_on_before;
-          if (win::valid_settings(s))
-            publish(s);
-        }
-        live_view.door_taken = false;
+        const auto s = release_door_hold(draft());
+        if (win::valid_settings(s))
+          publish(s);
       }
       // Closing saves what was adjusted, like Save changes.
       if (live_view.changed)
