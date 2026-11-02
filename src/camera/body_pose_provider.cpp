@@ -490,12 +490,25 @@ bool accept_lvar_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) n
       state.lvar_error = "lvar_values";
       continue;
     }
-    const bool on = standalone::lvar_on(values[k]);
     auto& read = state.lvar[binding];
-    // The stream's first value of each binding is where it starts, not a press.
-    if (read.read && on != state.lvar_was_on[binding])
-      ++(on ? read.rises : read.falls);
-    state.lvar_was_on[binding] = on;
+    // The stream's first value of each binding is where it starts, not a
+    // press. A momentary button's presses (lvar_presses: press counts too), a
+    // latched variable's on and off.
+    if (state.lvar_names[binding].trigger == static_cast<std::uint32_t>(standalone::LvarTrigger::momentary)) {
+      if (!read.read) {
+        state.lvar_was_on[binding] = standalone::lvar_held(values[k]);
+      } else {
+        const auto presses = standalone::lvar_presses(read.value, values[k], state.lvar_was_on[binding]);
+        read.rises += presses.rises;
+        read.falls += presses.falls;
+        state.lvar_was_on[binding] = presses.held;
+      }
+    } else {
+      const bool on = standalone::lvar_on(values[k]);
+      if (read.read && on != state.lvar_was_on[binding])
+        ++(on ? read.rises : read.falls);
+      state.lvar_was_on[binding] = on;
+    }
     read.value = static_cast<float>(values[k]);
     read.read = 1;
   }
@@ -1380,8 +1393,10 @@ LightingSample get_lighting() noexcept {
 void set_lvar_bindings(const standalone::LvarBindings& bindings) noexcept {
   AcquireSRWLockExclusive(&state.lock);
   bool changed = false;
+  // Another trigger reads the values another way: a new stream too.
   for (std::size_t i = 0; i < bindings.size(); ++i)
-    changed = changed || std::memcmp(state.lvar_names[i].name, bindings[i].name, standalone::LvarNameSize) != 0;
+    changed = changed || std::memcmp(state.lvar_names[i].name, bindings[i].name, standalone::LvarNameSize) != 0 ||
+              state.lvar_names[i].trigger != bindings[i].trigger;
   if (changed) {
     state.lvar_names = bindings;
     ++state.lvar_request;

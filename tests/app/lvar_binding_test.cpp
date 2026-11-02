@@ -56,6 +56,18 @@ int main() {
   bad = bindings;
   std::strcpy(bad[CameraLeft].name, "A B");
   require(!valid_lvar_bindings(bad), "An unsafe saved name is refused");
+  const auto same = [](LvarPresses a, LvarPresses b) { return a.rises == b.rises && a.falls == b.falls && a.held == b.held; };
+  require(same(lvar_presses(0, 1, false), {1, 0, true}) && same(lvar_presses(1, 0, true), {0, 1, false}) &&
+              same(lvar_presses(0, 100, false), {1, 0, true}) && same(lvar_presses(25, 50, true), {0, 0, true}) &&
+              same(lvar_presses(100, 0, true), {0, 1, false}),
+          "Plain buttons and animations press away from 0 and release back to it");
+  require(same(lvar_presses(12, 13, false), {1, 0, true}) && same(lvar_presses(13, 14, true), {0, 1, false}) &&
+              same(lvar_presses(14, 16, false), {1, 1, false}) && same(lvar_presses(1, 2, true), {0, 1, false}) &&
+              same(lvar_presses(16, 16, false), {0, 0, false}) && same(lvar_presses(13, 13, true), {0, 0, true}),
+          "The Fenix's press counts: odd is held, two steps in one reading are a press and a release");
+  require(!lvar_held(12) && lvar_held(13) && !lvar_held(0) && lvar_held(1) && lvar_held(0.75) &&
+              !lvar_held(std::numeric_limits<double>::quiet_NaN()),
+          "A stream starts held only on an odd count or a plain button held down");
   require(lvar_on(1) && lvar_on(1.00275) && lvar_on(100) && lvar_on(-1) && !lvar_on(0) && !lvar_on(0.003) &&
               !lvar_on(std::numeric_limits<double>::quiet_NaN()),
           "On is a magnitude of at least one half");

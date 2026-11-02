@@ -73,6 +73,39 @@ inline bool parse_lvar_name(const wchar_t* text, char (&out)[LvarNameSize]) noex
 inline bool lvar_on(double value) noexcept {
   return std::isfinite(value) && std::abs(value) >= 0.5;
 }
+// A momentary button's presses and releases between two readings. Plain
+// buttons and animations go from 0 to 1 (or 100) while held and back to 0.
+// The Fenix A320's count every press and release, one step each (12 at rest,
+// 13 held, 14 released; 2026-11-02), so a count stepping up by one or two goes
+// by parity: odd is held.
+struct LvarPresses {
+  std::uint32_t rises{}, falls{};
+  bool held{};
+};
+inline bool lvar_whole(double value) noexcept {
+  return std::isfinite(value) && std::abs(value) < 1e9 && std::abs(value - std::round(value)) < 1e-3;
+}
+inline LvarPresses lvar_presses(double previous, double value, bool held) noexcept {
+  // Every bound value comes when one changes: an unchanged one is nothing.
+  if (value == previous)
+    return {0, 0, held};
+  if (lvar_whole(previous) && lvar_whole(value) && lvar_on(previous)) {
+    const auto from = std::llround(previous), to = std::llround(value);
+    if (to - from == 1 || to - from == 2) {
+      LvarPresses out{};
+      for (auto n = from + 1; n <= to; ++n)
+        ++(n % 2 ? out.rises : out.falls);
+      out.held = to % 2 != 0;
+      return out;
+    }
+  }
+  const bool on = lvar_on(value);
+  return {on && !held ? 1u : 0u, !on && held ? 1u : 0u, on};
+}
+// Held or not at a stream's first reading: a count is held while odd.
+inline bool lvar_held(double value) noexcept {
+  return lvar_whole(value) && std::abs(value) >= 2 ? std::llround(value) % 2 != 0 : lvar_on(value);
+}
 
 // One binding as the bridge reads it (Status, protocol 27). The counters run
 // for one stream (Status::lvar_generation); a new stream starts them again.

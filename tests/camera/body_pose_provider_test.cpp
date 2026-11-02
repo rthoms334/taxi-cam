@@ -651,6 +651,7 @@ int offline_tests() {
     taxi_camera::standalone::LvarBindings bindings{};
     std::strcpy(bindings[1].name, "S_PED_COCKPIT_DOOR_VIDEO");
     std::strcpy(bindings[3].name, "I_OH_COCKPIT_DOOR_VIDEO");
+    bindings[3].trigger = static_cast<std::uint32_t>(taxi_camera::standalone::LvarTrigger::latched);
     set_lvar_bindings(bindings);
     const auto generation = testing::begin_lvar_stream(20);
     check(generation != 0 && get_lvar_bindings().generation == generation && !get_lvar_bindings().states[1].read);
@@ -707,6 +708,24 @@ int offline_tests() {
     check(next != generation && read.generation == next && !read.states[1].read && !read.states[1].rises);
     lvar_header[5] = lvar_header[3] = 20;  // The previous definition is ignored now.
     check(send() && !get_lvar_bindings().states[1].read);
+    // The Fenix A320's buttons count each press and release, odd while held
+    // (2026-11-02: VIDEO read 12 at rest): 13 14 is a press, 16 a press and
+    // release within one frame. A latched lamp at 100 is on, though even.
+    lvar_header[5] = 21;
+    lvar_header[3] = 23;
+    lvar_header[6] = 0;
+    lvar = {12, 0};
+    check(send() && get_lvar_bindings().states[1].read && !get_lvar_bindings().states[1].rises);
+    lvar_header[3] = 21;
+    lvar_header[6] = 1;
+    for (const double count : {13.0, 14.0, 16.0}) {
+      lvar[0] = count;
+      check(send());
+    }
+    lvar[1] = 100;
+    check(send());
+    read = get_lvar_bindings();
+    check(read.states[1].rises == 2 && read.states[1].falls == 2 && read.states[3].rises == 1 && !read.states[3].falls);
     // No bound name: no stream.
     set_lvar_bindings({});
     check(!testing::begin_lvar_stream(20) && !get_lvar_bindings().generation &&
