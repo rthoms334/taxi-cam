@@ -194,6 +194,74 @@ void setup_step_tests() {
   require(page == OverviewPage && !dirty && !shortcut_window && win::load_settings(loaded, L"", profiles::A359.id) && loaded.door_live == 1,
           "The last step saves and finishes on Overview");
 }
+namespace {
+// Displays in a flight whose panel names do not pair (the Fenix display boot
+// of 2026-11-02 left each PFD's name on an ND): a display placed by its
+// picture routes that picture's texture at once, keeps it when the step is
+// left, reopened or passed with Next, and no name from the flight is saved.
+void session_display_tests() {
+  current = {};
+  current.profile = profiles::A380.id;
+  current.auto_profile = 0;
+  current.mounts = profiles::A380.mounts;
+  dirty = false;
+  advanced = false;
+  page = OverviewPage;
+  build_controls();
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+    status.heartbeat = GetTickCount64();
+    status.graphics_ready = 1;
+    status.panel_discovery = 1;
+    status.panel_state = static_cast<std::uint32_t>(win::PanelMapState::paired);
+    status.panel_clean = 1;
+    status.panel_shift = -1;
+    status.panel_count = 2;
+    std::strcpy(status.aircraft_path, "SimObjects/Airplanes/FlyByWire_A380_842/aircraft.cfg");
+    // Each name on the other display's texture.
+    const char* names[]{"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"};
+    for (int i = 0; i < 2; ++i) {
+      std::strcpy(status.panels[i].name, names[i]);
+      status.panels[i].id = 702 - i;
+      status.panels[i].width = 768;
+      status.panels[i].height = 1024;
+      status.panels[i].mips = 5;
+    }
+  }
+  command(StepPillId);
+  require(page == SetupPage && setup.built_in == profiles::A380.id && setup.names[0] == "SCREEN_DU_PFDL" && setup.sides == 3,
+          "Displays opens on the profile's own displays, with a lower display");
+  require(setup_blocker(status).find(L"don't match their pictures") != std::wstring::npos,
+          "Names that did not pair in the flight are not offered for saving");
+  // The left PFD's picture is the texture named SCREEN_DU_PFDR here.
+  setup.picked = "SCREEN_DU_PFDR";
+  setup.picked_texture = 701;
+  place_setup_panel(0);
+  require(current.left_id == 701 && setup.textures[0] == 701, "The display placed by picture routes that picture at once");
+  command(100);
+  require(page == OverviewPage && current.left_id == 701, "Leaving Displays keeps this flight's route");
+  command(StepPillId);
+  require(page == SetupPage && current.left_id == 701, "Opening Displays again keeps it");
+  command(NextId);
+  require(
+      page == CamerasPage && current.left_id == 701 && !current.display_override.textures[0][0] && !current.display_override.textures[1][0],
+      "Next goes on without saving the flight's names, and the route stays");
+  // A cockpit test ends without taking the route back.
+  command(StepPillId);
+  setup.picked = "SCREEN_DU_PFDL";
+  setup.picked_texture = 702;
+  place_setup_panel(1);
+  setup.testing = 2;
+  apply_setup_trial();
+  command(100);
+  require(current.left_id == 701 && current.right_id == 702 && !current.calibration_mask, "Ending a cockpit test keeps both routes");
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+  }
+}
+}  // namespace
 int main() {
   try {
     instance = GetModuleHandleW(nullptr);
@@ -401,6 +469,7 @@ int main() {
     marking_controls_tests();
     stale_color_selection_tests();
     setup_step_tests();
+    session_display_tests();
     DestroyWindow(window);
     for (const auto* profile : profiles::Catalog) {
       win::Settings saved;

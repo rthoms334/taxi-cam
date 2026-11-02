@@ -570,6 +570,27 @@ void service_panel_identity(PanelIdentityLog& state,
     // the names that fit no shift in index order are then paired right.
     int shift = resolve(display_identity::PanelOrder::index);
     const bool by_section = shift < 0 && (shift = resolve(display_identity::PanelOrder::section)) >= 0;
+    // No window fits (a cockpit whose display boot keeps or adds textures):
+    // each named display pairs within its shape. A named side's shape is its
+    // display's (a set-up aircraft's: the panel it was set up on, with mips),
+    // its neighbours' the profile's panel shapes.
+    const auto shape = [&](const char* name, std::uint32_t& width, std::uint32_t& height, std::uint32_t& mips) {
+      for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
+        if (profile->panel_textures[side] && std::strcmp(profile->panel_textures[side], name) == 0) {
+          width = profile->fit_texture ? profile->side_shapes[side][0] : profile->width;
+          height = profile->fit_texture ? profile->side_shapes[side][1] : profile->height;
+          mips = profile->fit_texture ? profile->side_shapes[side][2] : 0;
+          return true;
+        }
+      mips = 0;
+      return expected(name, width, height);
+    };
+    const bool by_shape =
+        shift < 0 && profile &&
+        display_identity::resolve_by_shape(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
+                                           std::min<std::size_t>(profile->sides, MaxDisplaySides), shape, named.data(), proposal, paired);
+    if (by_shape)
+      shift = 0;
     const bool resolved = shift >= 0;
     bool complete = resolved;
     if (!resolved) {
@@ -581,7 +602,10 @@ void service_panel_identity(PanelIdentityLog& state,
     std::vector<std::string> pairs;
     char summary[128];
     std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s",
-                  complete ? 1 : 0, paired, shift, by_section ? "section" : "index");
+                  complete ? 1 : 0, paired, shift,
+                  by_shape     ? "shape"
+                  : by_section ? "section"
+                               : "index");
     pairs.emplace_back(summary);
     state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {

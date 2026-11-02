@@ -485,5 +485,6 @@ inline constexpr Translation GermanTranslations[]{
     {L"Choose display…", L"Anzeige wählen…"},
     {L"The lower display needs a panel the size of this aircraft's displays. Pick another.", L"Die untere Anzeige braucht ein Panel in der Größe der Anzeigen dieses Flugzeugs. Wählen Sie ein anderes."},
     {L"Place the lower display in Setup > Displays to show the door camera there.", L"Legen Sie die untere Anzeige unter Einrichtung > Anzeigen fest, um die Türkamera dort zu zeigen."},
+    {L"This flight's panel names don't match their pictures, so displays can't be saved now. What you place is used until Taxi Cam closes.", L"Die Panelnamen dieses Flugs passen nicht zu ihren Bildern, daher können Anzeigen jetzt nicht gespeichert werden. Was Sie platzieren, gilt, bis Taxi Cam geschlossen wird."},
 };
 }  // namespace taxi_camera::standalone

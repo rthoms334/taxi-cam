@@ -485,5 +485,6 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"Choose display…", L"选择显示屏…"},
     {L"The lower display needs a panel the size of this aircraft's displays. Pick another.", L"下方显示屏需要与此机型显示屏尺寸相同的面板。请另选一个。"},
     {L"Place the lower display in Setup > Displays to show the door camera there.", L"请在「设置 > 显示屏」中放置下方显示屏，舱门摄像头即可显示在那里。"},
+    {L"This flight's panel names don't match their pictures, so displays can't be saved now. What you place is used until Taxi Cam closes.", L"本次航班的面板名称与其画面不符，因此现在无法保存显示屏。你放置的内容会一直使用到关闭 Taxi Cam。"},
 };
 }  // namespace taxi_camera::standalone

@@ -1702,8 +1702,12 @@ struct AircraftSetup {
   std::array<std::string, GalleryColumns> card_names;
   bool positioning{};  // Taxi cameras shows the positioning step after a save.
   // The panel picked from the gallery for a display (Place here), and a drag
-  // of it from its card onto a display.
+  // of it from its card onto a display. picked_texture is the picture's own
+  // texture, and textures what each display was given by picture: this
+  // flight's routes, right even where the flight's panel names are off.
   std::string picked;
+  std::uint64_t picked_texture{};
+  std::array<std::uint64_t, MaxDisplaySides> textures{};
   bool dragging{};
   int drag_slot = -1;
   POINT drag_from{};
@@ -1764,14 +1768,25 @@ std::vector<win::PanelTexture> setup_items(const win::Status& sample) {
 // the aircraft yet.
 void sync_setup(const win::Status& sample) {
   const auto key = loaded_variant(sample);
-  if (setup.synced && key == setup.key)
+  // An aircraft report that comes and goes changes nothing: the picks being
+  // made stay. So does the report of the aircraft already loaded.
+  if (setup.synced && (!key[0] || key == setup.key))
     return;
+  const auto s = draft();
+  if (setup.synced && !setup.key[0] &&
+      (setup.built_in || (s.profile == profiles::DiscoveredProfileId && profiles::same_variant(key.data(), s.discovered.key)))) {
+    setup.key = key;
+    return;
+  }
   setup.synced = true;
   setup.key = key;
   setup.names = {};
+  // Each display starts on the texture it uses in this flight: the one the
+  // user placed, else the bridge's.
+  setup.textures = {s.left_id ? s.left_id : sample.left_id, s.right_id ? s.right_id : sample.right_id, sample.lower_id};
+  setup.picked_texture = 0;
   setup.sides = MaxDisplaySides;
   setup.gallery_page = 0;
-  const auto s = draft();
   // A built-in profile starts from the displays it uses now. Every aircraft
   // has a lower display: a pilot pair's is the one the user places there
   // (named_lower_side), where the door camera goes.
@@ -1797,6 +1812,16 @@ std::wstring setup_aircraft_name() {
   const auto* profile = profiles::find(draft().profile);
   return profile ? std::wstring(profile->name) : std::wstring(tr(L"this aircraft"));
 }
+// The aircraft loaded is the selected profile's, with names of its own,
+// and the bridge could not pair them in this flight (panel_shift).
+bool names_unpaired(const win::Status& sample) {
+  if (sample.panel_shift >= 0 || static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::paired)
+    return false;
+  const auto s = draft();
+  if (const auto* built_in = setup.built_in ? profiles::find(setup.built_in) : nullptr)
+    return built_in->panel_textures[0] && built_in->panel_textures[0][0];
+  return s.profile == profiles::DiscoveredProfileId && setup.key[0] && profiles::same_variant(setup.key.data(), s.discovered.key);
+}
 // What stops the setup now; empty when the picks can be saved.
 std::wstring setup_blocker(const win::Status& sample) {
   // Pictures and the panel list need the bridge connection.
@@ -1817,6 +1842,13 @@ std::wstring setup_blocker(const win::Status& sample) {
     case win::PanelMapState::paired:
       break;
   }
+  // The saved names of the aircraft loaded did not pair this flight
+  // (panel_shift): the names under the pictures can be off, so none are
+  // saved. What is placed is still used, by picture, for this flight.
+  if (names_unpaired(sample))
+    return tr(
+        L"This flight's panel names don't match their pictures, so displays can't be saved now. What you place is used until "
+        L"Taxi Cam closes.");
   // A built-in profile's names are its own, so no clean load is needed.
   if (!sample.panel_clean && !setup.built_in)
     return tr(
@@ -1839,6 +1871,9 @@ profiles::DisplayOverride built_in_choices(const profiles::AircraftProfile& base
   return choices;
 }
 std::uint64_t picked_id(const std::vector<win::PanelTexture>& items, unsigned side) {
+  // The picture the user gave the display this flight.
+  if (side < MaxDisplaySides && setup.textures[side])
+    return setup.textures[side];
   for (const auto& item : items)
     if (side < MaxDisplaySides && !setup.names[side].empty() && panel_name(item) == setup.names[side])
       return item.id;
@@ -1929,13 +1964,33 @@ void apply_setup_trial() {
   notice = tr(L"Test bars show on the tested panels in the cockpit after a few seconds.");
   InvalidateRect(window, nullptr, FALSE);
 }
-// Leaving the setup without saving: the settings from before the test.
+// Leaving the setup without saving: the settings from before the test,
+// keeping the displays placed as this flight's routes until Taxi Cam closes.
 void end_setup_trial(win::Settings& s) {
-  if (setup.trial)
+  if (setup.trial) {
+    const auto placed = s;
     s = setup.before;
+    s.left_id = placed.left_id;
+    s.right_id = placed.right_id;
+    s.route_request = placed.route_request;
+  }
   setup.trial = false;
   setup.testing = 0;
   s.panel_setup = 0;
+}
+// The displays placed, by picture, as this flight's routes (Texture
+// routing's choices): kept until Taxi Cam closes, saved or not.
+void route_placed_displays() {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  auto s = draft();
+  const auto left = s.left_id, right = s.right_id;
+  route_picks(s, setup_items(sample));
+  if (s.left_id != left || s.right_id != right)
+    publish(s);
 }
 // One panel per side: placing another side's panel swaps the two.
 void place_setup_panel(unsigned side) {
@@ -1954,6 +2009,7 @@ void place_setup_panel(unsigned side) {
     const auto item = std::find_if(items.begin(), items.end(), [&](const auto& panel) { return panel_name(panel) == name; });
     if (item == items.end() || !profiles::matches_display(*base, item->width, item->height, item->mips, profiles::DiscoveredFormat)) {
       setup.picked.clear();
+      setup.picked_texture = 0;
       notice = tr(L"The lower display needs a panel the size of this aircraft's displays. Pick another.");
       InvalidateRect(window, nullptr, FALSE);
       return;
@@ -1961,13 +2017,20 @@ void place_setup_panel(unsigned side) {
   }
   // Built-in profiles may share a texture between sides (the PMDG 777's DUS).
   for (unsigned other = 0; other < MaxDisplaySides && !setup.built_in; ++other)
-    if (other != side && setup.names[other] == name)
+    if (other != side && setup.names[other] == name) {
       setup.names[other] = setup.names[side];
+      setup.textures[other] = setup.textures[side];
+    }
   setup.names[side] = name;
+  setup.textures[side] = setup.picked_texture;
   setup.picked.clear();
-  // A running cockpit test follows the new picks.
+  setup.picked_texture = 0;
+  // A running cockpit test follows the new picks; otherwise they are this
+  // flight's routes at once.
   if (setup.testing)
     apply_setup_trial();
+  else
+    route_placed_displays();
 }
 // The displays' Test in cockpit, or Place here while a panel is picked.
 void refresh_setup_picking() {
@@ -2010,6 +2073,9 @@ void update_setup_buttons() {
   EnableWindow(GetDlgItem(window, SetupPreviousId), setup.gallery_page > 0);
   EnableWindow(GetDlgItem(window, SetupNextId), setup.gallery_page + 1 < pages);
 }
+void show_drag_ghost();
+void move_drag_ghost();
+void hide_drag_ghost();
 // Dragging a gallery card onto a display places its panel there: past the
 // drag distance the main window takes the mouse until the button comes up.
 LRESULT CALLBACK card_drag(HWND control, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
@@ -2023,14 +2089,17 @@ LRESULT CALLBACK card_drag(HWND control, UINT message, WPARAM w, LPARAM l, UINT_
          std::abs(point.y - setup.drag_from.y) > GetSystemMetrics(SM_CYDRAG)) &&
         slot < GalleryColumns && !setup.card_names[slot].empty()) {
       setup.picked = setup.card_names[slot];
+      setup.picked_texture = setup.ids[slot];
       setup.dragging = true;
       setup.drop_side = -1;
       SendMessageW(control, BM_SETSTATE, FALSE, 0);
       SetCapture(window);
       SetCursor(LoadCursorW(nullptr, IDC_HAND));
       refresh_setup_picking();
-      // The displays show as drop targets, the card as picked.
+      // The displays show as drop targets, the card as picked, and a copy of
+      // the card follows the cursor.
       RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+      show_drag_ghost();
       return 0;
     }
   } else if (message == WM_LBUTTONUP) {
@@ -2053,6 +2122,7 @@ void end_card_drag(POINT point) {
   setup.dragging = false;
   setup.drag_slot = -1;
   setup.drop_side = -1;
+  hide_drag_ghost();
   ReleaseCapture();
   if (const int side = drop_side_at(point); side >= 0)
     place_setup_panel(static_cast<unsigned>(side));
@@ -2470,6 +2540,69 @@ RECT draw_thumbnail(HDC dc, const RECT& well, std::uint64_t id, const wchar_t* m
   SelectObject(memory, old_bitmap);
   DeleteDC(memory);
   return {drawn.left, drawn.top, drawn.left + width, drawn.top + height};
+}
+// The card a drag carries: a translucent copy under the cursor with the
+// panel's picture and name. The mouse passes through it to the displays.
+constexpr wchar_t DragGhostClass[] = L"380TaxiCamera.DragGhost";
+constexpr int DragGhostWidth = 168, DragGhostHeight = 124;
+HWND drag_ghost{};
+LRESULT CALLBACK drag_ghost_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+  if (message == WM_NCHITTEST)
+    return HTTRANSPARENT;
+  if (message == WM_ERASEBKGND)
+    return 1;
+  if (message == WM_PAINT) {
+    PAINTSTRUCT paint{};
+    const HDC dc = BeginPaint(hwnd, &paint);
+    RECT r{};
+    GetClientRect(hwnd, &r);
+    FillRect(dc, &r, background_brush);
+    HBRUSH fill = CreateSolidBrush(Card);
+    HPEN pen = CreatePen(PS_SOLID, scale(2), Accent);
+    const auto old_fill = SelectObject(dc, fill), old_pen = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(10), scale(10));
+    SelectObject(dc, old_fill);
+    SelectObject(dc, old_pen);
+    DeleteObject(fill);
+    DeleteObject(pen);
+    draw_thumbnail(dc, rectangle(8, 8, DragGhostWidth - 16, DragGhostHeight - 44), setup.picked_texture, L"");
+    const auto name = widen(setup.picked.c_str());
+    text(dc, name.c_str(), 10, DragGhostHeight - 32, DragGhostWidth - 20, 24, small, Text,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    EndPaint(hwnd, &paint);
+    return 0;
+  }
+  return DefWindowProcW(hwnd, message, w, l);
+}
+void move_drag_ghost() {
+  if (!drag_ghost)
+    return;
+  POINT cursor{};
+  GetCursorPos(&cursor);
+  SetWindowPos(drag_ghost, HWND_TOPMOST, cursor.x + scale(14), cursor.y + scale(14), 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+void show_drag_ghost() {
+  if (!drag_ghost) {
+    WNDCLASSEXW type{};
+    type.cbSize = sizeof(type);
+    type.lpfnWndProc = drag_ghost_procedure;
+    type.hInstance = instance;
+    type.lpszClassName = DragGhostClass;
+    if (!RegisterClassExW(&type) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+      return;
+    drag_ghost = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, DragGhostClass,
+                                 L"", WS_POPUP, 0, 0, 0, 0, window, nullptr, instance, nullptr);
+    if (!drag_ghost)
+      return;
+    SetLayeredWindowAttributes(drag_ghost, 0, 215, LWA_ALPHA);
+  }
+  SetWindowPos(drag_ghost, HWND_TOPMOST, 0, 0, scale(DragGhostWidth), scale(DragGhostHeight), SWP_NOMOVE | SWP_NOACTIVATE);
+  InvalidateRect(drag_ghost, nullptr, TRUE);
+  move_drag_ghost();
+}
+void hide_drag_ghost() {
+  if (drag_ghost)
+    ShowWindow(drag_ghost, SW_HIDE);
 }
 // Overview's Cockpit displays: a card per display side, and the door
 // camera's own (side MaxDisplaySides) while it has no display.
@@ -5775,6 +5908,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case WM_MOUSEMOVE:
       if (setup.dragging) {
         SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        move_drag_ghost();
         // The display under the cursor lights up.
         if (const int side = drop_side_at({static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))}); side != setup.drop_side) {
           setup.drop_side = side;
@@ -5788,6 +5922,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         setup.dragging = false;
         setup.drag_slot = -1;
         setup.drop_side = -1;
+        hide_drag_ghost();
         refresh_setup_picking();
         RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
       }
@@ -6112,10 +6247,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         const auto slot = static_cast<unsigned>(id - SetupCardButtonId);
         if (HIWORD(w) == BN_DOUBLECLICKED) {
           setup.picked = setup.card_names[slot];
+          setup.picked_texture = setup.ids[slot];
           if (setup.ids[slot])
             show_display_snapshot(setup.ids[slot]);
         } else if (HIWORD(w) == BN_CLICKED) {
-          setup.picked = setup.picked == setup.card_names[slot] ? std::string() : setup.card_names[slot];
+          const bool again = setup.picked == setup.card_names[slot];
+          setup.picked = again ? std::string() : setup.card_names[slot];
+          setup.picked_texture = again ? 0 : setup.ids[slot];
         }
         refresh_setup_picking();
         return 0;

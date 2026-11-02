@@ -171,6 +171,101 @@ int resolve_names(const Panels& panels,
     ids[k] = 0;
   return -1;
 }
+// When no window fits (resolve_names gives -1): pairs each named panel
+// within its own shape. The Fenix A320's display boot (2026-11-02) kept the
+// refuelling panel's texture from before and added others, so no count put
+// the saved neighbours on their shapes, although its six 768 x 768 displays
+// were created in panel order as on every load. The panels that share a
+// named panel's shape (shape() gives a name's width, height and mips, mips 0
+// for any) take that many of the shape's newest creations, in panel order
+// (propose). Returns true with ids and out (those panels only) filled when
+// every non-empty name pairs.
+template <class Shape>
+bool resolve_by_shape(const Panels& panels,
+                      const Creation* creations,
+                      std::size_t count,
+                      const char* const* names,
+                      std::size_t name_count,
+                      Shape shape,
+                      std::uint64_t* ids,
+                      std::array<Assignment, kMaxPanels>& out,
+                      std::size_t& paired,
+                      PanelOrder by = PanelOrder::index) noexcept {
+  paired = 0;
+  for (std::size_t k = 0; k < name_count; ++k)
+    ids[k] = 0;
+  // propose's order: the panel created first comes first.
+  std::array<const Panel*, kMaxPanels> order{};
+  std::size_t textured_count = 0;
+  for (std::uint32_t i = 0; i < panels.count && i < kMaxPanels; ++i)
+    if (textured(panels.panels[i]))
+      order[textured_count++] = &panels.panels[i];
+  const auto before = [by](const Panel* a, const Panel* b) {
+    if (by == PanelOrder::section && section_number(*a) != section_number(*b))
+      return section_number(*a) > section_number(*b);
+    return a->index > b->index;
+  };
+  for (std::size_t i = 1; i < textured_count; ++i)
+    for (std::size_t j = i; j > 0 && before(order[j], order[j - 1]); --j) {
+      const auto* t = order[j - 1];
+      order[j - 1] = order[j];
+      order[j] = t;
+    }
+  bool wanted = false;
+  for (std::size_t k = 0; k < name_count; ++k) {
+    if (!names[k] || !names[k][0])
+      continue;
+    wanted = true;
+    std::uint32_t width = 0, height = 0, mips = 0;
+    if (!shape(names[k], width, height, mips))
+      return false;
+    // A shape another name already paired.
+    bool done = false;
+    for (std::size_t i = 0; i < paired && !done; ++i)
+      done = std::strcmp(out[i].panel->texture.data(), names[k]) == 0;
+    if (done)
+      continue;
+    // The panels of this shape, each texture once: a repeated name is one
+    // texture, created where its lowest index (its last place here) puts it.
+    std::array<const Panel*, kMaxPanels> group{};
+    std::size_t members = 0;
+    for (std::size_t i = 0; i < textured_count; ++i) {
+      std::uint32_t w = 0, h = 0, m = 0;
+      if (!shape(order[i]->texture.data(), w, h, m) || w != width || h != height)
+        continue;
+      std::size_t same = members;
+      for (std::size_t j = 0; j < members; ++j)
+        if (std::strcmp(group[j]->texture.data(), order[i]->texture.data()) == 0)
+          same = j;
+      if (same < members) {
+        for (std::size_t j = same; j + 1 < members; ++j)
+          group[j] = group[j + 1];
+        --members;
+      }
+      group[members++] = order[i];
+    }
+    // The shape's newest creations, one per panel, oldest of them first.
+    std::array<std::size_t, kMaxPanels> picks{};
+    std::size_t found = 0;
+    for (std::size_t c = count; c-- > 0 && found < members;)
+      if (creations[c].mips > 1 && creations[c].width == width && creations[c].height == height && (!mips || creations[c].mips == mips))
+        picks[found++] = c;
+    if (!members || found < members || paired + members > kMaxPanels)
+      return false;
+    for (std::size_t i = 0; i < members; ++i)
+      out[paired++] = {group[i], creations[picks[members - 1 - i]]};
+  }
+  if (!wanted)
+    return false;
+  for (std::size_t k = 0; k < name_count; ++k)
+    for (std::size_t i = 0; names[k] && names[k][0] && i < paired; ++i)
+      if (std::strcmp(out[i].panel->texture.data(), names[k]) == 0)
+        ids[k] = out[i].creation.id;
+  for (std::size_t k = 0; k < name_count; ++k)
+    if (names[k] && names[k][0] && !ids[k])
+      return false;
+  return true;
+}
 // Pairing with no profile names (aircraft discovery). Every cockpit panel
 // texture logged so far has 5 mips; UI textures (EFB, toolbar: 10-12 mips)
 // sometimes follow the cockpit's burst, as on a live PMDG 777 load that
