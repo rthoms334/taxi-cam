@@ -335,10 +335,20 @@ void SceneCaptureManager::apply_deferred_work() noexcept {
 
 SceneCaptureManager::DisplaySubmissionPlan::~DisplaySubmissionPlan() {
   for (auto& item : items) {
+    // Escaped, refused or unrecordable: the planner learns before its next plan.
+    if (!item.recorded && item.copy.dropped && item.copy.completed_value) {
+      auto seen = item.copy.dropped->load(std::memory_order_relaxed);
+      while (seen < item.copy.completed_value &&
+             !item.copy.dropped->compare_exchange_weak(seen, item.copy.completed_value, std::memory_order_release,
+                                                       std::memory_order_relaxed)) {
+      }
+    }
     if (item.copy.target)
       item.copy.target->Release();
     if (item.copy.source)
       item.copy.source->Release();
+    if (item.copy.save)
+      item.copy.save->Release();
   }
 }
 bool SceneCaptureManager::DisplaySubmissionPlan::current() const noexcept {
@@ -2191,20 +2201,35 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     lock.unlock();
     if (!queue_transaction_wait(*owner, queue))
       return 0;
-    if (record_display)
+    if (record_display) {
+      std::array<bool, engine_hook::queue_submit::kMaximumInsertions> recorded_items{};
       for (UINT i = 0; i < display_plan.count; ++i) {
-        const auto& planned = display_plan.items[i];
+        auto& planned = display_plan.items[i];
         if (planned.after_list >= count)
           continue;
-        const auto recorded = owner->display_copies.record(planned.copy);
+        // Without the restore before the instrument's draws, the display holds
+        // the camera under them: saving it would put the camera back later.
+        // The copy then confirms nothing about the shadow, and its save is
+        // reported dropped when the plan ends.
+        auto copy = planned.copy;
+        if (copy.save && planned.save_after != DisplaySubmissionPlan::NoItem &&
+            (planned.save_after >= i || !recorded_items[planned.save_after])) {
+          copy.save = nullptr;
+          copy.completed = copy.dropped = nullptr;
+          copy.completed_value = 0;
+        }
+        const auto recorded = owner->display_copies.record(copy);
         if (!recorded) {
           ++transaction_.display_unrecorded;  // Counted by finish_transaction under mutex_.
           continue;
         }
+        recorded_items[i] = true;
+        planned.recorded = copy.dropped != nullptr || !planned.copy.dropped;
         const auto slot = transaction_.display_count++;
         transaction_.display_slots[slot] = recorded.slot;
         transaction_.display_insertions[slot] = {planned.after_list, recorded.list, planned.before};
       }
+    }
     submission_lock.release();  // Same native wrapper thread must complete it.
   }
   return result.receipt;

@@ -619,8 +619,7 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     require(!context->pool.record(bad_read), "Readback without a completion serial was recorded");
     bad_read = valid;
     bad_read.completed = &done;
-    bad_read.completed_value = 7;
-    require(!context->pool.record(bad_read), "A display write accepted a readback completion counter");
+    require(!context->pool.record(bad_read), "A display write accepted a completion counter without a serial");
     require(context->pool.ready_count() == ready, "Malformed readback consumed a packet");
 
     const auto read_packet = context->pool.record(read);
@@ -668,6 +667,195 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
       }
     snapshot->Unmap(0, &none);
   }
+  // Display shadow: a camera copy first saves the panel's pixels under it into
+  // a DEFAULT-heap shadow, and a restore from that shadow puts them back. One
+  // Execute may restore the shadow before an instrument redraw and save it
+  // again before the next camera copy: every packet returns the shadow to
+  // COMMON and the display to its own state.
+  {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT panel_footprint{};
+    UINT64 panel_bytes{};
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &panel_footprint, nullptr, nullptr, &panel_bytes);
+    Ref<ID3D12Resource> panel, panel_upload, panel_readback, shadow, upload_shadow;
+    create_buffer(device.p, panel_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, panel_upload);
+    create_buffer(device.p, panel_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, panel_readback);
+    create_buffer(device.p, patch_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, shadow);
+    create_buffer(device.p, patch_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, upload_shadow);
+    const auto panel_pixel = [](UINT x, UINT y) {
+      return std::array<std::uint8_t, 4>{static_cast<std::uint8_t>(x * 5), static_cast<std::uint8_t>(y * 3), 41, 255};
+    };
+    success(panel_upload->Map(0, &none, reinterpret_cast<void**>(&bytes)), "Map panel pattern");
+    for (UINT y = 0; y < Height; ++y)
+      for (UINT x = 0; x < Width; ++x)
+        std::memcpy(bytes + panel_footprint.Offset + y * panel_footprint.Footprint.RowPitch + x * 4, panel_pixel(x, y).data(), 4);
+    panel_upload->Unmap(0, nullptr);
+    success(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                            IID_PPV_ARGS(panel.put())),
+            "Create shadowed panel");
+    Ref<ID3D12DescriptorHeap> panel_rtvs;
+    D3D12_DESCRIPTOR_HEAP_DESC panel_heap{};
+    panel_heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    panel_heap.NumDescriptors = 1;
+    success(device->CreateDescriptorHeap(&panel_heap, IID_PPV_ARGS(panel_rtvs.put())), "Create panel RTV heap");
+    const auto panel_rtv = panel_rtvs->GetCPUDescriptorHandleForHeapStart();
+    device->CreateRenderTargetView(panel.p, nullptr, panel_rtv);
+    std::uint64_t receipt = 6;
+    // Runs one original list on the fixture queue between optional packets,
+    // then retires the packets on the covering fence.
+    const auto execute = [&](std::initializer_list<Pool::Recording> before, ID3D12GraphicsCommandList* original,
+                             std::initializer_list<Pool::Recording> after) {
+      std::array<ID3D12CommandList*, 8> batch{};
+      UINT used = 0;
+      for (const auto& packet : before)
+        batch[used++] = packet.list;
+      if (original)
+        batch[used++] = original;
+      for (const auto& packet : after)
+        batch[used++] = packet.list;
+      queue->ExecuteCommandLists(used, batch.data());
+      success(queue->Signal(fence.p, ++receipt), "Signal shadow receipt");
+      for (const auto& packet : before)
+        context->pool.submit(packet.slot, receipt);
+      for (const auto& packet : after)
+        context->pool.submit(packet.slot, receipt);
+      complete(fence.p, receipt);
+      context->pool.service(device.p, fence->GetCompletedValue());
+    };
+    const auto record = [&](unsigned index) {
+      success(allocators[index]->Reset(), "Reset shadow fixture allocator");
+      success(lists[index]->Reset(allocators[index].p, nullptr), "Reset shadow fixture list");
+      return lists[index].p;
+    };
+    auto* setup = record(0);
+    D3D12_TEXTURE_COPY_LOCATION fill_source{}, fill_target{};
+    fill_source.pResource = panel_upload.p;
+    fill_source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    fill_source.PlacedFootprint = panel_footprint;
+    fill_target.pResource = panel.p;
+    fill_target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    setup->CopyTextureRegion(&fill_target, 0, 0, 0, &fill_source, nullptr);
+    transition(setup, panel.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    success(setup->Close(), "Close panel setup list");
+    execute({}, setup, {});
+    // Every panel pixel: the camera patch, the instrument's redraw colour, or
+    // the panel pattern.
+    const auto expect = [&](bool camera, bool redraw, const char* message) {
+      auto* list = record(1);
+      transition(list, panel.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+      source.pResource = panel.p;
+      source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      destination.pResource = panel_readback.p;
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      destination.PlacedFootprint = panel_footprint;
+      list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      transition(list, panel.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      success(list->Close(), "Close panel readback list");
+      execute({}, list, {});
+      const D3D12_RANGE range{0, static_cast<SIZE_T>(panel_bytes)};
+      success(panel_readback->Map(0, &range, reinterpret_cast<void**>(&bytes)), "Map shadowed panel");
+      for (UINT y = 0; y < Height; ++y)
+        for (UINT x = 0; x < Width; ++x) {
+          const auto* pixel = bytes + panel_footprint.Offset + y * panel_footprint.Footprint.RowPitch + x * 4;
+          const bool patch = x >= 8 && x < 8 + PatchWidth && y >= 4 && y < 4 + PatchHeight;
+          const bool redrawn = redraw && x >= 10 && x < 14 && y >= 5 && y < 9;
+          const auto own = panel_pixel(x, y);
+          const std::array<std::uint8_t, 4> wanted =
+              patch && camera
+                  ? std::array<std::uint8_t, 4>{static_cast<std::uint8_t>(180 + x - 8), static_cast<std::uint8_t>(70 + y - 4), 219, 255}
+              : redrawn ? std::array<std::uint8_t, 4>{51, 102, 153, 255}
+                        : own;
+          require(std::memcmp(pixel, wanted.data(), 4) == 0, message);
+        }
+      panel_readback->Unmap(0, &none);
+    };
+
+    auto stamp = valid;
+    stamp.target = panel.p;
+    stamp.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    stamp.save = shadow.p;
+    stamp.save_footprint = patch_footprint;
+    Pool::Copy restore{panel.p, shadow.p, patch_footprint, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 8, 4, PatchWidth, PatchHeight};
+    restore.shadow_source = true;
+    const auto ready = context->pool.ready_count();
+    auto bad = stamp;
+    bad.save = upload_shadow.p;
+    require(!context->pool.record(bad), "A save into a non-DEFAULT buffer was recorded");
+    bad = stamp;
+    bad.save_footprint.Footprint.Width = PatchWidth - 1;
+    require(!context->pool.record(bad), "A save of another size was recorded");
+    bad = stamp;
+    bad.save_footprint.Footprint.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    require(!context->pool.record(bad), "A save in another format family was recorded");
+    bad = stamp;
+    bad.save = upload.p;
+    require(!context->pool.record(bad), "A save into its own source was recorded");
+    bad = stamp;
+    bad.readback = true;
+    require(!context->pool.record(bad), "A readback with a save was recorded");
+    bad = restore;
+    bad.source = upload.p;
+    require(!context->pool.record(bad), "A shadow restore from a non-DEFAULT buffer was recorded");
+    require(context->pool.ready_count() == ready, "Malformed shadow copy consumed a packet");
+
+    // The camera starts: the panel's pixels go into the shadow first.
+    std::atomic<std::uint64_t> saved{0}, restored{0};
+    stamp.completed = &saved;
+    stamp.completed_value = 1;
+    const auto first = context->pool.record(stamp);
+    require(static_cast<bool>(first), "Record save and camera copy");
+    execute({first}, nullptr, {});
+    require(saved.load() == 1, "Completed save did not raise its serial");
+    expect(true, false, "Camera copy after a save left the wrong panel pixels");
+    // The instrument repaints part of the area under the camera: the shadow
+    // goes back before it and is saved again before the next camera copy.
+    auto* redraw = record(0);
+    transition(redraw, panel.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const float colour[]{51.0f / 255.0f, 102.0f / 255.0f, 153.0f / 255.0f, 1};
+    const D3D12_RECT changed{10, 5, 14, 9};
+    redraw->ClearRenderTargetView(panel_rtv, colour, 1, &changed);
+    transition(redraw, panel.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    success(redraw->Close(), "Close instrument redraw");
+    const auto entry = context->pool.record(restore);
+    stamp.completed_value = 2;
+    const auto again = context->pool.record(stamp);
+    require(entry && again, "Record shadow restore and second save");
+    execute({entry}, redraw, {again});
+    require(saved.load() == 2, "Second save did not raise its serial");
+    expect(true, false, "The camera did not cover the instrument's redraw");
+    // The camera stops: the panel returns with the instrument's redraw.
+    restore.completed = &restored;
+    restore.completed_value = 3;
+    const auto last = context->pool.record(restore);
+    require(static_cast<bool>(last), "Record the restore after the camera");
+    execute({last}, nullptr, {});
+    require(restored.load() == 3, "Completed restore did not raise its serial");
+    expect(false, true, "The restored panel lost its pixels or the instrument's redraw");
+    // A shadow copy that will not run raises its drop serial instead, so the
+    // planner learns before its next plan: cancelled before submission, or
+    // quarantined. A completed copy never raises it.
+    std::atomic<std::uint64_t> dropped{0};
+    auto doomed = restore;
+    doomed.dropped = &dropped;
+    doomed.completed_value = 0;
+    require(!context->pool.record(doomed), "A drop counter without a serial was recorded");
+    doomed.completed_value = 4;
+    const auto cancelled = context->pool.record(doomed);
+    require(static_cast<bool>(cancelled), "Record a shadow copy that is cancelled");
+    context->pool.cancel(cancelled.slot);
+    context->pool.service(device.p, fence->GetCompletedValue());
+    require(dropped.load() == 4 && restored.load() == 3, "A cancelled shadow copy did not report its drop, or reported completion");
+    doomed.completed_value = 5;
+    const auto uncertain_copy = context->pool.record(doomed);
+    require(static_cast<bool>(uncertain_copy), "Record a shadow copy that is quarantined");
+    context->pool.quarantine(uncertain_copy.slot);
+    require(dropped.load() == 5, "A quarantined shadow copy did not report its drop");
+    doomed.completed_value = 6;
+    const auto ran = context->pool.record(doomed);
+    require(static_cast<bool>(ran), "Record a shadow copy that runs");
+    execute({ran}, nullptr, {});
+    require(restored.load() == 6 && dropped.load() == 5, "A completed shadow copy reported a drop");
+  }
   success(device->GetDeviceRemovedReason(), "D3D12 device removed");
   if (diagnostics.p) {
     for (UINT64 i = 0; i < diagnostics->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
@@ -682,10 +870,11 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
       require(message->Severity > D3D12_MESSAGE_SEVERITY_ERROR, "D3D12 reported invalid inserted copy work");
     }
   }
-  std::printf("PASS: %u PFD submission checks; 1024 actual sampled pixels, four lower mips unchanged, 128 snapshot readback pixels "
-              "(%s, %s, %s, debug layer %s).\n",
-              checks, warp ? "WARP" : "hardware", common ? "COMMON" : "explicit SRV",
-              before ? "before mixed list" : "after barrier-only list", debug_enabled ? "enabled" : "unavailable");
+  std::printf(
+      "PASS: %u PFD submission checks; 1024 actual sampled pixels, four lower mips unchanged, 128 snapshot readback pixels, "
+      "1536 shadow save/restore pixels (%s, %s, %s, debug layer %s).\n",
+      checks, warp ? "WARP" : "hardware", common ? "COMMON" : "explicit SRV", before ? "before mixed list" : "after barrier-only list",
+      debug_enabled ? "enabled" : "unavailable");
 }
 }  // namespace
 
