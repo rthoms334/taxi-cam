@@ -478,11 +478,6 @@ void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
   SelectObject(dc, small);
   SetTextColor(dc, Muted);
   DrawTextW(dc, tr(L"Cost"), -1, &cost, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-  if (item.itemState & ODS_FOCUS) {
-    RECT focus = item.rcItem;
-    InflateRect(&focus, -scale(4), -scale(4));
-    DrawFocusRect(dc, &focus);
-  }
 }
 // Cockpit L:vars for the selected aircraft (Taxi cameras and Door camera): a
 // name and a trigger per camera action, saved in the profile's [bindings].
@@ -533,8 +528,10 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
         *error = ui_text(L"Use letters, digits, underscores and dots for L:var names, for example S_PED_COCKPIT_DOOR_VIDEO.");
       continue;
     }
-    const auto trigger = GetWindowLongPtrW(GetDlgItem(window, LvarTriggerId + static_cast<int>(i)), GWLP_USERDATA);
-    binding.trigger = static_cast<std::uint32_t>(trigger == 1 ? win::LvarTrigger::latched : win::LvarTrigger::momentary);
+    // The trigger button's user data is the whole trigger, an equals value too.
+    const auto trigger =
+        static_cast<std::uint32_t>(GetWindowLongPtrW(GetDlgItem(window, LvarTriggerId + static_cast<int>(i)), GWLP_USERDATA));
+    binding.trigger = win::valid_lvar_trigger(trigger) ? trigger : static_cast<std::uint32_t>(win::LvarTrigger::momentary);
     settings.lvar_bindings[i] = binding;
   }
   const auto* guide_profile = profiles::find(settings.profile);
@@ -773,6 +770,21 @@ HWND dialog_control(HWND hwnd,
   SetWindowTheme(control, L"DarkMode_Explorer", nullptr);
   return control;
 }
+// WM_SETCURSOR: the hand over a window's own buttons, as over links.
+bool button_cursor(HWND hwnd, WPARAM w, LPARAM l) {
+  const auto control = reinterpret_cast<HWND>(w);
+  wchar_t type[16]{};
+  if (!control || control == hwnd || GetParent(control) != hwnd || LOWORD(l) != HTCLIENT || !GetClassNameW(control, type, 16) ||
+      lstrcmpiW(type, L"Button") != 0)
+    return false;
+  SetCursor(LoadCursorW(nullptr, IDC_HAND));
+  return true;
+}
+// A dialog's buttons without the dotted focus square until the keyboard is
+// used (Tab shows it again).
+void hide_focus_cues(HWND hwnd) {
+  SendMessageW(hwnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
+}
 INT_PTR dialog_colors(WPARAM w) {
   const auto dc = reinterpret_cast<HDC>(w);
   SetTextColor(dc, Text);
@@ -783,6 +795,17 @@ INT_PTR dialog_colors(WPARAM w) {
 // displays they turn on.
 bool lvar_action_available(const profiles::AircraftProfile* profile, unsigned action) {
   return profile && (action == win::CameraDoor || win::camera_action_sides(*profile, action) != 0);
+}
+// A trigger button's label: Momentary, Latched, or Equals and its value.
+std::wstring lvar_trigger_label(std::uint32_t trigger) {
+  switch (win::lvar_trigger_kind(trigger)) {
+    case win::LvarTrigger::latched:
+      return tr(L"Latched");
+    case win::LvarTrigger::equals:
+      return tr_format(L"Equals {0}", {std::to_wstring(win::lvar_equals_value(trigger))});
+    default:
+      return tr(L"Momentary");
+  }
 }
 void refresh_lvar_status(HWND hwnd) {
   win::Status sample;
@@ -1182,6 +1205,9 @@ bool open_whats_new(std::vector<win::WhatsNewBlock> blocks) {
   fetch_next_whats_new_picture();
   return true;
 }
+// The status line from before What's new started loading, shown again once
+// it opens.
+std::wstring notice_before_whats_new;
 void request_whats_new() {
   if (changelog_fetcher.busy())
     return;
@@ -1191,6 +1217,7 @@ void request_whats_new() {
     notice = tr(L"Could not start loading What's new. Try again.");
   } else {
     SetDlgItemTextW(window, 515, tr(L"Loading…"));
+    notice_before_whats_new = notice;
     notice = tr(L"Loading What's new from GitHub…");
   }
   InvalidateRect(window, nullptr, FALSE);
@@ -1348,7 +1375,7 @@ void paint_snapshot(HDC dc) {
   }
   RestoreDC(dc, saved);
 }
-INT_PTR CALLBACK snapshot_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
+INT_PTR CALLBACK snapshot_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_INITDIALOG) {
     place_dialog(hwnd, tr(L"Taxi Cam — Display texture snapshot"), 900, 760);
     dialog_control(hwnd, L"STATIC", tr(L"Display texture snapshot"), -1, 20, 17, 860, 28, 0, heading);
@@ -1359,7 +1386,12 @@ INT_PTR CALLBACK snapshot_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     SetTimer(hwnd, 1, 200, nullptr);
     update_snapshot_dialog(hwnd);
     SetFocus(close);
+    hide_focus_cues(hwnd);
     return FALSE;
+  }
+  if (message == WM_SETCURSOR && button_cursor(hwnd, w, l)) {
+    SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
+    return TRUE;
   }
   if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC)
     return dialog_colors(w);
@@ -1653,6 +1685,11 @@ constexpr int StepPillId = 710, AdvancedId = 716, BackId = 717, NextId = 718, Do
 // (none, then each side) and picture, and Overview's way to choose its display.
 constexpr int LiveFeedId = 720, DisplayAreaId = 724, DefaultsId = 725, RoutingOpenId = 729, GuidesOpenId = 730, DoorWhereId = 740,
               DoorSnapshotId = 744, DoorLiveId = 745, DoorChooseId = 746;
+// Power buttons on the live pictures: each taxi camera card's (790 + feed)
+// turns the taxi cameras on or off, the door camera step's the door camera.
+constexpr int CameraPowerId = 790, DoorPowerId = 793;
+// The door camera step's Display area: its display's area in the live view.
+constexpr int DoorAreaId = 747;
 // Taxi cameras: its camera cards, Advanced's guide row and the controls card
 // below with a row per camera action (draw_page and build_controls share
 // them).
@@ -1742,11 +1779,10 @@ std::string panel_name(const win::PanelTexture& panel) {
 }
 // The panel map's tracked textures. A repeated name is listed once, as its
 // lowest index (the texture created last), which learn_layout pairs.
+// Every cockpit display the bridge tracks while Displays is open, for set-up
+// and built-in aircraft alike (placing one is checked by fits_built_in).
 std::vector<win::PanelTexture> setup_items(const win::Status& sample) {
   std::vector<win::PanelTexture> items;
-  // A built-in profile keeps its own matching: only panels of its display
-  // shape can be its displays.
-  const auto* built_in = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr;
   for (std::size_t i = 0; i < std::min<std::size_t>(sample.panel_count, win::MaxPanelTextures); ++i) {
     const auto& panel = sample.panels[i];
     if (!panel.name[0])
@@ -1757,10 +1793,15 @@ std::vector<win::PanelTexture> setup_items(const win::Status& sample) {
     else
       items.push_back(panel);
   }
-  std::erase_if(items, [&](const auto& item) {
-    return !item.id || (built_in && !profiles::named_display(*built_in, item.width, item.height, item.mips, profiles::DiscoveredFormat));
-  });
+  std::erase_if(items, [](const auto& item) { return !item.id; });
   return items;
+}
+// A built-in profile's own displays are regions of its display shape, so they
+// use only panels of that shape; a set-up aircraft, and a lower display added
+// to a pilot pair, use any panel.
+bool fits_built_in(const win::PanelTexture& panel) {
+  const auto* built_in = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr;
+  return !built_in || profiles::named_display(*built_in, panel.width, panel.height, panel.mips, profiles::DiscoveredFormat);
 }
 // Picks belong to one variant: another aircraft starts again, and an aircraft
 // already set up starts from its saved displays. They load when Displays
@@ -1997,9 +2038,11 @@ void place_setup_panel(unsigned side) {
   if (side >= setup.sides || setup.picked.empty())
     return;
   const auto name = setup.picked;
-  // A built-in profile's added lower display is found by name on a panel of
-  // its displays' shape: another shape would never be drawn on.
-  if (const auto* base = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr; base && side >= base->sides) {
+  // A built-in profile's own displays are found by name on panels of their
+  // shape: another shape is never drawn on. A lower display added to a pilot
+  // pair may be any panel (lower_any_panel).
+  const auto* base = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr;
+  if (base && side < base->sides) {
     win::Status sample;
     {
       const std::lock_guard lock(app_mutex);
@@ -2007,10 +2050,10 @@ void place_setup_panel(unsigned side) {
     }
     const auto items = setup_items(sample);
     const auto item = std::find_if(items.begin(), items.end(), [&](const auto& panel) { return panel_name(panel) == name; });
-    if (item == items.end() || !profiles::matches_display(*base, item->width, item->height, item->mips, profiles::DiscoveredFormat)) {
+    if (item == items.end() || !fits_built_in(*item)) {
       setup.picked.clear();
       setup.picked_texture = 0;
-      notice = tr(L"The lower display needs a panel the size of this aircraft's displays. Pick another.");
+      notice = tr(L"This aircraft draws its cameras only on panels the size of its own displays. Pick another.");
       InvalidateRect(window, nullptr, FALSE);
       return;
     }
@@ -2250,13 +2293,17 @@ std::pair<unsigned, std::uint64_t> live_view_target(const win::Settings& s,
     return {live_view.area_side, routed[live_view.area_side]};
   if (live_door(profile) && win::door_camera_set_up(s))
     return {s.door_side, routed[s.door_side]};
-  const unsigned on = live_cameras_on(s, sample, profile);
+  // A taxi camera: never the door camera's display while that shows the door
+  // page, unless it is the only one.
+  const unsigned door = s.door_on && s.door_side < MaxDisplaySides ? 1u << s.door_side : 0u;
+  const unsigned on = live_cameras_on(s, sample, profile) & ~door;
   for (unsigned side = 0; side < profile.sides && side < MaxDisplaySides; ++side)
     if (routed[side] && (on & (1u << side)))
       return {side, routed[side]};
-  for (unsigned side = 0; side < profile.sides && side < MaxDisplaySides; ++side)
-    if (routed[side])
-      return {side, routed[side]};
+  for (const unsigned skip : {door, 0u})
+    for (unsigned side = 0; side < profile.sides && side < MaxDisplaySides; ++side)
+      if (routed[side] && !(skip & (1u << side)))
+        return {side, routed[side]};
   return {0, 0};
 }
 void service_live_view() {
@@ -2657,7 +2704,11 @@ void draw_display_strip(HDC dc, const win::Status& sample) {
     const auto id = routed[card.side];
     const auto* t = find_thumbnail(id);
     // A set-up aircraft's side is the whole texture: nothing to crop.
-    const bool fits = t && !profile->fit_texture && t->texture_width == profile->width && t->texture_height == profile->height;
+    // A placed lower display's region is in its own panel's pixels, whatever
+    // that panel's size (lower_any_panel).
+    const bool fits = t && !profile->fit_texture &&
+                      ((t->texture_width == profile->width && t->texture_height == profile->height) ||
+                       (card.side == MaxDisplaySides - 1 && profiles::lower_any_panel(*profile)));
     const auto crop = profiles::display_rect(*profile, card.side);
     draw_thumbnail(dc, picture, id, tr(L"No display"), fits ? &crop : nullptr);
     hit_areas.push_back({rectangle(x, y, width, DisplayCardSwitches - 4), 0});
@@ -2701,7 +2752,8 @@ void draw_feed_picture(HDC dc, const win::Status& sample, unsigned feed, const R
   const auto* t = find_thumbnail(id);
   profiles::DisplayRect crop{};
   if (profile && t && t->texture_width && t->texture_height &&
-      (profile->fit_texture || (t->texture_width == profile->width && t->texture_height == profile->height))) {
+      (profile->fit_texture || (t->texture_width == profile->width && t->texture_height == profile->height) ||
+       (side == MaxDisplaySides - 1 && profiles::lower_any_panel(*profile)))) {
     const auto area = profiles::side_content_rect(*profile, side, t->texture_width, t->texture_height);
     const auto b = pane_box(profile->composition, feed);
     const double w = area.right - area.left, h = area.bottom - area.top;
@@ -2931,11 +2983,6 @@ bool draw_page_button(const DRAWITEMSTRUCT& item) {
   SetTextColor(item.hDC, Muted);
   RECT details_box{r.left + scale(10), r.bottom - scale(26), r.right - scale(10), r.bottom - scale(6)};
   DrawTextW(item.hDC, details, -1, &details_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-  if (item.itemState & ODS_FOCUS) {
-    RECT focus = r;
-    InflateRect(&focus, -scale(3), -scale(3));
-    DrawFocusRect(item.hDC, &focus);
-  }
   return true;
 }
 // Selected states of the steps' choice buttons.
@@ -2966,6 +3013,7 @@ void show_whats_new() {
   }
   // Opened by itself once per installed version; the link stays.
   whats_new = false;
+  notice = notice_before_whats_new;
   if (!preview_ui && !win::record_whats_new_seen(win::settings_directory(), InstalledVersion))
     notice = tr(L"Could not remember that What's new was read. It will show again next launch.");
   InvalidateRect(window, nullptr, FALSE);
@@ -3385,14 +3433,11 @@ LiveHit live_hit(const LiveLayout& l, const win::Settings& s, const profiles::Ai
   const auto w = live_working(l, p);
   const int feed = live_feed_at(l, w[0], w[1]);
   if (area) {
-    // The frame: the rectangle's edges, and inside it wherever no camera is
-    // drawn (the camera inset and the gaps between cameras).
+    // The whole rectangle, its edges and all inside it (cameras included),
+    // moves it: the area is placed here, cameras are aimed outside this mode.
     const auto from = live_texture_point(l.picture, a.left, a.top), to = live_texture_point(l.picture, a.right, a.bottom);
     const int reach = scale(6);
-    const bool around = p.x >= from.x - reach && p.x <= to.x + reach && p.y >= from.y - reach && p.y <= to.y + reach;
-    const bool edge = std::abs(p.x - from.x) <= reach || std::abs(p.x - to.x) <= reach || std::abs(p.y - from.y) <= reach ||
-                      std::abs(p.y - to.y) <= reach;
-    if (around && (edge || feed < 0))
+    if (p.x >= from.x - reach && p.x <= to.x + reach && p.y >= from.y - reach && p.y <= to.y + reach)
       return {LiveHit::Kind::area, 8};
   }
   if (feed >= 0)
@@ -3414,18 +3459,24 @@ void paint_live_view(HWND hwnd, HDC dc) {
   const auto l = live_layout(hwnd, profile);
   if (!live_feed_offered(l.split, live_view.feed))
     live_view.feed = 0;
-  // Toolbar: camera, step size, display area, undo and defaults.
+  // Toolbar: camera, step size, display area, undo and defaults. The camera
+  // buttons narrow to keep clear of Defaults (four with a split bottom).
+  int offered = 0;
+  for (unsigned feed = 0; feed < l.feeds; ++feed)
+    offered += live_feed_offered(l.split, feed) ? 1 : 0;
+  const int defaults_left = client.right - scale(306);
+  const int feed_width = offered ? std::clamp((defaults_left - scale(314)) / offered - scale(8), scale(96), scale(118)) : scale(118);
   int x = scale(16);
   for (unsigned feed = 0; feed < l.feeds; ++feed) {
     if (!live_feed_offered(l.split, feed))
       continue;
-    live_button(dc, {x, scale(14), x + scale(118), scale(50)}, live_feed_name(l.split, feed), live_feed + static_cast<int>(feed),
+    live_button(dc, {x, scale(14), x + feed_width, scale(50)}, live_feed_name(l.split, feed), live_feed + static_cast<int>(feed),
                 feed == live_view.feed);
-    x += scale(126);
+    x += feed_width + scale(8);
   }
   const wchar_t* steps[]{tr(L"Step: Fine"), tr(L"Step: Normal"), tr(L"Step: Coarse")};
-  live_button(dc, {x + scale(8), scale(14), x + scale(160), scale(50)}, steps[live_view.step], live_step);
-  live_button(dc, {x + scale(168), scale(14), x + scale(320), scale(50)}, tr(L"Display area"), live_area, live_view.area_mode);
+  live_button(dc, {x + scale(8), scale(14), x + scale(144), scale(50)}, steps[live_view.step], live_step);
+  live_button(dc, {x + scale(152), scale(14), x + scale(288), scale(50)}, tr(L"Display area"), live_area, live_view.area_mode);
   // Changes apply live and are saved when the window closes. Undo returns to
   // the saved settings from when it opened; Defaults to the profile's.
   live_button(dc, {client.right - scale(166), scale(14), client.right - scale(16), scale(50)}, tr(L"Undo changes"), live_undo, false,
@@ -3442,7 +3493,7 @@ void paint_live_view(HWND hwnd, HDC dc) {
     caption = tr(L"Waiting for a display to be found for this aircraft.");
   else {
     const auto side = display_side_title(s, live_view.side);
-    caption = live_view.area_mode ? tr_format(L"{0} · drag a white handle to resize the camera area, or its frame to move it", {side})
+    caption = live_view.area_mode ? tr_format(L"{0} · drag a white handle to resize the camera area, or inside it to move it", {side})
                                   : tr_format(L"{0} · drag in a camera picture to aim it, wheel to zoom", {side});
     // Without a fresh picture, say what the bridge is doing (cameras starting,
     // waiting for the display) rather than showing a blank view.
@@ -3612,12 +3663,12 @@ void paint_live_view(HWND hwnd, HDC dc) {
   y += scale(40 + 6 * 44 + 8);
   live_text(dc,
             live_view.area_mode && live_door_page()
-                ? tr(L"The white rectangle is where the door camera is drawn on its display. Drag a handle to resize it or its "
-                     L"frame to move it; it applies when you let go. The door camera then renders at that shape, which takes a few "
+                ? tr(L"The white rectangle is where the door camera is drawn on its display. Drag a handle to resize it or "
+                     L"inside it to move it; it applies when you let go. The door camera then renders at that shape, which takes a few "
                      L"seconds.")
             : live_view.area_mode
                 ? tr(L"The white rectangle is where this display's camera is drawn on its texture. Drag a handle to resize it or "
-                     L"its frame to move it; it applies when you let go. A new shape renders the cameras at that shape, which "
+                     L"inside it to move it; it applies when you let go. A new shape renders the cameras at that shape, which "
                      L"takes a few seconds; the other display shows them at that shape too.")
                 : tr(L"Drag a camera picture to aim it; the wheel zooms. Arrows move right and forward, Page Up/Down up and down, "
                      L"Ctrl+arrows aim, + and − zoom, Tab changes camera, Shift is fine. Drag the white points to move the guides; "
@@ -3849,16 +3900,18 @@ void live_drag(HWND hwnd, POINT p) {
     live_apply(s);
     return;
   }
-  // Aim: the picture follows the pointer. The lens is the vertical field of
-  // view, so a pane's height in pixels spans that many degrees.
+  // Aim: the camera turns the way the pointer moves, as the simulator's mouse
+  // look and Ctrl+arrows do (drag right to look right, down to look down).
+  // The lens is the vertical field of view, so a pane's height in pixels
+  // spans that many degrees.
   const float pane_rows = live_view.feed == 0 || l.door ? l.c.nose_height
                           : l.c.split_bottom            ? (l.c.bottom_pane_height > 0 ? l.c.bottom_pane_height : live_split_pane(l))
                                                         : 763 - l.c.tail_top;
   const double rows_on_screen = std::max(1.0, pane_rows * double(l.drawn.bottom - l.drawn.top) / 763.0);
   auto& mount = s.mounts[live_view.feed];
   const double degrees_per_pixel = mount[5] * 180.0 / 3.14159265358979323846 / rows_on_screen;
-  mount[4] -= (p.x - live_view.last.x) * degrees_per_pixel;
-  mount[3] += (p.y - live_view.last.y) * degrees_per_pixel;
+  mount[4] += (p.x - live_view.last.x) * degrees_per_pixel;
+  mount[3] -= (p.y - live_view.last.y) * degrees_per_pixel;
   live_view.last = p;
   live_apply(s);
 }
@@ -4050,13 +4103,13 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
   }
   return DefWindowProcW(hwnd, message, w, l);
 }
-// Opens the camera adjustment window on a camera, or with its display area
-// to adjust.
-void open_live_view(unsigned feed = 0, bool area = false) {
+// Opens the camera adjustment window on a camera, or with a display area to
+// adjust: area_side's (the door camera's display), else the display shown.
+void open_live_view(unsigned feed = 0, bool area = false, unsigned area_side = MaxDisplaySides) {
   if (live_view.window) {
     live_view.feed = feed;
     live_view.area_mode = area;
-    live_view.area_side = live_view.side;
+    live_view.area_side = area_side < MaxDisplaySides ? area_side : live_view.side;
     InvalidateRect(live_view.window, nullptr, FALSE);
     ShowWindow(live_view.window, SW_SHOWNORMAL);
     SetForegroundWindow(live_view.window);
@@ -4076,6 +4129,8 @@ void open_live_view(unsigned feed = 0, bool area = false) {
   live_view = {};
   live_view.feed = feed < profiles::CameraViews ? feed : 0;
   live_view.area_mode = area;
+  if (area_side < MaxDisplaySides)
+    live_view.area_side = area_side;
   // Undo returns to the saved settings, not to unsaved edits.
   {
     const auto current = draft();
@@ -4443,7 +4498,7 @@ void copy_setup_variant(HWND hwnd) {
   fill_setup_list(hwnd);
   SetDlgItemTextW(hwnd, 803, tr_format(L"{0} now starts from {1}'s setup and is selected.", {to, from}).c_str());
 }
-INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
+INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_INITDIALOG) {
     place_dialog(hwnd, tr(L"Taxi Cam — Set-up aircraft"), 640, 460);
     dialog_control(hwnd, L"STATIC", tr(L"Set-up aircraft"), -1, 20, 17, 600, 28, 0, heading);
@@ -4459,7 +4514,12 @@ INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     const auto close = dialog_control(hwnd, L"BUTTON", tr(L"Close"), IDCANCEL, 520, 406, 100, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
     fill_setup_list(hwnd);
     SetFocus(close);
+    hide_focus_cues(hwnd);
     return FALSE;
+  }
+  if (message == WM_SETCURSOR && button_cursor(hwnd, w, l)) {
+    SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
+    return TRUE;
   }
   if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORLISTBOX)
     return dialog_colors(w);
@@ -4528,12 +4588,22 @@ void control_row(const win::Settings& s,
   auto lvar = child(L"EDIT", name.c_str(), LvarNameId + i, lvar_place.x, lvar_place.y, lvar_place.w - 106, 30, ES_AUTOHSCROLL);
   SendMessageW(lvar, EM_SETLIMITTEXT, win::LvarNameSize + 1, 0);
   frame_field(lvar);
-  // The trigger: a button that switches between its two choices (its
-  // user data, 1 for latched).
-  const bool latched = binding.trigger == static_cast<std::uint32_t>(win::LvarTrigger::latched);
+  // The trigger: a button that steps through Momentary, Latched and Equals
+  // (its user data, the whole trigger).
   auto trigger =
-      button(latched ? tr(L"Latched") : tr(L"Momentary"), LvarTriggerId + i, lvar_place.x + lvar_place.w - 100, lvar_place.y, 100, 30);
-  SetWindowLongPtrW(trigger, GWLP_USERDATA, latched);
+      button(lvar_trigger_label(binding.trigger).c_str(), LvarTriggerId + i, lvar_place.x + lvar_place.w - 100, lvar_place.y, 100, 30);
+  SetWindowLongPtrW(trigger, GWLP_USERDATA, static_cast<LONG_PTR>(binding.trigger));
+  if (sidebar_tooltip) {
+    TOOLINFOW tip{};
+    tip.cbSize = sizeof(tip);
+    tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tip.hwnd = window;
+    tip.uId = reinterpret_cast<UINT_PTR>(trigger);
+    tip.lpszText =
+        const_cast<wchar_t*>(tr(L"Momentary: each press. Latched: on while it is set. Equals: on while it reads the value it "
+                                L"read when you chose Equals, such as a display's page: select that page first."));
+    SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+  }
   EnableWindow(lvar, available);
   EnableWindow(trigger, available);
   status(LvarStatusId + i, lvar_place);
@@ -4602,9 +4672,24 @@ bool handle_controls_command(int id, int code) {
   }
   if (id >= LvarTriggerId && id < LvarTriggerId + actions) {
     const auto trigger = GetDlgItem(window, id);
-    const bool latched = GetWindowLongPtrW(trigger, GWLP_USERDATA) != 1;
-    SetWindowLongPtrW(trigger, GWLP_USERDATA, latched);
-    SetWindowTextW(trigger, latched ? tr(L"Latched") : tr(L"Momentary"));
+    const auto current = static_cast<std::uint32_t>(GetWindowLongPtrW(trigger, GWLP_USERDATA));
+    auto next = static_cast<std::uint32_t>(win::LvarTrigger::momentary);
+    if (win::lvar_trigger_kind(current) == win::LvarTrigger::momentary) {
+      next = static_cast<std::uint32_t>(win::LvarTrigger::latched);
+    } else if (win::lvar_trigger_kind(current) == win::LvarTrigger::latched) {
+      // Equals what the L:var reads now (a page selected first), else 1.
+      win::Status sample;
+      {
+        const std::lock_guard lock(app_mutex);
+        sample = status;
+      }
+      const auto& read = sample.lvars[static_cast<unsigned>(id - LvarTriggerId)];
+      const bool known = sample.heartbeat && sample.lvar_generation && read.read && std::isfinite(read.value) && read.value >= 0 &&
+                         read.value <= static_cast<float>(win::LvarEqualsMax);
+      next = win::lvar_equals_trigger(known ? static_cast<std::uint32_t>(std::lround(read.value)) : 1u);
+    }
+    SetWindowLongPtrW(trigger, GWLP_USERDATA, static_cast<LONG_PTR>(next));
+    SetWindowTextW(trigger, lvar_trigger_label(next).c_str());
     dirty_notice();
     return true;
   }
@@ -4645,6 +4730,73 @@ bool save_controls() {
   refresh_shortcut_status();
   return true;
 }
+// The power icon in a live picture's top left corner (device pixels).
+RECT power_icon_rect(const RECT& well) {
+  return {well.left + scale(6), well.top + scale(6), well.left + scale(34), well.top + scale(34)};
+}
+// Its tooltip, for a picture well at these logical coordinates.
+void power_tooltip(int id, int x, int y, int w, int h, const wchar_t* tip) {
+  if (!sidebar_tooltip)
+    return;
+  TOOLINFOW info{};
+  info.cbSize = sizeof(info);
+  info.uFlags = TTF_SUBCLASS;
+  info.hwnd = window;
+  info.uId = static_cast<UINT_PTR>(id);
+  info.rect = power_icon_rect(rectangle(x, y, w, h));
+  info.lpszText = const_cast<wchar_t*>(tip);
+  SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
+}
+// On for the taxi cameras when the left and right cameras both are, as the
+// Both action turns them off then; for the door camera while it is on.
+bool camera_power_on(int id) {
+  const auto s = draft();
+  if (id == DoorPowerId)
+    return s.door_on != 0;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto* profile = profiles::find(s.profile);
+  const unsigned both = profile ? win::camera_action_sides(*profile, win::CameraBoth) : 0u;
+  return both && (live_cameras_on(s, sample, *profile) & both) == both;
+}
+// The live pictures' power icons drawn by draw_page, in device pixels.
+struct PowerArea {
+  RECT bounds{};
+  int id{};
+};
+std::vector<PowerArea> power_areas;
+const PowerArea* power_area_at(POINT point) {
+  for (const auto& area : power_areas)
+    if (PtInRect(&area.bounds, point))
+      return &area;
+  return nullptr;
+}
+// The power symbol in a live picture's top left corner, on the picture with
+// no background: the accent while on, light while off, outlined in black so
+// it shows on any picture.
+void draw_power_icon(HDC dc, const RECT& well, int id) {
+  const auto r = power_icon_rect(well);
+  power_areas.push_back({r, id});
+  const bool on = camera_power_on(id);
+  const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2 + scale(1), radius = scale(8);
+  const int dx = radius / 2, dy = radius * 866 / 1000;
+  const auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+  for (const bool outline : {true, false}) {
+    HPEN pen = CreatePen(PS_SOLID, outline ? scale(5) : scale(2), outline ? RGB(0, 0, 0) : on ? Accent : Text);
+    const auto old_pen = SelectObject(dc, pen);
+    // The ring, open at the top (counterclockwise from upper left to upper
+    // right), and the stroke through the opening.
+    Arc(dc, cx - radius, cy - radius, cx + radius, cy + radius, cx - dx, cy - dy, cx + dx, cy - dy);
+    MoveToEx(dc, cx, cy - radius - scale(2), nullptr);
+    LineTo(dc, cx, cy - scale(1));
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+  }
+  SelectObject(dc, old_brush);
+}
 void build_controls() {
   refreshing = true;
   if (setup_step(page) < 0)
@@ -4663,11 +4815,12 @@ void build_controls() {
   constexpr int nav_ids[]{100 + OverviewPage, 100 + CamerasPage, 100 + OptionsPage, 100 + DiagnosticsPage};
   for (int slot = 0; slot < 4; ++slot)
     navigation.push_back(button(names[slot], nav_ids[slot], 20, 156 + slot * 49, 166, 40));
-  const auto donate_button = button(tr(L"Donate"), 513, 24, 590, 110, 40);
-  const auto report_button = button(tr(L"Report a bug"), 512, 24, 638, 40, 40);
-  const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 155, 22);
+  const auto donate_button = button(tr(L"Donate"), 513, 24, 590, 162, 40);
+  const auto report_button = button(tr(L"Report a bug"), 512, 24, 638, 162, 40);
+  // The version, with What's new beside it.
+  const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 60, 22);
   SendMessageW(version_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
-  const HWND whats_new_link = button(changelog_fetcher.busy() ? tr(L"Loading…") : tr(L"What's new"), 515, 76, 647, 110, 22);
+  const HWND whats_new_link = button(changelog_fetcher.busy() ? tr(L"Loading…") : tr(L"What's new"), 515, 90, 692, 96, 22);
   SendMessageW(whats_new_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
   sidebar_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
                                     CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
@@ -4760,6 +4913,8 @@ void build_controls() {
         for (int j = 0; j < 6; ++j)
           edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * (field + 10), 246 + (j / 3) * 50, field);
       }
+      if (!advanced)
+        power_tooltip(CameraPowerId + i, x, 212, inner, CameraCardHeight - 90, tr(L"Turn the left and right cameras on or off"));
       const int half = (inner - 10) / 2;
       button(tr(L"Adjust live view"), LiveFeedId + i, x, 172 + height - 42, half, 32);
       button(tr(L"Defaults"), DefaultsId + i, x + half + 10, 172 + height - 42, half, 32);
@@ -4795,12 +4950,17 @@ void build_controls() {
     const auto* profile = profiles::find(s.profile);
     const unsigned sides = profile ? std::min<unsigned>(profile->sides, MaxDisplaySides) : 2;
     const int width = (400 - 8 * static_cast<int>(sides)) / static_cast<int>(sides + 1);
+    // Where on that display: its area, placed anywhere on the whole texture.
+    button(tr(L"Display area"), DoorAreaId, 530, 180, 132, 30);
+    EnableWindow(GetDlgItem(window, DoorAreaId), s.door_side < MaxDisplaySides);
     button(tr(L"None"), DoorWhereId, 262, 216, width);
     for (unsigned side = 0; side < sides; ++side)
       button(display_side_title(s, side), DoorWhereId + 1 + static_cast<int>(side), 262 + static_cast<int>(side + 1) * (width + 8), 216,
              width);
     button(tr(L"Snapshot"), DoorSnapshotId, 262, 352, 196);
     button(tr(L"Live"), DoorLiveId, 466, 352, 196);
+    if (s.door_side < MaxDisplaySides)
+      power_tooltip(DoorPowerId, 712, 236, 280, advanced ? 150 : 276, tr(L"Turn the door camera on or off"));
     button(tr(L"Adjust live view"), LiveFeedId + static_cast<int>(profiles::DoorFeed), 712, 528, 136);
     button(tr(L"Defaults"), DefaultsId + static_cast<int>(profiles::DoorFeed), 856, 528, 136);
     if (advanced) {
@@ -4854,8 +5014,8 @@ void build_controls() {
       button(switch_label(side_toggle_name(s, side), s.calibration_mask & (1u << side)).c_str(), calibrations[side],
              600 + static_cast<int>(side) * 132, 318, 124);
     edit(s.calibration_budget, 203, 872, 392, 120);
-    button(tr(L"Open log folder"), 510, 244, 454, 210);
-    button(tr(L"Stop camera tests"), 511, 464, 454, 210);
+    button(tr(L"Stop camera tests"), 511, 782, 440, 210);
+    button(tr(L"Open log folder"), 510, 244, 500, 210);
   } else if (page == GuidesPage) {
     const auto* guide_profile = profiles::find(s.profile);
     const bool draw_guides = !guide_profile || guide_profile->reference_guides;
@@ -5069,6 +5229,7 @@ void choose_language(const wchar_t* preference) {
 }
 void draw_page(HDC dc) {
   hit_areas.clear();
+  power_areas.clear();
   RECT client{};
   GetClientRect(window, &client);
   FillRect(dc, &client, background_brush);
@@ -5137,7 +5298,8 @@ void draw_page(HDC dc) {
                                                            L"Restart Flight only if the list stays empty."))
                       : sample.heartbeat ? widen(sample.message)
                                          : live;
-    text(dc, line.c_str(), 262, 166, 730, 36, small, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
+    // Left of Auto-connect and Disconnect (686-992), as the heading is.
+    text(dc, line.c_str(), 262, 166, 410, 36, small, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
     panel(dc, 244, 222, 766, 84);
     text(dc, tr(L"Setup"), 262, 230, 120, 26, heading);
     text(dc, unsupported ? tr(L"This aircraft is not set up yet. Start with Displays.") : tr(L"Open any step to change it."), 382, 230, 610,
@@ -5185,6 +5347,7 @@ void draw_page(HDC dc) {
           text(dc, labels[j], x + 18 + (j % 3) * (field + 10), 228 + (j / 3) * 50, field, 18, small, Muted);
       } else {
         draw_feed_picture(dc, sample, static_cast<unsigned>(i), rectangle(x + 18, 212, inner, CameraCardHeight - 90));
+        draw_power_icon(dc, rectangle(x + 18, 212, inner, CameraCardHeight - 90), CameraPowerId + i);
       }
     }
     if (advanced) {
@@ -5261,12 +5424,14 @@ void draw_page(HDC dc) {
       const auto id = routed_texture_ids(sample, *profile)[s.door_side];
       const auto* t = find_thumbnail(id);
       const bool fits = t && t->texture_width && t->texture_height &&
-                        (profile->fit_texture || (t->texture_width == profile->width && t->texture_height == profile->height));
+                        (profile->fit_texture || (t->texture_width == profile->width && t->texture_height == profile->height) ||
+                         (s.door_side == MaxDisplaySides - 1 && profiles::lower_any_panel(*profile)));
       const auto crop =
           fits ? profiles::side_content_rect(*profile, s.door_side, t->texture_width, t->texture_height, true) : profiles::DisplayRect{};
       draw_thumbnail(dc, box, id, tr(L"No display"), crop.right > crop.left ? &crop : nullptr);
       if (id)
         hit_areas.push_back({box, id});
+      draw_power_icon(dc, box, DoorPowerId);
     } else {
       draw_thumbnail(dc, box, 0, tr(L"No display chosen"));
     }
@@ -5358,13 +5523,14 @@ void draw_page(HDC dc) {
                             {stage(0), stage(1), stage(2), stage(3), stage(4), stage(5), stage(6), stage(7), stage(8), stage(9)}) +
                         L"\n\n" + tr(L"Excludes engine rendering and GPU time.");
     text(dc, timing.c_str(), 637, 140, 355, 136, small, Muted, DT_LEFT | DT_WORDBREAK);
-    panel(dc, 244, 304, 766, 136);
+    // The tests, with Stop camera tests at the bottom right.
+    panel(dc, 244, 304, 766, 182);
     text(dc, tr(L"Calibration bars"), 480, 318, 112, 36, small, Muted);
     text(dc, tr(L"Scene test renders without PFD delivery. Calibration bars identify each screen and pause TAXI-button control."), 262, 362,
          730, 22, small, Muted, DT_LEFT | DT_WORDBREAK);
     const auto line = sample.heartbeat ? widen(sample.message) : live;
     text(dc, tr(L"Calibration batches per 50 ms (64–16384)"), 262, 395, 550, 24, small, Muted);
-    text(dc, line.c_str(), 244, 504, 766, 38, small, Muted, DT_LEFT | DT_WORDBREAK);
+    text(dc, line.c_str(), 244, 550, 766, 38, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == SetupPage) {
     draw_setup(dc, sample);
   } else if (page == GuidesPage) {
@@ -5809,11 +5975,6 @@ void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
   SelectObject(item.hDC, normal);
   SetTextColor(item.hDC, Text);
   DrawTextW(item.hDC, step_name(step), -1, &label_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-  if (item.itemState & ODS_FOCUS) {
-    RECT focus = r;
-    InflateRect(&focus, -scale(4), -scale(4));
-    DrawFocusRect(item.hDC, &focus);
-  }
 }
 // The page a navigation button stands for: Setup for every step.
 bool navigation_selected(int id) {
@@ -5957,6 +6118,12 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         end_card_drag(point);
         return 0;
       }
+      // A picture's power icon comes before the picture under it.
+      if (const auto* power = power_area_at(point)) {
+        toggle_camera_from_hotkey(power->id == DoorPowerId ? win::CameraDoor : win::CameraBoth);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
       if (const auto* area = hit_area_at(point)) {
         if (area->id)
           show_display_snapshot(area->id);
@@ -5971,16 +6138,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         POINT point{};
         GetCursorPos(&point);
         ScreenToClient(hwnd, &point);
-        if (hit_area_at(point)) {
+        if (hit_area_at(point) || power_area_at(point)) {
           SetCursor(LoadCursorW(nullptr, IDC_HAND));
           return TRUE;
         }
       }
-      if (const auto link = reinterpret_cast<HWND>(w);
-          link && GetParent(link) == hwnd && (GetDlgCtrlID(link) == 514 || GetDlgCtrlID(link) == 515) && LOWORD(l) == HTCLIENT) {
-        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+      if (button_cursor(hwnd, w, l))
         return TRUE;
-      }
       break;
     case WM_PAINT: {
       PAINTSTRUCT ps;
@@ -6066,10 +6230,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         SetBkMode(item->hDC, TRANSPARENT);
         auto bounds = item->rcItem;
         DrawTextW(item->hDC, label, -1, &bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        if (!disabled && (item->itemState & ODS_FOCUS)) {
-          InflateRect(&bounds, -1, -1);
-          DrawFocusRect(item->hDC, &bounds);
-        }
         RestoreDC(item->hDC, saved);
         return TRUE;
       }
@@ -6090,8 +6250,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       DeleteObject(pen);
       RECT r = item->rcItem;
       if (id == 512) {
-        draw_bug_icon(item->hDC, r, disabled ? Muted : Accent);
-        InflateRect(&r, -scale(4), -scale(4));
+        // Report a bug: the bug at the left, then the words.
+        draw_bug_icon(item->hDC, {r.left, r.top, r.left + scale(40), r.bottom}, disabled ? Muted : Accent);
+        wchar_t label[64]{};
+        GetWindowTextW(item->hwndItem, label, 64);
+        RECT words{r.left + scale(40), r.top, r.right - scale(8), r.bottom};
+        SelectObject(item->hDC, normal);
+        SetTextColor(item->hDC, disabled ? Muted : Text);
+        SetBkMode(item->hDC, TRANSPARENT);
+        DrawTextW(item->hDC, label, -1, &words, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
       } else {
         wchar_t label[160];
         GetWindowTextW(item->hwndItem, label, 160);
@@ -6112,11 +6279,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           InflateRect(&r, scale(6), 0);
         }
         DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-      }
-      if (!disabled && (item->itemState & ODS_FOCUS)) {
-        if (id != 512)
-          InflateRect(&r, -2, -4);
-        DrawFocusRect(item->hDC, &r);
       }
       return TRUE;
     }
@@ -6508,6 +6670,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (id == DisplayAreaId) {
         if (apply(false))
           open_live_view(0, true);
+        return 0;
+      }
+      if (id == DoorAreaId) {
+        if (apply(false))
+          open_live_view(profiles::DoorFeed, true, draft().door_side);
         return 0;
       }
       if (id >= DefaultsId && id < DefaultsId + static_cast<int>(profiles::CameraViews)) {

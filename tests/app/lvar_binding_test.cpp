@@ -48,8 +48,20 @@ int main() {
   bindings[CameraRight].trigger = static_cast<std::uint32_t>(LvarTrigger::latched);
   require(valid_lvar_bindings(bindings), "A bound action is valid");
   auto bad = bindings;
-  bad[CameraLeft].trigger = 2;
+  bad[CameraLeft].trigger = 3;
   require(!valid_lvar_bindings(bad), "Unknown triggers are refused");
+  bad[CameraLeft].trigger = static_cast<std::uint32_t>(LvarTrigger::latched) | 15u << 8;
+  require(!valid_lvar_bindings(bad), "Only an equals trigger carries a value");
+  bad[CameraLeft].trigger = lvar_equals_trigger(15);
+  require(valid_lvar_bindings(bad) && lvar_trigger_kind(bad[CameraLeft].trigger) == LvarTrigger::equals &&
+              lvar_equals_value(bad[CameraLeft].trigger) == 15 && lvar_equals_value(lvar_equals_trigger(LvarEqualsMax)) == LvarEqualsMax,
+          "An equals trigger keeps its value");
+  require(lvar_active(lvar_equals_trigger(15), 15) && lvar_active(lvar_equals_trigger(15), 15.2) &&
+              !lvar_active(lvar_equals_trigger(15), 14) && !lvar_active(lvar_equals_trigger(15), 0) &&
+              lvar_active(lvar_equals_trigger(0), 0) && !lvar_active(lvar_equals_trigger(15), std::numeric_limits<double>::quiet_NaN()) &&
+              lvar_active(static_cast<std::uint32_t>(LvarTrigger::latched), 3) &&
+              !lvar_active(static_cast<std::uint32_t>(LvarTrigger::latched), 0),
+          "Equals is on at its value only; latched is on when non-zero");
   bad = bindings;
   std::memset(bad[CameraLeft].name, 'A', LvarNameSize);
   require(!valid_lvar_bindings(bad), "An unterminated name is refused");
@@ -125,6 +137,24 @@ int main() {
   require(several.update(bindings, 2, both, commands) == 2 && commands[0].action == CameraLeft &&
               commands[0].kind == LvarCommandKind::off && commands[1].action == CameraSd && commands[1].kind == LvarCommandKind::on,
           "Each binding gives its own command");
+
+  // Equals: the A380X's ECAM VIDEO key selects system display page 15
+  // (A32NX_ECAM_SD_CURRENT_PAGE_INDEX); the bridge counts entering and leaving it.
+  bindings = {};
+  std::strcpy(bindings[CameraDoor].name, "A32NX_ECAM_SD_CURRENT_PAGE_INDEX");
+  bindings[CameraDoor].trigger = lvar_equals_trigger(15);
+  const auto page = [](float value, std::uint32_t rises, std::uint32_t falls) {
+    LvarBindingStates states{};
+    states[CameraDoor] = {value, rises, falls, 1};
+    return states;
+  };
+  LvarBindingTracker equals;
+  require(!equals.update(bindings, 4, page(3, 0, 0), commands), "The first page only records the counters");
+  require(equals.update(bindings, 4, page(15, 1, 0), commands) == 1 && commands[0].action == CameraDoor &&
+              commands[0].kind == LvarCommandKind::on,
+          "The VIDEO page turns the door camera on");
+  require(equals.update(bindings, 4, page(2, 1, 1), commands) == 1 && commands[0].kind == LvarCommandKind::off,
+          "Another page turns it off");
 
   // Whether the action's displays are on is read as its shortcut reads it.
   Settings settings{};

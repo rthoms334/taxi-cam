@@ -409,6 +409,15 @@ void placed_lower_display() {
               !chosen->taxi_lvars[2][0] && chosen->taxi_events[2] && !chosen->taxi_events[2][0] &&
               chosen->camera_panes == profiles::A380.camera_panes,
           "The lower display takes side 0's region, no cockpit control, and the same cameras");
+  // It may be any cockpit panel, such as the A380X's 1646 x 1024 MFD; the
+  // pilot displays and automatic detection keep the display shape.
+  require(profiles::lower_any_panel(*chosen) && !profiles::lower_any_panel(profiles::A380) &&
+              profiles::side_display(*chosen, 2, 1646, 1024, 5, 28) && !profiles::side_display(*chosen, 0, 1646, 1024, 5, 28) &&
+              profiles::side_display(*chosen, 0, 768, 1024, 5, 28) && !profiles::side_display(*chosen, 2, 1646, 1024, 1, 28),
+          "Only the placed lower display takes a panel of another shape");
+  require(profiles::drawable(*chosen, 1646, 1024, 5, 28) && !profiles::drawable(profiles::A380, 1646, 1024, 5, 28) &&
+              !profiles::matches_detection(*chosen, 1646, 1024, 5, 28) && !profiles::lower_any_panel(profiles::Pmdg777),
+          "Detection and the profiles without a placed lower display are unchanged");
   Settings s;
   s.display_override = lower;
   s.door_side = 2;

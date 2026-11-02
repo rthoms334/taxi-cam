@@ -11,17 +11,34 @@ namespace taxi_camera::standalone {
 // Cockpit L:vars the user binds to camera actions, saved per aircraft profile.
 // Taxi Cam only reads them. A momentary binding works like its action's
 // shortcut on every press (zero to non-zero); a latched binding turns the
-// action's displays on when it becomes non-zero and off when it returns to zero.
+// action's displays on when it becomes non-zero and off when it returns to
+// zero; an equals binding turns them on while it reads one value, such as a
+// display's page number (the A380X's ECAM VIDEO key selects system display
+// page 15), and off otherwise.
 inline constexpr std::size_t LvarNameSize = 64;
 // One binding per CameraAction: left, right, both, lower, door camera.
 inline constexpr std::size_t LvarBindingCount = 5;
-enum class LvarTrigger : std::uint32_t { momentary, latched };
+enum class LvarTrigger : std::uint32_t { momentary, latched, equals };
 struct LvarBinding {
   char name[LvarNameSize]{};  // Without the "L:" prefix; empty when the action is not bound.
-  std::uint32_t trigger{};    // LvarTrigger
+  std::uint32_t trigger{};    // LvarTrigger in the low byte; an equals binding's value above it.
 };
 using LvarBindings = std::array<LvarBinding, LvarBindingCount>;
 static_assert(std::has_unique_object_representations_v<LvarBinding>);
+// An equals binding's value: a whole number up to LvarEqualsMax.
+inline constexpr std::uint32_t LvarEqualsMax = 0xffffff;
+inline constexpr LvarTrigger lvar_trigger_kind(std::uint32_t trigger) noexcept {
+  return static_cast<LvarTrigger>(trigger & 0xff);
+}
+inline constexpr std::uint32_t lvar_equals_value(std::uint32_t trigger) noexcept {
+  return trigger >> 8;
+}
+inline constexpr std::uint32_t lvar_equals_trigger(std::uint32_t value) noexcept {
+  return static_cast<std::uint32_t>(LvarTrigger::equals) | (value & LvarEqualsMax) << 8;
+}
+inline constexpr bool valid_lvar_trigger(std::uint32_t trigger) noexcept {
+  return lvar_trigger_kind(trigger) == LvarTrigger::equals ? true : trigger <= static_cast<std::uint32_t>(LvarTrigger::latched);
+}
 
 // Letters, digits, underscores and dots, 1-63 characters. Nothing that could
 // carry a unit, an index or a second variable into the SimConnect definition.
@@ -40,7 +57,7 @@ inline bool valid_lvar_bindings(const LvarBindings& bindings) noexcept {
   for (const auto& binding : bindings) {
     if (!std::memchr(binding.name, 0, LvarNameSize) || (binding.name[0] && !valid_lvar_name(binding.name)))
       return false;
-    if (binding.trigger > static_cast<std::uint32_t>(LvarTrigger::latched))
+    if (!valid_lvar_trigger(binding.trigger))
       return false;
   }
   return true;
@@ -68,10 +85,16 @@ inline bool parse_lvar_name(const wchar_t* text, char (&out)[LvarNameSize]) noex
   std::memset(out, 0, sizeof(out));
   return false;
 }
-// The value's on/off reading, for both trigger kinds. Lamps and animations
-// that read 1.003 or 100 when on count as on.
+// The value's on/off reading, for momentary and latched bindings. Lamps and
+// animations that read 1.003 or 100 when on count as on.
 inline bool lvar_on(double value) noexcept {
   return std::isfinite(value) && std::abs(value) >= 0.5;
+}
+// A latched or equals binding's on/off reading: equals is on at its value.
+inline bool lvar_active(std::uint32_t trigger, double value) noexcept {
+  if (lvar_trigger_kind(trigger) != LvarTrigger::equals)
+    return lvar_on(value);
+  return std::isfinite(value) && std::abs(value - static_cast<double>(lvar_equals_value(trigger))) < 0.5;
 }
 // A momentary button's presses and releases between two readings. Plain
 // buttons and animations go from 0 to 1 (or 100) while held and back to 0.
@@ -163,7 +186,7 @@ class LvarBindingTracker {
         if (rises % 2)
           out[count++] = {static_cast<unsigned>(i), LvarCommandKind::toggle};
       } else {
-        out[count++] = {static_cast<unsigned>(i), lvar_on(state.value) ? LvarCommandKind::on : LvarCommandKind::off};
+        out[count++] = {static_cast<unsigned>(i), lvar_active(binding.trigger, state.value) ? LvarCommandKind::on : LvarCommandKind::off};
       }
     }
     return count;

@@ -487,7 +487,9 @@ int main() {
       assert(!profiles::matches_display(*profile, 1560, 2340, 5, 27) && !profiles::matches_display(*profile, 2340, 2340, 5, 28));
       assert(!profiles::matches_display(*profile, 1560, 2340, 1, 10));
       assert(profile->composition.tail_corner == profiles::AerosoftA346.composition.tail_corner);
-      assert(profile->mounts == profiles::A359.mounts);
+      // The A350-900's taxi cameras; the A350's door camera stays in its cabin.
+      assert(profile->mounts[0] == profiles::A359.mounts[0] && profile->mounts[1] == profiles::A359.mounts[1] &&
+             profile->mounts[3] == profiles::DoorMount);
       continue;
     }
     if (profile->id == profiles::AerosoftA346.id) {
@@ -621,11 +623,18 @@ int main() {
   }
   // Every aircraft's set has four views: the taxi cameras, the right wing slot
   // (a copy of the tail where there is no split bottom) and the door camera at
-  // the working image's size on the shared approximate mount.
+  // the working image's size, on the shared approximate mount until the
+  // aircraft has its own (the PMDG 777s and A350s, set live on the 777-200ER
+  // and A350-900).
   for (const auto* profile : profiles::Catalog) {
     const bool split = profile->composition.split_bottom != 0;
     assert(profiles::taxi_feeds(*profile) == (split ? 3u : 2u) && profiles::DoorFeed == 3 && profiles::CameraViews == 4);
-    assert(profile->camera_panes[profiles::DoorFeed] == profiles::DoorPane && profile->mounts[profiles::DoorFeed] == profiles::DoorMount);
+    const auto& door = profile->id == profiles::Pmdg777300ER.id                       ? profiles::Pmdg777300DoorMount
+                       : profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam ? profiles::Pmdg777DoorMount
+                       : profile->id == profiles::A359.id                             ? profiles::A350DoorMount
+                       : profile->id == profiles::A35K.id                             ? profiles::A35KDoorMount
+                                                                                      : profiles::DoorMount;
+    assert(profile->camera_panes[profiles::DoorFeed] == profiles::DoorPane && profile->mounts[profiles::DoorFeed] == door);
     if (!split)
       assert(profile->camera_panes[2] == profile->camera_panes[1] && profile->mounts[2] == profile->mounts[1]);
   }

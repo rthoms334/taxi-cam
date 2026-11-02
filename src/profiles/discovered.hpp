@@ -39,8 +39,9 @@ inline bool same_layout(const DiscoveredLayout& a, const DiscoveredLayout& b) no
 // Panel textures are created R8G8B8A8_UNORM (format 28), the only format
 // aircraft discovery pairs with panel names.
 inline constexpr std::uint32_t DiscoveredFormat = 28;
-// Starting camera mounts until the user positions the cameras: the A350-900's.
-inline constexpr CameraMounts DiscoveredMounts = A359.mounts;
+// Starting camera mounts until the user positions the cameras: the A350-900's
+// taxi cameras and the shared door camera (the A350's own sits in its cabin).
+inline constexpr CameraMounts DiscoveredMounts{{A359.mounts[0], A359.mounts[1], A359.mounts[2], DoorMount}};
 namespace discovered_detail {
 template <std::size_t N>
 inline bool terminated_name(const char (&text)[N], bool allow_empty) noexcept {

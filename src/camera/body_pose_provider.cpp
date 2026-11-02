@@ -504,7 +504,8 @@ bool accept_lvar_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) n
         state.lvar_was_on[binding] = presses.held;
       }
     } else {
-      const bool on = standalone::lvar_on(values[k]);
+      // Latched: non-zero; equals: its value, such as a display's page.
+      const bool on = standalone::lvar_active(state.lvar_names[binding].trigger, values[k]);
       if (read.read && on != state.lvar_was_on[binding])
         ++(on ? read.rises : read.falls);
       state.lvar_was_on[binding] = on;

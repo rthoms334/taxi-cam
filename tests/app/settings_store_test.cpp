@@ -256,11 +256,15 @@ void lvar_bindings_persist() {
   std::strcpy(saved.lvar_bindings[1].name, "S_PED_COCKPIT_DOOR_VIDEO");
   std::strcpy(saved.lvar_bindings[3].name, "I_OH_COCKPIT_DOOR_VIDEO");
   saved.lvar_bindings[3].trigger = static_cast<std::uint32_t>(LvarTrigger::latched);
+  std::strcpy(saved.lvar_bindings[4].name, "A32NX_ECAM_SD_CURRENT_PAGE_INDEX");
+  saved.lvar_bindings[4].trigger = lvar_equals_trigger(15);
   require(save_settings(saved), "Save a profile with L:var bindings");
   const auto path = settings_path(saved);
   require(ini(path, L"bindings", L"right") == L"S_PED_COCKPIT_DOOR_VIDEO" && ini(path, L"bindings", L"right_trigger") == L"momentary" &&
-              ini(path, L"bindings", L"sd_trigger") == L"latched" && ini(path, L"bindings", L"left") == L"<missing>",
-          "Only bound actions are written");
+              ini(path, L"bindings", L"sd_trigger") == L"latched" && ini(path, L"bindings", L"left") == L"<missing>" &&
+              ini(path, L"bindings", L"door_trigger") == L"equals" && ini(path, L"bindings", L"door_value") == L"15" &&
+              ini(path, L"bindings", L"sd_value") == L"<missing>",
+          "Only bound actions are written, an equals binding with its value");
   Settings loaded;
   require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) &&
               std::memcmp(&loaded.lvar_bindings, &saved.lvar_bindings, sizeof(saved.lvar_bindings)) == 0,
@@ -271,6 +275,11 @@ void lvar_bindings_persist() {
               loaded.lvar_bindings[0].trigger == 0 && !loaded.lvar_bindings[1].name[0] &&
               std::strcmp(loaded.lvar_bindings[3].name, "I_OH_COCKPIT_DOOR_VIDEO") == 0,
           "A hand-edited L: prefix is dropped and an unsafe name unbinds only its action");
+  require(loaded.lvar_bindings[4].trigger == lvar_equals_trigger(15), "An equals binding loads with its value");
+  patch(path, L"bindings", L"door_value", L"1.5");
+  require(load_settings(loaded, L"missing-installation", saved.profile) &&
+              loaded.lvar_bindings[4].trigger == static_cast<std::uint32_t>(LvarTrigger::momentary),
+          "An equals binding without a whole value falls back to momentary");
 }
 
 // Every aircraft keeps the door camera's mount in [door] and its display and
@@ -278,6 +287,10 @@ void lvar_bindings_persist() {
 void door_camera_persists() {
   select_fixture(L"door-camera");
   auto saved = customized(profiles::A380);
+  // Two displays: without the system display the A380X places by default.
+  require(std::strcmp(saved.display_override.textures[2], "SCREEN_DU_SD") == 0 && saved.door_side == 2,
+          "A fresh A380X starts its door camera on its system display");
+  saved.display_override = {};
   saved.door_side = 1;
   saved.door_live = 1;
   saved.door_on = 1;
@@ -310,11 +323,25 @@ void door_camera_persists() {
   patch(wing_path, L"door_camera", L"display", nullptr);
   require(load_settings(loaded, L"missing-installation", wing.profile) && loaded.door_side == 2,
           "The 777 door camera defaults to the lower DU");
+  require(load_settings(loaded, L"missing-installation", profiles::Pmdg777.id) && loaded.door_side == 2 &&
+              loaded.mounts[3] == profiles::Pmdg777DoorMount,
+          "A fresh 777-200ER starts from its shipped door camera");
   require(load_settings(loaded, L"missing-installation", profiles::AerosoftA346.id) && loaded.door_side == 2,
           "A fresh A340-600 profile starts its door camera on the lower ECAM");
   patch(path, L"door_camera", L"display", nullptr);
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.door_side == DoorSideNone,
-          "A two-display aircraft starts without a door display");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.door_side == 2 &&
+              std::strcmp(loaded.display_override.textures[2], "SCREEN_DU_SD") == 0 && valid_settings(loaded),
+          "The A380X places its system display as the lower display for the door camera");
+  require(load_settings(loaded, L"missing-installation", profiles::A359.id) && loaded.door_side == 2 &&
+              std::strcmp(loaded.display_override.textures[2], "$SD") == 0 && loaded.display_override.areas[2].top == 268 &&
+              loaded.display_override.areas[2].bottom == 925 && loaded.display_override.areas[2].right == 806 && valid_settings(loaded),
+          "The A350 places its centre display, the system page only, for the door camera");
+  require(load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.door_side == 2 &&
+              std::strcmp(loaded.display_override.textures[2], "$SD") == 0 && profiles::empty_area(loaded.display_override.areas[2]),
+          "The iniBuilds A380 places its own system display");
+  for (const auto* profile : profiles::Catalog)
+    require(load_settings(loaded, L"missing-installation", profile->id) && loaded.door_side == 2,
+            "Every built-in aircraft starts its door camera on a lower display");
 }
 
 void rejected_preferences_are_left_unchanged() {

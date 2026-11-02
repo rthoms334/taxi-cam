@@ -937,9 +937,17 @@ std::array<std::uint64_t, 2> allocation_group_pair(const profiles::AircraftProfi
       return {};
   return {ids[7], ids[5]};
 }
+// A texture of the profile's display shape, or the one routed to a placed
+// lower display that is another panel (lower_any_panel): only that texture,
+// so readiness and backfill still count the profile's displays alone.
 bool display_item(const Registry& r, const Resource& item) noexcept {
-  return item.alive && profiles::matches_display(*r.profile, static_cast<UINT>(item.desc.Width), item.desc.Height, item.desc.MipLevels,
-                                                 static_cast<UINT>(item.desc.Format));
+  if (!item.alive)
+    return false;
+  const UINT width = static_cast<UINT>(item.desc.Width), height = item.desc.Height, mips = item.desc.MipLevels,
+             format = static_cast<UINT>(item.desc.Format);
+  return profiles::matches_display(*r.profile, width, height, mips, format) ||
+         (profiles::lower_any_panel(*r.profile) && item.id && item.id == r.routes.targets[MaxDisplaySides - 1] &&
+          profiles::panel_texture_shape(width, height, mips, format));
 }
 unsigned live_display_resources(const Registry& r) noexcept {
   unsigned n = 0;
@@ -2311,8 +2319,8 @@ void stage_pfd(List& item, std::uint64_t id) noexcept {
     const auto& view = list->targets[slot];
     if (!view.resource || !view.resource->alive || view.mip)
       continue;
-    if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
-                                   view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
+    if (!profiles::drawable(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                            view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
       continue;
     for (unsigned side = 0; side < MaxDisplaySides; ++side) {
       if (r.routes.targets[side] != view.resource->id || !((r.active_mask | r.calibration_mask) & (1u << side)))
@@ -2401,8 +2409,8 @@ void drain_pfds(List& item, std::uint64_t id, bool recording_end = false) noexce
     const auto format = output_format(view);
     if (current == r.rtvs.end() || current->second.resource != view.resource || current->second.format != view.format ||
         current->second.recovered != view.recovered || current->second.mip || format == DXGI_FORMAT_UNKNOWN ||
-        !profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
-                                   view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format))) {
+        !profiles::drawable(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                            view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format))) {
       list->pending_rt[side] = false;
       ++r.fallback_state_refused;
       continue;
@@ -2492,8 +2500,8 @@ UINT selected_legacy_targets(void*, ID3D12GraphicsCommandList* native, std::uint
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     const auto& item = r.selected_resources[side];
     if (!(((r.active_mask | r.calibration_mask) & (1u << side)) && item && item->alive &&
-          profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
-                                    static_cast<UINT>(item->desc.Format))))
+          profiles::drawable(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                             static_cast<UINT>(item->desc.Format))))
       continue;
     bool listed = false;
     for (UINT i = 0; i < count; ++i)
@@ -2558,8 +2566,8 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
                                   (r.waiting_mask & (1u << i)) != 0, (r.door_mask & (1u << i)) != 0};
       }
     if (!item || !placed_count ||
-        !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
-                                   static_cast<UINT>(item->desc.Format)))
+        !profiles::drawable(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                            static_cast<UINT>(item->desc.Format)))
       return;
     ++r.selected_rt_callbacks;
     const auto current = r.rtvs.find(pending.rtv);

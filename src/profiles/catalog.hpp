@@ -130,6 +130,12 @@ struct AircraftProfile {
   // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
   // routing by name. Empty keeps automatic detection for that side.
   std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
+  // A pilot pair's lower display (a panel of the pair's shape), placed for the
+  // door camera while the aircraft's settings have no door camera yet; the
+  // user's choice in Displays is kept from then on. Empty: none known. The
+  // area is its display area on that panel; empty keeps side 0's region.
+  const char* door_lower_texture = "";
+  DisplayRect door_lower_area{};
   // A second accepted mip count (0 = none), for named panel textures whose
   // mip count differs from the detected display targets'. Kept narrow: every
   // profile's shape admits display candidates on every aircraft.
@@ -170,8 +176,9 @@ inline constexpr bool separate_lower_texture(const AircraftProfile& p) noexcept 
   return p.sides > 2 && p.pfd_detection == PfdDetectionPolicy::single_display && p.lower_display_texture[0] != '\0';
 }
 // A catalog profile with a pilot pair of displays can take a third: the lower
-// display the user placed in Displays (apply_choices), a panel of the pair's
-// shape on its own texture, found by its name only. Used for the door camera.
+// display the user placed in Displays (apply_choices), any cockpit panel on
+// its own texture (lower_any_panel), found by its name only. Used for the door
+// camera.
 inline constexpr bool pair_detection(const AircraftProfile& p) noexcept {
   return !p.fit_texture &&
          (p.pfd_detection == PfdDetectionPolicy::dominant_activity || p.pfd_detection == PfdDetectionPolicy::ini_a380_allocation_group);
@@ -210,6 +217,9 @@ inline constexpr AircraftProfile A380 = [] {
                     1024,
                     5};
   p.panel_textures = {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", ""};
+  // The system display below the EWD (panel.cfg VCockpit04, 768 x 1024 like
+  // the PFDs), read from the installed package on 2026-11-02.
+  p.door_lower_texture = "SCREEN_DU_SD";
   p.panel_shapes = {{{"SCREEN_DU_MFD", 1646, 1024},
                      {"SCREEN_DU_EWD", 768, 1024},
                      {"SCREEN_DU_SD", 768, 1024},
@@ -227,6 +237,16 @@ inline constexpr AircraftProfile A380 = [] {
 // rate sweep, parked A350-900 under Man FG target 30. Above the manager
 // ceiling, so only that ceiling caps the useful rate on this aircraft.
 inline constexpr unsigned A350PfdRefreshHz = 80;
+// The door camera's display: $SD, the centre unit (1644 x 1024 like the EFIS
+// textures). Its left half holds the engine display, the system page and the
+// TAT/SAT/GW strip; its right half the ECAM messages. The area is the system
+// page between the dividers at y 266 and 927 (a 2026-11-02 A350-900 snapshot).
+inline constexpr DisplayRect A350DoorArea{0, 268, 806, 925};
+// Door: Robert's live A350-900 door camera (2026-11-02) on that area, behind
+// the cockpit door looking aft and down. The -1000's moves forward with its
+// nose camera (3.81 m); not checked live.
+inline constexpr std::array<double, 6> A350DoorMount{-0.4, 2.8, 24, -57, 179.88, 1.2};
+inline constexpr std::array<double, 6> A35KDoorMount{-0.4, 2.8, 27.81, -57, 179.88, 1.2};
 inline constexpr AircraftProfile A359 = [] {
   AircraftProfile p{2,
                     "ini-a350-900",
@@ -234,7 +254,7 @@ inline constexpr AircraftProfile A359 = [] {
                     {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                     {"", ""},
                     {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                    {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}, {0, 10, -33.0, -15, 0, 0.62}, DoorMount}},
+                    {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}, {0, 10, -33.0, -15, 0, 0.62}, A350DoorMount}},
                     1644,
                     1024,
                     0,
@@ -248,6 +268,8 @@ inline constexpr AircraftProfile A359 = [] {
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
   p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
+  p.door_lower_texture = "$SD";
+  p.door_lower_area = A350DoorArea;
   p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
@@ -258,7 +280,7 @@ inline constexpr AircraftProfile A35K = [] {
                     {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                     {"", ""},
                     {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                    {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}, {0, 10, -36.17, -15, 0, 0.62}, DoorMount}},
+                    {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}, {0, 10, -36.17, -15, 0, 0.62}, A35KDoorMount}},
                     1644,
                     1024,
                     0,
@@ -272,6 +294,8 @@ inline constexpr AircraftProfile A35K = [] {
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
   p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
+  p.door_lower_texture = "$SD";
+  p.door_lower_area = A350DoorArea;
   p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
@@ -302,6 +326,8 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.mips = 1;
   p.panel_mips = 5;
   p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
+  // Its system display, a five-mip 768 x 1024 panel like the PFDs (same table).
+  p.door_lower_texture = "$SD";
   p.panel_shapes = {{{"$INI_FAP", 2048, 1536}, {"$ND_CPT", 768, 1024}, {"$ND_FO", 768, 1024}, {"$EWD", 768, 1024}, {"$SD", 768, 1024}}};
   p.formats = {28, 29, 87, 91, 27, 90};
   p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
@@ -380,9 +406,15 @@ inline constexpr Composition Pmdg777Composition = [] {
 // single tail capture). 200ER/777F published nose from Robert's live 777-200ER
 // calibration. 300ER nose from his live longer-fuselage capture (forward 22 m);
 // wing mounts stay the published shared defaults until calibrated separately.
-inline constexpr CameraMounts Pmdg777Mounts{{{0, -2, 16, -18, 0, 1}, {-6, 1.5, -28, -5, -12, 0.6}, {6, 1.5, -28, -5, 12, 0.6}, DoorMount}};
-inline constexpr CameraMounts Pmdg777300Mounts{{{0, -2, 22, -18, 0, 1}, Pmdg777Mounts[1], Pmdg777Mounts[2], DoorMount}};
-inline constexpr CameraMounts Pmdg777FMounts{{Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2], DoorMount}};
+// Door: Robert's live 777-200ER door camera (2026-11-02), behind the cockpit
+// door looking aft and down the aisle, on the lower DU. The 300ER's moves
+// forward with its nose camera (6 m); not checked live.
+inline constexpr std::array<double, 6> Pmdg777DoorMount{-0.6, 3.2, 23.5, -54.86, -178.77, 1.2};
+inline constexpr std::array<double, 6> Pmdg777300DoorMount{-0.6, 3.2, 29.5, -54.86, -178.77, 1.2};
+inline constexpr CameraMounts Pmdg777Mounts{
+    {{0, -2, 16, -18, 0, 1}, {-6, 1.5, -28, -5, -12, 0.6}, {6, 1.5, -28, -5, 12, 0.6}, Pmdg777DoorMount}};
+inline constexpr CameraMounts Pmdg777300Mounts{{{0, -2, 22, -18, 0, 1}, Pmdg777Mounts[1], Pmdg777Mounts[2], Pmdg777300DoorMount}};
+inline constexpr CameraMounts Pmdg777FMounts{{Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2], Pmdg777DoorMount}};
 // The 200LR has the 200ER's fuselage length, so it starts from the 200ER mounts
 // until calibrated live.
 inline constexpr CameraMounts Pmdg777200LRMounts = Pmdg777Mounts;
@@ -437,6 +469,9 @@ inline constexpr AircraftProfile Pmdg777200LR =
     make_pmdg_777(10, "pmdg-777-200lr", L"PMDG 777-200LR", "PMDG 777-200LR", Pmdg777200LRMounts);
 static_assert(Pmdg777300ER.mounts[0][2] == 22);
 static_assert(Pmdg777300ER.mounts[0] != Pmdg777Mounts[0]);
+static_assert(Pmdg777300DoorMount[2] - Pmdg777DoorMount[2] == Pmdg777300Mounts[0][2] - Pmdg777Mounts[0][2]);
+inline constexpr double A35KDoorShift = A35KDoorMount[2] - A350DoorMount[2] - (A35K.mounts[0][2] - A359.mounts[0][2]);
+static_assert(A35KDoorShift < 1e-9 && A35KDoorShift > -1e-9);
 static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
 static_assert(Pmdg777200LR.mounts == Pmdg777Mounts);
 // Aerosoft A346 Pro 1.0.1 panel.cfg: every display is an htmlgauge on one
@@ -526,7 +561,7 @@ inline constexpr AircraftProfile IniA343 = [] {
                     {"", "", ""},
                     {"", "", ""},
                     {"", "", ""},
-                    A359.mounts,
+                    {{A359.mounts[0], A359.mounts[1], A359.mounts[2], DoorMount}},
                     IniA343DisplayWidth,
                     IniA343DisplayHeight,
                     1,
@@ -701,6 +736,30 @@ inline constexpr bool named_display(const AircraftProfile& p, unsigned width, un
     if (p.side_shapes[side] == std::array<unsigned, 3>{width, height, mips})
       return true;
   return false;
+}
+// A pilot pair's placed lower display (named_lower_side) is any cockpit panel
+// its name picks, such as the A380X's 1646 x 1024 MFD for the door camera. Its
+// pilot displays keep their own shape, and automatic detection only ever
+// considers that shape (matches_detection).
+inline constexpr bool lower_any_panel(const AircraftProfile& p) noexcept {
+  return named_lower_side(p);
+}
+// Name routing per side: the placed lower display any panel texture, every
+// other side named_display.
+inline constexpr bool side_display(const AircraftProfile& p,
+                                   unsigned side,
+                                   unsigned width,
+                                   unsigned height,
+                                   unsigned mips,
+                                   unsigned format) noexcept {
+  if (side == MaxDisplaySides - 1 && lower_any_panel(p))
+    return panel_texture_shape(width, height, mips, format);
+  return named_display(p, width, height, mips, format);
+}
+// A texture some side may be drawn on, once routed there: the display shape,
+// or any panel texture where the placed lower display can be one.
+inline constexpr bool drawable(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
+  return matches_display(p, width, height, mips, format) || (lower_any_panel(p) && panel_texture_shape(width, height, mips, format));
 }
 inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) noexcept {
   const auto equal = [](std::string_view a, std::string_view b) {

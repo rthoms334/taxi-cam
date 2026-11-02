@@ -105,6 +105,35 @@ int main() {
     require(resolve_names(a350, extras.data(), extras.size(), none, 3, fit, any, ids, out, pairs) == -1,
             "A profile without names resolves nothing");
   }
+  // A pilot pair's placed lower display may be any panel (lower_any_panel):
+  // with a fit per side, the A350's 1645 x 1024 $FMS resolves for side 2
+  // while the pilot displays keep their 1644 x 1024 shape (2026-11-02 table).
+  {
+    Panels a350;
+    add(a350, 0, "VCockpit01", "$INI_FAP", 4, 1024);
+    add(a350, 2, "VCockpit02", "$EFIS_LEFT", 4, 1024);
+    add(a350, 3, "VCockpit03", "$EFIS_RIGHT", 4, 1024);
+    add(a350, 4, "VCockpit04", "$SD", 4, 1024);
+    add(a350, 5, "VCockpit05", "$FMS", 4, 1024);
+    const std::vector<Creation> load{{975, 0, 1645, 1024, 5, 28},
+                                     {976, 1, 1644, 1024, 5, 28},
+                                     {977, 2, 1644, 1024, 5, 28},
+                                     {978, 3, 1644, 1024, 5, 28},
+                                     {981, 4, 2048, 2048, 5, 28}};
+    const auto strict = [](const Creation& c) { return c.width == 1644 && c.height == 1024; };
+    const auto per_side = [](const Creation& c, std::size_t side) { return side == 2 || (c.width == 1644 && c.height == 1024); };
+    const char* names[]{"$EFIS_LEFT", "$EFIS_RIGHT", "$FMS"};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    require(resolve_names(a350, load.data(), load.size(), names, 3, strict, any, ids, out, pairs) == -1,
+            "One shape for every side refuses the lower display on the FMS");
+    require(resolve_names(a350, load.data(), load.size(), names, 3, per_side, any, ids, out, pairs) == 0 && ids[0] == 978 &&
+                ids[1] == 977 && ids[2] == 975,
+            "A fit per side routes the lower display to the FMS and the pilot displays as before");
+    const char* swapped[]{"$FMS", "$EFIS_RIGHT", ""};
+    require(resolve_names(a350, load.data(), load.size(), swapped, 3, per_side, any, ids, out, pairs) == -1,
+            "A pilot display never takes another panel's shape");
+  }
   // 777 names resolve unshifted from the recorded burst (DUS 233, EICASCDU 232).
   {
     const char* names[]{"DUS", "DUS", "EICASCDU"};

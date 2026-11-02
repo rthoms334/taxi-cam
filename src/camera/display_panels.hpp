@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 namespace taxi_camera::display_identity {
 // The panel.cfg reader creates one 0x690-byte panel per [VCockpitNN]/
@@ -159,8 +160,16 @@ int resolve_names(const Panels& panels,
       ids[k] = 0;
       if (!names[k] || !names[k][0])
         continue;
+      // fit(creation, side) when the sides differ (a pilot pair's placed
+      // lower display may be any panel), else fit(creation).
+      const auto fits = [&](const Creation& c) {
+        if constexpr (std::is_invocable_v<Fit, const Creation&, std::size_t>)
+          return fit(c, k);
+        else
+          return fit(c);
+      };
       for (std::size_t i = 0; i < paired; ++i)
-        if (out[i].creation.id && fit(out[i].creation) && std::strcmp(out[i].panel->texture.data(), names[k]) == 0)
+        if (out[i].creation.id && fits(out[i].creation) && std::strcmp(out[i].panel->texture.data(), names[k]) == 0)
           ids[k] = out[i].creation.id;
       all = all && ids[k];
     }

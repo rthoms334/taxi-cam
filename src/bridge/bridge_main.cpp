@@ -542,13 +542,19 @@ void service_panel_identity(PanelIdentityLog& state,
     if (first)
       log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
     // Route by name: every named side of the selected profile must resolve to
-    // a tracked texture of the profile's display shape, or nothing is
-    // published for this profile.
+    // a tracked texture of its display's shape (side_display: any panel for a
+    // pilot pair's placed lower display), or nothing is published for this
+    // profile. A placed lower display that does not resolve is left out
+    // rather than leaving the pilot displays without routes.
     std::array<display_identity::Assignment, display_identity::kMaxPanels> proposal{};
     std::size_t paired = 0;
     std::array<std::uint64_t, MaxDisplaySides> named{};
-    const auto fit = [&](const display_identity::Creation& c) {
-      return profile && profiles::named_display(*profile, c.width, c.height, c.mips, c.format);
+    std::array<const char*, MaxDisplaySides> names{};
+    if (profile)
+      names = profile->panel_textures;
+    const std::size_t name_count = profile ? std::min<std::size_t>(profile->sides, MaxDisplaySides) : 0;
+    const auto fit = [&](const display_identity::Creation& c, std::size_t side) {
+      return profile && profiles::side_display(*profile, static_cast<unsigned>(side), c.width, c.height, c.mips, c.format);
     };
     const auto expected = [&](const char* name, std::uint32_t& width, std::uint32_t& height) {
       for (const auto& shape : profile->panel_shapes)
@@ -560,23 +566,20 @@ void service_panel_identity(PanelIdentityLog& state,
       return false;
     };
     const auto resolve = [&](display_identity::PanelOrder by) {
-      return profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
-                                                       std::min<std::size_t>(profile->sides, MaxDisplaySides), fit, expected, named.data(),
-                                                       proposal, paired, 8, by)
+      return profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), names.data(), name_count, fit, expected,
+                                                       named.data(), proposal, paired, 8, by)
                      : -1;
     };
-    // The table's index order first (every catalog aircraft's), else the
-    // panel.cfg section order, for a table listing a section's panels apart:
-    // the names that fit no shift in index order are then paired right.
-    int shift = resolve(display_identity::PanelOrder::index);
-    const bool by_section = shift < 0 && (shift = resolve(display_identity::PanelOrder::section)) >= 0;
     // No window fits (a cockpit whose display boot keeps or adds textures):
     // each named display pairs within its shape. A named side's shape is its
-    // display's (a set-up aircraft's: the panel it was set up on, with mips),
-    // its neighbours' the profile's panel shapes.
+    // display's (a set-up aircraft's: the panel it was set up on, with mips;
+    // a placed lower display's: its panel shape, if the profile lists it), its
+    // neighbours' the profile's panel shapes.
     const auto shape = [&](const char* name, std::uint32_t& width, std::uint32_t& height, std::uint32_t& mips) {
-      for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
-        if (profile->panel_textures[side] && std::strcmp(profile->panel_textures[side], name) == 0) {
+      for (unsigned side = 0; side < name_count; ++side)
+        if (names[side] && std::strcmp(names[side], name) == 0) {
+          if (side == MaxDisplaySides - 1 && profiles::lower_any_panel(*profile))
+            break;
           width = profile->fit_texture ? profile->side_shapes[side][0] : profile->width;
           height = profile->fit_texture ? profile->side_shapes[side][1] : profile->height;
           mips = profile->fit_texture ? profile->side_shapes[side][2] : 0;
@@ -585,12 +588,29 @@ void service_panel_identity(PanelIdentityLog& state,
       mips = 0;
       return expected(name, width, height);
     };
-    const bool by_shape =
-        shift < 0 && profile &&
-        display_identity::resolve_by_shape(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
-                                           std::min<std::size_t>(profile->sides, MaxDisplaySides), shape, named.data(), proposal, paired);
-    if (by_shape)
-      shift = 0;
+    // The table's index order first (every catalog aircraft's), else the
+    // panel.cfg section order, for a table listing a section's panels apart:
+    // the names that fit no shift in index order are then paired right; else
+    // by shape.
+    int shift = -1;
+    bool by_section = false, by_shape = false, lower_left_out = false;
+    for (const bool with_lower : {true, false}) {
+      if (!with_lower) {
+        if (!profile || !profiles::lower_any_panel(*profile) || !names[MaxDisplaySides - 1] || !names[MaxDisplaySides - 1][0])
+          break;
+        names[MaxDisplaySides - 1] = "";
+        lower_left_out = true;
+      }
+      shift = resolve(display_identity::PanelOrder::index);
+      by_section = shift < 0 && (shift = resolve(display_identity::PanelOrder::section)) >= 0;
+      by_shape = shift < 0 && profile &&
+                 display_identity::resolve_by_shape(state.panels, burst.data(), burst.size(), names.data(), name_count, shape, named.data(),
+                                                    proposal, paired);
+      if (by_shape)
+        shift = 0;
+      if (shift >= 0)
+        break;
+    }
     const bool resolved = shift >= 0;
     bool complete = resolved;
     if (!resolved) {
@@ -601,11 +621,12 @@ void service_panel_identity(PanelIdentityLog& state,
     }
     std::vector<std::string> pairs;
     char summary[128];
-    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s",
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s%s",
                   complete ? 1 : 0, paired, shift,
                   by_shape     ? "shape"
                   : by_section ? "section"
-                               : "index");
+                               : "index",
+                  lower_left_out ? " lower=unresolved" : "");
     pairs.emplace_back(summary);
     state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {
@@ -1447,8 +1468,9 @@ DWORD run_impl() {
         // needs a supported aircraft), so aircraft discovery runs here. The
         // panel table is first observed once the flight has loaded, as on a
         // ready flight, so the late-creation rule keeps the same meaning.
+        const auto* lower_profile = profiles::find(pending_profile);
         win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) ||
-                                 (connected && settings.panel_setup));
+                                 (connected && (settings.panel_setup || (lower_profile && profiles::lower_any_panel(*lower_profile)))));
         pending.panel_discovery = win::panel_discovery();
         const bool discovering = pending.panel_discovery && transition_session.flight_loaded;
         if (discovering)
@@ -1995,8 +2017,10 @@ DWORD run_impl() {
     // pilot-pair profile, or a set-up aircraft's.
     status.lower_id = profile && profiles::own_lower_texture(*profile) ? targets[2] : 0;
     status.named_mask = win::named_target_mask();
-    // The companion's aircraft setup also needs every panel texture tracked.
-    win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) || (connected && settings.panel_setup));
+    // The companion's aircraft setup also needs every panel texture tracked,
+    // and so does a placed lower display that may be any panel.
+    win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) ||
+                             (connected && (settings.panel_setup || (profile && profiles::lower_any_panel(*profile)))));
     status.panel_discovery = win::panel_discovery();
     publish_panel_map(panel_identity, status);
     status.snapshot_serial = snapshot.serial;

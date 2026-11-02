@@ -2,7 +2,7 @@
   "releases": [
     {
       "version": "1.3.0",
-      "date": "2026-11-01",
+      "date": "2026-11-02",
       "features": [
         {
           "title": "Door camera",
@@ -11,7 +11,7 @@
         },
         {
           "title": "Set up the door camera",
-          "text": "Setup → Door camera chooses the display it fills and whether it takes one picture each time it turns on (Snapshot) or keeps rendering (Live). Adjust live view aims it, and its display area can take any shape: the camera renders at that shape, so it fills the area. Aircraft such as the A380 first need their lower display placed in Setup → Displays.",
+          "text": "Setup → Door camera chooses the display it fills and whether it takes one picture each time it turns on (Snapshot) or keeps rendering (Live). Adjust live view aims it; Display area places it anywhere on that display, at any shape, and the camera renders at that shape. On the A380s and A350s the lower display can be any cockpit panel, such as an MFD.",
           "image": "docs/whats-new/1.3.0/door-camera-setup.png"
         },
         {
@@ -26,10 +26,12 @@
         },
         {
           "title": "Cockpit L:vars",
-          "text": "Setup → Taxi cameras and Door camera let a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press) or Latched (on while set). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads these variables."
+          "text": "Setup → Taxi cameras and Door camera let a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press), Latched (on while set) or Equals (on at one value, such as the A380X's ECAM video page). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads these variables."
         }
       ],
       "fixes": [
+        "Setup → Displays now lists every cockpit display on built-in aircraft too, not only panels the size of their PFDs.",
+        "Dragging a camera in the live view now turns it the way you drag, like the simulator's mouse look: drag right to look right, down to look down. It used to turn the other way.",
         "Taxi Cam no longer makes the simulator wait for camera work it has not finished on another graphics queue, the cause found in logs of freezes of several seconds on the PMDG 777, except on frames where it is also capturing a camera picture. On the other frames, the camera picture is skipped for that frame instead.",
         "The cameras no longer switch off and on again and again when the simulator keeps stalling. After three stalls within five minutes while the cameras are on, they stay off and Taxi Cam says so; turn them off and on again to retry. bridge.log now records the simulator's graphics memory use, to help find what causes the stalls.",
         "Settings no longer has First camera only. With it on, the cameras never started and the display only showed the waiting page; a saved setting is ignored.",

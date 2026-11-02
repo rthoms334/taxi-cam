@@ -391,6 +391,20 @@ inline bool load_settings(Settings& s,
       binding.trigger = static_cast<std::uint32_t>(LvarTrigger::momentary);
     }
   };
+  // A pilot pair with a known lower display (door_lower_texture) has it
+  // placed, as the user would in Displays, while no door camera is saved.
+  const auto place_door_lower = [&] {
+    constexpr unsigned lower = MaxDisplaySides - 1;
+    if (!profile->door_lower_texture[0] || value.door_side != DoorSideNone || value.display_override.textures[lower][0] ||
+        std::strlen(profile->door_lower_texture) >= profiles::MaxPanelName)
+      return;
+    auto next = value;
+    std::strcpy(next.display_override.textures[lower], profile->door_lower_texture);
+    if (profiles::empty_area(next.display_override.areas[lower]))
+      next.display_override.areas[lower] = profile->door_lower_area;
+    if (valid_settings(next))
+      value = next;
+  };
   // Without a saved or template display, the door camera shows on the lower
   // display where the aircraft has one, as door camera pages usually do.
   const auto default_door_display = [&] {
@@ -416,6 +430,7 @@ inline bool load_settings(Settings& s,
     // the settings owner; stale installer defaults never override later UI edits.
     if (profile->id != profiles::A380.id) {
       apply_door_template(false);
+      place_door_lower();
       default_door_display();
       s = value;
       return true;
@@ -436,6 +451,8 @@ inline bool load_settings(Settings& s,
       }
       CloseHandle(file);
     }
+    place_door_lower();
+    default_door_display();
     s = value;
     return true;
   }
@@ -543,6 +560,12 @@ inline bool load_settings(Settings& s,
       continue;
     GetPrivateProfileStringW(L"bindings", (std::wstring(LvarBindingKeys[i]) + L"_trigger").c_str(), L"", text, 96, path.c_str());
     binding.trigger = static_cast<std::uint32_t>(std::wcscmp(text, L"latched") == 0 ? LvarTrigger::latched : LvarTrigger::momentary);
+    // equals with its value (<key>_value), a whole number; without one it is momentary.
+    if (std::wcscmp(text, L"equals") == 0) {
+      const double equals = read(L"bindings", (std::wstring(LvarBindingKeys[i]) + L"_value").c_str(), -1);
+      if (equals >= 0 && equals <= LvarEqualsMax && std::floor(equals) == equals)
+        binding.trigger = lvar_equals_trigger(static_cast<std::uint32_t>(equals));
+    }
   }
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
   constexpr std::array<const wchar_t*, profiles::CameraViews> sections{L"nose", L"tail", L"wing_right", L"door"};
@@ -561,6 +584,7 @@ inline bool load_settings(Settings& s,
   }
   if (!door_saved[0]) {
     apply_door_template(mount_saved[profiles::DoorFeed]);
+    place_door_lower();
     default_door_display();
   }
   if (!valid_settings(value))
@@ -643,9 +667,15 @@ inline bool save_settings(const Settings& s) {
     const auto& binding = s.lvar_bindings[i];
     if (!binding.name[0])
       continue;
-    const bool latched = binding.trigger == static_cast<std::uint32_t>(LvarTrigger::latched);
+    const auto kind = lvar_trigger_kind(binding.trigger);
     bindings += std::wstring(LvarBindingKeys[i]) + L"=" + std::wstring(binding.name, binding.name + std::strlen(binding.name)) + L"\r\n" +
-                LvarBindingKeys[i] + L"_trigger=" + (latched ? L"latched" : L"momentary") + L"\r\n";
+                LvarBindingKeys[i] + L"_trigger=" +
+                (kind == LvarTrigger::equals    ? L"equals"
+                 : kind == LvarTrigger::latched ? L"latched"
+                                                : L"momentary") +
+                L"\r\n";
+    if (kind == LvarTrigger::equals)
+      bindings += std::wstring(LvarBindingKeys[i]) + L"_value=" + std::to_wstring(lvar_equals_value(binding.trigger)) + L"\r\n";
   }
   if (!write(path, std::wstring(text, static_cast<std::size_t>(count)) + std::wstring(right, static_cast<std::size_t>(right_count)) +
                        displays + door + bindings + layout))
