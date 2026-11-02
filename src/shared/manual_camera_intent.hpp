@@ -91,7 +91,9 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
   settings.taxi_desired_mask = (settings.taxi_desired_mask & pending & ~affected) | (target & affected);
   settings.taxi_selected_mask = pending | affected;
   settings.taxi_request = std::max(settings.taxi_request, status.taxi_request_seen) + 1;
-  settings.manual_mask = target;
+  // The buttons say nothing about a side without one: keep its manual layer.
+  const auto buttons = profiles::taxi_button_sides(*profile);
+  settings.manual_mask = (target & buttons) | (settings.manual_mask & ~buttons);
   settings.calibration_mask = settings.scene_test = 0;
   return CameraHotkeyResult::aircraft;
 }

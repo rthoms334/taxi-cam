@@ -302,11 +302,16 @@ void aircraft_hotkey_intent_checks() {
                 lower_settings.manual_mask == 4 && lower_settings.follow_taxi && !lower_settings.taxi_request &&
                 camera_action_requested(lower_settings, buttons, CameraSd) && camera_action_requested(lower_settings, buttons, CameraLeft),
             "The lower display's shortcut adds a manual layer and sends nothing to the aircraft");
-    require(request_camera_hotkey(lower_settings, CameraSd, buttons, 1001) == CameraHotkeyResult::manual && !lower_settings.manual_mask &&
-                !camera_action_requested(lower_settings, buttons, CameraSd),
+    require(request_camera_hotkey(lower_settings, CameraLeft, buttons, 1001) == CameraHotkeyResult::aircraft &&
+                lower_settings.taxi_request && (lower_settings.manual_mask & 4) &&
+                camera_action_requested(lower_settings, buttons, CameraSd),
+            "A pilot display's shortcut commands its TAXI button and keeps the lower layer");
+    require(request_camera_hotkey(lower_settings, CameraBoth, buttons, 1002) == CameraHotkeyResult::aircraft &&
+                (lower_settings.manual_mask & 4),
+            "Both keeps the lower layer too");
+    require(request_camera_hotkey(lower_settings, CameraSd, buttons, 1003) == CameraHotkeyResult::manual &&
+                !(lower_settings.manual_mask & 4) && !camera_action_requested(lower_settings, buttons, CameraSd),
             "The lower display's shortcut turns its layer off again");
-    require(request_camera_hotkey(lower_settings, CameraLeft, buttons, 1002) == CameraHotkeyResult::aircraft && lower_settings.taxi_request,
-            "The pilot displays still command their TAXI buttons");
     profiles::publish_override(&profiles::A380, {});
   }
   Settings manual;
