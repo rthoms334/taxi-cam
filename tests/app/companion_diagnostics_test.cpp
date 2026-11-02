@@ -194,6 +194,41 @@ void setup_step_tests() {
   require(page == OverviewPage && !dirty && !shortcut_window && win::load_settings(loaded, L"", profiles::A359.id) && loaded.door_live == 1,
           "The last step saves and finishes on Overview");
 }
+// The live view holds the door camera on, rendering live, while Door is
+// selected. Saves keep the aircraft's own Live or Snapshot (the user's latest
+// pick), never the forced Live, and closing gives back what it still holds.
+void door_hold_save_tests() {
+  win::Settings s;
+  require(win::load_settings(s, L"", profiles::AerosoftA346.id) && s.door_side == 2, "The A340-600 has a door camera on its lower ECAM");
+  s.auto_profile = 0;
+  s.door_live = s.door_on = 0;
+  require(win::save_settings(s), "Save the A340-600 as Snapshot");
+  current = s;
+  dirty = false;
+  page = DoorPage;
+  build_controls();
+  live_view = {};
+  live_keep_door(draft());
+  require(live_view.door_taken && current.door_on && current.door_live, "Selecting Door turns it on, live");
+  win::Settings loaded;
+  require(apply() && win::load_settings(loaded, L"", profiles::AerosoftA346.id) && loaded.door_live == 0,
+          "A save while Door is held keeps the aircraft's Snapshot");
+  command(DoorLiveId);
+  require(apply() && win::load_settings(loaded, L"", profiles::AerosoftA346.id) && loaded.door_live == 1,
+          "Live picked during the hold is saved");
+  command(DoorSnapshotId);
+  live_keep_door(draft());
+  require(current.door_live == 1 && apply() && win::load_settings(loaded, L"", profiles::AerosoftA346.id) && loaded.door_live == 0,
+          "Snapshot picked during the hold is saved, though the view still renders live");
+  // Another aircraft: the hold belongs to the A340-600, so nothing is given
+  // back to the A350's settings, and closing ends the hold.
+  auto other = current;
+  other.profile = profiles::A359.id;
+  other.door_live = 1;
+  const auto released = release_door_hold(other);
+  require(released.door_live == 1 && !live_view.door_taken, "Another aircraft's Live is never replaced by the hold's");
+  live_view = {};
+}
 namespace {
 // Displays in a flight whose panel names do not pair (the Fenix display boot
 // of 2026-11-02 left each PFD's name on an ND): a display placed by its
@@ -469,6 +504,7 @@ int main() {
     marking_controls_tests();
     stale_color_selection_tests();
     setup_step_tests();
+    door_hold_save_tests();
     session_display_tests();
     DestroyWindow(window);
     for (const auto* profile : profiles::Catalog) {

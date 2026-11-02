@@ -3088,10 +3088,10 @@ bool apply(bool save = true) {
     return false;
   }
   // While the live view holds the door camera on this aircraft, the file
-  // keeps the aircraft's own Live or Snapshot, not the view's forced Live
-  // (an aircraft switch saves before the hold is released).
+  // keeps the aircraft's own Live or Snapshot (the user's latest pick), not
+  // the view's forced Live (an aircraft switch saves before the hold ends).
   auto saved = settings;
-  if (door_hold_aircraft(saved))
+  if (door_hold_aircraft(saved) && saved.door_live)
     saved.door_live = live_view.door_live_before;
   if (save && !win::save_settings(saved)) {
     notice = tr(L"Could not save settings. Check access to your local settings folder.");
@@ -4554,8 +4554,12 @@ void copy_setup_variant(HWND hwnd) {
     return;
   }
   next.enabled = s.enabled;
-  if (win::prepare_profile_selection(next, s, s.auto_profile != 0) && win::save_settings(next))
+  if (win::prepare_profile_selection(next, s, s.auto_profile != 0) && win::save_settings(next)) {
+    // The copied setup is this aircraft's now: a live view's door hold on it
+    // ends without giving back the old values, and is taken again from these.
+    live_view.door_taken = false;
     publish(next);
+  }
   saved_variant = {};
   fill_setup_list(hwnd);
   SetDlgItemTextW(hwnd, 803, tr_format(L"{0} now starts from {1}'s setup and is selected.", {to, from}).c_str());
@@ -6890,6 +6894,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         auto s = draft();
         if (id == DoorSnapshotId || id == DoorLiveId) {
           s.door_live = id == DoorLiveId ? 1u : 0u;
+          // Picked while the live view holds the door camera: the choice is
+          // what it gives back and what saves keep.
+          if (door_hold_aircraft(s))
+            live_view.door_live_before = s.door_live;
         } else {
           s.door_side = id == DoorWhereId ? win::DoorSideNone : static_cast<std::uint32_t>(id - DoorWhereId - 1);
           if (s.door_side == win::DoorSideNone)
