@@ -89,6 +89,12 @@ class CameraCompositorD3D12 {
   void set_composition(const profiles::Composition& layout) noexcept { composition_ = layout; }
   bool reference_guides() const noexcept { return reference_guides_; }
   void set_reference_guides(bool enabled) noexcept { reference_guides_ = enabled; }
+  // The cameras' looks, a recorded root constant: LookGrain << n gives input n
+  // (nose, tail left, tail right) film grain and darker edges, and
+  // LookBlackAndWhite << n takes its colour out. The grain moves with each
+  // composition.
+  static constexpr UINT LookGrain = 1, LookBlackAndWhite = 256;
+  void set_camera_look(UINT look) noexcept { look_ = look & (7 * LookGrain | 7 * LookBlackAndWhite); }
   void set_ground_speed(float knots, bool valid) noexcept {
     const auto display = ground_speed_display(knots, valid);
     ground_speed_hidden_ = false;
@@ -133,6 +139,17 @@ class CameraCompositorD3D12 {
     return true;
   }
   void clear_tone_curve() noexcept { tone_exposure_ = 0; }
+  // The caller's recording was submitted, or discarded without running: a
+  // tone-table copy it held is then pending again, and the table counts as
+  // written only if it was before.
+  void recording_submitted() noexcept { tone_recorded_ = false; }
+  void recording_discarded() noexcept {
+    if (!tone_recorded_)
+      return;
+    tone_pending_ = true;
+    tone_ready_ = tone_was_ready_;
+    tone_recorded_ = false;
+  }
   bool tone_curve_active() const noexcept { return tone_exposure_ > 0 && (tone_ready_ || tone_pending_); }
 
   // Compiles the five shaders into the process cache without a device, so a
@@ -210,11 +227,17 @@ class CameraCompositorD3D12 {
   // root table stays valid; that fill is not a third feed), exactly three when
   // the bottoms are distinct. Never CopyDescriptorsSimple from this shader-visible
   // heap — it is CPU-write-only as a copy source.
+  // A single-camera page (the door camera: the nose rows fill the image, no
+  // tail rows) passes its one input three times; it counts as one binding.
   HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail_left, DXGI_FORMAT left_format,
                      ID3D12Resource* tail_right, DXGI_FORMAT right_format) noexcept {
     if (!output_.get())
       return fail(E_UNEXPECTED, "Initialize the compositor before binding inputs.");
-    if (!nose || !tail_left || !tail_right || same_object(nose, tail_left) || same_object(nose, tail_right) ||
+    const bool single = same_object(nose, tail_left) && same_object(nose, tail_right);
+    if (single &&
+        (composition_.split_bottom != 0 || composition_.tail_top < Height || nose_format != left_format || nose_format != right_format))
+      return fail(E_INVALIDARG, "Only a single-camera page with no tail rows may pass one input for every feed.");
+    if (!nose || !tail_left || !tail_right || (!single && (same_object(nose, tail_left) || same_object(nose, tail_right))) ||
         same_object(nose, output_.get()) || same_object(tail_left, output_.get()) || same_object(tail_right, output_.get()))
       return fail(E_INVALIDARG, "Nose and bottom inputs must be non-null and must not alias the compositor output.");
     const bool shared_bottom = same_object(tail_left, tail_right);
@@ -249,6 +272,10 @@ class CameraCompositorD3D12 {
     input_descriptions_ = descriptions;
     for (std::size_t index = 0; index < resources.size(); ++index) {
       const bool hdr = formats[index] == DXGI_FORMAT_R11G11B10_FLOAT;
+      if (index && single) {
+        bloom_view(index, hdr ? pyramids_[0].bloom.get() : nullptr);
+        continue;
+      }
       if (index == 2 && shared_bottom) {
         bloom_view(2, hdr ? pyramids_[1].bloom.get() : nullptr);
         continue;
@@ -263,7 +290,7 @@ class CameraCompositorD3D12 {
         bloom_view(index, nullptr);
       }
     }
-    statistics_.descriptor_writes += shared_bottom ? 2u : 3u;
+    statistics_.descriptor_writes += single ? 1u : shared_bottom ? 2u : 3u;
     ++statistics_.input_changes;
     error_[0] = '\0';
     return S_OK;
@@ -287,18 +314,21 @@ class CameraCompositorD3D12 {
         !valid_state(right_before, input_descriptions_[2]))
       return fail(E_INVALIDARG, "A private direct list, bound inputs and supported exact mip-zero states are required.");
     const bool shared_bottom = same_object(inputs_[1].get(), inputs_[2].get());
-    if (shared_bottom && left_before != right_before)
-      return fail(E_INVALIDARG, "Aliased bottom inputs must share the same before state.");
+    const bool single = shared_bottom && same_object(inputs_[0].get(), inputs_[1].get());
+    if ((shared_bottom && left_before != right_before) || (single && nose_before != left_before))
+      return fail(E_INVALIDARG, "Aliased inputs must share the same before state.");
+    // Each distinct input is transitioned (and bloomed) once.
+    const auto aliased = [&](std::size_t index) { return (index == 2 && shared_bottom) || (index && single); };
     const std::array<D3D12_RESOURCE_STATES, 3> states{nose_before, left_before, right_before};
     for (std::size_t index = 0; index < inputs_.size(); ++index) {
-      if (index == 2 && shared_bottom)
+      if (aliased(index))
         continue;
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
                (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
     for (UINT index = 0; index < 3; ++index) {
-      const UINT source = index == 2 && shared_bottom ? 1u : index;
+      const UINT source = single ? 0u : index == 2 && shared_bottom ? 1u : index;
       if (!(hdr & (1u << index)) || pyramids_[source].levels < 2)
         continue;
       if (index == source)
@@ -306,6 +336,9 @@ class CameraCompositorD3D12 {
       hdr |= 16u << index;
     }
     if (tone_pending_) {
+      // Taken back if this recording is discarded unsubmitted (recording_discarded).
+      tone_recorded_ = true;
+      tone_was_ready_ = tone_ready_;
       transition(private_list, tone_table_.get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
       D3D12_TEXTURE_COPY_LOCATION destination{}, source{};
       destination.pResource = tone_table_.get();
@@ -324,7 +357,7 @@ class CameraCompositorD3D12 {
     draw_output(private_list, hdr, ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u));
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     for (std::size_t index = 0; index < inputs_.size(); ++index) {
-      if (index == 2 && shared_bottom)
+      if (aliased(index))
         continue;
       transition(private_list, inputs_[index].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, states[index]);
     }
@@ -386,7 +419,7 @@ class CameraCompositorD3D12 {
     tone_upload_.reset();
     tone_table_.reset();
     tone_exposure_ = 0;
-    tone_pending_ = tone_ready_ = false;
+    tone_pending_ = tone_ready_ = tone_recorded_ = tone_was_ready_ = false;
     device_.reset();
     formats_ = {};
     input_descriptions_ = {};
@@ -640,7 +673,7 @@ class CameraCompositorD3D12 {
   static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
   static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
   static constexpr UINT ToneBit = 256;
-  static constexpr UINT RootConstants = 41;
+  static constexpr UINT RootConstants = 43;
   HRESULT initialize_tone_curve() noexcept {
     D3D12_HEAP_PROPERTIES properties{};
     properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -703,7 +736,9 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-    } display{hdr, exposure, reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
+      UINT look;
+      UINT grain_seed;
+    } display{hdr, exposure, reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_, look_, grain_seed_++};
     static_assert(sizeof(display) == RootConstants * sizeof(UINT));
     private_list->SetGraphicsRoot32BitConstants(1, RootConstants, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1075,7 +1110,7 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
  float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder;
  float TailCornerRX; float TailCornerRY; float TailUpperRX; float TailUpperRY; float TailInnerRX; float TailInnerRY;
- float UiAspect; };
+ float UiAspect; uint LookMask; uint GrainSeed; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -1278,9 +1313,40 @@ float3 feed_rgb(Texture2D<float4> image, Texture2D<float4> bloom, float2 uv, uin
   if ((HdrMask & (17u << feed)) != (17u << feed) || !all(isfinite(rgb))) return rgb;
   return lerp(rgb, bloom.SampleLevel(LinearClamp, uv, 0).rgb, BloomMix);
 }
+float srgb_light(float code) {
+  return code <= 0.04045 ? code / 12.92 : pow(max((code + 0.055) / 1.055, 0), 2.4);
+}
+// One value in [-0.5, 0.5] per output pixel and composition (GrainSeed).
+float grain_noise(float2 position) {
+  uint2 p = uint2(position);
+  uint h = p.x * 1973u + p.y * 9277u + GrainSeed * 26699u;
+  h = (h ^ (h >> 15)) * 0x2c1b3c6du;
+  h = (h ^ (h >> 12)) * 0x297a2d39u;
+  h ^= h >> 15;
+  return float(h & 0xffffu) / 65535.0 - 0.5;
+}
+// The camera looks on a display-referred camera code (LookMask): black and
+// white takes the luminance; film grain darkens the edges of its picture (uv)
+// and adds grain, strongest in the mid tones. Off, the code is unchanged.
+float3 camera_look(float3 code, uint feed, float2 uv, float2 position) {
+  if ((LookMask & (257u << feed)) == 0) return code;
+  if ((LookMask & (256u << feed)) != 0) {
+    float light = dot(float3(srgb_light(code.r), srgb_light(code.g), srgb_light(code.b)), float3(0.2126, 0.7152, 0.0722));
+    float gray = srgb_code(saturate(light));
+    code = float3(gray, gray, gray);
+  }
+  if ((LookMask & (1u << feed)) != 0) {
+    code *= 1 - 0.4 * smoothstep(0.55, 1.4, length((uv - 0.5) * 2));
+    float luma = dot(saturate(code), float3(0.299, 0.587, 0.114));
+    code += grain_noise(position) * 0.1 * (0.35 + 2.6 * luma * (1 - luma));
+  }
+  return saturate(code);
+}
 // Alpha 1 flags a display-referred camera code: the PFD stamp stores this byte
 // on UNORM and sRGB views alike. Overlays use ui_pixel.
-float4 camera_pixel(float3 rgb, uint feed) { return float4(display_rgb(rgb, feed), 1); }
+float4 camera_pixel(float3 rgb, uint feed, float2 uv, float2 position) {
+  return float4(camera_look(display_rgb(rgb, feed), feed, uv, position), 1);
+}
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
@@ -1364,7 +1430,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float right = side_borders ? 768.0 - nose_border : 768.0;
     float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
     float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
-    return camera_pixel(feed_rgb(Nose, NoseBloom, uv, 0), 0);
+    return camera_pixel(feed_rgb(Nose, NoseBloom, uv, 0), 0, uv, position.xy);
   }
   if (position.y < TailTop) return ui_pixel(float3(0, 0, 0));
   if (SplitBottom != 0) {
@@ -1379,11 +1445,11 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
                        (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
-      return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
-    return camera_pixel(feed_rgb(TailRight, TailRightBloom, uv, 2), 2);
+      return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1, uv, position.xy);
+    return camera_pixel(feed_rgb(TailRight, TailRightBloom, uv, 2), 2, uv, position.xy);
   }
   float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
-  return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
+  return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1, uv, position.xy);
 }
 )";
 
@@ -1400,6 +1466,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   float tone_exposure_ = 0;
   bool tone_pending_ = false;
   bool tone_ready_ = false;
+  bool tone_recorded_ = false, tone_was_ready_ = false;
   Reference<ID3D12DescriptorHeap> srv_heap_;
   Reference<ID3D12DescriptorHeap> rtv_heap_;
   Reference<ID3D12Resource> output_;
@@ -1410,6 +1477,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   Statistics statistics_;
   float exposure_ev_ = DefaultExposureEv;
   bool reference_guides_ = true;
+  UINT look_ = 0, grain_seed_ = 0;
   profiles::Composition composition_{};
   UINT ground_speed_ = 0;
   bool ground_speed_valid_ = false;

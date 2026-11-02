@@ -8,6 +8,7 @@
 #include "../profiles/discovered.hpp"
 #include "camera_brightness.hpp"
 #include "camera_rate.hpp"
+#include "lvar_binding.hpp"
 #include "sim_messages.hpp"
 #include "version.hpp"
 
@@ -35,8 +36,19 @@ namespace taxi_camera::standalone {
 // map (each textured cockpit panel with its paired texture) and lists up to 32
 // candidates (any panel can be a set-up aircraft's display); Settings gains
 // the discovered layout of an aircraft the user set up.
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 26;
+// Protocol 27: Settings mounts grow to four (the door camera's is [3]) and gain
+// lvar_bindings (cockpit L:vars bound to camera actions) and the door camera
+// (door_side, door_live, door_on); Status gains lvar_generation/lvars (what the
+// bridge reads from them) and door_state.
+// Protocol 28: Settings film_grain and black_and_white (the cameras' looks).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 28;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
+// Settings::door_side of an aircraft without a door camera display.
+inline constexpr std::uint32_t DoorSideNone = MaxDisplaySides;
+// Status::door_state.
+enum class DoorState : std::uint32_t { off, waiting, live, snapshot };
+// Every camera view's look bit (Settings::film_grain, black_and_white).
+inline constexpr std::uint32_t CameraLookMask = (1u << profiles::CameraViews) - 1;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate;
   std::uint64_t route_request{}, left_id{}, right_id{};
@@ -61,7 +73,7 @@ struct Settings {
   // test (it never produced output); the companion sends 0, the bridge ignores it.
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, retired_single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
-  std::array<std::array<double, 6>, 3> mounts = profiles::A380.mounts;
+  profiles::CameraMounts mounts = profiles::A380.mounts;
   // Protocol 15: explicit separate side-2 texture, sent with route_request
   // (0 = automatic). Unused when side 2 shares the display texture.
   std::uint64_t lower_id{};
@@ -89,6 +101,18 @@ struct Settings {
   // Protocol 26: the user's display choices for this profile (discovered.hpp
   // DisplayOverride). All empty is the profile as it comes.
   profiles::DisplayOverride display_override{};
+  // Protocol 27: cockpit L:vars bound to the camera actions (lvar_binding.hpp),
+  // read by the bridge and acted on by the companion. Saved per aircraft profile.
+  LvarBindings lvar_bindings{};
+  // Protocol 27: the door camera (profiles::DoorFeed, on mounts[3]). door_side
+  // is the display side it fills (DoorSideNone: no door camera); door_live 1
+  // keeps it rendering, 0 shows one snapshot taken each time it is turned on.
+  // Both are saved per aircraft profile. door_on, session-only, turns it on.
+  std::uint32_t door_side = DoorSideNone, door_live = 0, door_on = 0;
+  // Protocol 28: the cameras' looks, a bit per camera view (nose, tail, third
+  // view, door): film grain with darker edges, and black and white. Every
+  // camera starts with film grain, in colour. Saved per aircraft profile.
+  std::uint32_t film_grain = CameraLookMask, black_and_white = 0;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -171,6 +195,13 @@ struct Status {
   std::uint32_t panel_discovery{}, panel_state{}, panel_count{}, panel_clean{};
   std::int32_t panel_shift{-1};
   PanelTexture panels[MaxPanelTextures]{};
+  // Protocol 27: the bound L:vars as read, in Settings::lvar_bindings order.
+  // A new generation (new names, a reconnected worker, a flight change) starts
+  // the counters again; 0 while nothing is read.
+  std::uint32_t lvar_generation{};
+  LvarBindingStates lvars{};
+  // Protocol 27: DoorState of the door camera.
+  std::uint32_t door_state{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};
@@ -198,9 +229,10 @@ inline bool valid_settings(const Settings& s) noexcept {
       return false;
     sides = (1u << s.discovered.sides) - 1;
   } else if (const auto* profile = profiles::base_profile(s.profile)) {
-    if (!profiles::valid_override(profile->sides, profile->fit_texture, profile->camera_padding, s.display_override))
+    if (!profiles::valid_override(*profile, s.display_override))
       return false;
-    sides = profiles::side_mask(*profile);
+    // A lower display the user placed is a side too (override_sides).
+    sides = (1u << profiles::override_sides(*profile, s.display_override)) - 1;
     separate_lower = profiles::separate_lower_texture(*profile);
   } else {
     return false;
@@ -209,7 +241,12 @@ inline bool valid_settings(const Settings& s) noexcept {
       s.scene_test > 1 || s.panel_setup > 1 || s.camera_mode >= kCameraModeCount || s.calibration_budget < 64 ||
       s.calibration_budget > 16384)
     return false;
-  if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
+  if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides) || !valid_lvar_bindings(s.lvar_bindings))
+    return false;
+  if ((s.film_grain & ~CameraLookMask) || (s.black_and_white & ~CameraLookMask))
+    return false;
+  if (s.door_live > 1 || s.door_on > 1 ||
+      (s.door_side != DoorSideNone && (s.door_side >= MaxDisplaySides || !(sides & (1u << s.door_side)))))
     return false;
   if (s.lower_id && (!separate_lower || s.lower_id == s.left_id || s.lower_id == s.right_id))
     return false;
@@ -225,6 +262,18 @@ inline bool valid_settings(const Settings& s) noexcept {
   }
   return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate &&
          valid_camera_brightness(s.day_brightness) && valid_camera_brightness(s.night_brightness);
+}
+// A new display layout can leave the door camera's side out: it has no
+// display then, and is off.
+inline void fit_door_camera(Settings& s) noexcept {
+  const auto* profile = s.profile == profiles::DiscoveredProfileId ? nullptr : profiles::base_profile(s.profile);
+  const unsigned sides = s.profile == profiles::DiscoveredProfileId ? s.discovered.sides
+                         : profile                                  ? profiles::override_sides(*profile, s.display_override)
+                                                                    : 0;
+  if (s.door_side >= sides) {
+    s.door_side = DoorSideNone;
+    s.door_on = 0;
+  }
 }
 class Mailbox {
  public:

@@ -282,7 +282,7 @@ void publish_transition(Runtime& runtime, ProbeSnapshot& report);
 // revalidation) takes the full reset.
 void begin_flight_change(Runtime& runtime) {
   const auto pair = runtime.pair.snapshot();
-  const bool owned = pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2];
+  const bool owned = ec::any_owned(pair.owned_ids);
   const auto* profile = runtime.requested_profile;
   if (owned && profile == runtime.aircraft_profile && runtime.profile_transition.holding() &&
       runtime.profile_transition.id() == profile->id && !runtime.profile_transition.failed()) {
@@ -563,6 +563,17 @@ std::array<std::uint64_t, kMaxCameraFeeds> view_addresses(const std::array<ec::O
   for (unsigned i = 0; i < views.size(); ++i)
     out[i] = views[i].complete && views[i].ready ? views[i].view_address : 0;
   return out;
+}
+std::array<std::uint64_t, kMaxCameraFeeds> view_resources(const std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds>& views) {
+  std::array<std::uint64_t, kMaxCameraFeeds> out{};
+  for (unsigned i = 0; i < views.size(); ++i)
+    out[i] = views[i].resource_address;
+  return out;
+}
+static_assert(ec::kMaxOwnedViews == kMaxCameraFeeds, "Every feed has an owned view");
+// A gate (or a requested gate) of any feed.
+bool any_feed(const std::array<bool, kMaxCameraFeeds>& feeds) noexcept {
+  return std::find(feeds.begin(), feeds.end(), true) != feeds.end();
 }
 // The camera just matched to CameraGet's current view is the main view. Its
 // far distances are kept as numbers only, bound to the current aircraft
@@ -989,10 +1000,10 @@ void inspect_pair(Runtime& runtime,
     report.ready = report.resource_present = report.output_ready = {};
     report.dimensions = {};
     report.flags = {};
-    report.inspection_status = {"not_inspected", "not_inspected", "not_inspected"};
+    report.inspection_status.fill("not_inspected");
     return;
   }
-  if (publish && report.ready[0] && report.ready[1] && (ids[2] == 0 || report.ready[2]) && session_work_allowed(runtime))
+  if (publish && ec::owned_ready(ids, report.ready) && session_work_allowed(runtime))
     report.outputs_matched = timed(runtime, ProbeStage::handoff, [&] {
       return scene_handoff().publish(ticket, {runtime.token.identity, runtime.token.generation}, ids, resources);
     });
@@ -1549,9 +1560,10 @@ void apply_gates(Runtime& runtime,
 enum class ResizeOutcome { failed, output_pending, complete };
 ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true);
 
-// Feeds a profile renders: a split bottom display has a camera per half.
-unsigned profile_feeds(const profiles::AircraftProfile& profile) noexcept {
-  return profile.composition.split_bottom != 0 ? 3u : 2u;
+// Views every camera set has (profiles::CameraViews): the taxi cameras, a
+// right wing slot that is idle on two-camera aircraft, and the door camera.
+unsigned profile_feeds(const profiles::AircraftProfile&) noexcept {
+  return profiles::CameraViews;
 }
 
 enum class KeptPanes { ready, pending, failed };
@@ -2297,7 +2309,7 @@ void observer(void* manager) noexcept {
     std::uint64_t start_revision = 0;
     {
       const std::lock_guard lock(runtime.mutex);
-      if (!before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !before.creation_pending)
+      if (!ec::any_owned(before.owned_ids) && !before.creation_pending)
         runtime.aircraft_profile = runtime.requested_profile;
       if ((runtime.flight_change_hold || runtime.kept_resize_refused) && runtime.profile_transition.failed()) {
         // The kept pair could not be revalidated or resized: the full reset
@@ -2310,14 +2322,13 @@ void observer(void* manager) noexcept {
           (readiness.loading || RetainedProfileTransition::session_changed(before, runtime.scene_session_epoch, readiness.epoch)))
         begin_flight_change(runtime);
       session_hold = runtime.session_reset.holding();
-      profile_hold = runtime.profile_transition.holding() &&
-                     (before.owned_ids[0] || before.owned_ids[1] || before.owned_ids[2] || runtime.profile_transition.awaiting_pair());
+      profile_hold =
+          runtime.profile_transition.holding() && (ec::any_owned(before.owned_ids) || runtime.profile_transition.awaiting_pair());
       requested_start = runtime.requested_start;
       start_revision = runtime.requested_start_revision;
       recovery_pending = runtime.recovery.pending() || runtime.published.view_waiting || runtime.published.pose_waiting ||
                          runtime.resize_recovery.pending() || runtime.resize_recovery.failed();
-      pair_ready = runtime.published.ready[0] && runtime.published.ready[1] &&
-                     (!before.owned_ids[2] || runtime.published.ready[2]);
+      pair_ready = ec::owned_ready(before.owned_ids, runtime.published.ready);
       if (runtime.mount_revision != runtime.requested_mount_revision) {
         mount_changed = true;
         runtime.mounts = runtime.requested_mounts;
@@ -2325,21 +2336,18 @@ void observer(void* manager) noexcept {
       }
     }
     auto next_schedule = runtime.schedule;
-    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u);
+    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 7u, (settings >> 20) & 0xfu);
     std::array<bool, kMaxCameraFeeds> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
     if (scheduled_pair)
       desired = next_schedule.tick(schedule_clock_ms(), suspended);
     const bool gate_change = scheduled_pair && desired != runtime.gates;
-    const ProbeInspectionState inspection_state{scheduled_pair && before.owner.valid() && before.owned_ids[0] && before.owned_ids[1] &&
-                                                    before.owned_ids[0] != before.owned_ids[1] &&
-                                                    (!before.owned_ids[2] || (before.owned_ids[2] != before.owned_ids[0] &&
-                                                                             before.owned_ids[2] != before.owned_ids[1])) &&
-                                                    runtime.resized_ids == before.owned_ids &&
-                                                    before.failure == ec::Failure::none && before.blocked == ec::Blocked::none,
+    const ProbeInspectionState inspection_state{scheduled_pair && before.owner.valid() && ec::distinct_owned(before.owned_ids) &&
+                                                    runtime.resized_ids == before.owned_ids && before.failure == ec::Failure::none &&
+                                                    before.blocked == ec::Blocked::none,
                                                 suspended,
-                                                !runtime.gates[0] && !runtime.gates[1] && !runtime.gates[2],
+                                                !any_feed(runtime.gates),
                                                 pair_ready,
                                                 before.request_pending || before.creation_pending,
                                                 requested_start,
@@ -2359,12 +2367,11 @@ void observer(void* manager) noexcept {
     // inspection on every manager update (issue 69). A gate still recorded open
     // (its view was not ready when recovery closed the others) keeps the
     // per-update closure attempt.
-    const bool recovery_gates_closed = (runtime.resize_recovery.pending() || runtime.resize_recovery.failed()) && !runtime.gates[0] &&
-                                       !runtime.gates[1] && !runtime.gates[2];
+    const bool recovery_gates_closed = (runtime.resize_recovery.pending() || runtime.resize_recovery.failed()) && !any_feed(runtime.gates);
     // A camera held open across frames is placed again on every update it
     // renders: its aim is a world point set at placement, so the view would
     // otherwise lag the aircraft in a turn until the next inspection.
-    const bool rendering = desired[0] || desired[1] || desired[2];
+    const bool rendering = any_feed(desired);
     if (inspection != ProbeInspectionDecision::required && !session_hold && !before.request_pending &&
         (!gate_change || recovery_gates_closed) && !rendering && !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
       runtime.schedule = next_schedule;
@@ -2385,10 +2392,10 @@ void observer(void* manager) noexcept {
     report.accepting_requests = true;
     report.updates = runtime.updates;
     report.thread_id = GetCurrentThreadId();
-    const bool close_only = inspection_state.established_pair && pair_ready && gate_change && !desired[0] && !desired[1] && !desired[2] &&
-                            (runtime.gates[0] || runtime.gates[1] || runtime.gates[2]) && !before.request_pending &&
-                            !before.creation_pending && !requested_start && !runtime.resize_warmup.pending() &&
-                            !runtime.resize_recovery.pending() && !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed;
+    const bool close_only = inspection_state.established_pair && pair_ready && gate_change && !any_feed(desired) &&
+                            (any_feed(runtime.gates)) && !before.request_pending && !before.creation_pending && !requested_start &&
+                            !runtime.resize_warmup.pending() && !runtime.resize_recovery.pending() && !runtime.resize_recovery.failed() &&
+                            !recovery_pending && !mount_changed;
     // Only an established pair can combine these adjacent read-only stages.
     // No lifecycle callback, publication or private call runs inside the cache.
     // A callback requested meanwhile invalidates the prepared view result below.
@@ -2425,7 +2432,7 @@ void observer(void* manager) noexcept {
         bool fused_reads = false;
         if (manager_valid && runtime.token == before.owner) {
           inspect_pair(runtime, before.owned_ids, report, prepared_views, false, &queries);
-          if (report.ready[0] && report.ready[1] && (!before.owned_ids[2] || report.ready[2]))
+          if (ec::owned_ready(before.owned_ids, report.ready))
             fused_reads = prepare_fused_reads(runtime, desired, prepared_views);
         }
         const bool stable = queries.finish();
@@ -2457,14 +2464,14 @@ void observer(void* manager) noexcept {
       service_profile_transition(runtime, manager, report);
     } else if (!readiness.ready) {
       park_unready_session(runtime, manager, report);
-    } else if (park_initial_scene(suspended, before.owned_ids[0] || before.owned_ids[1] || before.owned_ids[2])) {
+    } else if (park_initial_scene(suspended, ec::any_owned(before.owned_ids))) {
       // OFF also parks an unfinished background creation request. Keep its
       // mailbox request for an explicit resume; never create behind a lost
       // heartbeat or expired prewarm budget, and never erase a pair.
       report.pair = before;
       report.message = "Initial camera creation parked until render demand resumes.";
-    } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !start_body.valid &&
-               !start_body.calibration_required && !(session_pose_proven && outside_local_calibration_radius(start_body.error))) {
+    } else if (requested_start && !ec::any_owned(before.owned_ids) && !start_body.valid && !start_body.calibration_required &&
+               !(session_pose_proven && outside_local_calibration_radius(start_body.error))) {
       // Public startup is asynchronous. Do not walk private manager, pool or
       // aircraft graphs repeatedly while its first telemetry is still pending.
       // A stale local lock after relocation is cleared so the next tick can
@@ -2530,7 +2537,7 @@ void observer(void* manager) noexcept {
         }
       }
       bool retry_pose_waiting = false;
-      if (!requested_start && !pair.owned_ids[0] && !pair.owned_ids[1] && !pair.owned_ids[2]) {
+      if (!requested_start && !ec::any_owned(pair.owned_ids)) {
         const auto retry_body = sample_body_pose(GetTickCount64());
         bool retry_pending = false, calibrate_retry = false;
         {
@@ -2561,7 +2568,7 @@ void observer(void* manager) noexcept {
       bool resolution_pause = false;
       bool output_blocked = false;
       bool output_warmup = false;
-      if (requested_start && !pair.owned_ids[0] && !pair.owned_ids[1] && !pair.owned_ids[2]) {
+      if (requested_start && !ec::any_owned(pair.owned_ids)) {
         waiting_for_pool = !timed(runtime, ProbeStage::pool, [&] { return creation_capacity(runtime, std::max(2u, runtime.schedule.feeds())); });
         if (!waiting_for_pool)
           waiting_for_body = !timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
@@ -2662,10 +2669,10 @@ void observer(void* manager) noexcept {
             fused_views = true;
             views = prepared_views;
             report.free_views = prepared_free_views;
-            if (report.ready[0] && report.ready[1] && (!pair.owned_ids[2] || report.ready[2]) && session_work_allowed(runtime))
+            if (ec::owned_ready(pair.owned_ids, report.ready) && session_work_allowed(runtime))
               report.outputs_matched = timed(runtime, ProbeStage::handoff, [&] {
                 return scene_handoff().publish(prepared_ticket, {runtime.token.identity, runtime.token.generation}, pair.owned_ids,
-                                               {views[0].resource_address, views[1].resource_address, views[2].resource_address});
+                                               view_resources(views));
               });
           } else {
             inspect_pair(runtime, pair.owned_ids, report, views);
@@ -2753,7 +2760,7 @@ void observer(void* manager) noexcept {
                 }
                 runtime.message = "Camera dimensions restored without replacing entries or output textures; waiting for fresh frames.";
                 inspect_pair(runtime, pair.owned_ids, report, views);
-                restored_now = report.ready[0] && report.ready[1] && (!pair.owned_ids[2] || report.ready[2]);
+                restored_now = ec::owned_ready(pair.owned_ids, report.ready);
               } else {
                 runtime.resize_recovery.mark_failed();
               }
@@ -2782,13 +2789,13 @@ void observer(void* manager) noexcept {
           // Dimensions are applied and both gates are closed. No publication or
           // activation until the requested pane output of both views is observed.
           runtime.schedule = next_schedule;
-        } else if (!runtime.resize_warmup.pending() && report.ready[0] && report.ready[1] && (!pair.owned_ids[2] || report.ready[2]) &&
+        } else if (!runtime.resize_warmup.pending() && ec::owned_ready(pair.owned_ids, report.ready) &&
                    (runtime.creations == 0 || runtime.creation_valid)) {
           const bool new_pair = runtime.scheduled_ids != pair.owned_ids;
           // The early tick only decides whether validation is necessary. Anchor
           // the committed pulse near its call after potentially slow reads.
           next_schedule = runtime.schedule;
-          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u);
+          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 7u, (settings >> 20) & 0xfu);
           if (new_pair) {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
@@ -2819,7 +2826,7 @@ void observer(void* manager) noexcept {
           if (record_blocked) {
             ++runtime.rt_record_refusals;
             ++runtime.rt_record_holds;
-          } else if (desired[0] || desired[1] || desired[2])
+          } else if (any_feed(desired))
             runtime.rt_record_refusals = 0;
           // These verified views are Taxi Cam's for the shadow-slice hook, which
           // only ever writes into the view the simulator is preparing.
@@ -2837,7 +2844,7 @@ void observer(void* manager) noexcept {
           }
           // Every scheduled feed needs the shared aircraft body pose. Omitting the
           // third slot left the right-wing camera at a stale world transform.
-          const bool needs_pose = desired[0] || desired[1] || desired[2];
+          const bool needs_pose = any_feed(desired);
           // A late pulse other than the early one the fused pre-reads were
           // taken for reads its pose and mounts in their own scopes.
           if (desired != fused_desired)
@@ -2961,7 +2968,7 @@ void observer(void* manager) noexcept {
           runtime.message = *runtime.stage_error ? runtime.stage_error : "Owned view validation failed; removal requested.";
         }
       }
-      if (!pair.owned_ids[0] && !pair.owned_ids[1] && !pair.owned_ids[2]) {
+      if (!ec::any_owned(pair.owned_ids)) {
         clear_retired_pair(runtime);
       }
       report.pair = pair;
@@ -3231,7 +3238,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
     runtime.published.readiness_deferred = false;
     runtime.reset_requested.store(false, std::memory_order_release);
     const bool retained = runtime.profile_transition.can_resume(pair);
-    if (runtime.profile_transition.holding() && (pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2]) && !retained) {
+    if (runtime.profile_transition.holding() && (ec::any_owned(pair.owned_ids)) && !retained) {
       runtime.published.message = "Retained transition is not ready; no creation or removal requested.";
       return;
     }
@@ -3329,7 +3336,7 @@ void request_scene_stop(bool keep_telemetry) noexcept {
     runtime.stop_detail = "Explicit camera OFF/Stop requested.";
     scene_handoff().stop_scene();
     const auto pair = runtime.pair.snapshot();
-    if (!runtime.session_reset.holding() && (!runtime.profile_transition.holding() || (!pair.owned_ids[0] && !pair.owned_ids[1] && !pair.owned_ids[2]))) {
+    if (!runtime.session_reset.holding() && (!runtime.profile_transition.holding() || (!ec::any_owned(pair.owned_ids)))) {
       runtime.profile_transition.consume();
       runtime.pair.request_disable();
     }
@@ -3349,9 +3356,10 @@ void suspend_scene_rendering(bool suspended) noexcept {
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
 }
 
-void request_scene_rate(unsigned rate, unsigned feeds, unsigned per_frame) noexcept {
+void request_scene_rate(unsigned rate, unsigned feeds, unsigned per_frame, unsigned wanted) noexcept {
+  static_assert(kMaxCameraFeeds <= 4, "per_frame and wanted are packed in 3 and 4 bits");
   const auto settings = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
-                        (std::min(per_frame, kMaxCameraFeeds) << 16);
+                        (std::min(per_frame, kMaxCameraFeeds) << 16) | ((wanted & 0xfu) << 20);
   state().requested_settings.store(settings, std::memory_order_release);
 }
 
@@ -3362,7 +3370,7 @@ bool request_scene_profile(std::uint32_t id) noexcept {
   auto& runtime = state();
   const std::lock_guard lock(runtime.mutex);
   const auto pair = runtime.pair.snapshot();
-  if (pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2] || pair.creation_pending)
+  if (ec::any_owned(pair.owned_ids) || pair.creation_pending)
     return false;
   runtime.requested_profile = profile;
   return true;

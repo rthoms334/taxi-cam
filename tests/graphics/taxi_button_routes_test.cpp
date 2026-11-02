@@ -294,5 +294,17 @@ int main() {
   taxi_camera::TaxiButtonRoutes shared;
   assert(shared.adopt_single(55) && (shared.targets == Sides{55, 55, 55}));
   std::puts("Lower DU routing: PASS; separate texture, explicit choice kept, automatic rebind, shared profiles unchanged");
+  // A pilot pair's placed lower display, found by name, leaves the pair to
+  // detection; detection and an explicit pair keep it; destruction frees it.
+  taxi_camera::TaxiButtonRoutes placed;
+  assert(placed.adopt_named({0, 0, 901}, 3) && placed.named(2) && (placed.targets == Sides{0, 0, 901}));
+  assert(placed.adopt_detected({701, 702}) && (placed.targets == Sides{701, 702, 901}));
+  assert(placed.select_explicit({702, 701}) && (placed.targets == Sides{702, 701, 901}));
+  taxi_camera::TaxiButtonRoutes taken;
+  assert(taken.adopt_named({0, 0, 901}, 3) && !taken.adopt_detected({901, 702}) && (taken.targets == Sides{0, 0, 901}));
+  assert(taken.adopt_detected({701, 702}) && (taken.targets == Sides{701, 702, 901}));
+  taken.forget(901);
+  assert((taken.targets == Sides{701, 702, 0}) && taken.adopt_named({0, 0, 905}, 3) && (taken.targets == Sides{701, 702, 905}));
+  std::puts("Placed lower display: PASS; named alone, pair still detected, kept by detection and explicit choices");
   std::puts("Taxi button routes: PASS");
 }

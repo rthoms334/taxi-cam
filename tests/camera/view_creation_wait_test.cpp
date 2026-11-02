@@ -39,7 +39,7 @@ struct Engine {
   bool reentrant_resume_refused = false;
   unsigned initializers = 0, create_callbacks = 0, native_initializers = 0, native_creates = 0, erases = 0;
   unsigned attempt_initializers = 0, attempt_creates = 0;
-  std::array<ec::EntryId, 3> live{};
+  std::array<ec::EntryId, 4> live{};
   ec::EntryId next_id = 1001;
 
   bool refuse_pool() noexcept {
@@ -168,14 +168,14 @@ void partial_callback_wait() {
     }
     e.allow_erase = true;
     e.update();
-    require(e.pair.snapshot().state == ec::State::disabled && e.live == std::array<ec::EntryId, 3>{},
+    require(e.pair.snapshot().state == ec::State::disabled && e.live == std::array<ec::EntryId, 4>{},
             "Later cleanup did not confirm the first allocation absent");
     const auto erases = e.erases;
     require(e.wait.resume(e.pair, revision, true) && !e.wait.pending(), "Confirmed partial cleanup lost the pending Start");
     e.pool_pending = false;
     e.start();
     require(e.pair.snapshot().state == ec::State::active && e.native_creates == 3 && e.erases == erases &&
-                e.pair.snapshot().owned_ids == std::array<ec::EntryId, 3>{1002, 1003, 0},
+                e.pair.snapshot().owned_ids == std::array<ec::EntryId, 4>{1002, 1003, 0},
             "Partial cleanup retry reused a retired ID or failed to produce one replacement pair");
   }
 }

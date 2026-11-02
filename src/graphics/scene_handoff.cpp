@@ -161,8 +161,8 @@ SceneCaptureTicket SceneHandoff::begin_capture() {
 
 bool SceneHandoff::publish(SceneCaptureTicket ticket,
                            SceneManagerIdentity manager,
-                           const std::array<std::uint64_t, 3>& ids,
-                           const std::array<std::uint64_t, 3>& handles) {
+                           const std::array<std::uint64_t, SceneFeeds>& ids,
+                           const std::array<std::uint64_t, SceneFeeds>& handles) {
   const std::lock_guard lock(mutex_);
   // An old concurrent completion may not revoke or replace a newer capture.
   if (active_ && ticket.scene_epoch == scene_epoch_ && ticket.sequence == capture_sequence_ && ticket.lifecycle_epoch != lifecycle_epoch_)
@@ -179,10 +179,15 @@ bool SceneHandoff::publish(SceneCaptureTicket ticket,
   if (manager.identity == 0 || manager.generation == 0 || ids[0] == 0 || ids[1] == 0 || ids[0] == ids[1] || handles[0] == 0 ||
       handles[1] == 0 || handles[0] == handles[1])
     return refuse_latest();
-  if ((ids[2] == 0) != (handles[2] == 0))
-    return refuse_latest();
-  if (ids[2] && (ids[2] == ids[0] || ids[2] == ids[1] || handles[2] == 0 || handles[2] == handles[0] || handles[2] == handles[1]))
-    return refuse_latest();
+  // The optional feeds (the third view, the door camera): an id and a handle
+  // together or neither, each distinct from every feed before it.
+  for (std::size_t feed = 2; feed < ids.size(); ++feed) {
+    if ((ids[feed] == 0) != (handles[feed] == 0))
+      return refuse_latest();
+    for (std::size_t before = 0; ids[feed] && before < feed; ++before)
+      if (ids[feed] == ids[before] || handles[feed] == handles[before])
+        return refuse_latest();
+  }
   if (owner_bound_ && (owner_ != manager || owned_ids_ != ids)) {
     // A new manager/pair requires a new authorized scene epoch.
     active_ = false;

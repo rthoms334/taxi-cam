@@ -53,14 +53,28 @@ class SceneFrameOutput {
   bool hide_ground_speed() noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
   bool set_reference_guides(bool enabled) noexcept;
+  // CameraCompositorD3D12::set_camera_look, for the next recording.
+  bool set_camera_look(std::uint32_t look) noexcept;
   bool set_patch_profile(std::uint32_t profile) noexcept;
   // Metadata-only demand, admitted against the current profile's exact shape.
   // Requests never allocate or record GPU work. Every admitted slot remains
   // refreshed on later compositions, including after profile changes, because
   // closed application recordings can replay its stable buffer indefinitely.
+  // With every slot taken, a new shape (another display area) takes the slot
+  // unrequested longest, once that is PatchStaleMs: demand is re-requested
+  // continuously, so only a shape no longer shown goes stale. Its buffer is
+  // never released: the new shape writes the same buffer, or a larger one
+  // while the old one stays retained (at most RetiredBuffers per output), so
+  // an old recording still reads live memory, at worst one wrong image.
   bool request_patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) noexcept;
+  bool request_patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content, std::uint64_t now_ms) noexcept;
+  static constexpr std::uint64_t PatchStaleMs = 2000;
+  static constexpr unsigned RetiredBuffers = 16;
   std::uint32_t patch_requests() const noexcept { return patch_requests_; }
   std::uint64_t patch_draws() const noexcept { return patch_draws_; }
+  // Slots given to a new shape (request_patch), and buffers retained for them.
+  std::uint32_t patch_reuses() const noexcept { return patch_reuses_; }
+  unsigned retired_buffers() const noexcept { return retired_count_; }
   // Stable process-retained buffer; consumer registration/timeline is required
   // before every recorded copy. No allocation or CPU image access here.
   Patch patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
@@ -81,6 +95,11 @@ class SceneFrameOutput {
   // inputs, into this output's buffer and every requested patch. Same private
   // submission lifetime and manager timeline contract as prepare().
   bool prepare_waiting() noexcept;
+  // Every requested patch again from the image already in this output's
+  // buffer, after at least one submitted composition: a door camera snapshot
+  // keeps serving displays that ask for a new patch after its camera stopped.
+  // Same private submission lifetime and manager timeline contract as prepare().
+  bool prepare_patches_only() noexcept;
   // A requested patch has not yet been written by a submitted recording.
   bool patches_pending() const noexcept;
   // Discard a closed prepared list which was NEVER submitted (e.g. the manager
@@ -109,8 +128,10 @@ class SceneFrameOutput {
     ID3D12Resource* texture = nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
     D3D12_RECT content{};
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    UINT width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN, texture_format = DXGI_FORMAT_UNKNOWN;
+    UINT width = 0, height = 0, texture_width = 0, texture_height = 0;
+    UINT64 buffer_bytes = 0;
+    std::uint64_t requested_ms = 0;
     unsigned drawer = 0;
     bool written = false, recorded = false;
   };
@@ -123,8 +144,10 @@ class SceneFrameOutput {
   CameraCompositorD3D12* compositor_ = nullptr;
   std::array<PfdStampD3D12*, 4> patch_drawers_{};
   std::array<PatchStorage, 8> patches_{};
+  std::array<ID3D12Resource*, RetiredBuffers> retired_buffers_{};
+  unsigned retired_count_ = 0;
   ID3D12DescriptorHeap* patch_heap_ = nullptr;
-  std::uint32_t patch_profile_ = 1, patch_requests_ = 0;
+  std::uint32_t patch_profile_ = 1, patch_requests_ = 0, patch_reuses_ = 0;
   std::uint64_t patch_draws_ = 0;
   D3D12_GPU_VIRTUAL_ADDRESS address_ = 0;
   std::uint64_t submitted_ = 0;

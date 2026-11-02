@@ -138,7 +138,8 @@ void repeat_checks() {
   require(guard.accept(0, 1000 + CameraButtonRepeatMs), "A deliberate press after the window toggles again");
   require(guard.accept(2, 0), "A press at tick zero is accepted");
   require(guard.accept(1, 999), "A clock reset never blocks a press");
-  require(!guard.accept(4, 5000), "Unknown actions are refused");
+  require(guard.accept(4, 5000), "The door camera action is accepted");
+  require(!guard.accept(5, 5000), "Unknown actions are refused");
 }
 
 struct FakeRawInput {

@@ -12,13 +12,16 @@ struct CameraHotkey {
   UINT key{}, modifiers{};
   bool operator==(const CameraHotkey&) const = default;
 };
-// Actions 0 left, 1 right, 2 both pilot displays, 3 lower ECAM (SD).
-using CameraHotkeys = std::array<CameraHotkey, 4>;
-inline constexpr CameraHotkeys DefaultCameraHotkeys{
-    {{'L', MOD_CONTROL | MOD_SHIFT}, {'R', MOD_CONTROL | MOD_SHIFT}, {'B', MOD_CONTROL | MOD_SHIFT}, {'D', MOD_CONTROL | MOD_SHIFT}}};
-inline constexpr std::array<const wchar_t*, 4> CameraHotkeyNames{ui_text(L"Left camera"), ui_text(L"Right camera"),
-                                                                 ui_text(L"Both cameras"), ui_text(L"Lower ECAM (SD) camera")};
-inline constexpr std::array<const wchar_t*, 4> CameraHotkeyKeys{L"left", L"right", L"both", L"sd"};
+// Actions 0 left, 1 right, 2 both pilot displays, 3 lower ECAM (SD), 4 door camera.
+using CameraHotkeys = std::array<CameraHotkey, 5>;
+inline constexpr CameraHotkeys DefaultCameraHotkeys{{{'L', MOD_CONTROL | MOD_SHIFT},
+                                                     {'R', MOD_CONTROL | MOD_SHIFT},
+                                                     {'B', MOD_CONTROL | MOD_SHIFT},
+                                                     {'D', MOD_CONTROL | MOD_SHIFT},
+                                                     {'V', MOD_CONTROL | MOD_SHIFT}}};
+inline constexpr std::array<const wchar_t*, 5> CameraHotkeyNames{
+    ui_text(L"Left camera"), ui_text(L"Right camera"), ui_text(L"Both cameras"), ui_text(L"Lower camera"), ui_text(L"Door camera")};
+inline constexpr std::array<const wchar_t*, 5> CameraHotkeyKeys{L"left", L"right", L"both", L"sd", L"door"};
 // Shortcuts added after a hotkeys.ini was written take their default when that
 // key is absent, or stay disabled if the default is already in use.
 inline constexpr size_t CameraHotkeyOriginalCount = 3;
@@ -129,9 +132,9 @@ inline bool save_camera_hotkeys(const CameraHotkeys& chords, const std::wstring&
   if (directory.empty() || !valid_camera_hotkeys(chords))
     return false;
   wchar_t value[256];
-  const int count =
-      std::swprintf(value, 256, L"[shortcuts]\r\nleft=%u\r\nright=%u\r\nboth=%u\r\nsd=%u\r\n", hotkey_control_value(chords[0]),
-                    hotkey_control_value(chords[1]), hotkey_control_value(chords[2]), hotkey_control_value(chords[3]));
+  const int count = std::swprintf(value, 256, L"[shortcuts]\r\nleft=%u\r\nright=%u\r\nboth=%u\r\nsd=%u\r\ndoor=%u\r\n",
+                                  hotkey_control_value(chords[0]), hotkey_control_value(chords[1]), hotkey_control_value(chords[2]),
+                                  hotkey_control_value(chords[3]), hotkey_control_value(chords[4]));
   return write_preferences_file(directory + L"\\hotkeys.ini", value, count);
 }
 
@@ -182,14 +185,16 @@ class CameraHotkeyRegistration {
     if (!chords_[i].key)
       return ui_text(L"Disabled");
     if (preview_)
-      return ui_text(L"Preview only — shortcut not registered");
+      return ui_text(L"Preview only");
     if (registered_[i])
-      return ui_text(L"Ready — works while Taxi Cam is hidden");
+      return ui_text(L"Ready");
     if (errors_[i] == ERROR_HOTKEY_ALREADY_REGISTERED)
-      return ui_text(L"Unavailable — another app uses this shortcut");
-    return ui_text(L"Unavailable — Windows error {0}");
+      return ui_text(L"In use by another app");
+    return ui_text(L"Windows error {0}");
   }
   DWORD error(size_t i) const noexcept { return errors_[i]; }
+  // A shortcut that is set but did not register; status_wording says why.
+  bool unavailable(size_t i) const noexcept { return chords_[i].key && !preview_ && !registered_[i]; }
   std::wstring status(size_t i) const {
     std::wstring text = status_wording(i);
     if (const auto at = text.find(L"{0}"); at != std::wstring::npos)

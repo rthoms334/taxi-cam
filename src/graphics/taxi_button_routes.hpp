@@ -64,11 +64,12 @@ class TaxiButtonRoutes {
 
   // The caller first validates supplied nonzero resource IDs. Zero requests
   // automatic detection for that side; both zero starts a fresh explicit request.
+  // Side 2 is not part of the pair: a lower display the user placed (named) stays.
   bool select_explicit(const Pair& selection) noexcept {
     if (selection[0] && selection[0] == selection[1])
       return false;
-    targets = {selection[0], selection[1], 0};
-    detected_targets_ = {};
+    targets = {selection[0], selection[1], targets[2]};
+    detected_targets_ = {0, 0, detected_targets_[2]};
     assigned_ = selection[0] != 0 || selection[1] != 0;
     return true;
   }
@@ -125,12 +126,13 @@ class TaxiButtonRoutes {
   // Detector ordering is only an initial-session hint. Once a side is known,
   // retain every surviving identity through replacement. With both lost,
   // semantic labels or an explicit assignment are required to recover sides.
+  // A lower display found by name (side 2) is not the pair's and stays.
   bool adopt_detected(const Pair& detected, bool exact_names = false) noexcept {
-    if (!detected[0] || !detected[1] || detected[0] == detected[1])
+    if (!detected[0] || !detected[1] || detected[0] == detected[1] || detected[0] == targets[2] || detected[1] == targets[2])
       return false;
     if (exact_names || (!assigned_ && !targets[0] && !targets[1])) {
-      targets = {detected[0], detected[1], 0};
-      detected_targets_ = exact_names ? Sides{} : Sides{detected[0], detected[1], 0};
+      targets = {detected[0], detected[1], targets[2]};
+      detected_targets_ = exact_names ? Sides{0, 0, detected_targets_[2]} : Sides{detected[0], detected[1], detected_targets_[2]};
       assigned_ = true;
       return true;
     }
@@ -223,14 +225,16 @@ class TaxiButtonRoutes {
         continue;
       targets[side] = named_targets_[side] = id;
       detected_targets_[side] = 0;
-      assigned_ = changed = true;
+      // A lower display alone leaves the pair to detection.
+      assigned_ = assigned_ || side < 2;
+      changed = true;
     }
     return changed;
   }
   bool named(unsigned side) const noexcept { return side < targets.size() && targets[side] && targets[side] == named_targets_[side]; }
 
   void forget(std::uint64_t id) noexcept {
-    assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0 || targets[2] != 0;
+    assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0;
     for (unsigned side = 0; side < targets.size(); ++side)
       if (targets[side] == id) {
         targets[side] = 0;

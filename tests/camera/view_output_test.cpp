@@ -84,7 +84,7 @@ void admission() {
 }
 void output_wait() {
   ViewResizeWarmup warmup;
-  const std::array<std::uint64_t, 3> ids{1003, 1004, 0};
+  const std::array<std::uint64_t, 4> ids{1003, 1004, 0, 0};
   require(!warmup.await_output(ids, 5), "An inactive warmup accepted an output wait");
   require(warmup.begin(ids, 10), "Warmup did not begin");
   require(!warmup.await_output(ids, 10), "An output wait was accepted before the original update passed");

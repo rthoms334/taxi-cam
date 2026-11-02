@@ -47,13 +47,13 @@ void require_inert(const nc::ProbeSnapshot& snapshot) {
               performance.requested_bytes == 0 && performance.query_ms == 0 && performance.read_ms == 0 && performance.entry_count == 0 &&
               performance.bucket_count == 0,
           "Wrong host performed or timed diagnostic memory work");
-  require(snapshot.gates == std::array<bool, 3>{} && snapshot.activation_counts == std::array<std::uint64_t, 3>{},
+  require(snapshot.gates == std::array<bool, 4>{} && snapshot.activation_counts == std::array<std::uint64_t, 4>{},
           "Wrong host applied a private activation pulse");
-  require(snapshot.free_views == 0 && snapshot.ready == std::array<bool, 3>{} && snapshot.resource_present == std::array<bool, 3>{},
+  require(snapshot.free_views == 0 && snapshot.ready == std::array<bool, 4>{} && snapshot.resource_present == std::array<bool, 4>{},
           "Wrong host published discovered views or output resources");
   require(snapshot.dimensions == decltype(snapshot.dimensions){} && snapshot.flags == decltype(snapshot.flags){},
           "Wrong host published private view dimension or flag metadata");
-  require(snapshot.pair.owned_ids == std::array<ec::EntryId, 3>{} && !snapshot.pair.owner.valid(),
+  require(snapshot.pair.owned_ids == std::array<ec::EntryId, 4>{} && !snapshot.pair.owner.valid(),
           "Wrong host acquired an engine-manager lifetime or owned entry IDs");
   require(snapshot.pair.state == ec::State::disabled && snapshot.pair.failure == ec::Failure::none &&
               snapshot.pair.blocked == ec::Blocked::none && !snapshot.pair.creation_pending,

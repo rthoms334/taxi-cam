@@ -27,9 +27,10 @@ struct MountConfig {
   float fov_radians = 0.85f;
 };
 
-// Up to three feeds: nose, tail/bottom-left, bottom-right. Non-split profiles
-// keep a valid third mount equal to the second; only feeds 0 and 1 are used.
-inline constexpr unsigned kMaxCameraFeeds = 3;
+// Every camera set's views (profiles::CameraViews): nose, tail/bottom-left,
+// bottom-right (a valid copy of the tail on non-split profiles) and the door
+// camera.
+inline constexpr unsigned kMaxCameraFeeds = profiles::CameraViews;
 using MountPair = std::array<MountConfig, kMaxCameraFeeds>;
 
 struct MountedPose {

@@ -14,6 +14,7 @@
 #include <vector>
 #include "../../src/graphics/camera_compositor_d3d12.hpp"
 #include "../../src/graphics/scene_capture_manager.hpp"
+#include "../../src/profiles/discovered.hpp"
 #include "../support/reference_overlay_oracle.hpp"
 
 namespace {
@@ -87,6 +88,95 @@ struct EncodingResult {
 // PMDG 777 layout through the production output: compositor buffer, then every
 // typed patch format. Camera codes survive UNORM and sRGB patches; the #1C1B22
 // T and black frames are overlays, which an sRGB patch encodes like aircraft UI.
+// A door camera display's patch fills its whole camera area, where the taxi
+// picture keeps the cameras' shape (the A380's left PFD) inside it.
+void door_patch_case(ID3D12Device* device) {
+  namespace profiles = taxi_camera::profiles;
+  profiles::DisplayOverride lower{};
+  std::strcpy(lower.textures[2], "SCREEN_DU_SD");
+  lower.areas[2] = {0, 0, 768, 666};
+  const auto* profile = profiles::publish_override(&profiles::A380, lower, 2);
+  require(profile && profile->sides == 3, "Publish the A380 with the door camera on a placed lower display");
+  auto output = std::make_unique<Output>();
+  require(output->initialize(device) && output->set_patch_profile(profile->id), output->error());
+  const auto local = [](const profiles::DisplayRect& r) {
+    return D3D12_RECT{static_cast<LONG>(r.left), static_cast<LONG>(r.top), static_cast<LONG>(r.right), static_cast<LONG>(r.bottom)};
+  };
+  const auto door = local(profiles::side_content_rect(*profile, 2, 768, 666, true)),
+             taxi = local(profiles::side_content_rect(*profile, 2, 768, 666));
+  require(door.left == 16 && door.top == 12 && door.right == 752 && door.bottom == 666 && taxi.right - taxi.left < door.right - door.left,
+          "The door camera fills the area; the taxi picture keeps the cameras' shape");
+  require(output->request_patch(DXGI_FORMAT_R8G8B8A8_UNORM, 768, 666, door), "A door page patch is admitted");
+  require(output->request_patch(DXGI_FORMAT_R8G8B8A8_UNORM, 768, 666, taxi), "So is the taxi page on that display");
+  require(!output->request_patch(DXGI_FORMAT_R8G8B8A8_UNORM, 768, 666, {door.left + 1, door.top, door.right, door.bottom}),
+          "Another content rectangle is not");
+  profiles::publish_override(&profiles::A380, {});
+}
+// Display areas changed again and again: past eight shapes a request takes the
+// slot unrequested longest, keeping its buffer when the shape fits, else
+// retaining it and growing; a slot still in use is never taken.
+void patch_reuse_case(ID3D12Device* device) {
+  namespace profiles = taxi_camera::profiles;
+  auto output = std::make_unique<Output>();
+  require(output->initialize(device) && output->set_patch_profile(profiles::A380.id), output->error());
+  struct Shape {
+    UINT width, height;
+    D3D12_RECT content;
+  };
+  // Side 0 with a display area of this size, the profile the request is made against.
+  const auto shape = [](UINT width, UINT height) {
+    profiles::DisplayOverride area{};
+    area.areas[0] = {0, 0, width, height};
+    const auto* profile = profiles::publish_override(&profiles::A380, area);
+    require(profile != nullptr, "Publish a display area");
+    const auto inner = profiles::side_content_rect(*profile, 0, width, height);
+    return Shape{
+        width,
+        height,
+        {static_cast<LONG>(inner.left), static_cast<LONG>(inner.top), static_cast<LONG>(inner.right), static_cast<LONG>(inner.bottom)}};
+  };
+  const auto request = [&](const Shape& s, std::uint64_t now) {
+    shape(s.width, s.height);
+    return output->request_patch(DXGI_FORMAT_R8G8B8A8_UNORM, s.width, s.height, s.content, now);
+  };
+  const auto compose = [&] {
+    require(output->prepare_waiting(), output->error());
+    require(output->submit(), output->error());
+    wait([&] { return output->idle(); });
+  };
+  const auto buffer = [&](const Shape& s) {
+    shape(s.width, s.height);
+    return output->patch(DXGI_FORMAT_R8G8B8A8_UNORM, s.width, s.height, s.content).buffer;
+  };
+  std::vector<Shape> shapes;
+  for (UINT i = 0; i < 8; ++i) {
+    shapes.push_back(shape(768 - 8 * i, 763));
+    require(request(shapes.back(), 1000), "Eight shapes take the eight slots");
+  }
+  compose();
+  auto* first = buffer(shapes[0]);
+  require(first && buffer(shapes[7]), "Every shape is written");
+  const auto ninth = shape(700, 700);
+  require(!request(ninth, 1000 + Output::PatchStaleMs - 1) && output->patch_reuses() == 0, "No slot is taken while it is still shown");
+  for (UINT i = 1; i < 8; ++i)
+    require(request(shapes[i], 2500), "The shapes shown are requested again");
+  require(request(ninth, 1000 + Output::PatchStaleMs) && output->patch_reuses() == 1 && output->retired_buffers() == 0,
+          "A ninth shape takes the stalest slot");
+  require(!buffer(ninth) && !buffer(shapes[0]), "Neither shape is shown before a composition writes it");
+  compose();
+  require(buffer(ninth) == first, "The new shape writes the slot's buffer, which is never released");
+  for (UINT i = 1; i < 8; ++i)
+    require(buffer(shapes[i]) != nullptr, "The other shapes keep their slots");
+  // Larger than every buffer: the stalest slot's buffer is retained and a new one made.
+  const auto tall = shape(768, 900);
+  auto* old = buffer(shapes[1]);
+  require(request(tall, 2500 + Output::PatchStaleMs) && output->patch_reuses() == 2 && output->retired_buffers() == 1,
+          "A larger shape retains the old buffer");
+  compose();
+  require(buffer(tall) && buffer(tall) != old && !buffer(shapes[1]), "It writes a new, larger buffer");
+  require(buffer(ninth) == first, "The shape still shown is untouched");
+  profiles::publish_override(&profiles::A380, {});
+}
 EncodingResult encoding_case(ID3D12Device* device, Manager& manager) {
   namespace profiles = taxi_camera::profiles;
   using reference_overlay_oracle::CameraAlpha;
@@ -523,6 +613,8 @@ void run(bool warp) {
     manager->destroy_command_list(patch_replays[replay].commands.list.p, 30 + replay);
   require(checked_patch_pixels == 102, "Both typed formats and the old profile replay were checked");
   const auto encoding = encoding_case(device.p, *manager);
+  door_patch_case(device.p);
+  patch_reuse_case(device.p);
   unsigned debug_errors = 0;
   if (info.p)
     for (UINT64 i = 0; i < info->GetNumStoredMessages(); ++i) {

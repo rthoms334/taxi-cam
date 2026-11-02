@@ -440,11 +440,11 @@ void active_profile_switch_case(bool warp) {
                                           IID_PPV_ARGS(readbacks[i].put())),
           "Profile switch readback");
   }
-  const std::array<std::uint64_t, 3> handles{reinterpret_cast<std::uint64_t>(sources[0].get()),
+  const std::array<std::uint64_t, 4> handles{reinterpret_cast<std::uint64_t>(sources[0].get()),
                                              reinterpret_cast<std::uint64_t>(sources[1].get()), 0};
   auto& handoff = scene_handoff();
   const SceneManagerIdentity manager{501, 1};
-  const std::array<std::uint64_t, 3> entries{701, 702, 0};
+  const std::array<std::uint64_t, 4> entries{701, 702, 0, 0};
   const auto submit = [&] {
     check(list->Close(), "Profile switch Close");
     ID3D12CommandList* batch[]{list.get()};

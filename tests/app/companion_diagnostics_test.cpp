@@ -75,7 +75,7 @@ void marking_controls_tests() {
     bool matching = true;
     for (const bool right : {false, true}) {
       const int x = 817 + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
-      const int y = 177 + static_cast<int>(std::lround(current.nose_dot[1] * 45));
+      const int y = 225 + static_cast<int>(std::lround(current.nose_dot[1] * 45));  // Below the step pills.
       // The corner is inside a square and outside the former circular marker.
       matching = matching && GetPixel(dc, x, y) == marking_color && GetPixel(dc, x + 6, y + 6) == marking_color;
     }
@@ -139,6 +139,161 @@ void stale_color_selection_tests() {
     require(apply_color_selection(opened, markings, RGB(51, 102, 153)) && current.enabled == 1 &&
                 current.aircraft_session_epoch == opened.aircraft_session_epoch + 1 && current.profile_request == opened.profile_request,
             "Current-session colour selection preserves concurrent enabled and aircraft-session fields");
+  }
+}
+}  // namespace
+// Setup's three steps: the pills on every page, Advanced and its pages,
+// Next saving a step (its L:vars too) and going on, and the door camera's
+// display and picture.
+void setup_step_tests() {
+  current = {};
+  current.profile = profiles::A359.id;
+  current.auto_profile = 0;
+  current.mounts = profiles::A359.mounts;
+  dirty = false;
+  advanced = false;
+  page = OverviewPage;
+  build_controls();
+  require(GetDlgItem(window, StepPillId) && GetDlgItem(window, StepPillId + 2) && !GetDlgItem(window, StepPillId + 3) &&
+              !GetDlgItem(window, NextId),
+          "Overview opens each of the three steps");
+  command(StepPillId + 1);
+  require(page == CamerasPage && GetDlgItem(window, LiveFeedId) && !GetDlgItem(window, 300) && GetDlgItem(window, 620) &&
+              GetDlgItem(window, LvarNameId) && !GetDlgItem(window, 624),
+          "Taxi cameras has its cameras and their controls, and its values only with Advanced");
+  command(AdvancedId);
+  require(advanced && GetDlgItem(window, 300) && GetDlgItem(window, GuidesOpenId), "Advanced adds the values and the guides");
+  command(GuidesOpenId);
+  require(page == GuidesPage && setup_step(page) == 1 && GetDlgItem(window, 370), "Guide values is Taxi cameras' Advanced page");
+  command(AdvancedId);
+  require(!advanced && page == CamerasPage, "Turning Advanced off returns to the step's own page");
+  current.mounts[0][1] += 1;
+  command(DefaultsId);
+  require(current.mounts[0] == profiles::A359.mounts[0], "Defaults restores that camera's mount");
+  SetDlgItemTextW(window, LvarNameId, L"NOT AN LVAR");
+  command(NextId);
+  require(page == CamerasPage && notice.find(L"L:var") != std::wstring::npos, "A name that is not an L:var keeps the step");
+  SetDlgItemTextW(window, LvarNameId, L"A32NX_TAXI");
+  command(NextId);
+  win::Settings loaded;
+  require(page == DoorPage && std::strcmp(current.lvar_bindings[0].name, "A32NX_TAXI") == 0 &&
+              win::load_settings(loaded, L"", profiles::A359.id) && std::strcmp(loaded.lvar_bindings[0].name, "A32NX_TAXI") == 0,
+          "Next saves the step with its L:vars and goes on to Door camera");
+  require(GetDlgItem(window, 624) && GetDlgItem(window, LvarNameId + 4) && !GetDlgItem(window, 620),
+          "Door camera has the door camera's own controls");
+  command(DoorWhereId + 1);
+  require(current.door_side == 0, "Where it shows picks a display");
+  command(DoorLiveId);
+  require(current.door_live == 1, "Live keeps the door camera rendering");
+  command(DoorWhereId);
+  require(current.door_side == win::DoorSideNone && !current.door_on, "None leaves the door camera without a display");
+  command(BackId);
+  require(page == CamerasPage, "Back goes to the step before");
+  command(StepPillId + 2);
+  command(NextId);
+  require(page == OverviewPage && !dirty && !shortcut_window && win::load_settings(loaded, L"", profiles::A359.id) && loaded.door_live == 1,
+          "The last step saves and finishes on Overview");
+}
+// The live view holds the door camera on, rendering live, while Door is
+// selected. Saves keep the aircraft's own Live or Snapshot (the user's latest
+// pick), never the forced Live, and closing gives back what it still holds.
+void door_hold_save_tests() {
+  win::Settings s;
+  require(win::load_settings(s, L"", profiles::AerosoftA346.id) && s.door_side == 2, "The A340-600 has a door camera on its lower ECAM");
+  s.auto_profile = 0;
+  s.door_live = s.door_on = 0;
+  require(win::save_settings(s), "Save the A340-600 as Snapshot");
+  current = s;
+  dirty = false;
+  page = DoorPage;
+  build_controls();
+  live_view = {};
+  live_keep_door(draft());
+  require(live_view.door_taken && current.door_on && current.door_live, "Selecting Door turns it on, live");
+  win::Settings loaded;
+  require(apply() && win::load_settings(loaded, L"", profiles::AerosoftA346.id) && loaded.door_live == 0,
+          "A save while Door is held keeps the aircraft's Snapshot");
+  command(DoorLiveId);
+  require(apply() && win::load_settings(loaded, L"", profiles::AerosoftA346.id) && loaded.door_live == 1,
+          "Live picked during the hold is saved");
+  command(DoorSnapshotId);
+  live_keep_door(draft());
+  require(current.door_live == 1 && apply() && win::load_settings(loaded, L"", profiles::AerosoftA346.id) && loaded.door_live == 0,
+          "Snapshot picked during the hold is saved, though the view still renders live");
+  // Another aircraft: the hold belongs to the A340-600, so nothing is given
+  // back to the A350's settings, and closing ends the hold.
+  auto other = current;
+  other.profile = profiles::A359.id;
+  other.door_live = 1;
+  const auto released = release_door_hold(other);
+  require(released.door_live == 1 && !live_view.door_taken, "Another aircraft's Live is never replaced by the hold's");
+  live_view = {};
+}
+namespace {
+// Displays in a flight whose panel names do not pair (the Fenix display boot
+// of 2026-11-02 left each PFD's name on an ND): a display placed by its
+// picture routes that picture's texture at once, keeps it when the step is
+// left, reopened or passed with Next, and no name from the flight is saved.
+void session_display_tests() {
+  current = {};
+  current.profile = profiles::A380.id;
+  current.auto_profile = 0;
+  current.mounts = profiles::A380.mounts;
+  dirty = false;
+  advanced = false;
+  page = OverviewPage;
+  build_controls();
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+    status.heartbeat = GetTickCount64();
+    status.graphics_ready = 1;
+    status.panel_discovery = 1;
+    status.panel_state = static_cast<std::uint32_t>(win::PanelMapState::paired);
+    status.panel_clean = 1;
+    status.panel_shift = -1;
+    status.panel_count = 2;
+    std::strcpy(status.aircraft_path, "SimObjects/Airplanes/FlyByWire_A380_842/aircraft.cfg");
+    // Each name on the other display's texture.
+    const char* names[]{"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"};
+    for (int i = 0; i < 2; ++i) {
+      std::strcpy(status.panels[i].name, names[i]);
+      status.panels[i].id = 702 - i;
+      status.panels[i].width = 768;
+      status.panels[i].height = 1024;
+      status.panels[i].mips = 5;
+    }
+  }
+  command(StepPillId);
+  require(page == SetupPage && setup.built_in == profiles::A380.id && setup.names[0] == "SCREEN_DU_PFDL" && setup.sides == 3,
+          "Displays opens on the profile's own displays, with a lower display");
+  require(setup_blocker(status).find(L"don't match their pictures") != std::wstring::npos,
+          "Names that did not pair in the flight are not offered for saving");
+  // The left PFD's picture is the texture named SCREEN_DU_PFDR here.
+  setup.picked = "SCREEN_DU_PFDR";
+  setup.picked_texture = 701;
+  place_setup_panel(0);
+  require(current.left_id == 701 && setup.textures[0] == 701, "The display placed by picture routes that picture at once");
+  command(100);
+  require(page == OverviewPage && current.left_id == 701, "Leaving Displays keeps this flight's route");
+  command(StepPillId);
+  require(page == SetupPage && current.left_id == 701, "Opening Displays again keeps it");
+  command(NextId);
+  require(
+      page == CamerasPage && current.left_id == 701 && !current.display_override.textures[0][0] && !current.display_override.textures[1][0],
+      "Next goes on without saving the flight's names, and the route stays");
+  // A cockpit test ends without taking the route back.
+  command(StepPillId);
+  setup.picked = "SCREEN_DU_PFDL";
+  setup.picked_texture = 702;
+  place_setup_panel(1);
+  setup.testing = 2;
+  apply_setup_trial();
+  command(100);
+  require(current.left_id == 701 && current.right_id == 702 && !current.calibration_mask, "Ending a cockpit test keeps both routes");
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
   }
 }
 }  // namespace
@@ -348,6 +503,9 @@ int main() {
             "Profile selection clears temporary camera requests");
     marking_controls_tests();
     stale_color_selection_tests();
+    setup_step_tests();
+    door_hold_save_tests();
+    session_display_tests();
     DestroyWindow(window);
     for (const auto* profile : profiles::Catalog) {
       win::Settings saved;
@@ -355,6 +513,7 @@ int main() {
       DeleteFileW(win::settings_path(saved).c_str());
     }
     DeleteFileW((win::settings_override + L"\\settings.ini").c_str());
+    DeleteFileW((win::settings_override + L"\\hotkeys.ini").c_str());
     RemoveDirectoryW((win::settings_override + L"\\profiles").c_str());
     RemoveDirectoryW(win::settings_override.c_str());
     std::printf("PASS production diagnostic controls: %u checks; hidden own-window only.\n", checks);

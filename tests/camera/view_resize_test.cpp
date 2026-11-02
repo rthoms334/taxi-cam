@@ -84,10 +84,12 @@ void planning() {
   for (const auto inherited : std::array<std::array<std::int32_t, 2>, 7>{
            {{3413, 913}, {1920, 1080}, {768, 763}, {512, 512}, {16384, 16384}, {32, 32}, {16384, 32}}}) {
     input.fill(inherited);
-    for (unsigned feed = 0; feed < 3; ++feed) {
+    for (unsigned feed = 0; feed < 4; ++feed) {
       require(nc::plan_view_resize(input, feed, output), "valid dimensions refused");
       for (const auto pair : output)
-        require(pair == std::array<std::int32_t, 2>{736, feed == 0 ? 251 : 496}, "output differs from its exact PFD pane");
+        // Nose, tail, the idle right wing slot at the tail's size, and the door camera's 768 x 763.
+        require(pair == (feed < 3 ? std::array<std::int32_t, 2>{736, feed == 0 ? 251 : 496} : std::array<std::int32_t, 2>{768, 763}),
+                "output differs from its exact PFD pane");
     }
   }
   for (const auto value : {std::numeric_limits<std::int32_t>::min(), -1, 0, 31, 16385, std::numeric_limits<std::int32_t>::max()}) {
@@ -104,9 +106,10 @@ void planning() {
         require(pair == nc::kCameraPaneDimensions[feed], "mixed inherited sizes altered the exact requested pane");
     }
   input.fill({3413, 913});
-  // CameraPanes holds three known feeds (nose / left-or-tail / right). Feed 2 is
-  // valid; only indexes past that capacity must refuse without writing output.
-  for (const auto feed : {3u, std::numeric_limits<unsigned>::max()})
+  // CameraPanes holds four known feeds (nose / left-or-tail / right / door).
+  // Feed 3 is valid; only indexes past that capacity must refuse without
+  // writing output.
+  for (const auto feed : {4u, std::numeric_limits<unsigned>::max()})
     require(!nc::plan_view_resize(input, feed, output) && output == nc::ViewDimensions{}, "unknown feed accepted/leaked output");
 }
 void independent_dimension_guards() {
@@ -396,7 +399,7 @@ void retained_dimension_restore() {
 
 void empty_manager_warmup(const nc::ViewDimensions& primary) {
   nc::ViewResizeWarmup warmup;
-  const std::array<std::uint64_t, 3> ids{1003, 1004, 0};
+  const std::array<std::uint64_t, 4> ids{1003, 1004, 0, 0};
   require(!warmup.begin({0, 1004, 0}, 1) && !warmup.pending(), "zero owned ID admitted");
   require(!warmup.begin({1003, 1003, 0}, 1) && !warmup.pending(), "duplicate owned ID admitted");
   require(!warmup.begin(ids, 0) && !warmup.pending(), "unobserved iteration admitted");

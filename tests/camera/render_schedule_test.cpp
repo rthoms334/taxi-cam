@@ -19,9 +19,9 @@ void require(bool value, const char* message) {
 }
 
 struct Run {
-  std::array<unsigned, 3> images{};
-  unsigned updates = 0, gate_changes = 0, busiest_frame = 0, quietest_frame = 3;
-  std::array<unsigned, 4> frames_with{};  // Updates that rendered 0, 1, 2 or 3 cameras.
+  std::array<unsigned, 4> images{};
+  unsigned updates = 0, gate_changes = 0, busiest_frame = 0, quietest_frame = 4;
+  std::array<unsigned, 5> frames_with{};  // Updates that rendered 0 to 4 cameras.
 };
 
 // Drives the schedule for ten seconds at a simulator frame time (optionally
@@ -31,7 +31,7 @@ Run drive(unsigned rate, unsigned feeds, double frame_ms, double jitter = 0, uns
   RenderSchedule schedule;
   schedule.configure(rate, feeds, per_frame);
   Run run;
-  std::array<bool, 3> previous{};
+  std::array<bool, 4> previous{};
   double t = 0;
   for (unsigned tick = 0; t < 10000; ++tick) {
     const auto now = static_cast<std::uint64_t>(t);
@@ -41,7 +41,7 @@ Run drive(unsigned rate, unsigned feeds, double frame_ms, double jitter = 0, uns
       run.gate_changes += active != previous;
     previous = active;
     unsigned open = 0;
-    for (unsigned feed = 0; feed < 3; ++feed) {
+    for (unsigned feed = 0; feed < 4; ++feed) {
       require(!active[feed] || feed < feeds, "A disabled feed opened");
       if (active[feed]) {
         ++open;
@@ -104,7 +104,7 @@ void even_frames() {
 }
 
 void stalls_suspension_and_changes() {
-  using Gates = std::array<bool, 3>;
+  using Gates = std::array<bool, 4>;
   RenderSchedule schedule;
   schedule.configure(10, 3);
   // The first frame opens one camera; then 10 × 3 at 30 fps is one per frame.
@@ -135,7 +135,7 @@ void stalls_suspension_and_changes() {
   bounds.configure(0, 0, 9);
   require(bounds.rate() == taxi_camera::kMinimumCameraRate && bounds.feeds() == 1 && bounds.per_frame() == 1, "Lower bounds");
   bounds.configure(999, 999);
-  require(bounds.rate() == taxi_camera::kMaximumCameraRate && bounds.feeds() == 3 && bounds.per_frame() == 0, "Upper bounds");
+  require(bounds.rate() == taxi_camera::kMaximumCameraRate && bounds.feeds() == 4 && bounds.per_frame() == 0, "Upper bounds");
   require(bounds.tick(std::numeric_limits<std::uint64_t>::max() - 1)[0], "Large clock value");
 }
 

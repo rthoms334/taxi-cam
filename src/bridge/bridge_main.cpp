@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include "../camera/body_pose_provider.hpp"
@@ -15,6 +16,7 @@
 #include "../hooks/render_boundary_observer.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/companion_control.hpp"
+#include "../shared/door_camera.hpp"
 #include "../shared/hook_timing.hpp"
 #include "../shared/lock_holder_priority.hpp"
 #include "../shared/protocol.hpp"
@@ -540,13 +542,19 @@ void service_panel_identity(PanelIdentityLog& state,
     if (first)
       log_chunks(status, "Display creation burst (id:shape:mips:format:ms from panel table)", items);
     // Route by name: every named side of the selected profile must resolve to
-    // a tracked texture of the profile's display shape, or nothing is
-    // published for this profile.
+    // a tracked texture of its display's shape (side_display: any panel for a
+    // pilot pair's placed lower display), or nothing is published for this
+    // profile. A placed lower display that does not resolve is left out
+    // rather than leaving the pilot displays without routes.
     std::array<display_identity::Assignment, display_identity::kMaxPanels> proposal{};
     std::size_t paired = 0;
     std::array<std::uint64_t, MaxDisplaySides> named{};
-    const auto fit = [&](const display_identity::Creation& c) {
-      return profile && profiles::named_display(*profile, c.width, c.height, c.mips, c.format);
+    std::array<const char*, MaxDisplaySides> names{};
+    if (profile)
+      names = profile->panel_textures;
+    const std::size_t name_count = profile ? std::min<std::size_t>(profile->sides, MaxDisplaySides) : 0;
+    const auto fit = [&](const display_identity::Creation& c, std::size_t side) {
+      return profile && profiles::side_display(*profile, static_cast<unsigned>(side), c.width, c.height, c.mips, c.format);
     };
     const auto expected = [&](const char* name, std::uint32_t& width, std::uint32_t& height) {
       for (const auto& shape : profile->panel_shapes)
@@ -558,16 +566,51 @@ void service_panel_identity(PanelIdentityLog& state,
       return false;
     };
     const auto resolve = [&](display_identity::PanelOrder by) {
-      return profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), profile->panel_textures.data(),
-                                                       std::min<std::size_t>(profile->sides, MaxDisplaySides), fit, expected, named.data(),
-                                                       proposal, paired, 8, by)
+      return profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), names.data(), name_count, fit, expected,
+                                                       named.data(), proposal, paired, 8, by)
                      : -1;
+    };
+    // No window fits (a cockpit whose display boot keeps or adds textures):
+    // each named display pairs within its shape. A named side's shape is its
+    // display's (a set-up aircraft's: the panel it was set up on, with mips;
+    // a placed lower display's: its panel shape, if the profile lists it), its
+    // neighbours' the profile's panel shapes.
+    const auto shape = [&](const char* name, std::uint32_t& width, std::uint32_t& height, std::uint32_t& mips) {
+      for (unsigned side = 0; side < name_count; ++side)
+        if (names[side] && std::strcmp(names[side], name) == 0) {
+          if (side == MaxDisplaySides - 1 && profiles::lower_any_panel(*profile))
+            break;
+          width = profile->fit_texture ? profile->side_shapes[side][0] : profile->width;
+          height = profile->fit_texture ? profile->side_shapes[side][1] : profile->height;
+          mips = profile->fit_texture ? profile->side_shapes[side][2] : 0;
+          return true;
+        }
+      mips = 0;
+      return expected(name, width, height);
     };
     // The table's index order first (every catalog aircraft's), else the
     // panel.cfg section order, for a table listing a section's panels apart:
-    // the names that fit no shift in index order are then paired right.
-    int shift = resolve(display_identity::PanelOrder::index);
-    const bool by_section = shift < 0 && (shift = resolve(display_identity::PanelOrder::section)) >= 0;
+    // the names that fit no shift in index order are then paired right; else
+    // by shape.
+    int shift = -1;
+    bool by_section = false, by_shape = false, lower_left_out = false;
+    for (const bool with_lower : {true, false}) {
+      if (!with_lower) {
+        if (!profile || !profiles::lower_any_panel(*profile) || !names[MaxDisplaySides - 1] || !names[MaxDisplaySides - 1][0])
+          break;
+        names[MaxDisplaySides - 1] = "";
+        lower_left_out = true;
+      }
+      shift = resolve(display_identity::PanelOrder::index);
+      by_section = shift < 0 && (shift = resolve(display_identity::PanelOrder::section)) >= 0;
+      by_shape = shift < 0 && profile &&
+                 display_identity::resolve_by_shape(state.panels, burst.data(), burst.size(), names.data(), name_count, shape, named.data(),
+                                                    proposal, paired);
+      if (by_shape)
+        shift = 0;
+      if (shift >= 0)
+        break;
+    }
     const bool resolved = shift >= 0;
     bool complete = resolved;
     if (!resolved) {
@@ -578,8 +621,12 @@ void service_panel_identity(PanelIdentityLog& state,
     }
     std::vector<std::string> pairs;
     char summary[128];
-    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s",
-                  complete ? 1 : 0, paired, shift, by_section ? "section" : "index");
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s%s",
+                  complete ? 1 : 0, paired, shift,
+                  by_shape     ? "shape"
+                  : by_section ? "section"
+                               : "index",
+                  lower_left_out ? " lower=unresolved" : "");
     pairs.emplace_back(summary);
     state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {
@@ -1042,7 +1089,9 @@ DWORD run_impl() {
     service_max_ms = std::max(service_max_ms, GetTickCount64() - begin);
   };
   std::vector<PfdTargetObservation> inventory;
-  unsigned rate{}, feeds{}, applied_profile{}, scheduled_per_frame{}, source_rate{};
+  // feeds: the cameras that render; scheduled_wanted: their bits.
+  unsigned rate{}, feeds{}, applied_profile{}, scheduled_per_frame{}, scheduled_wanted{}, source_rate{};
+  win::DoorSnapshot door_snapshot;
   AutoCameraPolicy auto_policy;
   UpdateRateMeter update_meter;
   // Frame-time histogram read at the previous status log line.
@@ -1086,7 +1135,7 @@ DWORD run_impl() {
       announce(events[i], sim_limiter, at);
   };
   std::uint64_t last_stop_sequence{};
-  std::array<std::array<double, 6>, 3> applied_mounts{};
+  profiles::CameraMounts applied_mounts{};
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -1230,8 +1279,8 @@ DWORD run_impl() {
       if (!next)
         return false;
       const auto owned = native_camera::scene_snapshot().pair.owned_ids;
-      const unsigned have = (owned[0] ? 1u : 0u) + (owned[1] ? 1u : 0u) + (owned[2] ? 1u : 0u);
-      return have >= (next->composition.split_bottom != 0 ? 3u : 2u);
+      const unsigned have = engine_camera::owned_count(owned);
+      return have >= profiles::CameraViews;
     };
     // One snapshot per companion serial. It needs graphics observation while
     // pending, like calibration, but never a camera or a matching aircraft:
@@ -1282,19 +1331,20 @@ DWORD run_impl() {
     const bool layout_changed = settings.profile == profiles::DiscoveredProfileId && !profiles::discovered_current(settings.discovered);
     // The user's display choices for the profile (another panel or display
     // area per side) are another profile too. A new layout brings new ones.
-    const bool choices_changed =
-        layout_changed || !profiles::override_current(profiles::base_profile(settings.profile), settings.display_override);
+    const bool choices_changed = layout_changed || !profiles::override_current(profiles::base_profile(settings.profile),
+                                                                               settings.display_override, settings.door_side);
     // Choices that give the cameras another shape (a reshaped display area,
-    // or another panel on a set-up aircraft) resize them: the transition
+    // another panel on a set-up aircraft, or the door camera's display) resize them: the transition
     // below takes the kept pair to the new panes (resize_kept_panes).
     bool reshaped = false;
     if (choices_changed && !layout_changed) {
       const auto* base = profiles::base_profile(settings.profile);
       const auto* current = profiles::find(settings.profile);
-      if (base && current && profiles::valid_override(base->sides, base->fit_texture, base->camera_padding, settings.display_override)) {
+      if (base && current && profiles::valid_override(*base, settings.display_override)) {
         auto next = *base;
-        profiles::apply_choices(next, *base, settings.display_override);
-        reshaped = next.camera_panes != current->camera_panes;
+        profiles::apply_choices(next, *base, settings.display_override, settings.door_side);
+        // A placed or removed lower display changes the sides: a transition too.
+        reshaped = next.camera_panes != current->camera_panes || next.sides != current->sides;
       }
     }
     // Display choices alone (same profile and layout, same camera shape)
@@ -1305,14 +1355,15 @@ DWORD run_impl() {
     if (connected && settings.enabled && choices_changed && !layout_changed && !reshaped && !changing_profile && applied_profile &&
         settings.profile == applied_profile) {
       const auto& o = settings.display_override;
-      const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o);
+      const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o, settings.door_side);
       if (chosen)
         win::set_aircraft_profile(settings.profile);
       char detail[384];
-      std::snprintf(detail, sizeof(detail), "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u",
+      std::snprintf(detail, sizeof(detail),
+                    "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u door=%u",
                     chosen ? "applied" : "refused", settings.profile, o.textures[0], o.textures[1], o.textures[2], o.areas[0].left,
                     o.areas[0].top, o.areas[0].right, o.areas[0].bottom, o.areas[1].left, o.areas[1].top, o.areas[1].right,
-                    o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom);
+                    o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom, settings.door_side);
       log_status(status, detail);
     }
     const bool reapply = layout_changed || (choices_changed && (settings.profile != applied_profile || reshaped));
@@ -1344,12 +1395,13 @@ DWORD run_impl() {
         }
         if (choices_changed) {
           const auto& o = settings.display_override;
-          const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o);
+          const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o, settings.door_side);
           char detail[384];
-          std::snprintf(detail, sizeof(detail), "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u",
+          std::snprintf(detail, sizeof(detail),
+                        "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u door=%u",
                         chosen ? "published" : "refused", settings.profile, o.textures[0], o.textures[1], o.textures[2], o.areas[0].left,
                         o.areas[0].top, o.areas[0].right, o.areas[0].bottom, o.areas[1].left, o.areas[1].top, o.areas[1].right,
-                        o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom);
+                        o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom, settings.door_side);
           log_status(status, detail);
         }
         scene_runtime::manager().stop_source_tracking();
@@ -1416,8 +1468,9 @@ DWORD run_impl() {
         // needs a supported aircraft), so aircraft discovery runs here. The
         // panel table is first observed once the flight has loaded, as on a
         // ready flight, so the late-creation rule keeps the same meaning.
+        const auto* lower_profile = profiles::find(pending_profile);
         win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) ||
-                                 (connected && settings.panel_setup));
+                                 (connected && (settings.panel_setup || (lower_profile && profiles::lower_any_panel(*lower_profile)))));
         pending.panel_discovery = win::panel_discovery();
         const bool discovering = pending.panel_discovery && transition_session.flight_loaded;
         if (discovering)
@@ -1558,7 +1611,7 @@ DWORD run_impl() {
     // add displays on top. Nothing is sent to the aircraft.
     const bool pmdg_dsp = profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
     const bool commandable = profile && profiles::commandable_buttons(*profile);
-    const bool selected_profile_separate_lower = profile && profiles::separate_lower_texture(*profile);
+
     const auto buttons = native_camera::get_taxi_buttons();
     const auto desired = intent.observe(now, buttons.valid, buttons.mask());
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
@@ -1569,22 +1622,25 @@ DWORD run_impl() {
                                                                             : settings.manual_mask) &
                                     sides;
     // What is requested and ready, before the watchdog gate.
-    const unsigned wanted = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready()
-                                ? requested_mask
-                                : 0;
-    const unsigned mask = degraded ? 0u : wanted;
+    const bool admitted = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready();
+    const unsigned wanted = admitted ? requested_mask : 0;
+    // The door camera takes its side over from the taxi cameras while it is on.
+    const unsigned door_side = profile && settings.door_on && settings.door_side < MaxDisplaySides ? 1u << settings.door_side : 0;
+    const unsigned door_wanted = admitted ? door_side & sides : 0;
+    const unsigned mask = degraded ? 0u : wanted & ~door_wanted;
+    const unsigned door = degraded ? 0u : door_wanted;
     const bool wanted_test_scene =
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test;
     const bool test_scene = wanted_test_scene && !degraded;
     // Trips count toward a repeated-stall hold only while cameras are wanted;
     // the hold lasts until the pilot turns them off (a known OFF, never a
     // readiness lapse or a stale button reading).
-    cameras_wanted.store(wanted || wanted_test_scene, std::memory_order_release);
+    cameras_wanted.store(wanted || door_wanted || wanted_test_scene, std::memory_order_release);
     request_hold_release(
         stall_hold_known_off(connected, settings.enabled != 0, settings.scene_test != 0, requested_mask, uses_buttons, buttons.valid),
         status);
     const auto intent_observed_ms = GetTickCount64();
-    if (!mask && !test_scene && !prewarm.active())
+    if (!mask && !door && !test_scene && !prewarm.active())
       failed = false;
     const auto targets = win::target_ids();
     unsigned assigned = 0;
@@ -1627,12 +1683,11 @@ DWORD run_impl() {
       const auto warm_scene = native_camera::scene_snapshot();
       const auto warm_output = scene_runtime::snapshot(key);
       const auto previous_warm_phase = prewarm.phase();
-      background_warmup = prewarm.observe(
-          now, warm_readiness().eligible(), mask || test_scene,
-          {requested && warm_scene.ready[0] && warm_scene.ready[1] && (!warm_scene.pair.owned_ids[2] || warm_scene.ready[2]),
-           warm_output.output, warm_output.frames, warm_output.completed_frames},
-          failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
-              warm_scene.pair.state == engine_camera::State::blocked);
+      background_warmup = prewarm.observe(now, warm_readiness().eligible(), mask || test_scene,
+                                          {requested && engine_camera::owned_ready(warm_scene.pair.owned_ids, warm_scene.ready),
+                                           warm_output.output, warm_output.frames, warm_output.completed_frames},
+                                          failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
+                                              warm_scene.pair.state == engine_camera::State::blocked);
       if (prewarm.phase() != previous_warm_phase) {
         char detail[384]{};
         std::snprintf(
@@ -1650,23 +1705,37 @@ DWORD run_impl() {
         log_status(status, detail);
       }
     }
-    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup && !degraded);
-    unsigned active = demand.stamp_mask;
+    // A snapshot stops rendering once taken; its page stays on the display, and
+    // is taken again if a reset dropped it.
+    const auto door_page = scene_runtime::door_page(key);
+    const bool door_render = door_snapshot.observe(door != 0, settings.door_live != 0, door_page.pages, door_page.ready);
+    const auto demand =
+        win::scene_demand(mask | (door_render ? door : 0u), test_scene, assigned, requested, failed, background_warmup && !degraded);
+    unsigned active = demand.stamp_mask | (failed ? 0u : door & assigned);
     const unsigned calibration =
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && !degraded ? settings.calibration_mask : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
-    win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending);
+    // A taken door snapshot renders nothing but its page is still drawn.
+    win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending || (door & active) != 0);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
     win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
+    win::set_door_mask(door & active);
+    scene_runtime::set_door(key, door != 0, settings.door_live != 0);
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
     // Only the schedule rate changes here. The pair, its gates and the saved
     // camera_rate are untouched; configure() on a live pair retains its grid.
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
-    const unsigned desired_feeds = rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u;
+    // Every set has its taxi cameras and, on two-camera aircraft, the door
+    // camera; only the wanted ones render and share the rate.
+    const unsigned set_feeds = profiles::CameraViews;
+    const unsigned taxi_bits = (1u << (rate_profile ? profiles::taxi_feeds(*rate_profile) : 2u)) - 1;
+    const unsigned wanted_feeds =
+        (mask || test_scene || background_warmup ? taxi_bits : 0u) | (door_render ? 1u << profiles::DoorFeed : 0u);
+    const unsigned desired_feeds = std::max(1u, static_cast<unsigned>(std::popcount(wanted_feeds ? wanted_feeds : taxi_bits)));
     const unsigned pfd_refresh_hz = rate_profile ? rate_profile->pfd_refresh_hz : 0;
     const double update_hz = update_meter.update(now, native_camera::scene_update_count());
     if (!demand.suspend) {
@@ -1705,11 +1774,13 @@ DWORD run_impl() {
                                                                    : reachable_camera_rate(effective_rate.rate, update_hz);
     if (!automatic && std::isfinite(reachable) && reachable + 0.5 < effective_rate.rate)
       effective_rate.reasons |= kRateLimitSimulator;
-    if (connected && (rate != effective_rate.rate || feeds != desired_feeds || scheduled_per_frame != per_frame)) {
+    if (connected &&
+        (rate != effective_rate.rate || feeds != desired_feeds || scheduled_per_frame != per_frame || scheduled_wanted != wanted_feeds)) {
       rate = effective_rate.rate;
       feeds = desired_feeds;
       scheduled_per_frame = per_frame;
-      native_camera::request_scene_rate(rate, feeds, per_frame);
+      scheduled_wanted = wanted_feeds;
+      native_camera::request_scene_rate(rate, set_feeds, per_frame, wanted_feeds);
     }
     // Capture spacing follows the measured frame time, so a camera rendering
     // on every frame above 120 fps keeps every image (PR #135 review).
@@ -1801,6 +1872,7 @@ DWORD run_impl() {
         log_startup(status, start_timing, "request_begin");
         scene_runtime::set_composition(key, composition);
         scene_runtime::set_reference_guides(key, drawing->reference_guides);
+        scene_runtime::set_camera_look(key, settings.film_grain, settings.black_and_white);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
@@ -1840,6 +1912,7 @@ DWORD run_impl() {
     // source leases. The profile-change transaction above still owns teardown.
     scene_runtime::set_composition(key, composition);
     scene_runtime::set_reference_guides(key, drawing->reference_guides);
+    scene_runtime::set_camera_look(key, settings.film_grain, settings.black_and_white);
     const auto light = native_camera::get_lighting();
     // The fallback exposure, used while the tone curve is not: automatic from
     // the ambient light with a fixed night boost.
@@ -1929,18 +2002,29 @@ DWORD run_impl() {
     status.taxi_request_retired = taxi_request_status.pending_mask ? 0 : taxi_request_status.serial;
     status.taxi_request_pending = taxi_request_status.pending_mask;
     status.taxi_request_failed = taxi_request_status.failed;
+    // Bound cockpit L:vars are only read here; the companion turns their
+    // presses into the same requests as the matching shortcuts.
+    native_camera::set_lvar_bindings(connected ? settings.lvar_bindings : win::LvarBindings{});
+    const auto lvars = native_camera::get_lvar_bindings();
+    status.lvar_generation = lvars.generation;
+    status.lvars = lvars.states;
     std::memcpy(status.aircraft_type, identity.type.data(), sizeof(status.aircraft_type));
     std::memcpy(status.aircraft_path, identity.path.data(), sizeof(status.aircraft_path));
     status.graphics_ready = graphics.ready;
     status.hook_failures = graphics.hook_failures;
-    status.scene_ready = scene.ready[0] && scene.ready[1] && (!scene.pair.owned_ids[2] || scene.ready[2]);
+    status.scene_ready = engine_camera::owned_ready(scene.pair.owned_ids, scene.ready);
     status.taxi_mask = active;
+    status.door_state = static_cast<std::uint32_t>(win::door_state(door != 0, settings.door_live != 0, door_page.ready));
     status.left_id = targets[0];
     status.right_id = targets[1];
-    status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
+    // Side 2's own texture: the 777 lower DU, a lower display placed on a
+    // pilot-pair profile, or a set-up aircraft's.
+    status.lower_id = profile && profiles::own_lower_texture(*profile) ? targets[2] : 0;
     status.named_mask = win::named_target_mask();
-    // The companion's aircraft setup also needs every panel texture tracked.
-    win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) || (connected && settings.panel_setup));
+    // The companion's aircraft setup also needs every panel texture tracked,
+    // and so does a placed lower display that may be any panel.
+    win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) ||
+                             (connected && (settings.panel_setup || (profile && profiles::lower_any_panel(*profile)))));
     status.panel_discovery = win::panel_discovery();
     publish_panel_map(panel_identity, status);
     status.snapshot_serial = snapshot.serial;
@@ -2294,24 +2378,26 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
-      char retention_detail[640];
-      std::snprintf(retention_detail, sizeof(retention_detail),
-                    "Camera retention: created_total=%llu snapshot_bytes=%llu snapshot_allocations=%llu quarantined=%llu prewarm=%s "
-                    "patch_requests=%u patch_draws=%llu "
-                    "waiting_pages=%llu "
-                    "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
-                    "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
-                    "rt_holds=%llu",
-                    static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
-                    static_cast<unsigned long long>(output.capture.allocations),
-                    static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
-                    static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(output.waiting_pages),
-                    static_cast<unsigned long long>(scene.retirement_deferrals), scene.retirement_waiting, scene.retirement_status,
-                    scene.retirement_queue_counts[0], scene.retirement_queue_counts[1], static_cast<unsigned long long>(scene.flags[0][0]),
-                    static_cast<unsigned long long>(scene.flags[0][1]), static_cast<unsigned long long>(scene.flags[1][0]),
-                    static_cast<unsigned long long>(scene.flags[1][1]), static_cast<unsigned long long>(scene.aa_restores),
-                    static_cast<unsigned long long>(scene.aa_restore_failures), scene.aa_cleared_pending, scene.output_slots[0],
-                    scene.output_slots[1], scene.rt_record_refusals, static_cast<unsigned long long>(scene.rt_record_holds));
+      char retention_detail[768];
+      std::snprintf(
+          retention_detail, sizeof(retention_detail),
+          "Camera retention: created_total=%llu snapshot_bytes=%llu snapshot_allocations=%llu quarantined=%llu prewarm=%s "
+          "patch_requests=%u patch_draws=%llu patch_reuses=%u retired_patch_buffers=%u "
+          "waiting_pages=%llu door=%u/%llu/%llu "
+          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
+          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
+          "rt_holds=%llu",
+          static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
+          static_cast<unsigned long long>(output.capture.allocations), static_cast<unsigned long long>(output.capture.quarantined),
+          prewarm.name(), output.patch_requests, static_cast<unsigned long long>(output.patch_draws), output.patch_reuses,
+          output.retired_patch_buffers, static_cast<unsigned long long>(output.waiting_pages), status.door_state,
+          static_cast<unsigned long long>(output.door_pages), static_cast<unsigned long long>(output.accepted_frames[profiles::DoorFeed]),
+          static_cast<unsigned long long>(scene.retirement_deferrals), scene.retirement_waiting, scene.retirement_status,
+          scene.retirement_queue_counts[0], scene.retirement_queue_counts[1], static_cast<unsigned long long>(scene.flags[0][0]),
+          static_cast<unsigned long long>(scene.flags[0][1]), static_cast<unsigned long long>(scene.flags[1][0]),
+          static_cast<unsigned long long>(scene.flags[1][1]), static_cast<unsigned long long>(scene.aa_restores),
+          static_cast<unsigned long long>(scene.aa_restore_failures), scene.aa_cleared_pending, scene.output_slots[0],
+          scene.output_slots[1], scene.rt_record_refusals, static_cast<unsigned long long>(scene.rt_record_holds));
       log_status(status, retention_detail);
       // Per camera and for the main view: near plane / culling far / default far, metres.
       char clip_detail[448];
@@ -2356,6 +2442,30 @@ DWORD run_impl() {
       std::snprintf(fog_detail, sizeof(fog_detail), "Camera fog: resets=%llu volumes=%u", static_cast<unsigned long long>(fog.resets),
                     fog.volumes);
       log_status(status, fog_detail);
+      // Camera look: film grain and black and white, a bit per camera view.
+      char look_detail[96];
+      std::snprintf(look_detail, sizeof(look_detail), "Camera look: film_grain=0x%x black_and_white=0x%x", settings.film_grain,
+                    settings.black_and_white);
+      log_status(status, look_detail);
+      // Cockpit L:vars: the stream and each bound name as read (value, changes
+      // to on and to off this stream; unread until the simulator sends it).
+      const auto lvar_read = native_camera::get_lvar_bindings();
+      char lvar_detail[640];
+      auto lvar_used =
+          static_cast<std::size_t>(std::snprintf(lvar_detail, sizeof(lvar_detail), "Cockpit L:vars: generation=%u error=%s",
+                                                 lvar_read.generation, lvar_read.error && *lvar_read.error ? lvar_read.error : "none"));
+      for (std::size_t i = 0; i < win::LvarBindingCount && lvar_used < sizeof(lvar_detail); ++i) {
+        const auto& binding = settings.lvar_bindings[i];
+        if (!binding.name[0])
+          continue;
+        const auto& read = lvar_read.states[i];
+        const auto appended = std::snprintf(lvar_detail + lvar_used, sizeof(lvar_detail) - lvar_used, " %.63s=%.6g/%u/%u%s", binding.name,
+                                            static_cast<double>(read.value), read.rises, read.falls, read.read ? "" : "(unread)");
+        if (appended < 0 || static_cast<std::size_t>(appended) >= sizeof(lvar_detail) - lvar_used)
+          break;
+        lvar_used += static_cast<std::size_t>(appended);
+      }
+      log_status(status, lvar_detail);
       // Capture phase, per feed nose/left/right since the bridge started:
       // ordered batches that drew the camera image, those that drew it once
       // (the deferred lighting) and the most draws in one batch; captures after

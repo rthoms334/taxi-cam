@@ -105,6 +105,35 @@ int main() {
     require(resolve_names(a350, extras.data(), extras.size(), none, 3, fit, any, ids, out, pairs) == -1,
             "A profile without names resolves nothing");
   }
+  // A pilot pair's placed lower display may be any panel (lower_any_panel):
+  // with a fit per side, the A350's 1645 x 1024 $FMS resolves for side 2
+  // while the pilot displays keep their 1644 x 1024 shape (2026-11-02 table).
+  {
+    Panels a350;
+    add(a350, 0, "VCockpit01", "$INI_FAP", 4, 1024);
+    add(a350, 2, "VCockpit02", "$EFIS_LEFT", 4, 1024);
+    add(a350, 3, "VCockpit03", "$EFIS_RIGHT", 4, 1024);
+    add(a350, 4, "VCockpit04", "$SD", 4, 1024);
+    add(a350, 5, "VCockpit05", "$FMS", 4, 1024);
+    const std::vector<Creation> load{{975, 0, 1645, 1024, 5, 28},
+                                     {976, 1, 1644, 1024, 5, 28},
+                                     {977, 2, 1644, 1024, 5, 28},
+                                     {978, 3, 1644, 1024, 5, 28},
+                                     {981, 4, 2048, 2048, 5, 28}};
+    const auto strict = [](const Creation& c) { return c.width == 1644 && c.height == 1024; };
+    const auto per_side = [](const Creation& c, std::size_t side) { return side == 2 || (c.width == 1644 && c.height == 1024); };
+    const char* names[]{"$EFIS_LEFT", "$EFIS_RIGHT", "$FMS"};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    require(resolve_names(a350, load.data(), load.size(), names, 3, strict, any, ids, out, pairs) == -1,
+            "One shape for every side refuses the lower display on the FMS");
+    require(resolve_names(a350, load.data(), load.size(), names, 3, per_side, any, ids, out, pairs) == 0 && ids[0] == 978 &&
+                ids[1] == 977 && ids[2] == 975,
+            "A fit per side routes the lower display to the FMS and the pilot displays as before");
+    const char* swapped[]{"$FMS", "$EFIS_RIGHT", ""};
+    require(resolve_names(a350, load.data(), load.size(), swapped, 3, per_side, any, ids, out, pairs) == -1,
+            "A pilot display never takes another panel's shape");
+  }
   // 777 names resolve unshifted from the recorded burst (DUS 233, EICASCDU 232).
   {
     const char* names[]{"DUS", "DUS", "EICASCDU"};
@@ -217,6 +246,96 @@ int main() {
                 resolve_names(ordered, load.data(), load.size(), names, 3, fit, anchors, by_section, out, pairs, 8, PanelOrder::section) &&
             by_index[0] == by_section[0] && by_index[1] == by_section[1] && by_index[0] == 252,
         "A table in section order names the same in either order");
+    // The same load paired within shapes names the same displays.
+    const auto shape = [](const char* panel, std::uint32_t& width, std::uint32_t& height, std::uint32_t& mips) {
+      const bool display =
+          std::strncmp(panel, "$A320_PFD", 9) == 0 || std::strncmp(panel, "$A320_ND", 8) == 0 || std::strncmp(panel, "$A320_ECAM", 10) == 0;
+      width = height = display ? 768 : 256;
+      mips = std::strncmp(panel, "$A320_PFD", 9) == 0 ? 5 : 0;
+      return display || std::strcmp(panel, "$A320_Standby") == 0;
+    };
+    require(
+        resolve_by_shape(fenix, load.data(), load.size(), names, 3, shape, ids, out, pairs) && ids[0] == 252 && ids[1] == 248 && pairs == 6,
+        "Pairing within shapes names the 2026-11-01 load as its section order did");
+  }
+  {
+    // Fenix A320 first load of 2026-11-02 (bridge.log, sessions 13-14): its
+    // display boot kept the refuelling panel's 996 x 744 texture (#227) and
+    // others from before and added two, so no window put the saved anchors
+    // on their shapes and the setup page showed each PFD's name on its ND.
+    Panels fenix;
+    const char* layout[][2]{
+        {"VCockpit17", "Panel_Refueling"},    {"VCockpit01", "$A320_PFD_Captain"},  {"VCockpit02", "$A320_ND_Captain"},
+        {"VCockpit03", "$A320_ECAM_Upper"},   {"VCockpit04", "$A320_ECAM_Lower"},   {"VCockpit05", "$A320_PFD_FO"},
+        {"VCockpit06", "$A320_ND_FO"},        {"VCockpit07", "$A320_Standby"},      {"VCockpit08", "$A320_Readouts_Legacy"},
+        {"VCockpit09", "$A320_Clock_Legacy"}, {"VCockpit10", "$A320_DCDU"},         {"VCockpit11", "$A320_MCDU_Captain"},
+        {"VCockpit12", "$A320_MCDU_FO"},      {"VCockpit13", "$EFB_Captain"},       {"VCockpit14", "$EFB_FO"},
+        {"VCockpit15", "NO_TEXTURE"},         {"VCockpit16", "DisplaysReflection"}, {"VCockpit17", "$FAP"}};
+    for (std::uint32_t i = 0; i < 18; ++i)
+      add(fenix, i, layout[i][0], layout[i][1], 4, 1024);
+    const std::vector<Creation> boot{
+        {79, 0, 768, 768, 10, 28},    {0, 1, 384, 264, 9, 28},    {0, 2, 813, 1020, 10, 28},   {0, 3, 813, 996, 10, 28},
+        {0, 4, 744, 996, 10, 28},     {226, 5, 744, 744, 10, 28}, {227, 6, 996, 744, 10, 28},  {231, 7, 768, 768, 10, 28},
+        {232, 8, 384, 264, 9, 28},    {233, 9, 1024, 768, 5, 28}, {234, 10, 1024, 512, 5, 28}, {235, 11, 2048, 1536, 5, 28},
+        {236, 12, 2048, 1536, 5, 28}, {237, 13, 512, 432, 5, 28}, {238, 14, 512, 432, 5, 28},  {239, 15, 512, 680, 5, 28},
+        {241, 16, 512, 512, 5, 28},   {242, 17, 256, 256, 5, 28}, {243, 18, 768, 768, 5, 28},  {244, 19, 768, 768, 5, 28},
+        {245, 20, 768, 768, 5, 28},   {246, 21, 768, 768, 5, 28}, {247, 22, 768, 768, 5, 28},  {248, 23, 768, 768, 5, 28}};
+    // The saved setup (layout.ini): three displays and their anchors.
+    const auto saved = [](const char* panel, std::uint32_t& width, std::uint32_t& height, std::uint32_t& mips) {
+      mips = 0;
+      const char* displays[]{"$A320_PFD_Captain", "$A320_PFD_FO", "$A320_ECAM_Lower"};
+      for (const char* name : displays)
+        if (std::strcmp(panel, name) == 0) {
+          width = height = 768;
+          mips = 5;
+          return true;
+        }
+      const struct {
+        const char* name;
+        std::uint32_t width, height;
+      } anchors[]{{"$A320_ECAM_Upper", 768, 768}, {"$A320_ND_Captain", 768, 768}, {"$FAP", 1024, 768},
+                  {"Panel_Refueling", 996, 744},  {"$A320_Standby", 256, 256},    {"$A320_ND_FO", 768, 768}};
+      for (const auto& anchor : anchors)
+        if (std::strcmp(panel, anchor.name) == 0) {
+          width = anchor.width;
+          height = anchor.height;
+          return true;
+        }
+      return false;
+    };
+    const auto anchors = [&](const char* panel, std::uint32_t& width, std::uint32_t& height) {
+      std::uint32_t mips = 0;
+      return saved(panel, width, height, mips);
+    };
+    const auto fit = [](const Creation& c) { return c.width == 768 && c.height == 768 && c.mips == 5; };
+    const char* names[]{"$A320_PFD_Captain", "$A320_PFD_FO", "$A320_ECAM_Lower"};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    std::array<Assignment, kMaxPanels> out{};
+    require(resolve_names(fenix, boot.data(), boot.size(), names, 3, fit, anchors, ids, out, pairs) == -1 &&
+                resolve_names(fenix, boot.data(), boot.size(), names, 3, fit, anchors, ids, out, pairs, 8, PanelOrder::section) == -1,
+            "The display boot fits no window, as in the flight");
+    require(resolve_by_shape(fenix, boot.data(), boot.size(), names, 3, saved, ids, out, pairs) && ids[0] == 248 && ids[1] == 244 &&
+                ids[2] == 245,
+            "Within shapes the PFDs and the lower ECAM get their own textures");
+    const auto named = [&](const char* texture) {
+      for (std::size_t i = 0; i < pairs; ++i)
+        if (std::strcmp(out[i].panel->texture.data(), texture) == 0)
+          return out[i].creation.id;
+      return std::uint64_t{};
+    };
+    require(pairs == 6 && named("$A320_ND_FO") == 243 && named("$A320_ECAM_Upper") == 246 && named("$A320_ND_Captain") == 247 &&
+                !named("$FAP") && !named("Panel_Refueling"),
+            "The displays' neighbours of their shape pair too; other shapes are left out");
+    // The older 768 x 768 textures of other mips never join the displays.
+    std::vector<Creation> short_boot(boot.begin(), boot.end() - 1);
+    require(!resolve_by_shape(fenix, short_boot.data(), short_boot.size(), names, 3, saved, ids, out, pairs) && !ids[0] && !ids[1],
+            "Too few creations of a shape pair nothing");
+    const char* unknown[]{"$A320_PFD_Captain", "$A320_Clock_Legacy", ""};
+    require(!resolve_by_shape(fenix, boot.data(), boot.size(), unknown, 3, saved, ids, out, pairs),
+            "A name of unknown shape pairs nothing");
+    const char* none[]{"", "", ""};
+    require(!resolve_by_shape(fenix, boot.data(), boot.size(), none, 3, saved, ids, out, pairs), "No names, nothing to pair");
   }
 
   std::array<char, 8> name{};
