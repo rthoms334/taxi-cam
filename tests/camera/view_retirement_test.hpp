@@ -87,7 +87,7 @@ inline void test_view_retirement() {
   for (engine.update = 2; engine.update < 200; ++engine.update) {
     pair.process_update(owner, engine.callbacks());
     assert(engine.creates == 2 && engine.erases == 0 && engine.closes == 2);
-    assert((pair.snapshot().owned_ids == std::array<ec::EntryId, 3>{1001, 1002, 0}));
+    assert((pair.snapshot().owned_ids == std::array<ec::EntryId, 4>{1001, 1002, 0}));
   }
   ready.flags[0] = 1;
   engine.views = {ready, ready};

@@ -48,9 +48,9 @@ struct ViewPoolSnapshot {
   std::array<ViewSlot, 8> slots{};
   // Published only after all slots and their consistency rechecks succeed.
   std::uint32_t free_count = 0;
-  // Track enough leading free slots for three-feed admission (nose + two bottoms).
-  // Two-feed callers still require only the first two.
-  std::array<std::int32_t, 3> first_free_indices{-1, -1, -1};
+  // Track enough leading free slots for a whole camera set (four views).
+  // Smaller requests still require only their first slots.
+  std::array<std::int32_t, 4> first_free_indices{-1, -1, -1, -1};
   bool release_checked = false;
   std::uint32_t release_count = 0;
   std::array<std::uint32_t, 2> release_queue_counts{};
@@ -141,9 +141,9 @@ class RetiredViewPool {
 
  private:
   std::uint64_t renderer_{};
-  // Capacity matches three owned camera feeds so a full trio can retire without
-  // dropping the third identity and blocking later creation.
-  std::array<std::uint64_t, 3> views_{};
+  // Capacity matches the four owned camera views so a full set can retire
+  // without dropping the last identity and blocking later creation.
+  std::array<std::uint64_t, 4> views_{};
 };
 
 }  // namespace taxi_camera::engine_camera

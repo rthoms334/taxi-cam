@@ -35,7 +35,7 @@ class SceneCaptureManager {
   // Camera feeds a receipt can capture at its queue tail: one per published
   // handoff entry (kMaxCameraFeeds in camera/aircraft_mounts.hpp, asserted
   // in the .cpp).
-  static constexpr std::size_t TailFeeds = 3;
+  static constexpr std::size_t TailFeeds = SceneFeeds;
   struct FrameOrder {
     // Actual serialized device timeline and list position within that submit.
     // Allocation tokens and CPU retirement times do not order rendered images.
@@ -144,9 +144,9 @@ class SceneCaptureManager {
     // Snapshot textures created. Steady captures reuse packets of their shape.
     std::uint64_t allocations = 0;
     std::uint64_t render_target_writes = 0, render_target_rewrites = 0;
-    std::array<RenderTargetDiagnostic, 3> render_targets{};
+    std::array<RenderTargetDiagnostic, SceneFeeds> render_targets{};
     std::uint64_t copy_writes = 0, copy_rewrites = 0;
-    std::array<CopyDiagnostic, 3> copies{};
+    std::array<CopyDiagnostic, SceneFeeds> copies{};
     std::uint64_t source_candidates = 0, source_draws = 0, tail_submissions = 0, tail_captures = 0;
     const char* tail_status = "not_started";
     std::array<CapturePhaseDiagnostic, TailFeeds> phases{};

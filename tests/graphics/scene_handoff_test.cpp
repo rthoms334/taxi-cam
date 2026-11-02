@@ -11,8 +11,8 @@ constexpr std::uint64_t kDevice = 11;
 constexpr std::uint64_t kNose = 101;
 constexpr std::uint64_t kTail = 202;
 constexpr SceneManagerIdentity kManager{301, 7};
-constexpr std::array<std::uint64_t, 3> kIds{401, 402, 0};
-constexpr std::array<std::uint64_t, 3> kHandles{kNose, kTail, 0};
+constexpr std::array<std::uint64_t, 4> kIds{401, 402, 0, 0};
+constexpr std::array<std::uint64_t, 4> kHandles{kNose, kTail, 0, 0};
 unsigned checks = 0;
 
 void require(bool value, const char* error) {
@@ -272,7 +272,7 @@ void completed_refresh_retention() {
   require(test.handoff.diagnostics().ticket_invalidations == 330 && test.handoff.diagnostics().publications == publications,
           "Retained publication was counted as a successful refresh");
 
-  constexpr std::array<std::uint64_t, 3> future{501, 502, 0};
+  constexpr std::array<std::uint64_t, 4> future{501, 502, 0, 0};
   require(test.handoff.register_resource(kDevice, future[0], 7) && test.handoff.register_resource(kDevice, future[1], 8),
           "Future outputs could not be registered");
   const auto older = test.handoff.begin_capture();

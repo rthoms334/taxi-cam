@@ -619,15 +619,15 @@ int main() {
     const auto content = profiles::display_content_rect(profiles::A380, side);
     assert(content.left == 16 && content.right == 752 && content.top == 12 && content.bottom == 763);
   }
-  // Two-camera aircraft have the door camera as their third view, at the
-  // working image's size and on the shared approximate mount; the PMDG 777's
-  // three views are all taxi cameras. Every set has three views.
+  // Every aircraft's set has four views: the taxi cameras, the right wing slot
+  // (a copy of the tail where there is no split bottom) and the door camera at
+  // the working image's size on the shared approximate mount.
   for (const auto* profile : profiles::Catalog) {
     const bool split = profile->composition.split_bottom != 0;
-    assert(profiles::door_camera(*profile) == !split && profiles::taxi_feeds(*profile) == (split ? 3u : 2u));
-    assert(profiles::camera_views(*profile) == 3);
+    assert(profiles::taxi_feeds(*profile) == (split ? 3u : 2u) && profiles::DoorFeed == 3 && profiles::CameraViews == 4);
+    assert(profile->camera_panes[profiles::DoorFeed] == profiles::DoorPane && profile->mounts[profiles::DoorFeed] == profiles::DoorMount);
     if (!split)
-      assert(profile->camera_panes[profiles::DoorFeed] == profiles::DoorPane && profile->mounts[profiles::DoorFeed] == profiles::DoorMount);
+      assert(profile->camera_panes[2] == profile->camera_panes[1] && profile->mounts[2] == profile->mounts[1]);
   }
   {
     // A reshaped camera area scales the taxi panes, never the door pane.
@@ -676,7 +676,7 @@ int main() {
     assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > 0.85 && gear[1] < 0.90);
     // The calibrated bracket corner sits outboard of the projected tyre contact.
     assert(a346.composition.tail_corner[0] < gear[0] && std::abs(a346.composition.tail_corner[1] - gear[1]) < 0.03);
-    assert(a346.mounts[2] == profiles::DoorMount);
+    assert(a346.mounts[1] == a346.mounts[2] && a346.mounts[3] == profiles::DoorMount);
   }
 
   for (const auto* profile : profiles::Catalog) {

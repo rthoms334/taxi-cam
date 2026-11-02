@@ -146,7 +146,7 @@ struct ProbeSnapshot {
   unsigned rt_record_refusals = 0;
   std::uint64_t rt_record_holds = 0;
   std::array<bool, kMaxCameraFeeds> ready{};
-  std::array<const char*, kMaxCameraFeeds> inspection_status{"not_inspected", "not_inspected", "not_inspected"};
+  std::array<const char*, kMaxCameraFeeds> inspection_status{"not_inspected", "not_inspected", "not_inspected", "not_inspected"};
   std::array<bool, kMaxCameraFeeds> resource_present{};
   // Output admission per view: mode2, resource present, all size pairs and the
   // Bitmap at the requested pane. Gates open only for views with this true.

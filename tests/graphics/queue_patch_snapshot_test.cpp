@@ -222,7 +222,7 @@ void run(bool warp, bool a350) {
   Reference<ID3D12DescriptorHeap> heap;
   const D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
   check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(heap.put())), "Camera RTVs");
-  std::array<std::uint64_t, 3> handles{};
+  std::array<std::uint64_t, 4> handles{};
   for (unsigned feed = 0; feed < 2; ++feed) {
     const auto pane = profile.camera_panes[feed];
     create_texture(device.get(), texture_description(pane[0], pane[1], DXGI_FORMAT_R8G8B8A8_UNORM), sources[feed].put());

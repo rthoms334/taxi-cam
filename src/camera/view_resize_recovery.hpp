@@ -3,6 +3,7 @@
 #include "entry_pair.hpp"
 #include "owned_view.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace taxi_camera::native_camera {
@@ -36,8 +37,8 @@ class ViewResizeRecovery {
     }
     return "unknown";
   }
-  using Ids = std::array<engine_camera::EntryId, 3>;
-  using Views = std::array<engine_camera::OwnedViewSnapshot, 3>;
+  using Ids = engine_camera::OwnedIds;
+  using Views = std::array<engine_camera::OwnedViewSnapshot, engine_camera::kMaxOwnedViews>;
 
   bool begin(engine_camera::ManagerToken owner, const Ids& ids) noexcept {
     if (failed_)
@@ -66,11 +67,11 @@ class ViewResizeRecovery {
     last_update_ = update;
     if (!first_update_)
       first_update_ = update;
-    // Only the feeds this pair owns. A two-feed aircraft (A380) leaves the
-    // third snapshot default, never inspected: judged here it read as a
+    // Only the feeds this pair owns. A view the set does not have leaves its
+    // snapshot default, never inspected: judged here it read as a
     // temporarily unavailable view forever, and a graphics change mid-flight
     // (Frame Generation toggle, issue 69) never got past this wait.
-    const unsigned feeds = ids[2] ? 3u : 2u;
+    const unsigned feeds = std::max(2u, engine_camera::owned_count(ids));
     bool temporary = false;
     for (unsigned index = 0; index < feeds; ++index) {
       const auto& view = views[index];
@@ -155,11 +156,7 @@ class ViewResizeRecovery {
 
  private:
   static bool valid_identity(engine_camera::ManagerToken owner, const Ids& ids) noexcept {
-    if (!owner.valid() || !ids[0] || !ids[1] || ids[0] == ids[1])
-      return false;
-    if (ids[2] && (ids[2] == ids[0] || ids[2] == ids[1]))
-      return false;
-    return true;
+    return owner.valid() && engine_camera::distinct_owned(ids);
   }
   bool matches(engine_camera::ManagerToken owner, const Ids& ids) const noexcept { return owner == owner_ && ids == ids_; }
   static bool ready_chain(const engine_camera::OwnedViewSnapshot& view) noexcept {

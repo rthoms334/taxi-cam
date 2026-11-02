@@ -8,6 +8,9 @@
 #include "../shared/bounded_lock.hpp"
 
 namespace taxi_camera {
+// Camera feeds of one owned set (native_camera::kMaxCameraFeeds, asserted by
+// the capture manager): nose, tail or left wing, right wing, door camera.
+inline constexpr std::size_t SceneFeeds = 4;
 
 struct SceneManagerIdentity {
   // Opaque internal identity and generation. Never dereference or serialize.
@@ -96,8 +99,8 @@ class SceneHandoff {
   SceneCaptureTicket begin_capture();
   bool publish(SceneCaptureTicket ticket,
                SceneManagerIdentity manager,
-               const std::array<std::uint64_t, 3>& entry_ids,
-               const std::array<std::uint64_t, 3>& resource_handles);
+               const std::array<std::uint64_t, SceneFeeds>& entry_ids,
+               const std::array<std::uint64_t, SceneFeeds>& resource_handles);
   SceneCopyObservation observe_copy(std::uint64_t device_key, std::uint64_t source_handle, std::uint64_t destination_handle) const;
   // Atomic rejection-only hint for high-frequency native RT boundaries. True
   // is never ownership proof: callers must still perform authoritative matching.
@@ -110,7 +113,7 @@ class SceneHandoff {
   struct Diagnostics {
     bool published = false;
     std::uint64_t publications = 0, unrelated_events = 0, target_invalidations = 0, ticket_invalidations = 0;
-    std::array<std::uint64_t, 3> resource_ids{};  // Registry IDs only; no pointer or capture authority.
+    std::array<std::uint64_t, SceneFeeds> resource_ids{};  // Registry IDs only; no pointer or capture authority.
   };
   Diagnostics diagnostics() const;
   bool is_current(const SceneCopyMatch& match) const;
@@ -131,9 +134,9 @@ class SceneHandoff {
     std::uint64_t sequence = 0;
     std::uint64_t device_key = 0;
     SceneManagerIdentity manager;
-    std::array<std::uint64_t, 3> entry_ids{};
-    std::array<std::uint64_t, 3> handles{};
-    std::array<SceneResourceIdentity, 3> resources{};
+    std::array<std::uint64_t, SceneFeeds> entry_ids{};
+    std::array<std::uint64_t, SceneFeeds> handles{};
+    std::array<SceneResourceIdentity, SceneFeeds> resources{};
   };
   bool advance(std::uint64_t& counter);
   bool lifecycle_event(std::uint64_t changed_handle = 0);
@@ -152,12 +155,12 @@ class SceneHandoff {
   bool active_ = false;
   bool owner_bound_ = false;
   SceneManagerIdentity owner_;
-  std::array<std::uint64_t, 3> owned_ids_{};
+  std::array<std::uint64_t, SceneFeeds> owned_ids_{};
   Publication publication_;
   // Rejection-only hint for unrelated high-frequency copy callbacks. Every
   // possible match still takes the mutex and verifies the full publication.
-  std::array<std::atomic<std::uint64_t>, 3> candidate_handles_{};
-  std::array<std::atomic<std::uint64_t>, 3> observed_handles_{};
+  std::array<std::atomic<std::uint64_t>, SceneFeeds> candidate_handles_{};
+  std::array<std::atomic<std::uint64_t>, SceneFeeds> observed_handles_{};
   Diagnostics diagnostics_;
 };
 

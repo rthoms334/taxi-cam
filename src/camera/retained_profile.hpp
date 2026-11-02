@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include "entry_pair.hpp"
 #include "owned_view.hpp"
 
@@ -8,17 +9,17 @@ namespace taxi_camera::native_camera {
 class RetainedProfileTransition {
  public:
   using Pair = engine_camera::Snapshot;
-  using Views = std::array<engine_camera::OwnedViewSnapshot, 3>;
-  using Dimensions = std::array<decltype(engine_camera::OwnedViewSnapshot::dimensions), 3>;
+  using Views = std::array<engine_camera::OwnedViewSnapshot, engine_camera::kMaxOwnedViews>;
+  using Dimensions = std::array<decltype(engine_camera::OwnedViewSnapshot::dimensions), engine_camera::kMaxOwnedViews>;
   struct AllocationEvidence {
     engine_camera::ManagerToken owner{};
-    std::array<engine_camera::EntryId, 3> ids{};
+    engine_camera::OwnedIds ids{};
     Dimensions dimensions{};
     bool matches(const Pair& pair) const noexcept { return owner == pair.owner && ids == pair.owned_ids; }
   };
   enum class Decision { wait, close, ready, refused };
   static bool session_changed(const Pair& pair, std::uint64_t started, std::uint64_t current) noexcept {
-    return (pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2]) && started != current;
+    return (engine_camera::any_owned(pair.owned_ids)) && started != current;
   }
   void begin(std::uint32_t id, const Pair& pair, const Dimensions& dimensions) noexcept {
     awaiting_pair_ = false;
@@ -30,7 +31,7 @@ class RetainedProfileTransition {
     state_ = Decision::wait;
     if (!id || pair.request_pending || pair.creation_pending)
       state_ = Decision::refused;
-    else if (!ids_[0] && !ids_[1] && !ids_[2])
+    else if (!engine_camera::any_owned(ids_))
       state_ = Decision::ready;
     else if (!valid_pair(pair))
       state_ = Decision::refused;
@@ -62,7 +63,7 @@ class RetainedProfileTransition {
     if (!matches(pair) || manager != owner_)
       return state_ = Decision::refused;
     bool open = false;
-    const unsigned feeds = ids_[2] ? 3u : 2u;
+    const unsigned feeds = std::max(2u, engine_camera::owned_count(ids_));
     for (unsigned i = 0; i < feeds; ++i) {
       const auto& view = views[i];
       if (!view.complete || !view.ready || view.status == engine_camera::OwnedViewStatus::pending)
@@ -107,17 +108,13 @@ class RetainedProfileTransition {
 
  private:
   static bool valid_pair(const Pair& pair) noexcept {
-    if (pair.state != engine_camera::State::active || !pair.owner.valid() || !pair.owned_ids[0] || !pair.owned_ids[1] ||
-        pair.owned_ids[0] == pair.owned_ids[1] || pair.request_pending || pair.creation_pending ||
-        pair.failure != engine_camera::Failure::none || pair.blocked != engine_camera::Blocked::none)
-      return false;
-    if (pair.owned_ids[2] && (pair.owned_ids[2] == pair.owned_ids[0] || pair.owned_ids[2] == pair.owned_ids[1]))
-      return false;
-    return true;
+    return pair.state == engine_camera::State::active && pair.owner.valid() && engine_camera::distinct_owned(pair.owned_ids) &&
+           !pair.request_pending && !pair.creation_pending && pair.failure == engine_camera::Failure::none &&
+           pair.blocked == engine_camera::Blocked::none;
   }
   std::uint32_t id_{};
   engine_camera::ManagerToken owner_{};
-  std::array<engine_camera::EntryId, 3> ids_{};
+  engine_camera::OwnedIds ids_{};
   Dimensions dimensions_{};
   bool awaiting_pair_ = false, resizing_ = false;
   Decision state_ = Decision::wait;

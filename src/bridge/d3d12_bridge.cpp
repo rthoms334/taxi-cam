@@ -4931,7 +4931,7 @@ void set_waiting_mask(unsigned mask) noexcept {
 void set_door_mask(unsigned mask) noexcept {
   auto& r = registry();
   const WorkerRegistryLock lock(r);
-  r.door_mask = profiles::door_camera(*r.profile) ? mask & profiles::side_mask(*r.profile) : 0;
+  r.door_mask = mask & profiles::side_mask(*r.profile);
   refresh_selected(r);
 }
 std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept {

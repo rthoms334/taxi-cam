@@ -89,11 +89,10 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
   return CameraHotkeyResult::aircraft;
 }
 
-// The door camera of a two-camera aircraft whose door camera has a display.
+// A door camera with a display.
 inline bool door_camera_set_up(const Settings& settings) noexcept {
   const auto* profile = profiles::find(settings.profile);
-  return profile && profiles::door_camera(*profile) && settings.door_side < MaxDisplaySides &&
-         (profiles::side_mask(*profile) & (1u << settings.door_side));
+  return profile && settings.door_side < MaxDisplaySides && (profiles::side_mask(*profile) & (1u << settings.door_side));
 }
 // Session-scoped like the manual request. False when there is no door camera.
 inline bool toggle_door_camera(Settings& settings) noexcept {

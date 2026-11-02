@@ -6,9 +6,9 @@ In **Settings → Overview**, select **Shortcuts and buttons…** in the **Fligh
 | --- | --- | --- |
 | Left camera | Ctrl + Shift + L | Toggle the left display |
 | Right camera | Ctrl + Shift + R | Toggle the right display |
-| Both cameras | Ctrl + Shift + B | Turn both on; if both are already on, turn both off. The SD is not changed |
-| Lower ECAM (SD) camera | Ctrl + Shift + D | Toggle the lower ECAM on aircraft that have one (Aerosoft A340-600, iniBuilds A340-300); other aircraft report that there is no SD camera |
-| Door camera | Ctrl + Shift + V | Toggle the [door camera](aircraft-profiles.md#door-camera) on its display; aircraft without one report it |
+| Both cameras | Ctrl + Shift + B | Turn both on; if both are already on, turn both off. The lower display is not changed |
+| Lower camera | Ctrl + Shift + D | Toggle the lower display on aircraft that have one (the lower ECAM on the Aerosoft A340-600 and iniBuilds A340-300); other aircraft report that there is no lower display camera |
+| Door camera | Ctrl + Shift + V | Toggle the [door camera](aircraft-profiles.md#door-camera) on its display; until a display is chosen it reports that |
 
 Each display contains the nose and tail views; the door camera fills its own display. Holding a shortcut does not repeatedly toggle the display. Each action can also have a [controller button](#controller-buttons).
 
@@ -47,6 +47,6 @@ An aircraft's own cockpit switch can run a camera action too. In **Settings → 
 
 Lamps that read about 1.003 when lit and button animations that read 100 while pushed count as on. The value Taxi Cam reads is shown below each field. Only changes act: a switch already on when Taxi Cam connects, when the aircraft or flight changes or when its name is changed does nothing until it changes again. A bound action follows the same aircraft, session and speed rules as its shortcut. On the FBW A380 and iniBuilds A350 it also updates the aircraft's TAXI button, as the shortcut does.
 
-Taxi Cam only reads these variables; it never writes to them. They are saved per aircraft in the profile's `[bindings]` section (keys `left`, `right`, `both`, `sd` and `door`, each with a `_trigger` of `momentary` or `latched`), so each aircraft keeps its own. The door camera's binding turns the door camera on and off. The bridge streams them through SimConnect every simulator frame, sending only changed values, so a short push is not missed; the companion acts on them within about a fifth of a second. A name the aircraft does not have reads 0 and never acts.
+Taxi Cam only reads these variables; it never writes to them. They are saved per aircraft in the profile's `[bindings]` section (keys `left`, `right`, `both`, `sd` for the lower camera and `door`, each with a `_trigger` of `momentary` or `latched`), so each aircraft keeps its own. The door camera's binding turns the door camera on and off. The bridge streams them through SimConnect every simulator frame, sending only changed values, so a short push is not missed; the companion acts on them within about a fifth of a second. A name the aircraft does not have reads 0 and never acts.
 
 For example, the Fenix A320's pedestal **VIDEO** button is `S_PED_COCKPIT_DOOR_VIDEO`, momentary, and the overhead **CKPT DOOR VIDEO** button is `S_OH_COCKPIT_DOOR_VIDEO`, latched (from the aircraft's `Cockpit_Behavior.xml`; not yet read live). The Fenix's door camera template binds the pedestal button to the door camera.

@@ -36,9 +36,10 @@ namespace taxi_camera::standalone {
 // map (each textured cockpit panel with its paired texture) and lists up to 32
 // candidates (any panel can be a set-up aircraft's display); Settings gains
 // the discovered layout of an aircraft the user set up.
-// Protocol 27: Settings lvar_bindings (cockpit L:vars bound to camera actions)
-// and Status lvar_generation/lvars (what the bridge reads from them); the door
-// camera (Settings door_side, door_live, door_on; Status door_state).
+// Protocol 27: Settings mounts grow to four (the door camera's is [3]) and gain
+// lvar_bindings (cockpit L:vars bound to camera actions) and the door camera
+// (door_side, door_live, door_on); Status gains lvar_generation/lvars (what the
+// bridge reads from them) and door_state.
 constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 27;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 // Settings::door_side of an aircraft without a door camera display.
@@ -69,7 +70,7 @@ struct Settings {
   // test (it never produced output); the companion sends 0, the bridge ignores it.
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, retired_single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
-  std::array<std::array<double, 6>, 3> mounts = profiles::A380.mounts;
+  profiles::CameraMounts mounts = profiles::A380.mounts;
   // Protocol 15: explicit separate side-2 texture, sent with route_request
   // (0 = automatic). Unused when side 2 shares the display texture.
   std::uint64_t lower_id{};
@@ -100,11 +101,10 @@ struct Settings {
   // Protocol 27: cockpit L:vars bound to the camera actions (lvar_binding.hpp),
   // read by the bridge and acted on by the companion. Saved per aircraft profile.
   LvarBindings lvar_bindings{};
-  // Protocol 27: the door camera of a two-camera aircraft (its third view,
-  // profiles::DoorFeed, on mounts[2]). door_side is the display side it fills
-  // (DoorSideNone: no door camera); door_live 1 keeps it rendering, 0 shows one
-  // snapshot taken each time it is turned on. Both are saved per aircraft
-  // profile. door_on, session-only, turns it on.
+  // Protocol 27: the door camera (profiles::DoorFeed, on mounts[3]). door_side
+  // is the display side it fills (DoorSideNone: no door camera); door_live 1
+  // keeps it rendering, 0 shows one snapshot taken each time it is turned on.
+  // Both are saved per aircraft profile. door_on, session-only, turns it on.
   std::uint32_t door_side = DoorSideNone, door_live = 0, door_on = 0;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
@@ -215,7 +215,7 @@ inline bool valid_settings(const Settings& s) noexcept {
   // A set-up aircraft is checked against the layout in this message, not
   // against a profile this process may not have published yet.
   unsigned sides = 0;
-  bool separate_lower = false, door = true;
+  bool separate_lower = false;
   if (s.profile == profiles::DiscoveredProfileId) {
     if (!profiles::valid_layout(s.discovered) ||
         !profiles::valid_override(s.discovered.sides, true, s.discovered.padding, s.display_override))
@@ -226,7 +226,6 @@ inline bool valid_settings(const Settings& s) noexcept {
       return false;
     sides = profiles::side_mask(*profile);
     separate_lower = profiles::separate_lower_texture(*profile);
-    door = profiles::door_camera(*profile);
   } else {
     return false;
   }
@@ -237,7 +236,7 @@ inline bool valid_settings(const Settings& s) noexcept {
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides) || !valid_lvar_bindings(s.lvar_bindings))
     return false;
   if (s.door_live > 1 || s.door_on > 1 ||
-      (s.door_side != DoorSideNone && (!door || s.door_side >= MaxDisplaySides || !(sides & (1u << s.door_side)))))
+      (s.door_side != DoorSideNone && (s.door_side >= MaxDisplaySides || !(sides & (1u << s.door_side)))))
     return false;
   if (s.lower_id && (!separate_lower || s.lower_id == s.left_id || s.lower_id == s.right_id))
     return false;
@@ -259,7 +258,7 @@ inline bool valid_settings(const Settings& s) noexcept {
 inline void fit_door_camera(Settings& s) noexcept {
   const auto* profile = s.profile == profiles::DiscoveredProfileId ? nullptr : profiles::base_profile(s.profile);
   const unsigned sides = s.profile == profiles::DiscoveredProfileId ? s.discovered.sides : profile ? profile->sides : 0;
-  if (s.door_side >= sides || (profile && !profiles::door_camera(*profile))) {
+  if (s.door_side >= sides) {
     s.door_side = DoorSideNone;
     s.door_on = 0;
   }

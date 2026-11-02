@@ -85,7 +85,8 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.tail_inner = {0.4375f, 0.25f};
   value.mounts[0] = {1.25, 2.5, 3.75, -12.5, 4.25, 0.75};
   value.mounts[1] = {-2.25, 5.5, -7.75, -25.5, 1.75, 0.875};
-  value.mounts[2] = {0.5, 2.25, 8.75, -9.5, 179.5, 1.125};  // The door camera on two-camera aircraft.
+  value.mounts[2] = value.mounts[1];
+  value.mounts[3] = {0.5, 2.25, 8.75, -9.5, 179.5, 1.125};  // The door camera.
   require(valid_settings(value), "Custom fixture preferences are valid");
   return value;
 }
@@ -272,8 +273,8 @@ void lvar_bindings_persist() {
           "A hand-edited L: prefix is dropped and an unsafe name unbinds only its action");
 }
 
-// Two-camera aircraft keep the door camera's mount in [door] and its display
-// and picture in [door_camera]; the PMDG 777's third mount stays [wing_right].
+// Every aircraft keeps the door camera's mount in [door] and its display and
+// picture in [door_camera]; the third mount stays [wing_right].
 void door_camera_persists() {
   select_fixture(L"door-camera");
   auto saved = customized(profiles::A380);
@@ -283,7 +284,7 @@ void door_camera_persists() {
   require(save_settings(saved), "Save a profile with a door camera");
   const auto path = settings_path(saved);
   require(ini(path, L"door", L"yaw") == L"179.5" && ini(path, L"door_camera", L"display") == L"1" &&
-              ini(path, L"door_camera", L"live") == L"1" && ini(path, L"wing_right", L"yaw") == L"<missing>",
+              ini(path, L"door_camera", L"live") == L"1" && ini(path, L"wing_right", L"yaw") == L"1.75",
           "The door camera has its own sections");
   Settings loaded;
   require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) && loaded.door_side == 1 &&
@@ -292,17 +293,28 @@ void door_camera_persists() {
   patch(path, L"door_camera", L"display", L"2");
   require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.door_side == DoorSideNone,
           "A side the aircraft does not have leaves it without a display");
-  // Before the door camera, two-camera files kept a copy of the tail in [wing_right].
+  // A file saved before the door camera has no [door].
   patch(path, L"door", L"right", nullptr);
-  patch(path, L"wing_right", L"right", L"-2.25");
-  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.mounts[2] == profiles::DoorMount,
-          "An older file's [wing_right] is not the door camera");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.mounts[3] == profiles::DoorMount &&
+              loaded.mounts[2] == saved.mounts[2],
+          "An older file starts the door camera from its default");
   auto wing = customized(profiles::Pmdg777300ER);
-  require(save_settings(wing), "Save a 777 profile");
+  wing.door_side = 2;
+  require(save_settings(wing), "Save a 777 profile with a door camera");
   const auto wing_path = settings_path(wing);
-  require(ini(wing_path, L"wing_right", L"yaw") == L"179.5" && ini(wing_path, L"door", L"yaw") == L"<missing>" &&
-              ini(wing_path, L"door_camera", L"display") == L"<missing>",
-          "The 777 keeps its right wing camera");
+  require(ini(wing_path, L"wing_right", L"yaw") == L"1.75" && ini(wing_path, L"door", L"yaw") == L"179.5" &&
+              ini(wing_path, L"door_camera", L"display") == L"2",
+          "The 777 keeps its right wing camera and has a door camera on its lower DU");
+  // Without a saved display the door camera starts on the lower display of an
+  // aircraft that has one, and on none elsewhere.
+  patch(wing_path, L"door_camera", L"display", nullptr);
+  require(load_settings(loaded, L"missing-installation", wing.profile) && loaded.door_side == 2,
+          "The 777 door camera defaults to the lower DU");
+  require(load_settings(loaded, L"missing-installation", profiles::AerosoftA346.id) && loaded.door_side == 2,
+          "A fresh A340-600 profile starts its door camera on the lower ECAM");
+  patch(path, L"door_camera", L"display", nullptr);
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.door_side == DoorSideNone,
+          "A two-display aircraft starts without a door display");
 }
 
 void rejected_preferences_are_left_unchanged() {

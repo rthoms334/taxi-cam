@@ -10,8 +10,44 @@ namespace taxi_camera::engine_camera {
 
 using EntryId = std::uint64_t;
 using PoseKey = std::array<std::uint8_t, 16>;
-inline constexpr unsigned kMaxOwnedViews = 3;
+// Nose, tail or left wing, right wing (idle on two-camera aircraft) and the
+// door camera (profiles::CameraViews).
+inline constexpr unsigned kMaxOwnedViews = 4;
 using PairKeys = std::array<PoseKey, kMaxOwnedViews>;
+using OwnedIds = std::array<EntryId, kMaxOwnedViews>;
+// The set's views are created in order, so its owned IDs come first.
+inline bool any_owned(const OwnedIds& ids) noexcept {
+  for (const auto id : ids)
+    if (id)
+      return true;
+  return false;
+}
+inline unsigned owned_count(const OwnedIds& ids) noexcept {
+  unsigned count = 0;
+  while (count < ids.size() && ids[count])
+    ++count;
+  return count;
+}
+// The first two views are owned and every owned ID is distinct.
+inline bool distinct_owned(const OwnedIds& ids) noexcept {
+  if (!ids[0] || !ids[1])
+    return false;
+  for (std::size_t i = 0; i < ids.size(); ++i)
+    for (std::size_t j = 0; j < i; ++j)
+      if (ids[i] && ids[i] == ids[j])
+        return false;
+  return true;
+}
+// Ready, a flag per view: the first two always, the others where owned.
+template <class Flags>
+inline bool owned_ready(const OwnedIds& ids, const Flags& ready) noexcept {
+  if (!ready[0] || !ready[1])
+    return false;
+  for (std::size_t i = 2; i < ids.size(); ++i)
+    if (ids[i] && !ready[i])
+      return false;
+  return true;
+}
 
 // Opaque adapter identity, not a dereferenceable pointer. Generation must change
 // if an address/identity is reused for a different manager lifetime.
@@ -55,6 +91,7 @@ enum class Failure {
   first_create_failed,
   second_create_failed,
   third_create_failed,
+  fourth_create_failed,
   duplicate_id,
   manager_destroyed
 };
@@ -66,8 +103,8 @@ struct Snapshot {
   Failure failure = Failure::none;
   Blocked blocked = Blocked::none;
   ManagerToken owner{};
-  // Capacity three; when only two feeds are requested ids[2] stays 0.
-  std::array<EntryId, kMaxOwnedViews> owned_ids{};
+  // Capacity four; views not requested stay 0.
+  OwnedIds owned_ids{};
   // Last-wins mailbox: querying/publishing requests never calls the engine.
   bool request_pending = false;
   bool creation_pending = false;
@@ -76,7 +113,7 @@ struct Snapshot {
 class PairController {
  public:
   void request_enable(const PairKeys& keys) noexcept;
-  // feeds is clamped to 1..3. Existing two-feed callers keep the default.
+  // feeds is clamped to 1..kMaxOwnedViews. Existing two-feed callers keep the default.
   void request_independent_pose(unsigned feeds = 2) noexcept;
   void request_disable() noexcept;
   Snapshot snapshot() const noexcept;

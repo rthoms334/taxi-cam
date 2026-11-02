@@ -161,8 +161,8 @@ SceneCaptureTicket SceneHandoff::begin_capture() {
 
 bool SceneHandoff::publish(SceneCaptureTicket ticket,
                            SceneManagerIdentity manager,
-                           const std::array<std::uint64_t, 3>& ids,
-                           const std::array<std::uint64_t, 3>& handles) {
+                           const std::array<std::uint64_t, SceneFeeds>& ids,
+                           const std::array<std::uint64_t, SceneFeeds>& handles) {
   const std::lock_guard lock(mutex_);
   // An old concurrent completion may not revoke or replace a newer capture.
   if (active_ && ticket.scene_epoch == scene_epoch_ && ticket.sequence == capture_sequence_ && ticket.lifecycle_epoch != lifecycle_epoch_)

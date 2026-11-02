@@ -23,8 +23,8 @@ struct Fixture {
   nc::SceneSessionReset reset;
   nc::ViewRetirement retirement;
   ec::ManagerToken owner{0x1000, 1};
-  std::array<ec::EntryId, 3> live{};
-  std::array<bool, 3> closed{};
+  std::array<ec::EntryId, 4> live{};
+  std::array<bool, 4> closed{};
   bool public_ready{true};
   bool identity_ready{true};
   bool entry_absence_proven{true};

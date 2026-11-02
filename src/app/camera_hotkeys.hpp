@@ -19,9 +19,8 @@ inline constexpr CameraHotkeys DefaultCameraHotkeys{{{'L', MOD_CONTROL | MOD_SHI
                                                      {'B', MOD_CONTROL | MOD_SHIFT},
                                                      {'D', MOD_CONTROL | MOD_SHIFT},
                                                      {'V', MOD_CONTROL | MOD_SHIFT}}};
-inline constexpr std::array<const wchar_t*, 5> CameraHotkeyNames{ui_text(L"Left camera"), ui_text(L"Right camera"),
-                                                                 ui_text(L"Both cameras"), ui_text(L"Lower ECAM (SD) camera"),
-                                                                 ui_text(L"Door camera")};
+inline constexpr std::array<const wchar_t*, 5> CameraHotkeyNames{
+    ui_text(L"Left camera"), ui_text(L"Right camera"), ui_text(L"Both cameras"), ui_text(L"Lower camera"), ui_text(L"Door camera")};
 inline constexpr std::array<const wchar_t*, 5> CameraHotkeyKeys{L"left", L"right", L"both", L"sd", L"door"};
 // Shortcuts added after a hotkeys.ini was written take their default when that
 // key is absent, or stay disabled if the default is already in use.

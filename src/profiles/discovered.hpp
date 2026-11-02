@@ -40,7 +40,7 @@ inline bool same_layout(const DiscoveredLayout& a, const DiscoveredLayout& b) no
 // aircraft discovery pairs with panel names.
 inline constexpr std::uint32_t DiscoveredFormat = 28;
 // Starting camera mounts until the user positions the cameras: the A350-900's.
-inline constexpr std::array<std::array<double, 6>, 3> DiscoveredMounts = A359.mounts;
+inline constexpr CameraMounts DiscoveredMounts = A359.mounts;
 namespace discovered_detail {
 template <std::size_t N>
 inline bool terminated_name(const char (&text)[N], bool allow_empty) noexcept {

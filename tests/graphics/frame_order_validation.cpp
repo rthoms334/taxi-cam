@@ -37,7 +37,7 @@ void frame_order_case(bool warp) {
   check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(heap.put())), "Frame-order RTVs");
   std::array<Reference<ID3D12Resource>, 2> sources;
   std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> rtvs{};
-  std::array<std::uint64_t, 3> handles{};
+  std::array<std::uint64_t, 4> handles{};
   for (UINT feed = 0; feed < 2; ++feed) {
     const auto pane = profiles::A380.camera_panes[feed];
     create_texture(device.get(), texture_description(pane[0], pane[1], DXGI_FORMAT_R8G8B8A8_UNORM), sources[feed].put());

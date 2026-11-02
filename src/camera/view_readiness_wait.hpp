@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include "entry_pair.hpp"
 #include "owned_view.hpp"
 
@@ -13,13 +14,12 @@ class ViewReadinessWait {
   bool observe(std::uint64_t now,
                const engine_camera::Snapshot& pair,
                bool established,
-               const std::array<engine_camera::OwnedViewSnapshot, 3>& views) noexcept {
+               const std::array<engine_camera::OwnedViewSnapshot, engine_camera::kMaxOwnedViews>& views) noexcept {
     bool pending = false;
-    bool valid = established && pair.state == engine_camera::State::active && pair.owner.valid() && pair.owned_ids[0] &&
-                 pair.owned_ids[1] && pair.owned_ids[0] != pair.owned_ids[1] && !pair.request_pending && !pair.creation_pending &&
-                 pair.failure == engine_camera::Failure::none && pair.blocked == engine_camera::Blocked::none &&
-                 (!pair.owned_ids[2] || (pair.owned_ids[2] != pair.owned_ids[0] && pair.owned_ids[2] != pair.owned_ids[1]));
-    const unsigned feeds = pair.owned_ids[2] ? 3u : 2u;
+    bool valid = established && pair.state == engine_camera::State::active && pair.owner.valid() &&
+                 engine_camera::distinct_owned(pair.owned_ids) && !pair.request_pending && !pair.creation_pending &&
+                 pair.failure == engine_camera::Failure::none && pair.blocked == engine_camera::Blocked::none;
+    const unsigned feeds = std::max(2u, engine_camera::owned_count(pair.owned_ids));
     for (unsigned vi = 0; vi < feeds; ++vi) {
       const auto& view = views[vi];
       const bool stable_pending = view.complete && !view.ready && view.status == engine_camera::OwnedViewStatus::pending;
@@ -56,7 +56,7 @@ class ViewReadinessWait {
  private:
   bool waiting_ = false;
   engine_camera::ManagerToken owner_{};
-  std::array<engine_camera::EntryId, 3> ids_{};
+  engine_camera::OwnedIds ids_{};
   std::uint64_t since_ = 0, episodes_ = 0;
 };
 

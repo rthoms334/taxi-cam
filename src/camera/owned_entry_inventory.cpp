@@ -70,7 +70,7 @@ class BoundedReader {
 
 OwnedEntryInventory inspect_owned_entries(MemoryReader& reader,
                                           std::uint64_t manager_address,
-                                          const std::array<std::uint64_t, 3>& owned_ids) {
+                                          const std::array<std::uint64_t, kOwnedEntryViews>& owned_ids) {
   OwnedEntryInventory result;
   for (std::size_t i = 0; i < owned_ids.size(); ++i) {
     if (!owned_ids[i])
@@ -105,7 +105,7 @@ OwnedEntryInventory inspect_owned_entries(MemoryReader& reader,
 
   std::array<std::uint64_t, kOwnedEntryBucketLimit> heads{};
   std::array<Node, kOwnedEntryNodeLimit> nodes{};
-  std::array<OwnedEntry, 3> found{};
+  std::array<OwnedEntry, kOwnedEntryViews> found{};
   // This is one contiguous metadata field. Read all declared heads at once,
   // rather than issuing VirtualQuery/ReadProcessMemory for every eight bytes.
   // The same bytes and final full reread remain required.

@@ -117,8 +117,10 @@ class SceneRecovery {
     ++sequence_;
   }
   bool retry(std::uint64_t now, const engine_camera::Snapshot& pair, bool fresh_pose) noexcept {
-    if (!requested_ || !pending_ || !fresh_pose || now < stopped_at_ || now - stopped_at_ < retry_delay_ms || pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2] || pair.request_pending || pair.creation_pending || pair.state != engine_camera::State::disabled ||
-        pair.failure != engine_camera::Failure::none || pair.blocked != engine_camera::Blocked::none)
+    if (!requested_ || !pending_ || !fresh_pose || now < stopped_at_ || now - stopped_at_ < retry_delay_ms ||
+        engine_camera::any_owned(pair.owned_ids) || pair.request_pending || pair.creation_pending ||
+        pair.state != engine_camera::State::disabled || pair.failure != engine_camera::Failure::none ||
+        pair.blocked != engine_camera::Blocked::none)
       return false;
     pending_ = false;
     ++attempts_;
@@ -171,8 +173,8 @@ inline bool initial_retry_calibration_allowed(const SceneRecovery& recovery,
   return calibration_required && !suspended && inspected_revision == current_revision && recovery.requested() && recovery.pending() &&
          retryable_scene_stop(recovery.reason()) && recovery.attempts() < SceneRecovery::maximum_retries &&
          pair.state == engine_camera::State::disabled && pair.failure == engine_camera::Failure::none &&
-         pair.blocked == engine_camera::Blocked::none && pair.owner == engine_camera::ManagerToken{} && !pair.owned_ids[0] &&
-         !pair.owned_ids[1] && !pair.owned_ids[2] && !pair.request_pending && !pair.creation_pending;
+         pair.blocked == engine_camera::Blocked::none && pair.owner == engine_camera::ManagerToken{} &&
+         !engine_camera::any_owned(pair.owned_ids) && !pair.request_pending && !pair.creation_pending;
 }
 
 // Called under the probe request mutex, after the first initializer refused a
@@ -193,14 +195,15 @@ inline bool defer_initial_pose_failure(engine_camera::PairController& controller
       recovery.attempts() >= SceneRecovery::maximum_retries ||
       (recovery.reason() != SceneStopReason::none && !retryable_scene_stop(recovery.reason())) ||
       pair.state != engine_camera::State::failed || pair.failure != engine_camera::Failure::initializer_failed ||
-      pair.blocked != engine_camera::Blocked::none || pair.owner != engine_camera::ManagerToken{} || pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2] || pair.request_pending || pair.creation_pending)
+      pair.blocked != engine_camera::Blocked::none || pair.owner != engine_camera::ManagerToken{} ||
+      engine_camera::any_owned(pair.owned_ids) || pair.request_pending || pair.creation_pending)
     return false;
   controller.request_disable();
   if (!controller.process_update(manager, {}))
     return false;
   const auto clean = controller.snapshot();
   if (clean.state != engine_camera::State::disabled || clean.failure != engine_camera::Failure::none ||
-      clean.blocked != engine_camera::Blocked::none || clean.owned_ids[0] || clean.owned_ids[1] || clean.owned_ids[2] || clean.request_pending ||
+      clean.blocked != engine_camera::Blocked::none || engine_camera::any_owned(clean.owned_ids) || clean.request_pending ||
       clean.creation_pending)
     return false;
   recovery.failed(SceneStopReason::inspection_unavailable, now);

@@ -69,10 +69,17 @@ int main() {
   settings = {};
   settings.profile = profiles::Pmdg777300ER.id;
   settings.door_side = 2;
-  require(!valid_settings(settings), "The 777 has no door camera yet");
+  require(valid_settings(settings) && door_camera_set_up(settings), "The 777's lower DU can show the door camera");
   settings.door_on = 1;
   fit_door_camera(settings);
-  require(settings.door_side == DoorSideNone && !settings.door_on && valid_settings(settings), "fit_door_camera removes it");
+  require(settings.door_side == 2 && settings.door_on, "fit_door_camera keeps a side the aircraft has");
+  settings = {};
+  settings.profile = profiles::DiscoveredProfileId;
+  settings.discovered.sides = 2;
+  settings.door_side = 2;
+  settings.door_on = 1;
+  fit_door_camera(settings);
+  require(settings.door_side == DoorSideNone && !settings.door_on, "fit_door_camera removes a side the layout lost");
   settings = {};
   settings.profile = profiles::AerosoftA346.id;
   settings.door_side = 2;
@@ -108,22 +115,30 @@ int main() {
 
   // Only the wanted feeds render: the taxi cameras, the door camera, or both.
   native_camera::RenderSchedule schedule;
-  schedule.configure(10, 3, 1, 1u << profiles::DoorFeed);
-  require(schedule.feeds() == 3 && schedule.rendered() == 1, "A set of three renders only the door camera");
+  schedule.configure(10, 4, 1, 1u << profiles::DoorFeed);
+  require(schedule.feeds() == 4 && schedule.rendered() == 1, "A set of four renders only the door camera");
   for (std::uint64_t t = 1000; t < 1100; t += 33) {
     const auto active = schedule.tick(t);
-    require(!active[0] && !active[1] && active[2], "Every frame opens the door camera alone");
+    require(!active[0] && !active[1] && !active[2] && active[3], "Every frame opens the door camera alone");
   }
-  schedule.configure(10, 3, 1, 3);
-  unsigned opened[3]{};
+  schedule.configure(10, 4, 1, 3);
+  unsigned opened[4]{};
   for (std::uint64_t t = 2000; t < 2000 + 33 * 10; t += 33) {
     const auto active = schedule.tick(t);
-    for (unsigned i = 0; i < 3; ++i)
+    for (unsigned i = 0; i < 4; ++i)
       opened[i] += active[i];
   }
-  require(opened[0] == 5 && opened[1] == 5 && !opened[2], "The taxi cameras take turns without the door camera");
-  schedule.configure(10, 3, 0, 0);
-  require(schedule.rendered() == 3 && schedule.wanted() == 7, "No mask renders every feed");
+  require(opened[0] == 5 && opened[1] == 5 && !opened[2] && !opened[3], "The taxi cameras take turns without the idle slot or the door");
+  schedule.configure(10, 4, 1, 7 | (1u << profiles::DoorFeed));
+  unsigned all[4]{};
+  for (std::uint64_t t = 3000; t < 3000 + 33 * 8; t += 33) {
+    const auto active = schedule.tick(t);
+    for (unsigned i = 0; i < 4; ++i)
+      all[i] += active[i];
+  }
+  require(all[0] == 2 && all[1] == 2 && all[2] == 2 && all[3] == 2, "The 777's wings and door camera share the frames");
+  schedule.configure(10, 4, 0, 0);
+  require(schedule.rendered() == 4 && schedule.wanted() == 15, "No mask renders every feed");
   schedule.configure(10, 2, 0, 1u << profiles::DoorFeed);
   require(schedule.rendered() == 2, "A feed the set does not have is ignored");
   std::printf("PASS: %u door camera checks.\n", checks);

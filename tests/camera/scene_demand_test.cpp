@@ -37,7 +37,7 @@ void button_sequence(unsigned rate) {
   bool requested = false;
   std::uint64_t time = 0;
   unsigned starts = 0;
-  std::array<ec::EntryId, 3> retained{};
+  std::array<ec::EntryId, 4> retained{};
   const auto phase = [&](bool wanted, unsigned duration) {
     std::array<unsigned, 2> pulses{};
     const auto end = time + duration;

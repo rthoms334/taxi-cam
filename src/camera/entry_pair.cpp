@@ -28,7 +28,9 @@ Failure create_failure_for(unsigned index) noexcept {
     return Failure::first_create_failed;
   if (index == 1)
     return Failure::second_create_failed;
-  return Failure::third_create_failed;
+  if (index == 2)
+    return Failure::third_create_failed;
+  return Failure::fourth_create_failed;
 }
 
 }  // namespace

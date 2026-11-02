@@ -1090,7 +1090,7 @@ DWORD run_impl() {
       announce(events[i], sim_limiter, at);
   };
   std::uint64_t last_stop_sequence{};
-  std::array<std::array<double, 6>, 3> applied_mounts{};
+  profiles::CameraMounts applied_mounts{};
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -1234,8 +1234,8 @@ DWORD run_impl() {
       if (!next)
         return false;
       const auto owned = native_camera::scene_snapshot().pair.owned_ids;
-      const unsigned have = (owned[0] ? 1u : 0u) + (owned[1] ? 1u : 0u) + (owned[2] ? 1u : 0u);
-      return have >= profiles::camera_views(*next);
+      const unsigned have = engine_camera::owned_count(owned);
+      return have >= profiles::CameraViews;
     };
     // One snapshot per companion serial. It needs graphics observation while
     // pending, like calibration, but never a camera or a matching aircraft:
@@ -1576,9 +1576,7 @@ DWORD run_impl() {
     const bool admitted = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready();
     const unsigned wanted = admitted ? requested_mask : 0;
     // The door camera takes its side over from the taxi cameras while it is on.
-    const unsigned door_side = profile && profiles::door_camera(*profile) && settings.door_on && settings.door_side < MaxDisplaySides
-                                   ? 1u << settings.door_side
-                                   : 0;
+    const unsigned door_side = profile && settings.door_on && settings.door_side < MaxDisplaySides ? 1u << settings.door_side : 0;
     const unsigned door_wanted = admitted ? door_side & sides : 0;
     const unsigned mask = degraded ? 0u : wanted & ~door_wanted;
     const unsigned door = degraded ? 0u : door_wanted;
@@ -1636,12 +1634,11 @@ DWORD run_impl() {
       const auto warm_scene = native_camera::scene_snapshot();
       const auto warm_output = scene_runtime::snapshot(key);
       const auto previous_warm_phase = prewarm.phase();
-      background_warmup = prewarm.observe(
-          now, warm_readiness().eligible(), mask || test_scene,
-          {requested && warm_scene.ready[0] && warm_scene.ready[1] && (!warm_scene.pair.owned_ids[2] || warm_scene.ready[2]),
-           warm_output.output, warm_output.frames, warm_output.completed_frames},
-          failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
-              warm_scene.pair.state == engine_camera::State::blocked);
+      background_warmup = prewarm.observe(now, warm_readiness().eligible(), mask || test_scene,
+                                          {requested && engine_camera::owned_ready(warm_scene.pair.owned_ids, warm_scene.ready),
+                                           warm_output.output, warm_output.frames, warm_output.completed_frames},
+                                          failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
+                                              warm_scene.pair.state == engine_camera::State::blocked);
       if (prewarm.phase() != previous_warm_phase) {
         char detail[384]{};
         std::snprintf(
@@ -1683,10 +1680,10 @@ DWORD run_impl() {
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
     // Every set has its taxi cameras and, on two-camera aircraft, the door
     // camera; only the wanted ones render and share the rate.
-    const unsigned set_feeds = rate_profile ? profiles::camera_views(*rate_profile) : 3u;
+    const unsigned set_feeds = profiles::CameraViews;
     const unsigned taxi_bits = (1u << (rate_profile ? profiles::taxi_feeds(*rate_profile) : 2u)) - 1;
-    const unsigned wanted_feeds = (mask || test_scene || background_warmup ? taxi_bits : 0u) |
-                                  (door_render && rate_profile && profiles::door_camera(*rate_profile) ? 1u << profiles::DoorFeed : 0u);
+    const unsigned wanted_feeds =
+        (mask || test_scene || background_warmup ? taxi_bits : 0u) | (door_render ? 1u << profiles::DoorFeed : 0u);
     const unsigned desired_feeds = std::max(1u, static_cast<unsigned>(std::popcount(wanted_feeds ? wanted_feeds : taxi_bits)));
     const unsigned pfd_refresh_hz = rate_profile ? rate_profile->pfd_refresh_hz : 0;
     const double update_hz = update_meter.update(now, native_camera::scene_update_count());
@@ -1962,7 +1959,7 @@ DWORD run_impl() {
     std::memcpy(status.aircraft_path, identity.path.data(), sizeof(status.aircraft_path));
     status.graphics_ready = graphics.ready;
     status.hook_failures = graphics.hook_failures;
-    status.scene_ready = scene.ready[0] && scene.ready[1] && (!scene.pair.owned_ids[2] || scene.ready[2]);
+    status.scene_ready = engine_camera::owned_ready(scene.pair.owned_ids, scene.ready);
     status.taxi_mask = active;
     status.door_state = static_cast<std::uint32_t>(win::door_state(door != 0, settings.door_live != 0, door_page.ready));
     status.left_id = targets[0];

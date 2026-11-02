@@ -12,6 +12,7 @@
 
 namespace taxi_camera::scene_runtime {
 namespace {
+static_assert(profiles::DoorFeed < SceneFeeds && profiles::CameraViews == SceneFeeds);
 constexpr std::array<DXGI_FORMAT, 4> Formats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,
                                              DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
 constexpr std::array<DXGI_FORMAT, 5> DepthFormats{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D24_UNORM_S8_UINT,
@@ -40,9 +41,9 @@ struct Device {
   QueuePatchSnapshot queue_snapshot;
   std::array<PfdStampD3D12, Formats.size() * DepthFormats.size()> stamps;
   std::array<bool, Formats.size() * DepthFormats.size()> stamp_ready{};
-  std::array<SceneCaptureManager::Frame, 3> pending;
-  std::array<SceneCopyMatch, 3> committed;
-  std::array<SceneCaptureManager::FrameOrder, 3> newest;
+  std::array<SceneCaptureManager::Frame, SceneFeeds> pending;
+  std::array<SceneCopyMatch, SceneFeeds> committed;
+  std::array<SceneCaptureManager::FrameOrder, SceneFeeds> newest;
   profiles::Composition composition{};
   Snapshot status;
   std::uint32_t patch_profile = 1;
@@ -157,7 +158,7 @@ bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
   const auto* profile = profiles::find(config.profile);
   if (!profile || config.profile != item.patch_profile ||
       ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) || (config.waiting_mask & ~config.camera_mask) ||
-      (config.door_mask & ~config.camera_mask) || (config.door_mask && !profiles::door_camera(*profile)))
+      (config.door_mask & ~config.camera_mask))
     return false;
   for (unsigned side = 0; side < profile->sides; ++side) {
     if (!((config.camera_mask | config.calibration_mask) & (1u << side)))
@@ -638,8 +639,6 @@ namespace {
 // marks the device failed (private submission ordering).
 bool service_door(Device& item) {
   auto& frame = item.pending[profiles::DoorFeed];
-  if (item.composition.split_bottom != 0)
-    return true;
   if (!item.door_available || !item.door_enabled) {
     if (frame.token)
       manager().discard_frame(frame.token);
@@ -870,8 +869,7 @@ void service() {
     manager().finish_consumption(second.token, submission.fence, submission.value);
     if (split)
       manager().finish_consumption(third.token, submission.fence, submission.value);
-    // A door image waiting in the third slot of a two-camera aircraft is not
-    // part of this composition.
+    // A door image waiting in its own slot is not part of this composition.
     first = second = {};
     if (split)
       third = {};

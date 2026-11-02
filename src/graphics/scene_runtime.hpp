@@ -80,7 +80,7 @@ struct Snapshot {
   std::uint64_t contended_writes = 0;
   std::uint64_t stale_frames = 0;
   // Completed captures accepted per feed, compared with activations per feed.
-  std::array<std::uint64_t, 3> accepted_frames{};
+  std::array<std::uint64_t, SceneFeeds> accepted_frames{};
   // Submitted renders of the retained PLEASE WAIT page.
   std::uint64_t waiting_pages = 0;
   // Submitted door camera pages composed from a new door image, and whether

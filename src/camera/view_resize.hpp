@@ -30,7 +30,7 @@ bool plan_view_resize(const ViewDimensions& inherited,
 class ViewResizeWarmup {
  public:
   static constexpr unsigned MaximumOutputWaits = 12;
-  using Ids = std::array<std::uint64_t, 3>;
+  using Ids = std::array<std::uint64_t, profiles::CameraViews>;
   static unsigned feed_count(const Ids& ids) noexcept {
     unsigned n = 0;
     for (auto id : ids)

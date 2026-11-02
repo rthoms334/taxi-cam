@@ -48,7 +48,7 @@ class SceneSessionReset {
     return !observer_can_retire(hooked, observer_enabled);
   }
   static bool empty(const engine_camera::Snapshot& pair) noexcept {
-    return !pair.owner.valid() && !pair.owned_ids[0] && !pair.owned_ids[1] && !pair.owned_ids[2] && !pair.request_pending && !pair.creation_pending;
+    return !pair.owner.valid() && !engine_camera::any_owned(pair.owned_ids) && !pair.request_pending && !pair.creation_pending;
   }
 
  private:
