@@ -89,6 +89,9 @@ struct Snapshot {
   bool door_ready = false;
   std::uint32_t patch_requests = 0;
   std::uint64_t patch_draws = 0;
+  // Every output's slots given to a new shape, and buffers retained for them.
+  std::uint32_t patch_reuses = 0;
+  unsigned retired_patch_buffers = 0;
   float display_exposure_ev = -8.8f;
   // The simulator's main-view exposure for the camera images (0: Taxi Cam's
   // exposure), and whether the latest composition used its tone curve.

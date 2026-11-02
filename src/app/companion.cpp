@@ -220,7 +220,7 @@ void publish(const win::Settings& value) {
   // display choices for the selected profile.
   if (value.profile == profiles::DiscoveredProfileId)
     profiles::publish_discovered(value.discovered);
-  profiles::publish_override(profiles::base_profile(value.profile), value.display_override);
+  profiles::publish_override(profiles::base_profile(value.profile), value.display_override, value.door_side);
   const std::lock_guard lock(app_mutex);
   const auto enabled = current.enabled;
   const auto profile_request = std::max(current.profile_request, value.profile_request);
@@ -1222,7 +1222,7 @@ void release_snapshot_image() {
 std::array<std::uint64_t, MaxDisplaySides> routed_texture_ids(const win::Status& sample, const profiles::AircraftProfile& profile) {
   const bool single = profile.pfd_detection == profiles::PfdDetectionPolicy::single_display;
   return {sample.left_id, single ? sample.left_id : sample.right_id,
-          profiles::separate_lower_texture(profile) || profiles::named_lower_side(profile) ? sample.lower_id : sample.left_id};
+          profiles::own_lower_texture(profile) ? sample.lower_id : sample.left_id};
 }
 const wchar_t* snapshot_side_name(const win::Settings& s, unsigned side) {
   return side_toggle_name(s, side);
@@ -2359,6 +2359,14 @@ void service_thumbnails() {
   const auto s = draft();
   const auto routed = routed_lists(s, sample);
   const auto* camera_profile = profiles::find(s.profile);
+  // Every display's texture, the lower display's too: Overview's cards and the
+  // door camera step show it.
+  std::array<std::uint64_t, MaxDisplaySides> displays{};
+  if (camera_profile)
+    displays = routed_texture_ids(sample, *camera_profile);
+  const auto display = [&](std::uint64_t id) {
+    return id && (id == routed[0] || id == routed[1] || std::find(displays.begin(), displays.end(), id) != displays.end());
+  };
   const unsigned cameras = camera_profile ? live_cameras_on(s, sample, *camera_profile) | (s.door_on ? 1u << MaxDisplaySides : 0u) : 0u;
   if (cameras != thumbnails.cameras) {
     thumbnails.cameras = cameras;
@@ -2367,7 +2375,7 @@ void service_thumbnails() {
   if (thumbnails.retake_ms && now >= thumbnails.retake_ms) {
     thumbnails.retake_ms = 0;
     for (auto& t : thumbnails.items)
-      if (t.id == routed[0] || t.id == routed[1])
+      if (display(t.id))
         t.taken_ms = t.tried_ms = 0;
   }
   std::vector<std::uint64_t> wanted;
@@ -2377,6 +2385,8 @@ void service_thumbnails() {
   };
   want(routed[0]);
   want(routed[1]);
+  for (unsigned side = 0; camera_profile && side < camera_profile->sides && side < MaxDisplaySides; ++side)
+    want(displays[side]);
   if (page == 3) {
     for (const auto id : gallery_ids)
       want(id);
@@ -2396,7 +2406,7 @@ void service_thumbnails() {
   // their pictures.
   std::erase_if(thumbnails.items, [&](Thumbnail& t) {
     const bool listed = std::any_of(panels.begin(), panels.end(), [&](const auto& panel) { return panel.id == t.id; });
-    const bool gone = t.id != routed[0] && t.id != routed[1] && !find_candidate(sample, t.id) && !listed;
+    const bool gone = !display(t.id) && !find_candidate(sample, t.id) && !listed;
     if (gone && t.image)
       DeleteObject(t.image);
     return gone;
@@ -3247,6 +3257,11 @@ profiles::DisplayRect live_area_now(const profiles::AircraftProfile& profile) {
     return live_view.area;
   return profiles::side_rect(profile, live_view.side, live_view.texture_width, live_view.texture_height);
 }
+// The display shown draws the door camera, over its whole camera area.
+bool live_door_page() {
+  const auto s = draft();
+  return s.door_on && s.door_side == live_view.side;
+}
 // Display area mode with a picture to edit the area on.
 bool live_area_shown() {
   return live_view.area_mode && live_view.image && live_view.texture_width && live_view.texture_height;
@@ -3267,12 +3282,12 @@ LiveLayout live_layout(HWND hwnd, const profiles::AircraftProfile* profile) {
   const RECT area{scale(16), scale(92), client.right - scale(336), client.bottom - scale(16)};
   // The camera area of the display texture, at its own aspect; in area mode
   // the whole texture.
-  const bool whole = profile && live_area_shown();
+  const bool whole = profile && live_area_shown(), door_page = live_door_page();
   double aspect = 768.0 / 763.0;
   if (whole)
     aspect = double(live_view.texture_width) / double(live_view.texture_height);
   else if (profile && live_view.texture_width && live_view.texture_height) {
-    const auto inner = profiles::side_content_rect(*profile, live_view.side, live_view.texture_width, live_view.texture_height);
+    const auto inner = profiles::side_content_rect(*profile, live_view.side, live_view.texture_width, live_view.texture_height, door_page);
     if (inner.right > inner.left && inner.bottom > inner.top)
       aspect = double(inner.right - inner.left) / double(inner.bottom - inner.top);
   }
@@ -3282,10 +3297,11 @@ LiveLayout live_layout(HWND hwnd, const profiles::AircraftProfile* profile) {
   l.drawn = l.picture;
   if (whole) {
     // The camera inset of the area, where the composition is drawn (at the
-    // cameras' shape on a side they were not shaped for).
+    // cameras' shape on a side they were not shaped for; the door camera
+    // fills it).
     const auto a = live_area_now(*profile);
     auto inner = profiles::fit_rect(profiles::inset_rect(a, profile->camera_padding),
-                                    live_view.side < MaxDisplaySides ? profile->fit_aspect[live_view.side] : 0);
+                                    live_view.side < MaxDisplaySides && !door_page ? profile->fit_aspect[live_view.side] : 0);
     if (inner.right <= inner.left || inner.bottom <= inner.top)
       inner = a;
     const auto from = live_texture_point(l.picture, inner.left, inner.top), to = live_texture_point(l.picture, inner.right, inner.bottom);
@@ -3450,7 +3466,8 @@ void paint_live_view(HWND hwnd, HDC dc) {
   if (profile && live_view.image && live_view.texture_width && live_view.texture_height) {
     int sx = 0, sy = 0, sw = live_view.width, sh = live_view.height;
     if (!area) {
-      const auto inner = profiles::side_content_rect(*profile, live_view.side, live_view.texture_width, live_view.texture_height);
+      const auto inner =
+          profiles::side_content_rect(*profile, live_view.side, live_view.texture_width, live_view.texture_height, live_door_page());
       const int tw = static_cast<int>(live_view.texture_width), th = static_cast<int>(live_view.texture_height);
       sw = 0;
       if (inner.right > inner.left && inner.bottom > inner.top && inner.right <= live_view.texture_width &&
@@ -3594,7 +3611,11 @@ void paint_live_view(HWND hwnd, HDC dc) {
   }
   y += scale(40 + 6 * 44 + 8);
   live_text(dc,
-            live_view.area_mode
+            live_view.area_mode && live_door_page()
+                ? tr(L"The white rectangle is where the door camera is drawn on its display. Drag a handle to resize it or its "
+                     L"frame to move it; it applies when you let go. The door camera then renders at that shape, which takes a few "
+                     L"seconds.")
+            : live_view.area_mode
                 ? tr(L"The white rectangle is where this display's camera is drawn on its texture. Drag a handle to resize it or "
                      L"its frame to move it; it applies when you let go. A new shape renders the cameras at that shape, which "
                      L"takes a few seconds; the other display shows them at that shape too.")
@@ -5230,17 +5251,20 @@ void draw_page(HDC dc) {
     panel(dc, 694, 172, 316, 576 + note_height + 16 - 172);
     text(dc, tr(L"Door camera"), 712, 184, 160, 26, heading);
     wchar_t door_label[96];
-    const auto& pane = profiles::DoorPane;
+    // The camera takes the shape of its display's area (shape_door).
+    const auto& pane = profile ? profile->camera_panes[profiles::DoorFeed] : profiles::DoorPane;
     std::swprintf(door_label, 96, L"%ls · %d × %d", tr(L"OWN DISPLAY"), pane[0], pane[1]);
     text(dc, door_label, 712, 210, 280, 20, small, Muted);
-    // The display it shows on, as the cockpit draws it now.
+    // Its area on the display it shows on, as the cockpit draws it now.
     const auto box = rectangle(712, 236, 280, advanced ? 150 : 276);
     if (profile && s.door_side < MaxDisplaySides) {
       const auto id = routed_texture_ids(sample, *profile)[s.door_side];
       const auto* t = find_thumbnail(id);
-      const bool fits = t && !profile->fit_texture && t->texture_width == profile->width && t->texture_height == profile->height;
-      const auto crop = profiles::display_rect(*profile, s.door_side);
-      draw_thumbnail(dc, box, id, tr(L"No display"), fits ? &crop : nullptr);
+      const bool fits = t && t->texture_width && t->texture_height &&
+                        (profile->fit_texture || (t->texture_width == profile->width && t->texture_height == profile->height));
+      const auto crop =
+          fits ? profiles::side_content_rect(*profile, s.door_side, t->texture_width, t->texture_height, true) : profiles::DisplayRect{};
+      draw_thumbnail(dc, box, id, tr(L"No display"), crop.right > crop.left ? &crop : nullptr);
       if (id)
         hit_areas.push_back({box, id});
     } else {
@@ -6670,7 +6694,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
     notice = tr(L"Saved settings were invalid; profile defaults loaded.");
   if (current.profile == profiles::DiscoveredProfileId)
     profiles::publish_discovered(current.discovered);
-  profiles::publish_override(profiles::base_profile(current.profile), current.display_override);
+  profiles::publish_override(profiles::base_profile(current.profile), current.display_override, current.door_side);
   whats_new = win::whats_new_pending(win::settings_directory(), InstalledVersion);
   // enabled is runtime connection state, not saved: it starts off until
   // Connect or Auto-connect enables it.

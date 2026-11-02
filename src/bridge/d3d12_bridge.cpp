@@ -2409,7 +2409,7 @@ void drain_pfds(List& item, std::uint64_t id, bool recording_end = false) noexce
     }
     const auto texture_width = static_cast<unsigned>(view.resource->desc.Width), texture_height = view.resource->desc.Height;
     const auto area = profiles::side_rect(*r.profile, side, texture_width, texture_height),
-               content = profiles::side_content_rect(*r.profile, side, texture_width, texture_height);
+               content = profiles::side_content_rect(*r.profile, side, texture_width, texture_height, (r.door_mask & (1u << side)) != 0);
     const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
                                  static_cast<LONG>(area.bottom)};
     const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
@@ -2553,7 +2553,8 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
           continue;
         const auto& desc = r.selected_resources[i]->desc;
         placed[placed_count++] = {profiles::side_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
-                                  profiles::side_content_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
+                                  profiles::side_content_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height,
+                                                              (r.door_mask & ~r.calibration_mask & (1u << i)) != 0),
                                   (r.waiting_mask & (1u << i)) != 0, (r.door_mask & (1u << i)) != 0};
       }
     if (!item || !placed_count ||

@@ -29,28 +29,37 @@ bool SceneFrameOutput::valid_patch_request(DXGI_FORMAT format, UINT width, UINT 
   if (!width || width > 16384 || !height || height > 16384)
     return false;
   // Any side's patch: sides can differ in size (the user's display areas, or
-  // a set-up aircraft's panels, whose patch is the size of its texture area).
-  for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side) {
-    if (profile->fit_texture) {
-      // The area on a texture of unknown size: any patch whose content is
-      // the padded patch, at the cameras' shape (shape_cameras).
-      const auto inner =
-          profiles::fit_rect(profiles::inset_rect({0, 0, width, height}, profile->camera_padding), profile->fit_aspect[side]);
-      const D3D12_RECT local{static_cast<LONG>(inner.left), static_cast<LONG>(inner.top), static_cast<LONG>(inner.right),
-                             static_cast<LONG>(inner.bottom)};
-      if (same_rect(content, local))
+  // a set-up aircraft's panels, whose patch is the size of its texture area),
+  // with the taxi picture's content or the door camera's whole area.
+  for (unsigned side = 0; side < profile->sides && side < MaxDisplaySides; ++side)
+    for (const bool door : {false, true}) {
+      if (profile->fit_texture) {
+        // The area on a texture of unknown size: any patch whose content is
+        // the padded patch, at the cameras' shape (shape_cameras).
+        const auto inner =
+            profiles::fit_rect(profiles::inset_rect({0, 0, width, height}, profile->camera_padding), door ? 0 : profile->fit_aspect[side]);
+        const D3D12_RECT local{static_cast<LONG>(inner.left), static_cast<LONG>(inner.top), static_cast<LONG>(inner.right),
+                               static_cast<LONG>(inner.bottom)};
+        if (same_rect(content, local))
+          return true;
+        continue;
+      }
+      const auto outer = profiles::display_rect(*profile, side), inner = profiles::side_content_rect(*profile, side, width, height, door);
+      const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                             static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+      if (width == outer.right - outer.left && height == outer.bottom - outer.top && same_rect(content, local))
         return true;
-      continue;
     }
-    const auto outer = profiles::display_rect(*profile, side), inner = profiles::side_content_rect(*profile, side, width, height);
-    const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
-                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
-    if (width == outer.right - outer.left && height == outer.bottom - outer.top && same_rect(content, local))
-      return true;
-  }
   return false;
 }
 bool SceneFrameOutput::request_patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) noexcept {
+  return request_patch(format, width, height, content, GetTickCount64());
+}
+bool SceneFrameOutput::request_patch(DXGI_FORMAT format,
+                                     UINT width,
+                                     UINT height,
+                                     const D3D12_RECT& content,
+                                     std::uint64_t now_ms) noexcept {
   if (!valid_patch_request(format, width, height, content))
     return false;
   unsigned drawer = 0;
@@ -58,20 +67,58 @@ bool SceneFrameOutput::request_patch(DXGI_FORMAT format, UINT width, UINT height
     ++drawer;
   if (drawer == PatchFormats.size())
     return false;
-  for (const auto& p : patches_)
-    if (p.width == width && p.height == height && p.format == format && same_rect(p.content, content))
-      return true;
   for (auto& p : patches_)
-    if (!p.width) {
-      p.format = format;
-      p.width = width;
-      p.height = height;
-      p.content = content;
-      p.drawer = drawer;
-      ++patch_requests_;
+    if (p.width == width && p.height == height && p.format == format && same_rect(p.content, content)) {
+      p.requested_ms = now_ms;
       return true;
     }
-  return false;
+  PatchStorage* slot = nullptr;
+  for (auto& p : patches_)
+    if (!p.width) {
+      slot = &p;
+      break;
+    }
+  if (!slot) {
+    // Every slot is taken: the stalest one no longer shown, keeping its buffer
+    // if the new shape fits, else one that may retain its buffer and grow.
+    const UINT64 needed = UINT64(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) *
+                              ((UINT64(width) * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) / D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) *
+                              (height - 1) +
+                          UINT64(width) * 4;
+    PatchStorage *fits = nullptr, *grows = nullptr;
+    for (auto& p : patches_) {
+      if (now_ms < p.requested_ms || now_ms - p.requested_ms < PatchStaleMs)
+        continue;
+      if (p.buffer_bytes >= needed || !p.view.buffer) {
+        if (!fits || p.requested_ms < fits->requested_ms)
+          fits = &p;
+      } else if (!grows || p.requested_ms < grows->requested_ms) {
+        grows = &p;
+      }
+    }
+    slot = fits ? fits : retired_count_ < retired_buffers_.size() ? grows : nullptr;
+    if (!slot)
+      return false;
+    if (slot == grows) {
+      // A recording made for the old shape may still read this buffer.
+      retired_buffers_[retired_count_++] = slot->view.buffer;
+      slot->view.buffer = nullptr;
+      slot->buffer_bytes = 0;
+    }
+    // Not written for the new shape until a composition records it; a
+    // recording already closed for the old shape is not counted as one. The
+    // texture is replaced when no submission uses it (prepare_patches).
+    slot->written = slot->recorded = false;
+    ++patch_reuses_;
+  }
+  slot->format = format;
+  slot->width = width;
+  slot->height = height;
+  slot->content = content;
+  slot->drawer = drawer;
+  slot->requested_ms = now_ms;
+  ++patch_requests_;
+  return true;
 }
 SceneFrameOutput::Patch SceneFrameOutput::patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept {
   if (valid_patch_request(format, width, height, content) && submitted_)
@@ -186,6 +233,12 @@ bool SceneFrameOutput::prepare_patches(std::uint64_t calibration_frame) noexcept
       continue;
     const auto width = patch->width, height = patch->height;
     const D3D12_RECT destination{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    if (patch->texture && (patch->texture_width != width || patch->texture_height != height || patch->texture_format != patch->format)) {
+      // A slot given to a new shape (request_patch). Every prepare waits for
+      // idle, so no submission uses this private texture any more.
+      patch->texture->Release();
+      patch->texture = nullptr;
+    }
     if (!patch->texture) {
       D3D12_HEAP_PROPERTIES heap{};
       heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -200,16 +253,32 @@ bool SceneFrameOutput::prepare_patches(std::uint64_t calibration_frame) noexcept
       if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
                                                   IID_PPV_ARGS(&patch->texture))))
         return fail("Creating a private PFD patch texture failed.");
+      patch->texture_width = width;
+      patch->texture_height = height;
+      patch->texture_format = patch->format;
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
       UINT64 bytes{};
-      device_->GetCopyableFootprints(&desc, 0, 1, 0, &patch->view.footprint, nullptr, nullptr, &bytes);
-      desc = {};
-      desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-      desc.Width = bytes;
-      desc.Height = desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
-      desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-      if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
-                                                  IID_PPV_ARGS(&patch->view.buffer))))
-        return fail("Creating a stable private PFD patch buffer failed.");
+      device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+      // The slot's buffer when the shape fits it (request_patch kept it only
+      // then); it is never released while a recording might read it.
+      if (patch->view.buffer && patch->buffer_bytes < bytes) {
+        if (retired_count_ == retired_buffers_.size())
+          return fail("A private PFD patch buffer could not be retained for a new shape.");
+        retired_buffers_[retired_count_++] = patch->view.buffer;
+        patch->view.buffer = nullptr;
+      }
+      if (!patch->view.buffer) {
+        desc = {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = bytes;
+        desc.Height = desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                    IID_PPV_ARGS(&patch->view.buffer))))
+          return fail("Creating a stable private PFD patch buffer failed.");
+        patch->buffer_bytes = bytes;
+      }
+      patch->view.footprint = footprint;
       patch->rtv = {base.ptr + static_cast<SIZE_T>(patch - patches_.data()) * stride};
       device_->CreateRenderTargetView(patch->texture, nullptr, patch->rtv);
     }

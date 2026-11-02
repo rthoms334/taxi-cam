@@ -184,19 +184,23 @@ bool request_queue_patches(Device& item) {
     return false;
   for (unsigned side = 0; side < profile->sides; ++side) {
     const auto [texture_width, texture_height] = config.sizes[side];
-    const auto outer = profiles::side_rect(*profile, side, texture_width, texture_height),
-               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
-    const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
-                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
     const bool door = (config.door_mask & (1u << side)) != 0;
+    // A door side's pages fill its whole camera area (side_content_rect).
+    const auto outer = profiles::side_rect(*profile, side, texture_width, texture_height),
+               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height),
+               page = profiles::side_content_rect(*profile, side, texture_width, texture_height, door);
+    const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)},
+        page_local{static_cast<LONG>(page.left - outer.left), static_cast<LONG>(page.top - outer.top),
+                   static_cast<LONG>(page.right - outer.left), static_cast<LONG>(page.bottom - outer.top)};
     if ((config.camera_mask & (1u << side)) && !door &&
         !item.output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
       return false;
     if (door && item.door_available &&
-        !item.door_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
+        !item.door_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, page_local))
       return false;
     if ((config.camera_mask & (1u << side)) && waiting_page(item) &&
-        !item.waiting_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
+        !item.waiting_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, page_local))
       return false;
     if ((config.calibration_mask & (1u << side)) &&
         !item.calibration_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
@@ -225,7 +229,8 @@ void publish_queue_patches(Device& item) {
     }
     const auto [texture_width, texture_height] = config.sizes[side];
     const auto outer = profiles::side_rect(*profile, side, texture_width, texture_height),
-               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
+               inner = profiles::side_content_rect(*profile, side, texture_width, texture_height,
+                                                   !calibration && (config.door_mask & (1u << side)) != 0);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
     const auto& source = calibration              ? item.calibration_output
@@ -893,6 +898,10 @@ Snapshot snapshot(std::uint64_t key) {
     result.completed_frames = item->output.completed_submissions();
     result.patch_requests = item->output.patch_requests();
     result.patch_draws = item->output.patch_draws();
+    for (const auto* output : {&item->output, &item->waiting_output, &item->door_output, &item->calibration_output}) {
+      result.patch_reuses += output->patch_reuses();
+      result.retired_patch_buffers += output->retired_buffers();
+    }
     result.door_ready = door_current(*item);
     if (result.output && !current_output(*item)) {
       result.output = false;

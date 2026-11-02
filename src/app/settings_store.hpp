@@ -367,8 +367,9 @@ inline bool load_settings(Settings& s,
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, selection.c_str());
   value.notifications = load_notification_preference(selection);
   // A set-up aircraft with no door camera yet starts from its family's door
-  // template, if one ships: the display (as its lower display), the mount
-  // unless one is saved, and the L:var unless that action is already bound.
+  // template, if one ships: the display (as its lower display) and its area
+  // unless one is saved, the mount unless one is saved, and the L:var unless
+  // that action is already bound.
   const auto apply_door_template = [&](bool mount_saved) {
     const auto* door = profile->id == profiles::DiscoveredProfileId ? profiles::door_template(value.discovered.key) : nullptr;
     if (!door || value.door_side != DoorSideNone || !profiles::add_door_display(value.discovered, *door))
@@ -377,6 +378,11 @@ inline bool load_settings(Settings& s,
     profiles::build_discovered(discovered);
     profile = &discovered.profile;
     value.door_side = MaxDisplaySides - 1;
+    if (auto& area = value.display_override.areas[value.door_side]; profiles::empty_area(area)) {
+      area = door->area;
+      if (!valid_settings(value))
+        area = {};
+    }
     if (!mount_saved)
       value.mounts[profiles::DoorFeed] = door->mount;
     auto& binding = value.lvar_bindings[CameraDoor];

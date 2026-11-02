@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -222,6 +223,10 @@ void settings_files(const std::wstring& root) {
               std::strcmp(sibling.lvar_bindings[CameraDoor].name, "S_PED_COCKPIT_DOOR_VIDEO") == 0 &&
               sibling.lvar_bindings[CameraDoor].trigger == static_cast<std::uint32_t>(LvarTrigger::momentary),
           "and the door camera template");
+  const auto& area = sibling.display_override.areas[2];
+  require(area.left == 0 && area.top == 0 && area.right == 768 && area.bottom == 666 &&
+              profiles::empty_area(sibling.display_override.areas[0]) && profiles::empty_area(sibling.display_override.areas[1]),
+          "with the door display's area above the ECAM's status lines");
   // Setup: a new layout replaces the saved one; the variant keeps its saved
   // calibration, and a variant never saved starts from the starting mounts.
   auto changed = fenix_layout();
@@ -472,6 +477,56 @@ void camera_shapes() {
   require(same(profiles::side_content_rect(mixed.profile, 1, 1024, 768), {128, 0, 896, 768}),
           "A wider panel shows the square picture with black either side");
 }
+// The door camera renders at the shape of its own display's camera area
+// (shape_door) and fills it; the taxi cameras keep theirs.
+void door_shapes() {
+  const auto same = [](const profiles::DisplayRect& a, profiles::DisplayRect b) {
+    return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+  };
+  const auto shape = [](const std::array<std::int32_t, 2>& pane) { return double(pane[0]) / pane[1]; };
+  const double door_pixels = double(profiles::DoorPane[0]) * profiles::DoorPane[1];
+  // The Fenix's lower ECAM cut to 768 x 666 (2026-11-02): bars either side
+  // of the door picture until it took the area's shape.
+  profiles::DiscoveredProfile fenix{};
+  fenix.layout = fenix_layout();
+  fenix.layout.sides = 3;
+  fenix.layout.shapes[2] = {768, 768, 5};
+  std::strcpy(fenix.layout.textures[2], "$A320_ECAM_Lower");
+  profiles::build_discovered(fenix);
+  profiles::DisplayOverride area{};
+  area.areas[2] = {0, 0, 768, 666};
+  const auto* none = profiles::publish_override(&fenix.profile, area);
+  require(none && none->camera_panes[profiles::DoorFeed] == profiles::DoorPane, "Without a display the door camera keeps its pane");
+  require(!profiles::override_current(&fenix.profile, area, 2), "The door camera's display is part of the choices");
+  const auto* door = profiles::publish_override(&fenix.profile, area, 2);
+  require(door && door != none && profiles::override_current(&fenix.profile, area, 2) &&
+              profiles::publish_override(&fenix.profile, area, 2) == door,
+          "The same display keeps its profile");
+  auto preview = fenix.profile;
+  profiles::apply_choices(preview, fenix.profile, area, 2);
+  require(preview.camera_panes == door->camera_panes, "The bridge's preview shapes the door camera too");
+  const auto filled = profiles::side_content_rect(*door, 2, 768, 768, true);
+  require(same(filled, {0, 0, 768, 666}), "The door camera fills its whole area");
+  require(!same(profiles::side_content_rect(*door, 2, 768, 768), filled), "The taxi picture there keeps the cameras' shape");
+  const auto& pane = door->camera_panes[profiles::DoorFeed];
+  require(std::abs(shape(pane) / (768.0 / 666) - 1) < 0.005 && std::abs(double(pane[0]) * pane[1] / door_pixels - 1) < 0.01,
+          "The door camera takes the area's shape at its usual pixel count");
+  require(profiles::camera_candidate(static_cast<unsigned>(pane[0]), static_cast<unsigned>(pane[1])),
+          "The door camera at its new shape is admitted");
+  for (std::size_t i = 0; i < profiles::DoorFeed; ++i)
+    require(door->camera_panes[i] == none->camera_panes[i], "The taxi cameras keep their shape");
+  // A display the door camera's pane already fits keeps that pane exactly.
+  profiles::DisplayOverride fitted{};
+  fitted.areas[2] = {0, 0, 768, 763};
+  require(profiles::publish_override(&fenix.profile, fitted, 2)->camera_panes[profiles::DoorFeed] == profiles::DoorPane,
+          "A 768 x 763 area keeps the door pane");
+  // A built-in profile's display: the A380's left PFD camera area, 736 x 751.
+  const auto* a380 = profiles::publish_override(&profiles::A380, {}, 0);
+  require(a380 && std::abs(shape(a380->camera_panes[profiles::DoorFeed]) / (736.0 / 751) - 1) < 0.005 &&
+              a380->camera_panes[0] == profiles::A380.camera_panes[0],
+          "A built-in display's door camera takes its camera area's shape");
+  profiles::publish_override(&profiles::A380, {});
+}
 void trimming() {
   std::vector<display_identity::Creation> burst;
   for (const std::uint32_t mips : {5u, 5u, 10u, 5u, 11u, 12u})
@@ -505,6 +560,7 @@ int main() {
     display_choices(root);
     placed_lower_display();
     camera_shapes();
+    door_shapes();
     std::printf("PASS: %u discovered aircraft checks (variant keys, layouts, detection, settings files, learning).\n", checks);
     return 0;
   } catch (const std::exception& error) {

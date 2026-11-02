@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <string_view>
 #include "../shared/display_sides.hpp"
@@ -21,8 +22,8 @@ inline constexpr unsigned CameraViews = 4;
 using CameraPanes = std::array<std::array<std::int32_t, 2>, CameraViews>;
 using CameraMounts = std::array<std::array<double, 6>, CameraViews>;
 // The door camera: one camera that fills a display of its own, separate from
-// the taxi cameras. It renders at the working image's size and is never
-// reshaped with the taxi panes. The mount is an approximate cabin view behind
+// the taxi cameras. It renders at the shape of that display's camera area
+// (shape_door), never reshaped with the taxi panes. The mount is an approximate cabin view behind
 // the flight deck looking aft (the Fenix A320's cabin from its cameras.cfg);
 // each aircraft adjusts it.
 inline constexpr unsigned DoorFeed = 3;
@@ -177,6 +178,11 @@ inline constexpr bool pair_detection(const AircraftProfile& p) noexcept {
 }
 inline constexpr bool named_lower_side(const AircraftProfile& p) noexcept {
   return p.sides > 2 && pair_detection(p);
+}
+// Side 2 has a texture of its own: the 777's lower DU, a pilot pair's placed
+// lower display, or a set-up aircraft's (each of its sides is a panel).
+inline constexpr bool own_lower_texture(const AircraftProfile& p) noexcept {
+  return separate_lower_texture(p) || named_lower_side(p) || (p.fit_texture && p.sides > 2);
 }
 // Sides drawn from the shared single-display texture.
 inline constexpr unsigned shared_texture_sides(const AircraftProfile& p) noexcept {
@@ -577,8 +583,15 @@ inline constexpr DisplayRect fit_rect(DisplayRect r, float aspect) noexcept {
   const auto fitted = static_cast<unsigned>(width / aspect + 0.5), top = r.top + (r.bottom - r.top - fitted) / 2;
   return {r.left, top, r.right, top + fitted};
 }
-inline constexpr DisplayRect side_content_rect(const AircraftProfile& p, unsigned side, unsigned width, unsigned height) noexcept {
-  return fit_rect(inset_rect(side_rect(p, side, width, height), p.camera_padding), side < MaxDisplaySides ? p.fit_aspect[side] : 0);
+// The camera area of a side: the taxi picture at the cameras' shape, or for
+// the door camera (door) the whole area, which its pane takes (shape_door).
+inline constexpr DisplayRect side_content_rect(const AircraftProfile& p,
+                                               unsigned side,
+                                               unsigned width,
+                                               unsigned height,
+                                               bool door = false) noexcept {
+  return fit_rect(inset_rect(side_rect(p, side, width, height), p.camera_padding),
+                  side < MaxDisplaySides && !door ? p.fit_aspect[side] : 0);
 }
 // Camera views are 32 to 2048 pixels on each edge (view_resize.cpp).
 inline constexpr std::int32_t MinCameraPane = 32, MaxCameraPane = 2048;
@@ -609,7 +622,7 @@ inline void shape_cameras(AircraftProfile& p,
     p.fit_aspect[side] = static_cast<float>(aspect * ratios[side]);
   if (width == reference_width && height == reference_height)
     return;
-  // The door camera fills its own display and keeps its pane.
+  // The door camera takes its own display's shape (shape_door).
   const std::size_t shaped = DoorFeed;
   double scale_x = width / reference_width, scale_y = height / reference_height, largest = 0;
   for (std::size_t i = 0; i < shaped; ++i)
@@ -622,6 +635,29 @@ inline void shape_cameras(AircraftProfile& p,
     p.camera_panes[i] = {std::clamp(static_cast<std::int32_t>(panes[i][0] * scale_x + 0.5), MinCameraPane, MaxCameraPane),
                          std::clamp(static_cast<std::int32_t>(panes[i][1] * scale_y + 0.5), MinCameraPane, MaxCameraPane)};
   p.composition.ui_aspect = static_cast<float>(ui_aspect * aspect / (reference_width / reference_height));
+}
+// The door camera rendered at the shape of the camera area of the side it
+// shows on (MaxDisplaySides or beyond: none, keeping DoorPane), with
+// DoorPane's pixel count so a new shape costs no more to render.
+inline void shape_door(AircraftProfile& p, unsigned side) noexcept {
+  p.camera_panes[DoorFeed] = DoorPane;
+  if (side >= p.sides || side >= MaxDisplaySides)
+    return;
+  const auto texture = p.fit_texture ? p.side_shapes[side] : std::array<unsigned, 3>{p.width, p.height, p.mips};
+  const auto content = side_content_rect(p, side, texture[0], texture[1], true);
+  if (content.right <= content.left || content.bottom <= content.top)
+    return;
+  const double aspect = double(content.right - content.left) / double(content.bottom - content.top);
+  const double pixels = double(DoorPane[0]) * DoorPane[1], own = double(DoorPane[0]) / DoorPane[1];
+  if (aspect > own * 0.995 && aspect < own * 1.005)
+    return;
+  double width = std::sqrt(pixels * aspect), height = std::sqrt(pixels / aspect);
+  if (const double largest = std::max(width, height); largest > MaxCameraPane) {
+    width *= MaxCameraPane / largest;
+    height *= MaxCameraPane / largest;
+  }
+  p.camera_panes[DoorFeed] = {std::clamp(static_cast<std::int32_t>(width + 0.5), MinCameraPane, MaxCameraPane),
+                              std::clamp(static_cast<std::int32_t>(height + 0.5), MinCameraPane, MaxCameraPane)};
 }
 // Cockpit panel textures: multi-mip R8G8B8A8_UNORM render targets, drawn
 // through UNORM or sRGB views.

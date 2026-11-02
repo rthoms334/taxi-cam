@@ -217,6 +217,7 @@ inline bool valid_override(const AircraftProfile& base, const DisplayOverride& o
 }
 struct OverrideProfile {
   DisplayOverride choices;
+  unsigned door_side = MaxDisplaySides;
   const AircraftProfile* base{};
   AircraftProfile profile{};
 };
@@ -224,9 +225,13 @@ namespace discovered_detail {
 inline const OverrideProfile* override_published{};
 }
 // p (a copy of base) with valid display choices: other panels by name (kept
-// in `choices`, which must outlive p), display areas, and the cameras shaped
-// for side 0's camera area (shape_cameras) from the ones base was made for.
-inline void apply_choices(AircraftProfile& p, const AircraftProfile& base, const DisplayOverride& choices) noexcept {
+// in `choices`, which must outlive p), display areas, the cameras shaped for
+// side 0's camera area (shape_cameras) from the ones base was made for, and
+// the door camera for its own side's (shape_door; MaxDisplaySides: none).
+inline void apply_choices(AircraftProfile& p,
+                          const AircraftProfile& base,
+                          const DisplayOverride& choices,
+                          unsigned door_side = MaxDisplaySides) noexcept {
   // A placed lower display: side 0's display region on the panel named for
   // it, with no cockpit control of its own.
   if (override_sides(base, choices) > base.sides) {
@@ -258,28 +263,34 @@ inline void apply_choices(AircraftProfile& p, const AircraftProfile& base, const
     for (unsigned side = 1; side < base.sides && side < MaxDisplaySides; ++side)
       ratios[side] = static_cast<float>(aspect(own(side)) / aspect(own(0)));
   shape_cameras(p, base.camera_panes, own(0), base.composition.ui_aspect, ratios);
+  shape_door(p, door_side);
 }
-inline bool override_current(const AircraftProfile* base, const DisplayOverride& choices) noexcept {
+inline bool override_current(const AircraftProfile* base, const DisplayOverride& choices, unsigned door_side = MaxDisplaySides) noexcept {
   const std::lock_guard lock(discovered_detail::publish_mutex);
   const auto* current = discovered_detail::override_published;
-  return current && base && current->base == base && std::memcmp(&current->choices, &choices, sizeof(choices)) == 0;
+  return current && base && current->base == base && current->door_side == door_side &&
+         std::memcmp(&current->choices, &choices, sizeof(choices)) == 0;
 }
-// Makes find(base->id) return base with these display choices. The same base
-// and choices keep their profile; nullptr when they are invalid.
-inline const AircraftProfile* publish_override(const AircraftProfile* base, const DisplayOverride& choices) noexcept {
+// Makes find(base->id) return base with these display choices and the door
+// camera on door_side. The same ones keep their profile; nullptr when the
+// choices are invalid.
+inline const AircraftProfile* publish_override(const AircraftProfile* base,
+                                               const DisplayOverride& choices,
+                                               unsigned door_side = MaxDisplaySides) noexcept {
   if (!base || !valid_override(*base, choices))
     return nullptr;
   const std::lock_guard lock(discovered_detail::publish_mutex);
   if (const auto* current = discovered_detail::override_published;
-      current && current->base == base && std::memcmp(&current->choices, &choices, sizeof(choices)) == 0)
+      current && current->base == base && current->door_side == door_side && std::memcmp(&current->choices, &choices, sizeof(choices)) == 0)
     return &current->profile;
   auto* next = new (std::nothrow) OverrideProfile{};  // Never freed: older readers keep their profile.
   if (!next)
     return nullptr;
   next->choices = choices;
+  next->door_side = door_side;
   next->base = base;
   next->profile = *base;
-  apply_choices(next->profile, *base, next->choices);
+  apply_choices(next->profile, *base, next->choices, door_side);
   discovered_detail::override_published = next;
   override_profile.store(&next->profile, std::memory_order_release);
   return &next->profile;

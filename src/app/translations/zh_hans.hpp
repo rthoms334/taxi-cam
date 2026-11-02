@@ -329,6 +329,7 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"The saved image could not be opened.", L"无法打开已保存的图像。"},
     {L"The snapshot could not be copied or saved. See bridge.log.", L"无法复制或保存快照。请查看 bridge.log。"},
     {L"The texture was destroyed or the flight reset before the copy finished.", L"复制完成前，纹理已被销毁或航班已重置。"},
+    {L"The white rectangle is where the door camera is drawn on its display. Drag a handle to resize it or its frame to move it; it applies when you let go. The door camera then renders at that shape, which takes a few seconds.", L"白色矩形是舱门摄像头画面在其显示屏上的绘制位置。拖动控制点可调整大小，拖动边框可移动位置；松开后即生效。舱门摄像头随后会按该形状重新渲染，需要几秒钟。"},
     {L"The white rectangle is where this display's camera is drawn on its texture. Drag a handle to resize it or its frame to move it; it applies when you let go. A new shape renders the cameras at that shape, which takes a few seconds; the other display shows them at that shape too.", L"白色矩形是此显示屏的摄像头画面在其纹理上的绘制位置。拖动控制点可调整大小，拖动边框可移动位置；松开后即生效。新的形状会让摄像头按该形状重新渲染，需要几秒钟；另一块显示屏也会按该形状显示。"},
     {L"These panels cannot be saved for this aircraft. Pick other panels.", L"无法为此机型保存这些面板。请选择其他面板。"},
     {L"This aircraft does not use alignment markers.", L"此机型不使用对齐标记。"},

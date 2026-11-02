@@ -1310,10 +1310,10 @@ DWORD run_impl() {
     const bool layout_changed = settings.profile == profiles::DiscoveredProfileId && !profiles::discovered_current(settings.discovered);
     // The user's display choices for the profile (another panel or display
     // area per side) are another profile too. A new layout brings new ones.
-    const bool choices_changed =
-        layout_changed || !profiles::override_current(profiles::base_profile(settings.profile), settings.display_override);
+    const bool choices_changed = layout_changed || !profiles::override_current(profiles::base_profile(settings.profile),
+                                                                               settings.display_override, settings.door_side);
     // Choices that give the cameras another shape (a reshaped display area,
-    // or another panel on a set-up aircraft) resize them: the transition
+    // another panel on a set-up aircraft, or the door camera's display) resize them: the transition
     // below takes the kept pair to the new panes (resize_kept_panes).
     bool reshaped = false;
     if (choices_changed && !layout_changed) {
@@ -1321,7 +1321,7 @@ DWORD run_impl() {
       const auto* current = profiles::find(settings.profile);
       if (base && current && profiles::valid_override(*base, settings.display_override)) {
         auto next = *base;
-        profiles::apply_choices(next, *base, settings.display_override);
+        profiles::apply_choices(next, *base, settings.display_override, settings.door_side);
         // A placed or removed lower display changes the sides: a transition too.
         reshaped = next.camera_panes != current->camera_panes || next.sides != current->sides;
       }
@@ -1334,14 +1334,15 @@ DWORD run_impl() {
     if (connected && settings.enabled && choices_changed && !layout_changed && !reshaped && !changing_profile && applied_profile &&
         settings.profile == applied_profile) {
       const auto& o = settings.display_override;
-      const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o);
+      const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o, settings.door_side);
       if (chosen)
         win::set_aircraft_profile(settings.profile);
       char detail[384];
-      std::snprintf(detail, sizeof(detail), "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u",
+      std::snprintf(detail, sizeof(detail),
+                    "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u door=%u",
                     chosen ? "applied" : "refused", settings.profile, o.textures[0], o.textures[1], o.textures[2], o.areas[0].left,
                     o.areas[0].top, o.areas[0].right, o.areas[0].bottom, o.areas[1].left, o.areas[1].top, o.areas[1].right,
-                    o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom);
+                    o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom, settings.door_side);
       log_status(status, detail);
     }
     const bool reapply = layout_changed || (choices_changed && (settings.profile != applied_profile || reshaped));
@@ -1373,12 +1374,13 @@ DWORD run_impl() {
         }
         if (choices_changed) {
           const auto& o = settings.display_override;
-          const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o);
+          const auto* chosen = profiles::publish_override(profiles::base_profile(settings.profile), o, settings.door_side);
           char detail[384];
-          std::snprintf(detail, sizeof(detail), "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u",
+          std::snprintf(detail, sizeof(detail),
+                        "Display choices: %s profile=%u panels=%s,%s,%s areas=%u,%u,%u,%u/%u,%u,%u,%u/%u,%u,%u,%u door=%u",
                         chosen ? "published" : "refused", settings.profile, o.textures[0], o.textures[1], o.textures[2], o.areas[0].left,
                         o.areas[0].top, o.areas[0].right, o.areas[0].bottom, o.areas[1].left, o.areas[1].top, o.areas[1].right,
-                        o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom);
+                        o.areas[1].bottom, o.areas[2].left, o.areas[2].top, o.areas[2].right, o.areas[2].bottom, settings.door_side);
           log_status(status, detail);
         }
         scene_runtime::manager().stop_source_tracking();
@@ -1587,7 +1589,7 @@ DWORD run_impl() {
     // add displays on top. Nothing is sent to the aircraft.
     const bool pmdg_dsp = profile && profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
     const bool commandable = profile && profiles::commandable_buttons(*profile);
-    const bool selected_profile_separate_lower = profile && profiles::separate_lower_texture(*profile);
+
     const auto buttons = native_camera::get_taxi_buttons();
     const auto desired = intent.observe(now, buttons.valid, buttons.mask());
     const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
@@ -1989,9 +1991,9 @@ DWORD run_impl() {
     status.door_state = static_cast<std::uint32_t>(win::door_state(door != 0, settings.door_live != 0, door_page.ready));
     status.left_id = targets[0];
     status.right_id = targets[1];
-    // Side 2's own texture: the 777 lower DU, or a lower display placed on a
-    // pilot-pair profile.
-    status.lower_id = selected_profile_separate_lower || (profile && profiles::named_lower_side(*profile)) ? targets[2] : 0;
+    // Side 2's own texture: the 777 lower DU, a lower display placed on a
+    // pilot-pair profile, or a set-up aircraft's.
+    status.lower_id = profile && profiles::own_lower_texture(*profile) ? targets[2] : 0;
     status.named_mask = win::named_target_mask();
     // The companion's aircraft setup also needs every panel texture tracked.
     win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) || (connected && settings.panel_setup));
@@ -2348,26 +2350,26 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
-      char retention_detail[640];
-      std::snprintf(retention_detail, sizeof(retention_detail),
-                    "Camera retention: created_total=%llu snapshot_bytes=%llu snapshot_allocations=%llu quarantined=%llu prewarm=%s "
-                    "patch_requests=%u patch_draws=%llu "
-                    "waiting_pages=%llu door=%u/%llu/%llu "
-                    "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
-                    "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
-                    "rt_holds=%llu",
-                    static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
-                    static_cast<unsigned long long>(output.capture.allocations),
-                    static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
-                    static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(output.waiting_pages),
-                    status.door_state, static_cast<unsigned long long>(output.door_pages),
-                    static_cast<unsigned long long>(output.accepted_frames[profiles::DoorFeed]),
-                    static_cast<unsigned long long>(scene.retirement_deferrals), scene.retirement_waiting, scene.retirement_status,
-                    scene.retirement_queue_counts[0], scene.retirement_queue_counts[1], static_cast<unsigned long long>(scene.flags[0][0]),
-                    static_cast<unsigned long long>(scene.flags[0][1]), static_cast<unsigned long long>(scene.flags[1][0]),
-                    static_cast<unsigned long long>(scene.flags[1][1]), static_cast<unsigned long long>(scene.aa_restores),
-                    static_cast<unsigned long long>(scene.aa_restore_failures), scene.aa_cleared_pending, scene.output_slots[0],
-                    scene.output_slots[1], scene.rt_record_refusals, static_cast<unsigned long long>(scene.rt_record_holds));
+      char retention_detail[768];
+      std::snprintf(
+          retention_detail, sizeof(retention_detail),
+          "Camera retention: created_total=%llu snapshot_bytes=%llu snapshot_allocations=%llu quarantined=%llu prewarm=%s "
+          "patch_requests=%u patch_draws=%llu patch_reuses=%u retired_patch_buffers=%u "
+          "waiting_pages=%llu door=%u/%llu/%llu "
+          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
+          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
+          "rt_holds=%llu",
+          static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
+          static_cast<unsigned long long>(output.capture.allocations), static_cast<unsigned long long>(output.capture.quarantined),
+          prewarm.name(), output.patch_requests, static_cast<unsigned long long>(output.patch_draws), output.patch_reuses,
+          output.retired_patch_buffers, static_cast<unsigned long long>(output.waiting_pages), status.door_state,
+          static_cast<unsigned long long>(output.door_pages), static_cast<unsigned long long>(output.accepted_frames[profiles::DoorFeed]),
+          static_cast<unsigned long long>(scene.retirement_deferrals), scene.retirement_waiting, scene.retirement_status,
+          scene.retirement_queue_counts[0], scene.retirement_queue_counts[1], static_cast<unsigned long long>(scene.flags[0][0]),
+          static_cast<unsigned long long>(scene.flags[0][1]), static_cast<unsigned long long>(scene.flags[1][0]),
+          static_cast<unsigned long long>(scene.flags[1][1]), static_cast<unsigned long long>(scene.aa_restores),
+          static_cast<unsigned long long>(scene.aa_restore_failures), scene.aa_cleared_pending, scene.output_slots[0],
+          scene.output_slots[1], scene.rt_record_refusals, static_cast<unsigned long long>(scene.rt_record_holds));
       log_status(status, retention_detail);
       // Per camera and for the main view: near plane / culling far / default far, metres.
       char clip_detail[448];
