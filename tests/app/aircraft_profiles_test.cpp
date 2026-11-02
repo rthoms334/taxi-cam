@@ -487,9 +487,9 @@ int main() {
       assert(!profiles::matches_display(*profile, 1560, 2340, 5, 27) && !profiles::matches_display(*profile, 2340, 2340, 5, 28));
       assert(!profiles::matches_display(*profile, 1560, 2340, 1, 10));
       assert(profile->composition.tail_corner == profiles::AerosoftA346.composition.tail_corner);
-      // The A350-900's taxi cameras; the A350's door camera stays in its cabin.
+      // The A350-900's taxi cameras, and its own door camera.
       assert(profile->mounts[0] == profiles::A359.mounts[0] && profile->mounts[1] == profiles::A359.mounts[1] &&
-             profile->mounts[3] == profiles::DoorMount);
+             profile->mounts[3] == profiles::IniA343DoorMount);
       continue;
     }
     if (profile->id == profiles::AerosoftA346.id) {
@@ -624,8 +624,9 @@ int main() {
   // Every aircraft's set has four views: the taxi cameras, the right wing slot
   // (a copy of the tail where there is no split bottom) and the door camera at
   // the working image's size, on the shared approximate mount until the
-  // aircraft has its own (the PMDG 777s and A350s, set live on the 777-200ER
-  // and A350-900).
+  // aircraft has its own. Every built-in aircraft has one, set live on it,
+  // except the 777-200LR and 777F (the 200ER's) and the 777-300ER and
+  // A350-1000 (moved forward with their nose cameras).
   for (const auto* profile : profiles::Catalog) {
     const bool split = profile->composition.split_bottom != 0;
     assert(profiles::taxi_feeds(*profile) == (split ? 3u : 2u) && profiles::DoorFeed == 3 && profiles::CameraViews == 4);
@@ -633,6 +634,10 @@ int main() {
                        : profile->taxi_control == profiles::TaxiControl::pmdg_dsp_cam ? profiles::Pmdg777DoorMount
                        : profile->id == profiles::A359.id                             ? profiles::A350DoorMount
                        : profile->id == profiles::A35K.id                             ? profiles::A35KDoorMount
+                       : profile->id == profiles::IniA380.id                          ? profiles::IniA380DoorMount
+                       : profile->id == profiles::A380.id                             ? profiles::A380XDoorMount
+                       : profile->id == profiles::IniA343.id                          ? profiles::IniA343DoorMount
+                       : profile->id == profiles::AerosoftA346.id                     ? profiles::A346DoorMount
                                                                                       : profiles::DoorMount;
     assert(profile->camera_panes[profiles::DoorFeed] == profiles::DoorPane && profile->mounts[profiles::DoorFeed] == door);
     if (!split)
@@ -685,7 +690,7 @@ int main() {
     assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > 0.85 && gear[1] < 0.90);
     // The calibrated bracket corner sits outboard of the projected tyre contact.
     assert(a346.composition.tail_corner[0] < gear[0] && std::abs(a346.composition.tail_corner[1] - gear[1]) < 0.03);
-    assert(a346.mounts[1] == a346.mounts[2] && a346.mounts[3] == profiles::DoorMount);
+    assert(a346.mounts[1] == a346.mounts[2] && a346.mounts[3] == profiles::A346DoorMount);
   }
 
   for (const auto* profile : profiles::Catalog) {

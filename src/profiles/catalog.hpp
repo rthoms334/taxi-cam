@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string_view>
 #include "../shared/display_sides.hpp"
+#include "../shared/lvar_binding.hpp"
 #include "aircraft_variant.hpp"
 namespace taxi_camera::profiles {
 struct DisplayRect {
@@ -133,9 +134,18 @@ struct AircraftProfile {
   // A pilot pair's lower display (a panel of the pair's shape), placed for the
   // door camera while the aircraft's settings have no door camera yet; the
   // user's choice in Displays is kept from then on. Empty: none known. The
-  // area is its display area on that panel; empty keeps side 0's region.
+  // area is its display area on that panel, or on an aircraft's own lower
+  // display (no texture) its display area there; empty keeps the region.
   const char* door_lower_texture = "";
   DisplayRect door_lower_area{};
+  // The aircraft's own door camera switch, bound to the door camera while the
+  // aircraft's settings have no door camera yet and that action is unbound:
+  // an L:var without "L:" and its standalone::LvarTrigger (lvar_binding.hpp).
+  const char* door_lvar = "";
+  std::uint32_t door_lvar_trigger = 0;
+  // Cameras that start in black and white (a bit per camera view) until the
+  // aircraft's settings save their look.
+  std::uint32_t black_and_white = 0;
   // A second accepted mip count (0 = none), for named panel textures whose
   // mip count differs from the detected display targets'. Kept narrow: every
   // profile's shape admits display candidates on every aircraft.
@@ -203,6 +213,7 @@ inline constexpr bool commandable_buttons(const AircraftProfile& p) noexcept {
 // age that brings the page back while the side stays on.
 inline constexpr std::uint64_t WaitingPageMinimumMs = 750;
 inline constexpr std::uint64_t WaitingPageStaleMs = 1000;
+inline constexpr std::array<double, 6> A380XDoorMount{-0.7, 4.1, 30.5, -62.83, 161.61, 1.2};
 // panel.cfg texture names were read live on 2026-10-04 and match the
 // cockpit material labels.
 inline constexpr AircraftProfile A380 = [] {
@@ -220,6 +231,13 @@ inline constexpr AircraftProfile A380 = [] {
   // The system display below the EWD (panel.cfg VCockpit04, 768 x 1024 like
   // the PFDs), read from the installed package on 2026-11-02.
   p.door_lower_texture = "SCREEN_DU_SD";
+  // Door: Robert's live A380X door camera (2026-11-02) on the system display
+  // above its bottom strip. The ECAM control panel's VIDEO key selects page 15
+  // of A32NX_ECAM_SD_CURRENT_PAGE_INDEX (read live; -1 when it is deselected).
+  p.door_lower_area = {0, 0, 768, 664};
+  p.mounts[DoorFeed] = A380XDoorMount;
+  p.door_lvar = "A32NX_ECAM_SD_CURRENT_PAGE_INDEX";
+  p.door_lvar_trigger = standalone::lvar_equals_trigger(15);
   p.panel_shapes = {{{"SCREEN_DU_MFD", 1646, 1024},
                      {"SCREEN_DU_EWD", 768, 1024},
                      {"SCREEN_DU_SD", 768, 1024},
@@ -299,6 +317,7 @@ inline constexpr AircraftProfile A35K = [] {
   p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
+inline constexpr std::array<double, 6> IniA380DoorMount{-0.6, 8, 20, -64.54, 158.19, 1.2};
 // iniBuilds A380 display layout started from FBW. Mounts and guide defaults
 // reflect the user's accepted live calibration from 2026-09-15.
 // The streamed aircraft reports Airbus with this exact AircraftLoaded path
@@ -328,6 +347,15 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
   // Its system display, a five-mip 768 x 1024 panel like the PFDs (same table).
   p.door_lower_texture = "$SD";
+  // Door: Robert's live iniBuilds A380 door camera (2026-11-02), in black and
+  // white in the picture of the system display's VIDEO page, between its tabs
+  // and its TAT/SAT strip. The ECAM control panel's VIDEO key selects page 16
+  // of INI_ECAM_ACTIVE_PAGE (read live; INI_ECAM_VIDEO stays 0).
+  p.door_lower_area = {0, 84, 768, 655};
+  p.mounts[DoorFeed] = IniA380DoorMount;
+  p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
+  p.door_lvar_trigger = standalone::lvar_equals_trigger(16);
+  p.black_and_white = 1u << DoorFeed;
   p.panel_shapes = {{{"$INI_FAP", 2048, 1536}, {"$ND_CPT", 768, 1024}, {"$ND_FO", 768, 1024}, {"$EWD", 768, 1024}, {"$SD", 768, 1024}}};
   p.formats = {28, 29, 87, 91, 27, 90};
   p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
@@ -495,8 +523,12 @@ inline constexpr unsigned A346SdY = 1230;
 // gear-relative offsets (nose 8.22 m aft of the NLG contact; tail 27.63 m aft
 // and 15.01 m above the MLG contact). Defaults reflect the user's saved live
 // calibration from 2026-09-23, which raised the nose camera to -2.5 m.
+// Door: Robert's live A340-600 door camera (2026-11-02) on the lower ECAM above
+// its bottom strip. Its pedestal ECAM video selector has no function (its
+// L:var stays 0), so the door camera has no cockpit switch.
+inline constexpr std::array<double, 6> A346DoorMount{-0.4, 1.8, 33.5, -57.1, 167.58, 1.55};
 inline constexpr CameraMounts A346Mounts{
-    {{0, -2.5, 23.33, -15, 0, 0.55}, {0, 8.18, -28.99, -15, 0, 0.62}, {0, 8.18, -28.99, -15, 0, 0.62}, DoorMount}};
+    {{0, -2.5, 23.33, -15, 0, 0.55}, {0, 8.18, -28.99, -15, 0, 0.62}, {0, 8.18, -28.99, -15, 0, 0.62}, A346DoorMount}};
 // Guide defaults from the same live calibration; the nose markers keep the
 // shared position.
 inline constexpr Composition A346Composition = [] {
@@ -528,6 +560,7 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.taxi_events[2] = "";
   p.pfd_labels[2] = "ECAM_LOWER";
   p.display_regions[2] = {A346SdX, A346SdY, A346SdX + A346DisplayUnit, A346SdY + A346DisplayUnit};
+  p.door_lower_area = {A346SdX, A346SdY, A346SdX + A346DisplayUnit, 1873};
   p.composition = A346Composition;
   p.formats = {};
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
@@ -554,6 +587,10 @@ inline constexpr DisplayRect ini_a343_cell(unsigned column, unsigned row) noexce
 // No TACS selector or other camera control was found, so the displays follow
 // the camera shortcuts and previews only, as on the iniBuilds A380. Mounts
 // start from the A350-900 defaults until calibrated live.
+// Door: Robert's live A340-300 door camera (2026-11-02) on the lower ECAM
+// cell above its bottom strip; its ECAM control panel's VIDEO key selects
+// page 15 of INI_ECAM_ACTIVE_PAGE (read live).
+inline constexpr std::array<double, 6> IniA343DoorMount{-0.5, 3.2, 23, -52.28, 163.55, 1.53};
 inline constexpr AircraftProfile IniA343 = [] {
   AircraftProfile p{9,
                     "ini-a340-300",
@@ -561,7 +598,7 @@ inline constexpr AircraftProfile IniA343 = [] {
                     {"", "", ""},
                     {"", "", ""},
                     {"", "", ""},
-                    {{A359.mounts[0], A359.mounts[1], A359.mounts[2], DoorMount}},
+                    {{A359.mounts[0], A359.mounts[1], A359.mounts[2], IniA343DoorMount}},
                     IniA343DisplayWidth,
                     IniA343DisplayHeight,
                     1,
@@ -573,6 +610,9 @@ inline constexpr AircraftProfile IniA343 = [] {
   p.formats = {28, 29, 87, 91, 27, 90};
   p.package_markers = {"simobjects/airplanes/inibuilds-a340", "fs24-inibuilds-aircraft-a340", ""};
   p.pfd_detection = PfdDetectionPolicy::single_display;
+  p.door_lower_area = {IniA343Cell, 2 * IniA343Cell, IniA343DisplayWidth, 2210};
+  p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
+  p.door_lvar_trigger = standalone::lvar_equals_trigger(15);
   return p;
 }();
 inline constexpr std::array<const AircraftProfile*, 10> Catalog{&A380,         &A359,         &A35K,     &IniA380,      &Pmdg777,

@@ -61,9 +61,9 @@ inline bool parse_mount_config(std::string_view text, MountPair& output, const c
   if (seen != 3 || !valid_mounts(candidate, 2))
     return false;
   // Legacy nose/tail files only carry two mounts: the unused third slot takes
-  // the aft mount and the door camera keeps its default.
+  // the aft mount and the door camera keeps the aircraft's default.
   candidate[2] = candidate[1];
-  const auto& door = profiles::DoorMount;
+  const auto& door = profiles::active().mounts[profiles::DoorFeed];
   candidate[profiles::DoorFeed] = {{door[0], door[1], door[2]}, door[3], door[4], static_cast<float>(door[5])};
   output = candidate;
   error = "";

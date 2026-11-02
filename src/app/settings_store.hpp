@@ -362,6 +362,7 @@ inline bool load_settings(Settings& s,
     value.discovered = discovered.layout;
   value.follow_taxi = profile->taxi_control == profiles::TaxiControl::manual_only ? 0u : 1u;
   value.mounts = profile->mounts;
+  value.black_and_white = profile->black_and_white;
   value.speed_color = profile->composition.speed_color;
   reset_guide_settings(value, *profile);
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, selection.c_str());
@@ -406,11 +407,28 @@ inline bool load_settings(Settings& s,
       value = next;
   };
   // Without a saved or template display, the door camera shows on the lower
-  // display where the aircraft has one, as door camera pages usually do.
+  // display where the aircraft has one, as door camera pages usually do. The
+  // aircraft's own door camera switch (door_lvar) binds it, unless that action
+  // is bound already.
   const auto default_door_display = [&] {
     constexpr unsigned lower = MaxDisplaySides - 1;
     if (value.door_side == DoorSideNone && profiles::override_sides(*profile, value.display_override) > lower)
       value.door_side = lower;
+    // On the aircraft's own lower display, its door area (door_lower_area)
+    // unless that display has an area of the user's.
+    if (value.door_side == lower && !profile->door_lower_texture[0] && !profiles::empty_area(profile->door_lower_area) &&
+        profiles::empty_area(value.display_override.areas[lower])) {
+      auto next = value;
+      next.display_override.areas[lower] = profile->door_lower_area;
+      if (valid_settings(next))
+        value = next;
+    }
+    auto& binding = value.lvar_bindings[CameraDoor];
+    if (!profile->door_lvar[0] || binding.name[0] || !valid_lvar_name(profile->door_lvar) ||
+        !valid_lvar_trigger(profile->door_lvar_trigger))
+      return;
+    std::strcpy(binding.name, profile->door_lvar);
+    binding.trigger = profile->door_lvar_trigger;
   };
   const auto destination = settings_path(value);
   auto path = destination;
