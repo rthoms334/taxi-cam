@@ -4,7 +4,7 @@ Taxi Cam creates additional camera views inside MSFS and draws their images into
 
 A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD or ND using another texture. Taxi Cam connects them by combining the camera images and copying or drawing the result into that display texture.
 
-Most profiles share **one nose camera and one tail camera** across the left and right displays. The PMDG 777 profile instead uses **three** cameras (nose, left wing, right wing) on a split-bottom navigation-display layout. Each EFIS TAXI button or manual camera request controls whether that side's display receives the combined image.
+Most profiles share **one nose camera and one tail camera** across the left and right displays. The PMDG 777 profile instead uses **three** cameras (nose, left wing, right wing) on a split-bottom navigation-display layout. Each EFIS TAXI button or manual camera request controls whether that side's display receives the combined image. Those two-camera aircraft also have a third view, the [door camera](aircraft-profiles.md#door-camera), which fills a display of its own and renders only while it is on (a snapshot stops after three images).
 
 ## The complete path
 
@@ -149,6 +149,7 @@ Before the AA operation, a fresh allocation/page check requires the entire 16-by
 | --- | --- | --- |
 | Nose | A380: 736 x 251; A350: 774 x 251 | Upper pane inside the black border |
 | Tail | A380: 736 x 496; A350: 774 x 496 | Lower camera pane inside the black border |
+| Door camera (two-camera aircraft) | 768 x 763 | The whole camera area of its own display (separate door page) |
 
 The aircraft profile selects these render sizes when a fresh pair is created. An aircraft change fully resets the session and retires the previous pair under the native ownership guards before creating the new profile's views. Ordinary TAXI OFF/ON retains their allocations. Both views remain much smaller than the main window.
 

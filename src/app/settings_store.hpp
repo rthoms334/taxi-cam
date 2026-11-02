@@ -4,13 +4,19 @@
 #include <string>
 #include <vector>
 #include "../camera/mount_config.hpp"
+#include "../profiles/door_templates.hpp"
+#include "../shared/manual_camera_intent.hpp"
 #include "../shared/protocol.hpp"
 
 namespace taxi_camera::standalone {
 // [bindings] keys of Settings::lvar_bindings, in CameraAction order (the
 // hotkeys.ini names); each has a <key>_trigger of momentary or latched.
-inline constexpr std::array<const wchar_t*, LvarBindingCount> LvarBindingKeys{L"left", L"right", L"both", L"sd"};
+inline constexpr std::array<const wchar_t*, LvarBindingCount> LvarBindingKeys{L"left", L"right", L"both", L"sd", L"door"};
 inline std::wstring settings_override;
+// Section of mounts[2]: the PMDG 777's right wing camera, otherwise the door camera.
+inline const wchar_t* third_mount_section(const profiles::AircraftProfile& profile) noexcept {
+  return profiles::door_camera(profile) ? L"door" : L"wing_right";
+}
 inline std::wstring legacy_settings_path(const std::wstring& path) {
   if (!settings_override.empty())
     return {};
@@ -364,6 +370,25 @@ inline bool load_settings(Settings& s,
   reset_guide_settings(value, *profile);
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, selection.c_str());
   value.notifications = load_notification_preference(selection);
+  // A set-up aircraft with no door camera yet starts from its family's door
+  // template, if one ships: the display (as its lower display), the mount
+  // unless one is saved, and the L:var unless that action is already bound.
+  const auto apply_door_template = [&](bool mount_saved) {
+    const auto* door = profile->id == profiles::DiscoveredProfileId ? profiles::door_template(value.discovered.key) : nullptr;
+    if (!door || value.door_side != DoorSideNone || !profiles::add_door_display(value.discovered, *door))
+      return;
+    discovered.layout = value.discovered;
+    profiles::build_discovered(discovered);
+    profile = &discovered.profile;
+    value.door_side = MaxDisplaySides - 1;
+    if (!mount_saved)
+      value.mounts[profiles::DoorFeed] = door->mount;
+    auto& binding = value.lvar_bindings[CameraDoor];
+    if (!binding.name[0]) {
+      std::strcpy(binding.name, door->lvar);
+      binding.trigger = static_cast<std::uint32_t>(LvarTrigger::momentary);
+    }
+  };
   const auto destination = settings_path(value);
   auto path = destination;
   // Set-up aircraft are newer than the former settings folder.
@@ -381,6 +406,7 @@ inline bool load_settings(Settings& s,
     // Import the user's existing camera calibration once. The companion becomes
     // the settings owner; stale installer defaults never override later UI edits.
     if (profile->id != profiles::A380.id) {
+      apply_door_template(false);
       s = value;
       return true;
     }
@@ -393,7 +419,7 @@ inline bool load_settings(Settings& s,
         native_camera::MountPair mounts;
         const char* error{};
         if (native_camera::parse_mount_config(std::string_view(buffer.data(), n), mounts, error))
-          for (unsigned i = 0; i < mounts.size(); ++i) {
+          for (unsigned i = 0; i < profiles::taxi_feeds(*profile); ++i) {
             const auto& m = mounts[i];
             value.mounts[i] = {m.position_m[0], m.position_m[1], m.position_m[2], m.pitch_degrees, m.yaw_degrees, m.fov_radians};
           }
@@ -489,6 +515,15 @@ inline bool load_settings(Settings& s,
     if (!valid_settings(value))
       value.display_override = {};
   }
+  // [door_camera]: the display side the door camera fills (none when absent
+  // or not a side of this aircraft) and live or snapshot.
+  wchar_t door_saved[8]{};
+  GetPrivateProfileStringW(L"door_camera", L"display", L"", door_saved, 8, path.c_str());
+  if (profiles::door_camera(*profile)) {
+    const UINT side = integer(L"door_camera", L"display", DoorSideNone);
+    value.door_side = side < MaxDisplaySides && (profiles::side_mask(*profile) & (1u << side)) ? side : DoorSideNone;
+    value.door_live = integer(L"door_camera", L"live", 0) == 1 ? 1u : 0u;
+  }
   // [bindings]: cockpit L:vars bound to the camera actions. A name that is not
   // a valid L:var leaves its action unbound.
   for (std::size_t i = 0; i < LvarBindingKeys.size(); ++i) {
@@ -501,18 +536,19 @@ inline bool load_settings(Settings& s,
     binding.trigger = static_cast<std::uint32_t>(std::wcscmp(text, L"latched") == 0 ? LvarTrigger::latched : LvarTrigger::momentary);
   }
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
-  constexpr std::array<const wchar_t*, 3> sections{L"nose", L"tail", L"wing_right"};
+  const std::array<const wchar_t*, 3> sections{L"nose", L"tail", third_mount_section(*profile)};
   for (unsigned i = 0; i < 3; ++i)
     for (unsigned j = 0; j < 6; ++j)
       value.mounts[i][j] = read(sections[i], names[j], value.mounts[i][j]);
-  // Pre-protocol-13 files only stored nose/tail. Keep the profile's third mount
-  // when wing_right keys are absent so split-bottom defaults remain valid.
-  {
-    wchar_t probe[8];
-    GetPrivateProfileStringW(L"wing_right", L"right", L"", probe, 8, path.c_str());
-    if (probe[0] == 0)
-      value.mounts[2] = profile->mounts[2];
-  }
+  // Pre-protocol-13 files only stored nose/tail, and files before the door
+  // camera kept a copy of the tail in [wing_right] on two-camera aircraft.
+  // Keep the profile's third mount when its section is absent.
+  wchar_t third_saved[8]{};
+  GetPrivateProfileStringW(sections[2], L"right", L"", third_saved, 8, path.c_str());
+  if (third_saved[0] == 0)
+    value.mounts[2] = profile->mounts[2];
+  if (!door_saved[0])
+    apply_door_template(third_saved[0] != 0);
   if (!valid_settings(value))
     return false;
   s = value;
@@ -525,6 +561,8 @@ inline bool save_settings(const Settings& s) {
   const auto path = settings_path(s);
   if (path.empty() || (discovered && !prepare_settings_file(path)))
     return false;
+  const auto* saved_profile = discovered ? nullptr : profiles::base_profile(s.profile);
+  const wchar_t* third = saved_profile ? third_mount_section(*saved_profile) : L"door";
   wchar_t text[4096];
   const auto& n = s.mounts[0];
   const auto& t = s.mounts[1];
@@ -540,11 +578,11 @@ inline bool save_settings(const Settings& s) {
       L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
       L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
       L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
-      L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
+      L"[%ls]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
       s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_mode, s.camera_rate, s.calibration_budget, s.day_brightness,
       s.night_brightness, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2],
       s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1],
-      n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
+      n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], third, w[0], w[1], w[2], w[3], w[4], w[5]);
   if (count <= 0)
     return false;
   const auto write = [](const std::wstring& destination, const std::wstring& body) {
@@ -583,6 +621,9 @@ inline bool save_settings(const Settings& s) {
       displays += line;
     }
   }
+  wchar_t door[96]{};
+  if (third == std::wstring_view(L"door"))
+    std::swprintf(door, 96, L"[door_camera]\r\ndisplay=%u\r\nlive=%u\r\n", s.door_side, s.door_live);
   std::wstring bindings = L"[bindings]\r\n";
   for (std::size_t i = 0; i < LvarBindingKeys.size(); ++i) {
     const auto& binding = s.lvar_bindings[i];
@@ -593,7 +634,7 @@ inline bool save_settings(const Settings& s) {
                 LvarBindingKeys[i] + L"_trigger=" + (latched ? L"latched" : L"momentary") + L"\r\n";
   }
   if (!write(path, std::wstring(text, static_cast<std::size_t>(count)) + std::wstring(right, static_cast<std::size_t>(right_count)) +
-                       displays + bindings + layout))
+                       displays + door + bindings + layout))
     return false;
   // The airplane folder's latest layout lets its other presets start from it.
   const auto family = discovered ? discovered_layout_path(s.discovered.key) : std::wstring{};

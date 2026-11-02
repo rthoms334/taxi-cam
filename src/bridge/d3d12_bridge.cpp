@@ -338,13 +338,15 @@ struct Registry {
   unsigned active_mask{}, calibration_mask{};
   // Active sides still inside their minimum PLEASE WAIT time.
   unsigned waiting_mask{};
+  // Active sides showing the door camera page.
+  unsigned door_mask{};
   std::array<std::shared_ptr<Resource>, MaxDisplaySides> selected_resources{};
   std::array<std::atomic<ID3D12Resource*>, MaxDisplaySides> selected_native{};
   std::array<std::atomic<std::uint64_t>, MaxDisplaySides> selected_ids{};
   std::atomic<unsigned> selected_mask{};
   std::atomic<std::uint64_t> queue_patch_generation{1};
   std::array<std::uint64_t, MaxDisplaySides> queue_patch_targets{};
-  unsigned queue_patch_camera{}, queue_patch_calibration{}, queue_patch_waiting{};
+  unsigned queue_patch_camera{}, queue_patch_calibration{}, queue_patch_waiting{}, queue_patch_door{};
   // Pointer, not id: a set-up aircraft keeps its id across layouts.
   const profiles::AircraftProfile* queue_patch_profile{};
   std::atomic<std::uint64_t> queue_patch_plans{};
@@ -753,11 +755,13 @@ void refresh_selected(Registry& r) {
   r.selected_mask.store(r.active_mask | r.calibration_mask, std::memory_order_relaxed);
   const std::array<std::uint64_t, MaxDisplaySides> selected{r.selected_ids[0].load(), r.selected_ids[1].load(), r.selected_ids[2].load()};
   if (selected != r.queue_patch_targets || r.queue_patch_camera != r.active_mask || r.queue_patch_calibration != r.calibration_mask ||
-      r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_profile != r.profile) {
+      r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_door != (r.door_mask & r.active_mask) ||
+      r.queue_patch_profile != r.profile) {
     r.queue_patch_targets = selected;
     r.queue_patch_camera = r.active_mask;
     r.queue_patch_calibration = r.calibration_mask;
     r.queue_patch_waiting = r.waiting_mask & r.active_mask;
+    r.queue_patch_door = r.door_mask & r.active_mask;
     r.queue_patch_profile = r.profile;
     r.queue_patch_generation.fetch_add(1, std::memory_order_release);
   }
@@ -2417,7 +2421,7 @@ void drain_pfds(List& item, std::uint64_t id, bool recording_end = false) noexce
       // ensure_list's boundary registration has already proved identical QI7.
       auto* enhanced = model == PfdCopyProof::Mode::enhanced_rt ? static_cast<ID3D12GraphicsCommandList7*>(native) : nullptr;
       if (runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, format, destination, inner, enhanced,
-                              (r.waiting_mask & (1u << side)) != 0)) {
+                              (r.waiting_mask & (1u << side)) != 0, (r.door_mask & (1u << side)) != 0)) {
         ++r.preferred_copy_stamps;
         r.preferred_copy_reason = model == PfdCopyProof::Mode::legacy_rt ? "copied_legacy" : "copied_enhanced";
         list->pending_rt[side] = false;
@@ -2460,7 +2464,7 @@ void drain_pfds(List& item, std::uint64_t id, bool recording_end = false) noexce
     // in place: no application commands follow and no root replay is needed.
     if (runtime::stamp_at_recording_end(native, list->graphics, r.key, format, static_cast<UINT>(view.resource->desc.Width),
                                         view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner,
-                                        (r.waiting_mask & (1u << side)) != 0)) {
+                                        (r.waiting_mask & (1u << side)) != 0, (r.door_mask & (1u << side)) != 0)) {
       ++r.fallback_stamps;
       ++r.recording_end_draws;
       list->pending_rt[side] = false;
@@ -2528,7 +2532,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
   struct PlacedRect {
     profiles::DisplayRect area{};
     profiles::DisplayRect content{};
-    bool waiting = false;
+    bool waiting = false, door = false;
   };
   std::array<PlacedRect, MaxDisplaySides> placed{};
   unsigned placed_count = 0;
@@ -2550,7 +2554,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
         const auto& desc = r.selected_resources[i]->desc;
         placed[placed_count++] = {profiles::side_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
                                   profiles::side_content_rect(*r.profile, i, static_cast<unsigned>(desc.Width), desc.Height),
-                                  (r.waiting_mask & (1u << i)) != 0};
+                                  (r.waiting_mask & (1u << i)) != 0, (r.door_mask & (1u << i)) != 0};
       }
     if (!item || !placed_count ||
         !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
@@ -2603,8 +2607,8 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
                            static_cast<LONG>(content.bottom)};
     ++r.copy_attempts;
-    if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner,
-                             enhanced, placed[i].waiting)) {
+    if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner, enhanced,
+                             placed[i].waiting, placed[i].door)) {
       ++r.copy_rejected;
       r.copy_error = "runtime_copy_rejected";
     } else
@@ -4656,6 +4660,7 @@ void service_display_patches() noexcept {
       config.sizes[side] = {static_cast<unsigned>(target->desc.Width), target->desc.Height};
       config.camera_mask |= r.active_mask & (1u << side);
       config.waiting_mask |= r.active_mask & r.waiting_mask & (1u << side);
+      config.door_mask |= r.active_mask & r.door_mask & (1u << side);
       config.calibration_mask |= r.calibration_mask & (1u << side);
     }
   }
@@ -4921,6 +4926,12 @@ void set_waiting_mask(unsigned mask) noexcept {
   auto& r = registry();
   const WorkerRegistryLock lock(r);
   r.waiting_mask = mask & profiles::side_mask(*r.profile);
+  refresh_selected(r);
+}
+void set_door_mask(unsigned mask) noexcept {
+  auto& r = registry();
+  const WorkerRegistryLock lock(r);
+  r.door_mask = profiles::door_camera(*r.profile) ? mask & profiles::side_mask(*r.profile) : 0;
   refresh_selected(r);
 }
 std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept {

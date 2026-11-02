@@ -29,6 +29,13 @@ struct Device {
   std::array<float, 3> waiting_color{-1, -1, -1}, waiting_prepared_color{-1, -1, -1};
   // Tick of the latest submitted camera composition; 0 before the first one.
   std::uint64_t output_ms = 0;
+  // Door camera page (two-camera aircraft): feed DoorFeed alone, composed into
+  // its own retained output. A snapshot keeps its last image after the camera
+  // stops; turning the page off forgets it.
+  SceneFrameOutput door_output;
+  bool door_available = false, door_enabled = false, door_live = false, door_ready = false, door_tone_pending = false;
+  SceneCopyMatch door_committed;
+  std::uint64_t door_ms = 0;
   QueuePatchConfig queue_config;
   QueuePatchSnapshot queue_snapshot;
   std::array<PfdStampD3D12, Formats.size() * DepthFormats.size()> stamps;
@@ -110,6 +117,36 @@ bool show_waiting(const Device& item, bool minimum_time) {
   const auto now = GetTickCount64();
   return !item.output_ms || now < item.output_ms || now - item.output_ms > limit;
 }
+// The door page: the door image fills the working image, with no divider, tail
+// rows, guides or ground speed.
+profiles::Composition door_layout(profiles::Composition layout) {
+  layout.split_bottom = 0;
+  layout.nose_height = layout.divider_top = layout.divider_bottom = layout.tail_top = SceneFrameOutput::Height;
+  return layout;
+}
+bool door_current(const Device& item) {
+  if (!item.door_available || !item.door_enabled || !item.door_ready || !item.status.session_active)
+    return false;
+  if (!item.door_live)
+    return true;
+  const auto limit = runtime().waiting_stale_ms;
+  const auto now = GetTickCount64();
+  return scene_handoff().is_current(item.door_committed) && (!limit || (now >= item.door_ms && now - item.door_ms <= limit));
+}
+enum class Page { none, camera, waiting, door };
+// What a camera side shows. A door side shows the door page once it has an
+// image and the waiting page before that (or while a live image is stale),
+// never the taxi image; without a door page it is not written.
+Page side_page(const Device& item, bool waiting, bool door) {
+  if (door)
+    return !item.door_available                       ? Page::none
+           : door_current(item)                       ? Page::door
+           : waiting_page(item) && item.waiting_ready ? Page::waiting
+                                                      : Page::none;
+  if (show_waiting(item, waiting))
+    return item.waiting_ready ? Page::waiting : Page::none;
+  return current_output(item) ? Page::camera : Page::none;
+}
 
 D3D12_RECT native_rect(const profiles::DisplayRect& rect) {
   return {static_cast<LONG>(rect.left), static_cast<LONG>(rect.top), static_cast<LONG>(rect.right), static_cast<LONG>(rect.bottom)};
@@ -119,7 +156,8 @@ bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
     return config == QueuePatchConfig{};
   const auto* profile = profiles::find(config.profile);
   if (!profile || config.profile != item.patch_profile ||
-      ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) || (config.waiting_mask & ~config.camera_mask))
+      ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) || (config.waiting_mask & ~config.camera_mask) ||
+      (config.door_mask & ~config.camera_mask) || (config.door_mask && !profiles::door_camera(*profile)))
     return false;
   for (unsigned side = 0; side < profile->sides; ++side) {
     if (!((config.camera_mask | config.calibration_mask) & (1u << side)))
@@ -149,8 +187,12 @@ bool request_queue_patches(Device& item) {
                inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
-    if ((config.camera_mask & (1u << side)) &&
+    const bool door = (config.door_mask & (1u << side)) != 0;
+    if ((config.camera_mask & (1u << side)) && !door &&
         !item.output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
+      return false;
+    if (door && item.door_available &&
+        !item.door_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
       return false;
     if ((config.camera_mask & (1u << side)) && waiting_page(item) &&
         !item.waiting_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
@@ -170,15 +212,14 @@ void publish_queue_patches(Device& item) {
     return;
   snapshot.generation = config.generation;
   snapshot.profile = config.profile;
-  const bool camera_ready = current_output(item);
   for (unsigned side = 0; side < profile->sides; ++side) {
     const bool calibration = (config.calibration_mask & (1u << side)) != 0;
-    bool waiting = false;
+    auto shown = Page::none;
     if (!calibration) {
       if (!(config.camera_mask & (1u << side)))
         continue;
-      waiting = show_waiting(item, (config.waiting_mask & (1u << side)) != 0);
-      if (waiting ? !item.waiting_ready : !camera_ready)
+      shown = side_page(item, (config.waiting_mask & (1u << side)) != 0, (config.door_mask & (1u << side)) != 0);
+      if (shown == Page::none)
         continue;
     }
     const auto [texture_width, texture_height] = config.sizes[side];
@@ -186,7 +227,10 @@ void publish_queue_patches(Device& item) {
                inner = profiles::side_content_rect(*profile, side, texture_width, texture_height);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
-    const auto& source = calibration ? item.calibration_output : waiting ? item.waiting_output : item.output;
+    const auto& source = calibration              ? item.calibration_output
+                         : shown == Page::waiting ? item.waiting_output
+                         : shown == Page::door    ? item.door_output
+                                                  : item.output;
     const auto patch = source.patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local);
     if (!patch.buffer)
       continue;
@@ -328,6 +372,10 @@ bool prepare(std::uint64_t key) {
   // The waiting page is cosmetic: failing to build it keeps the previous
   // behaviour (no display write until the camera image exists).
   item->waiting_available = item->waiting_output.initialize(item->native) && item->waiting_output.set_patch_profile(item->patch_profile);
+  // So is the door page: without it the door side is never written.
+  item->door_available = item->door_output.initialize(item->native) && item->door_output.set_patch_profile(item->patch_profile) &&
+                         item->door_output.set_composition(door_layout(item->composition)) &&
+                         item->door_output.set_reference_guides(false) && item->door_output.hide_ground_speed();
   for (std::size_t i = 0; i < Formats.size(); ++i) {
     for (std::size_t depth = 0; depth < DepthFormats.size(); ++depth) {
       const auto slot = i * DepthFormats.size() + depth;
@@ -358,6 +406,10 @@ bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
       item->waiting_available = item->waiting_ready = false;
     if (item->waiting_available && !item->waiting_output.set_patch_profile(profile))
       item->waiting_available = item->waiting_ready = false;
+    if (item->door_output.prepared() && !item->door_output.discard_prepared())
+      item->door_available = item->door_ready = false;
+    if (item->door_available && !item->door_output.set_patch_profile(profile))
+      item->door_available = item->door_ready = false;
     if (item->patch_profile != profile || item->patch_layout != layout)
       item->status.output = false;
     item->queue_snapshot = {};
@@ -377,15 +429,16 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
                 const D3D12_RECT& destination,
                 const D3D12_RECT& content,
                 ID3D12GraphicsCommandList7* enhanced,
-                bool waiting) {
+                bool waiting,
+                bool door) {
   // Recording-thread entry (barrier callback or Close). service() may hold this
   // mutex across a private compose submit; skip this write rather than wait.
   const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes, hook_timing::runtime_lock);
   if (!lock)
     return false;
   auto* item = find(key);
-  const bool page = item && item->status.session_active && show_waiting(*item, waiting);
-  if (!list || !target || !item || (page ? !item->waiting_ready : !current_output(*item)) || item->status.failed ||
+  const auto shown = item && item->status.session_active ? side_page(*item, waiting, door) : Page::none;
+  if (!list || !target || !item || shown == Page::none || item->status.failed ||
       (enhanced && static_cast<ID3D12GraphicsCommandList*>(enhanced) != list) || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
       desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 || !desc.MipLevels || !desc.Width || desc.Width > 16384 || !desc.Height ||
       desc.Height > 16384 || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 || destination.left < 0 || destination.top < 0 ||
@@ -410,11 +463,13 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
   // A cold request records no app commands; terminal delivery remains available
   // until a later composition publishes this exact typed patch.
   // Reserve both patches, so the live image is ready when the page ends and
-  // the page is already drawn when a side first starts or goes stale.
-  const bool camera_requested = item->output.request_patch(format, width, height, local);
+  // the page is already drawn when a side first starts or goes stale. A door
+  // side reserves the door page instead of the taxi image.
+  const bool image_requested = door ? item->door_available && item->door_output.request_patch(format, width, height, local)
+                                    : item->output.request_patch(format, width, height, local);
   const bool waiting_requested = waiting_page(*item) && item->waiting_output.request_patch(format, width, height, local);
-  auto& patches = page ? item->waiting_output : item->output;
-  if (!camera_requested || (page && !waiting_requested)) {
+  auto& patches = shown == Page::waiting ? item->waiting_output : shown == Page::door ? item->door_output : item->output;
+  if (!image_requested || (shown == Page::waiting && !waiting_requested)) {
     ++item->status.state_skips;
     return false;
   }
@@ -464,6 +519,19 @@ void set_composition(std::uint64_t key, const profiles::Composition& layout) {
   if (auto* item = find(key)) {
     item->composition = layout;
     item->output.set_composition(layout);
+    if (item->door_available && !item->door_output.set_composition(door_layout(layout)))
+      item->door_available = item->door_ready = false;
+  }
+}
+void set_door(std::uint64_t key, bool enabled, bool live) {
+  const std::lock_guard lock(runtime().mutex);
+  if (auto* item = find(key)) {
+    if (!enabled) {
+      item->door_ready = false;
+      item->door_committed = {};
+    }
+    item->door_enabled = enabled;
+    item->door_live = live;
   }
 }
 void set_reference_guides(std::uint64_t key, bool enabled) {
@@ -478,6 +546,8 @@ void reset_feed(std::uint64_t key) {
     item->status.output = false;
     item->queue_snapshot = {};
     item->committed = {};
+    item->door_ready = false;
+    item->door_committed = {};
     item->status.message = "Waiting for the first completed camera images.";
   }
 }
@@ -494,6 +564,8 @@ std::uint64_t reset_session(std::uint64_t key) {
   item->queue_config = {};
   item->queue_snapshot = {};
   item->committed = {};
+  item->door_ready = false;
+  item->door_committed = {};
   const auto generation = manager().reset_session(key);
   if (!generation)
     return 0;
@@ -538,7 +610,7 @@ bool set_tone_curve(std::uint64_t key, float exposure, const std::uint32_t* tabl
   item->status.tone_exposure = exposure;
   if (table) {
     item->tone_table.assign(table, table + CameraCompositorD3D12::ToneTableTexels);
-    item->tone_table_pending = true;
+    item->tone_table_pending = item->door_tone_pending = true;
   }
   return true;
 }
@@ -558,6 +630,71 @@ void hide_ground_speed(std::uint64_t key) {
     item->status.ground_speed_knots = 0;
   }
 }
+namespace {
+// The door camera page: each new door image is composed alone into the door
+// output, and a snapshot whose camera has stopped only redraws the patches
+// requested since. A recording whose submission is deferred is discarded and
+// recorded again, so a newer door image never replaces one it reads. False
+// marks the device failed (private submission ordering).
+bool service_door(Device& item) {
+  auto& frame = item.pending[profiles::DoorFeed];
+  if (item.composition.split_bottom != 0)
+    return true;
+  if (!item.door_available || !item.door_enabled) {
+    if (frame.token)
+      manager().discard_frame(frame.token);
+    frame = {};
+    return true;
+  }
+  if (!item.door_output.idle())
+    return true;
+  const bool compose = frame.token != 0;
+  if (!compose && !(item.door_ready && item.door_output.patches_pending()))
+    return true;
+  bool prepared = false;
+  if (compose) {
+    if (item.door_output.set_tone_curve(item.status.tone_exposure, item.door_tone_pending ? item.tone_table.data() : nullptr) &&
+        item.status.tone_exposure > 0)
+      item.door_tone_pending = false;
+    prepared = item.door_output.set_display_exposure(item.status.display_exposure_ev) &&
+               item.door_output.prepare(frame.resource, scene_format(frame.resource), frame.resource, scene_format(frame.resource),
+                                        frame.resource, scene_format(frame.resource));
+  } else {
+    prepared = item.door_output.prepare_patches_only();
+  }
+  if (!prepared) {
+    // The page is optional: the taxi cameras carry on without it. Nothing was
+    // submitted, so the door image goes back to capture.
+    item.door_available = item.door_ready = false;
+    if (frame.token)
+      manager().discard_frame(frame.token);
+    frame = {};
+    return true;
+  }
+  const auto submission = manager().begin_private_submission(item.key, item.door_output.queue());
+  if (!submission.receipt) {
+    if (submission.deferred && item.door_output.discard_prepared())
+      return true;
+    item.status.message = "Door camera queue ordering failed.";
+    return false;
+  }
+  const bool submitted = item.door_output.submit();
+  const bool ordered = manager().end_private_submission(submission.receipt);
+  if (!submitted || !ordered) {
+    item.status.message = "Door camera submission failed.";
+    return false;
+  }
+  if (compose) {
+    item.door_committed = frame.match;
+    manager().finish_consumption(frame.token, submission.fence, submission.value);
+    frame = {};
+    item.door_ready = true;
+    item.door_ms = GetTickCount64();
+    ++item.status.door_pages;
+  }
+  return true;
+}
+}  // namespace
 void service() {
   const standalone::OwnedWork owned_work_guard;
   manager().service_display_submissions();
@@ -665,6 +802,11 @@ void service() {
       }
     }
     publish_queue_patches(item);
+    if (item.status.initialized && !service_door(item)) {
+      item.status.failed = true;
+      continue;
+    }
+    publish_queue_patches(item);
     if (!item.key || !item.status.initialized || item.status.failed || !item.output.idle())
       continue;
     for (auto& frame : item.pending) {
@@ -728,7 +870,11 @@ void service() {
     manager().finish_consumption(second.token, submission.fence, submission.value);
     if (split)
       manager().finish_consumption(third.token, submission.fence, submission.value);
-    item.pending = {};
+    // A door image waiting in the third slot of a two-camera aircraft is not
+    // part of this composition.
+    first = second = {};
+    if (split)
+      third = {};
     item.status.output = true;
     item.output_ms = GetTickCount64();
     ++item.status.frames;
@@ -749,6 +895,7 @@ Snapshot snapshot(std::uint64_t key) {
     result.completed_frames = item->output.completed_submissions();
     result.patch_requests = item->output.patch_requests();
     result.patch_draws = item->output.patch_draws();
+    result.door_ready = door_current(*item);
     if (result.output && !current_output(*item)) {
       result.output = false;
       result.message = "Scene output identity changed; waiting for fresh completed camera images.";
@@ -759,6 +906,11 @@ Snapshot snapshot(std::uint64_t key) {
   result.contended_writes = runtime().contended_writes.load(std::memory_order_relaxed);
   return result;
 }
+DoorPage door_page(std::uint64_t key) {
+  const std::lock_guard lock(runtime().mutex);
+  const auto* item = find(key);
+  return item ? DoorPage{item->status.door_pages, door_current(*item)} : DoorPage{};
+}
 bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
                             const PfdGraphicsState& state,
                             std::uint64_t key,
@@ -768,15 +920,18 @@ bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
                             DXGI_FORMAT depth_format,
                             const D3D12_RECT* destination,
                             const D3D12_RECT* content,
-                            bool waiting) {
+                            bool waiting,
+                            bool door) {
   const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes, hook_timing::runtime_lock);
   if (!lock)
     return false;
   auto* item = find(key);
-  const bool page = item && item->status.session_active && show_waiting(*item, waiting);
-  if (!item || (page ? !item->waiting_ready : !current_output(*item)) || item->status.failed)
+  const auto shown = item && item->status.session_active ? side_page(*item, waiting, door) : Page::none;
+  if (!item || shown == Page::none || item->status.failed)
     return false;
-  const auto address = page ? item->waiting_output.address() : item->output.address();
+  const auto address = shown == Page::waiting ? item->waiting_output.address()
+                       : shown == Page::door  ? item->door_output.address()
+                                              : item->output.address();
   for (std::size_t i = 0; i < Formats.size(); ++i) {
     if (Formats[i] != format)
       continue;

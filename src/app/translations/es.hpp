@@ -479,5 +479,16 @@ inline constexpr Translation SpanishTranslations[]{
     {L"Trigger", L"Disparo"},
     {L"Use letters, digits, underscores and dots for L:var names, for example S_PED_COCKPIT_DOOR_VIDEO.", L"Usa letras, dígitos, guiones bajos y puntos en los nombres de L:var, por ejemplo S_PED_COCKPIT_DOOR_VIDEO."},
     {L"{0}: a bound L:var works like its action's shortcut. Momentary: each press turns the cameras on or off. Latched: the cameras are on while the variable is not 0. Taxi Cam only reads these variables.", L"{0}: una L:var asignada funciona como el atajo de su acción. Momentáneo: cada pulsación enciende o apaga las cámaras. Enclavado: las cámaras están encendidas mientras la variable no sea 0. Taxi Cam solo lee estas variables."},
+    {L"Display: {0}", L"Pantalla: {0}"},
+    {L"Door camera", L"Cámara de la puerta"},
+    {L"Door camera requested off.", L"Cámara de la puerta solicitada apagada."},
+    {L"Door camera requested on.", L"Cámara de la puerta solicitada encendida."},
+    {L"None", L"Ninguna"},
+    {L"OWN DISPLAY", L"PANTALLA PROPIA"},
+    {L"Picture: Live", L"Imagen: en directo"},
+    {L"Picture: Snapshot", L"Imagen: instantánea"},
+    {L"This aircraft has no door camera display. Choose one on Camera views.", L"Este avión no tiene pantalla para la cámara de la puerta. Elige una en Vistas de cámara."},
+    {L"This aircraft has no door camera.", L"Este avión no tiene cámara de la puerta."},
+    {L"Door", L"Puerta"},
 };
 }  // namespace taxi_camera::standalone

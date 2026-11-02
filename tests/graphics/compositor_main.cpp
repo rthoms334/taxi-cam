@@ -30,6 +30,7 @@ std::array<float, 4> packed_color(UINT, UINT source, bool night = false) {
 }
 
 struct Result {
+  std::uint64_t door_pixels = 0;
   bool warp = false;
   bool debug_layer = false;
   std::uint64_t debug_errors = 0;
@@ -518,6 +519,92 @@ void bloom_case(ID3D12Device* device, Result& result) {
   compositor.release();
 }
 
+// The door camera page: one input passed for every feed, its nose rows
+// filling the image with no divider, tail, guides or ground speed. A page with
+// tail rows still refuses an input that aliases another. Separate compositor
+// so the shared statistics above stay exact.
+void door_case(ID3D12Device* device, Result& result) {
+  Compositor compositor;
+  check(compositor.initialize(device), compositor.last_error());
+  Reference<ID3D12Resource> source;
+  create_texture(device, texture_description(768, 763, DXGI_FORMAT_R8G8B8A8_UNORM), source.put());
+  require(FAILED(compositor.set_inputs(source.get(), DXGI_FORMAT_R8G8B8A8_UNORM, source.get(), DXGI_FORMAT_R8G8B8A8_UNORM, source.get(),
+                                       DXGI_FORMAT_R8G8B8A8_UNORM)),
+          "A page with tail rows accepted one input for every feed");
+  auto layout = taxi_camera::profiles::A350Etacs;
+  layout.nose_height = layout.divider_top = layout.divider_bottom = layout.tail_top = Compositor::Height;
+  compositor.set_composition(layout);
+  compositor.set_reference_guides(false);
+  compositor.hide_ground_speed();
+  require(FAILED(compositor.set_inputs(source.get(), DXGI_FORMAT_R8G8B8A8_UNORM, source.get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                       source.get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)),
+          "One input with different views was accepted");
+  const auto writes = compositor.statistics().descriptor_writes;
+  check(compositor.set_inputs(source.get(), DXGI_FORMAT_R8G8B8A8_UNORM, source.get(), DXGI_FORMAT_R8G8B8A8_UNORM, source.get(),
+                              DXGI_FORMAT_R8G8B8A8_UNORM),
+        compositor.last_error());
+  require(compositor.statistics().descriptor_writes == writes + 1, "One input counts as one binding");
+  D3D12_DESCRIPTOR_HEAP_DESC heap{};
+  heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  heap.NumDescriptors = 1;
+  Reference<ID3D12DescriptorHeap> rtvs;
+  check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtvs.put())), "Create door-test RTV");
+  const auto handle = rtvs->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(source.get(), nullptr, handle);
+  const auto output_description = texture_description(Compositor::Width, Compositor::Height, DXGI_FORMAT_R8G8B8A8_UNORM);
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  UINT64 bytes = 0;
+  device->GetCopyableFootprints(&output_description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = bytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  const auto readback_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+  Reference<ID3D12Resource> readback;
+  check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(readback.put())),
+        "Create door-test readback");
+  PrivateSubmission submission(device);
+  auto* list = submission.list();
+  constexpr std::array<float, 4> Red{1, 0, 0, 1};
+  constexpr std::array<float, 4> Green{0, 1, 0, 1};
+  const D3D12_RECT lower{0, 382, 768, 763};
+  list->ClearRenderTargetView(handle, Red.data(), 0, nullptr);
+  list->ClearRenderTargetView(handle, Green.data(), 1, &lower);
+  check(compositor.record(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        compositor.last_error());
+  D3D12_TEXTURE_COPY_LOCATION from{};
+  from.pResource = compositor.output();
+  from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  D3D12_TEXTURE_COPY_LOCATION to{};
+  to.pResource = readback.get();
+  to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  to.PlacedFootprint = footprint;
+  list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+  submission.finish(compositor);
+  void* mapped = nullptr;
+  const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+  check(readback->Map(0, &range, &mapped), "Map door-test readback");
+  const auto pixel = [&](UINT x, UINT y) {
+    return static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch + 4 * x;
+  };
+  for (UINT y = 0; y < Compositor::Height; y += 3) {
+    for (const UINT x : {0u, 20u, 384u, 767u}) {
+      const auto* rgba = pixel(x, y);
+      const bool upper = y < 380, below = y > 384;
+      if (upper)
+        require(rgba[0] > 200 && rgba[1] < 40 && rgba[3] == 255, "The door image does not fill the upper rows");
+      if (below)
+        require(rgba[1] > 200 && rgba[0] < 40 && rgba[3] == 255, "The door image does not fill the lower rows");
+      ++result.door_pixels;
+    }
+  }
+  readback->Unmap(0, nullptr);
+  compositor.release();
+}
+
 // The simulator tone mapping with an identity table: an independent CPU
 // model of its chain (exposure, log2 table coordinate, 10-bit texels with
 // linear filtering, decode, shoulder, sRGB) must match within two codes.
@@ -696,6 +783,7 @@ Result run(bool force_warp) {
           "Unexpected compositor rebuild, descriptor update or recording count");
   compositor.release();
   bloom_case(device.get(), result);
+  door_case(device.get(), result);
   tone_case(device.get(), result);
   if (messages.get()) {
     for (UINT64 index = 0; index < messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++index) {

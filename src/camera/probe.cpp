@@ -1549,9 +1549,10 @@ void apply_gates(Runtime& runtime,
 enum class ResizeOutcome { failed, output_pending, complete };
 ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true);
 
-// Feeds a profile renders: a split bottom display has a camera per half.
+// Views a profile's camera set has: a split bottom display has a camera per
+// half; other aircraft have the door camera as their third view.
 unsigned profile_feeds(const profiles::AircraftProfile& profile) noexcept {
-  return profile.composition.split_bottom != 0 ? 3u : 2u;
+  return profiles::camera_views(profile);
 }
 
 enum class KeptPanes { ready, pending, failed };
@@ -2325,7 +2326,7 @@ void observer(void* manager) noexcept {
       }
     }
     auto next_schedule = runtime.schedule;
-    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u);
+    next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u, (settings >> 20) & 7u);
     std::array<bool, kMaxCameraFeeds> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
     const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
@@ -2788,7 +2789,7 @@ void observer(void* manager) noexcept {
           // The early tick only decides whether validation is necessary. Anchor
           // the committed pulse near its call after potentially slow reads.
           next_schedule = runtime.schedule;
-          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u);
+          next_schedule.configure(settings & 0xffu, (settings >> 8) & 0xffu, (settings >> 16) & 3u, (settings >> 20) & 7u);
           if (new_pair) {
             // A changed pair means the controller removed the prior IDs before
             // creation. Only this lifecycle transition resets pulse deadlines.
@@ -3349,9 +3350,10 @@ void suspend_scene_rendering(bool suspended) noexcept {
   runtime.suspended.store(suspended || !session_work_allowed(runtime));
 }
 
-void request_scene_rate(unsigned rate, unsigned feeds, unsigned per_frame) noexcept {
+void request_scene_rate(unsigned rate, unsigned feeds, unsigned per_frame, unsigned wanted) noexcept {
+  static_assert(kMaxCameraFeeds <= 3, "per_frame and wanted are packed in 2 and 3 bits");
   const auto settings = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, kMaxCameraFeeds) << 8) |
-                        (std::min(per_frame, kMaxCameraFeeds) << 16);
+                        (std::min(per_frame, kMaxCameraFeeds) << 16) | ((wanted & 7u) << 20);
   state().requested_settings.store(settings, std::memory_order_release);
 }
 

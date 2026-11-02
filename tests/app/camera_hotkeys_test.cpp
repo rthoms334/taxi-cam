@@ -35,14 +35,14 @@ void shortcut_command(HWND editor, int id) {
   shortcut_dialog(editor, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
 }
   struct FakeRegistration {
-  inline static std::array<bool, 4> active{};
+  inline static std::array<bool, 5> active{};
   inline static unsigned adds{}, removes{};
   inline static int blocked = -1;
   static BOOL WINAPI add(HWND, int id, UINT modifiers, UINT) {
     ++adds;
     require((modifiers & MOD_NOREPEAT) != 0, "Every actual registration suppresses held-key repeats");
     const int i = id - win::CameraHotkeyFirstId;
-    require(i >= 0 && i < 4 && !active[i], "Registration owns unique action IDs and releases before reconfiguration");
+    require(i >= 0 && i < 5 && !active[i], "Registration owns unique action IDs and releases before reconfiguration");
     if (i == blocked) {
       SetLastError(ERROR_HOTKEY_ALREADY_REGISTERED);
       return FALSE;
@@ -53,7 +53,7 @@ void shortcut_command(HWND editor, int id) {
   static BOOL WINAPI remove(HWND, int id) {
     ++removes;
     const int i = id - win::CameraHotkeyFirstId;
-    require(i >= 0 && i < 4 && active[i], "Only owned registrations are removed, once");
+    require(i >= 0 && i < 5 && active[i], "Only owned registrations are removed, once");
     active[i] = false;
     return TRUE;
   }
@@ -70,8 +70,10 @@ void registration_checks() {
             "Preview startup never calls RegisterHotKey");
     require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'L')) == -1,
             "A fabricated hotkey message cannot activate preview bindings");
-    require(registration.configure(fixture, DefaultCameraHotkeys, false) && FakeRegistration::adds == 4,
-            "Normal startup registers all four independent actions");
+    require(registration.configure(fixture, DefaultCameraHotkeys, false) && FakeRegistration::adds == 5,
+            "Normal startup registers all five independent actions");
+    require(registration.action(CameraHotkeyFirstId + 4, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'V')) == 4,
+            "The door camera dispatches from Ctrl + Shift + V");
     require(registration.action(CameraHotkeyFirstId + 3, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'D')) == 3,
             "SD action dispatches from the matching chord");
     require(registration.action(CameraHotkeyFirstId + 2, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'B')) == 2,
@@ -83,7 +85,7 @@ void registration_checks() {
     auto replacement = DefaultCameraHotkeys;
     replacement[0] = {'L', MOD_ALT | MOD_CONTROL};
     FakeRegistration::blocked = 1;
-    require(registration.configure(fixture, replacement, false) && FakeRegistration::removes == 4,
+    require(registration.configure(fixture, replacement, false) && FakeRegistration::removes == 5,
             "Reconfiguration unregisters all previous bindings before replacement");
     require(registration.conflicts() && registration.status(1).find(L"another app") != std::wstring::npos,
             "Registration conflicts identify the affected action");
@@ -92,14 +94,14 @@ void registration_checks() {
     require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'L')) == -1 &&
                 registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_ALT | MOD_CONTROL, 'L')) == 0,
             "Old queued hotkeys are rejected after changing a shortcut");
-    require(registration.configure(fixture, replacement, true) && FakeRegistration::removes == 7 && FakeRegistration::adds == 8,
+    require(registration.configure(fixture, replacement, true) && FakeRegistration::removes == 9 && FakeRegistration::adds == 10,
             "Switching to preview releases live registrations without acquiring any");
     FakeRegistration::blocked = -1;
     replacement[1] = {};
-    require(registration.configure(fixture, replacement, false) && FakeRegistration::adds == 11,
+    require(registration.configure(fixture, replacement, false) && FakeRegistration::adds == 14,
             "Disabled actions do not reserve a key combination");
   }
-  require(FakeRegistration::removes == 10 && FakeRegistration::active == std::array<bool, 4>{},
+  require(FakeRegistration::removes == 13 && FakeRegistration::active == std::array<bool, 5>{},
           "Shutdown releases every remaining owned shortcut");
 }
 void persistence_checks() {
@@ -155,6 +157,13 @@ void persistence_checks() {
   require(load_camera_hotkeys(loaded, settings_override) && loaded == taken && !loaded[3].key,
           "An SD default already in use stays disabled instead of duplicating a shortcut");
   require(save_camera_hotkeys(custom, settings_override), "Restore saved shortcut fixture after SD migration");
+  // So does one written before the door camera shortcut.
+  require(WritePrivateProfileStringW(L"shortcuts", L"door", nullptr, path.c_str()), "Write pre-door fixture");
+  expected = custom;
+  expected[4] = DefaultCameraHotkeys[4];
+  require(load_camera_hotkeys(loaded, settings_override) && loaded == expected && loaded[4].key == 'V',
+          "Older shortcut files gain Ctrl + Shift + V for the door camera");
+  require(save_camera_hotkeys(custom, settings_override), "Restore saved shortcut fixture after door migration");
 }
 void manual_intent_checks() {
   using namespace win;
@@ -362,8 +371,8 @@ void ui_checks() {
   const auto original_rate = current.camera_rate;
   const auto editor = shortcut_fixture();
   require(GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622) && GetDlgItem(editor, 623) &&
-              !GetDlgItem(editor, 624),
-          "Flight-deck shortcut editor exposes Left, Right, Both and SD");
+              GetDlgItem(editor, 624) && !GetDlgItem(editor, 625),
+          "Flight-deck shortcut editor exposes Left, Right, Both, SD and the door camera");
   shortcut_command(editor, 631);
   require(!hotkey_draft[1].key && hotkey_draft != hotkey_saved, "Clear marks a shortcut disabled without applying it early");
   shortcut_command(editor, IDOK);
@@ -458,8 +467,8 @@ void button_ui_checks() {
   constexpr CameraButton quadrant{0x044f, 0x0405, 5}, engine_master{0x4098, 0xb920, 2};
   const auto editor = shortcut_fixture();
   require(
-      GetDlgItem(editor, 670) && GetDlgItem(editor, 675) && GetDlgItem(editor, 683) && GetDlgItem(editor, 693) && !GetDlgItem(editor, 684),
-      "Shortcut editor exposes a controller button for Left, Right, Both and SD");
+      GetDlgItem(editor, 670) && GetDlgItem(editor, 675) && GetDlgItem(editor, 684) && GetDlgItem(editor, 694) && !GetDlgItem(editor, 685),
+      "Shortcut editor exposes a controller button for Left, Right, Both, SD and the door camera");
   wchar_t text[256]{};
   GetDlgItemTextW(editor, 670, text, 256);
   require(std::wstring(text) == L"No button" && button_saved == win::CameraButtons{}, "Controller buttons start unbound");

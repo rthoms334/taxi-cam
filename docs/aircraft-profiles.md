@@ -77,6 +77,21 @@ The aircraft is identified by its exact `AircraftLoaded` path: the SimObject fol
 
 Panel names are only learned from a clean cockpit load: the simulator session's first aircraft, or the same aircraft again. After a switch to another aircraft, leftover textures can move the pairing by a texture, so setup asks for a simulator restart with this aircraft loaded first. Once saved, the layout also stores the sizes of the panels created next to each display, which keeps name routing on the right textures after later aircraft switches. If the simulator's panel table cannot be found, the aircraft cannot be set up.
 
+## Door camera
+
+Aircraft with two taxi cameras (every profile except the PMDG 777, and every set-up aircraft) have a third camera, the door camera: one view, separate from the nose and tail, that fills a display of its own, like a cockpit door surveillance picture. It is the camera set's third view (feed 2, the 777's right wing slot), so every camera set now has three views and a change between the 777 and another aircraft keeps the set. It renders at 768 x 763, the working image's size, and is never reshaped with the taxi panes.
+
+On **Camera views**, the **Door camera** card has its mount (an approximate default: on the centreline 9 m forward and 2 m up, looking aft; each aircraft adjusts it), **Display** (one of the aircraft's display sides, or none) and **Picture**:
+
+- **Snapshot** (default): each time the door camera is turned on it renders until three images of it have been composed (so the view's anti-aliasing and the exposure settle), then stops; the last image stays on the display until it is turned off. It costs nothing while shown.
+- **Live**: it keeps rendering at the camera mode's rate, sharing it with any taxi camera that is on.
+
+The door camera turns on and off with its shortcut (Ctrl + Shift + V), a controller button or a [cockpit L:var](keyboard-shortcuts.md#cockpit-lvars). While it is on, its display shows the door page (PLEASE WAIT until the first image) instead of a taxi camera; the other displays are unchanged. A flight or aircraft change turns it off. **Adjust with live view** has a **Door** camera: selecting it turns the door camera on live on its display while the window is open, and closing the window puts it back as it was. The display and picture are saved per aircraft in `[door_camera]` (`display`, `live`) and the mount in `[door]`; files saved before the door camera kept a copy of the tail in `[wing_right]` on these aircraft, which is ignored.
+
+Set-up aircraft can start from a shipped template, chosen by airplane folder, while their settings have no door camera yet. The Fenix A319/A320/A321 (`SimObjects/Airplanes/FNX_32X`) template adds the lower ECAM, `$A320_ECAM_Lower` (768 x 768, five mips), as the lower display, shows the door camera there, binds the pedestal **VIDEO** button (`S_PED_COCKPIT_DOOR_VIDEO`, momentary) and keeps a saved door mount. The Fenix models no camera page of its own on the ECAM. Its separate CCTV monitor near the cockpit door is part of the rear wall's mesh and texture, with no display texture, so Taxi Cam cannot draw on it.
+
+Not yet established: whether a camera view draws an aircraft's cabin interior (the door camera has not been run in the simulator); the PMDG 777, whose three views are all taxi cameras, needs a fourth view for its door camera. A door display whose shape differs from side 0's shows the picture at side 0's camera shape, as the taxi cameras do on other sides.
+
 ## Adding an aircraft
 
 ### iniBuilds A380 configuration

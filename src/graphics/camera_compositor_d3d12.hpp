@@ -210,11 +210,17 @@ class CameraCompositorD3D12 {
   // root table stays valid; that fill is not a third feed), exactly three when
   // the bottoms are distinct. Never CopyDescriptorsSimple from this shader-visible
   // heap — it is CPU-write-only as a copy source.
+  // A single-camera page (the door camera: the nose rows fill the image, no
+  // tail rows) passes its one input three times; it counts as one binding.
   HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail_left, DXGI_FORMAT left_format,
                      ID3D12Resource* tail_right, DXGI_FORMAT right_format) noexcept {
     if (!output_.get())
       return fail(E_UNEXPECTED, "Initialize the compositor before binding inputs.");
-    if (!nose || !tail_left || !tail_right || same_object(nose, tail_left) || same_object(nose, tail_right) ||
+    const bool single = same_object(nose, tail_left) && same_object(nose, tail_right);
+    if (single &&
+        (composition_.split_bottom != 0 || composition_.tail_top < Height || nose_format != left_format || nose_format != right_format))
+      return fail(E_INVALIDARG, "Only a single-camera page with no tail rows may pass one input for every feed.");
+    if (!nose || !tail_left || !tail_right || (!single && (same_object(nose, tail_left) || same_object(nose, tail_right))) ||
         same_object(nose, output_.get()) || same_object(tail_left, output_.get()) || same_object(tail_right, output_.get()))
       return fail(E_INVALIDARG, "Nose and bottom inputs must be non-null and must not alias the compositor output.");
     const bool shared_bottom = same_object(tail_left, tail_right);
@@ -249,6 +255,10 @@ class CameraCompositorD3D12 {
     input_descriptions_ = descriptions;
     for (std::size_t index = 0; index < resources.size(); ++index) {
       const bool hdr = formats[index] == DXGI_FORMAT_R11G11B10_FLOAT;
+      if (index && single) {
+        bloom_view(index, hdr ? pyramids_[0].bloom.get() : nullptr);
+        continue;
+      }
       if (index == 2 && shared_bottom) {
         bloom_view(2, hdr ? pyramids_[1].bloom.get() : nullptr);
         continue;
@@ -263,7 +273,7 @@ class CameraCompositorD3D12 {
         bloom_view(index, nullptr);
       }
     }
-    statistics_.descriptor_writes += shared_bottom ? 2u : 3u;
+    statistics_.descriptor_writes += single ? 1u : shared_bottom ? 2u : 3u;
     ++statistics_.input_changes;
     error_[0] = '\0';
     return S_OK;
@@ -287,18 +297,21 @@ class CameraCompositorD3D12 {
         !valid_state(right_before, input_descriptions_[2]))
       return fail(E_INVALIDARG, "A private direct list, bound inputs and supported exact mip-zero states are required.");
     const bool shared_bottom = same_object(inputs_[1].get(), inputs_[2].get());
-    if (shared_bottom && left_before != right_before)
-      return fail(E_INVALIDARG, "Aliased bottom inputs must share the same before state.");
+    const bool single = shared_bottom && same_object(inputs_[0].get(), inputs_[1].get());
+    if ((shared_bottom && left_before != right_before) || (single && nose_before != left_before))
+      return fail(E_INVALIDARG, "Aliased inputs must share the same before state.");
+    // Each distinct input is transitioned (and bloomed) once.
+    const auto aliased = [&](std::size_t index) { return (index == 2 && shared_bottom) || (index && single); };
     const std::array<D3D12_RESOURCE_STATES, 3> states{nose_before, left_before, right_before};
     for (std::size_t index = 0; index < inputs_.size(); ++index) {
-      if (index == 2 && shared_bottom)
+      if (aliased(index))
         continue;
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
                (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
     for (UINT index = 0; index < 3; ++index) {
-      const UINT source = index == 2 && shared_bottom ? 1u : index;
+      const UINT source = single ? 0u : index == 2 && shared_bottom ? 1u : index;
       if (!(hdr & (1u << index)) || pyramids_[source].levels < 2)
         continue;
       if (index == source)
@@ -324,7 +337,7 @@ class CameraCompositorD3D12 {
     draw_output(private_list, hdr, ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u));
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     for (std::size_t index = 0; index < inputs_.size(); ++index) {
-      if (index == 2 && shared_bottom)
+      if (aliased(index))
         continue;
       transition(private_list, inputs_[index].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, states[index]);
     }

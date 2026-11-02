@@ -4,13 +4,15 @@
 #include "protocol.hpp"
 
 namespace taxi_camera::standalone {
-// Camera actions: 0 left, 1 right, 2 both pilot displays, 3 lower ECAM (SD).
-// Both never changes the SD; the SD action needs a profile with that side.
-enum CameraAction : unsigned { CameraLeft, CameraRight, CameraBoth, CameraSd, CameraActions };
+// Camera actions: 0 left, 1 right, 2 both pilot displays, 3 lower ECAM (SD),
+// 4 the door camera. Both never changes the SD; the SD action needs a profile
+// with that side. The door camera is not a side of its own: it turns the door
+// camera on its display on and off (toggle_door_camera).
+enum CameraAction : unsigned { CameraLeft, CameraRight, CameraBoth, CameraSd, CameraDoor, CameraActions };
 static_assert(LvarBindingCount == CameraActions, "One L:var binding per camera action");
 // The sides an action toggles, or 0 when the selected profile lacks them.
 inline unsigned camera_action_sides(const profiles::AircraftProfile& profile, unsigned action) noexcept {
-  const unsigned affected = action == CameraBoth ? PilotDisplaySides : action < CameraActions ? 1u << (action == CameraSd ? 2 : action) : 0u;
+  const unsigned affected = action == CameraBoth ? PilotDisplaySides : action < CameraDoor ? 1u << (action == CameraSd ? 2 : action) : 0u;
   return (affected & profiles::side_mask(profile)) == affected ? affected : 0u;
 }
 // All affected sides on turns them off; otherwise they all turn on.
@@ -87,11 +89,28 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
   return CameraHotkeyResult::aircraft;
 }
 
+// The door camera of a two-camera aircraft whose door camera has a display.
+inline bool door_camera_set_up(const Settings& settings) noexcept {
+  const auto* profile = profiles::find(settings.profile);
+  return profile && profiles::door_camera(*profile) && settings.door_side < MaxDisplaySides &&
+         (profiles::side_mask(*profile) & (1u << settings.door_side));
+}
+// Session-scoped like the manual request. False when there is no door camera.
+inline bool toggle_door_camera(Settings& settings) noexcept {
+  if (!door_camera_set_up(settings))
+    return false;
+  settings.door_on ^= 1u;
+  settings.calibration_mask = 0;
+  settings.scene_test = 0;
+  return true;
+}
 // Whether every display an action affects is requested now, read the way its
 // shortcut reads it: the cockpit buttons while they are followed on aircraft
 // Taxi Cam can command, otherwise the manual request (the PMDG 777's manual
 // layer). A latched L:var binding toggles only when this differs from it.
 inline bool camera_action_requested(const Settings& settings, const Status& status, unsigned action) noexcept {
+  if (action == CameraDoor)
+    return settings.door_on != 0;
   const auto* profile = profiles::find(settings.profile);
   const auto affected = profile ? camera_action_sides(*profile, action) : 0u;
   if (!affected)

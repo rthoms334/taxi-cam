@@ -8,6 +8,15 @@
           "title": "Taxi Cam in your language",
           "text": "Taxi Cam and Setup follow your Windows display language in German, Spanish, French and Simplified Chinese (thanks to JCH2333), or English. Choose another under Language in the tray menu or Settings → Menu. Aircraft names, simulator messages, these notes, logs and bug reports stay in English. The translations are new: if one reads wrong, please open an issue on GitHub with a better wording.",
           "image": "docs/whats-new/1.3.0/language.png"
+        },
+        {
+          "title": "Door camera",
+          "text": "Aircraft with nose and tail cameras get a door camera on a display of its own, to look into the cabin. Choose its display and Snapshot or Live on Camera views, then aim it with Adjust with live view. Ctrl + Shift + V, a controller button or a cockpit L:var turns it on. The Fenix A320 family starts with it on the lower ECAM and the pedestal VIDEO button.",
+          "image": "docs/whats-new/1.3.0/door-camera.png"
+        },
+        {
+          "title": "Cockpit L:vars",
+          "text": "Overview → Cockpit L:vars lets a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press) or Latched (on while set). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads these variables."
         }
       ],
       "fixes": [

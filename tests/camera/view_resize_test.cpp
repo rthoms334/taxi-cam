@@ -87,7 +87,9 @@ void planning() {
     for (unsigned feed = 0; feed < 3; ++feed) {
       require(nc::plan_view_resize(input, feed, output), "valid dimensions refused");
       for (const auto pair : output)
-        require(pair == std::array<std::int32_t, 2>{736, feed == 0 ? 251 : 496}, "output differs from its exact PFD pane");
+        // Nose, tail, and the door camera's 768 x 763 pane in the third view.
+        require(pair == (feed < 2 ? std::array<std::int32_t, 2>{736, feed == 0 ? 251 : 496} : std::array<std::int32_t, 2>{768, 763}),
+                "output differs from its exact PFD pane");
     }
   }
   for (const auto value : {std::numeric_limits<std::int32_t>::min(), -1, 0, 31, 16385, std::numeric_limits<std::int32_t>::max()}) {

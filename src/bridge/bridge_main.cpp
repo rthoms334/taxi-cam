@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include "../camera/body_pose_provider.hpp"
@@ -15,6 +16,7 @@
 #include "../hooks/render_boundary_observer.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/companion_control.hpp"
+#include "../shared/door_camera.hpp"
 #include "../shared/hook_timing.hpp"
 #include "../shared/lock_holder_priority.hpp"
 #include "../shared/protocol.hpp"
@@ -1042,7 +1044,9 @@ DWORD run_impl() {
     service_max_ms = std::max(service_max_ms, GetTickCount64() - begin);
   };
   std::vector<PfdTargetObservation> inventory;
-  unsigned rate{}, feeds{}, applied_profile{}, scheduled_per_frame{}, source_rate{};
+  // feeds: the cameras that render; scheduled_wanted: their bits.
+  unsigned rate{}, feeds{}, applied_profile{}, scheduled_per_frame{}, scheduled_wanted{}, source_rate{};
+  win::DoorSnapshot door_snapshot;
   AutoCameraPolicy auto_policy;
   UpdateRateMeter update_meter;
   // Frame-time histogram read at the previous status log line.
@@ -1231,7 +1235,7 @@ DWORD run_impl() {
         return false;
       const auto owned = native_camera::scene_snapshot().pair.owned_ids;
       const unsigned have = (owned[0] ? 1u : 0u) + (owned[1] ? 1u : 0u) + (owned[2] ? 1u : 0u);
-      return have >= (next->composition.split_bottom != 0 ? 3u : 2u);
+      return have >= profiles::camera_views(*next);
     };
     // One snapshot per companion serial. It needs graphics observation while
     // pending, like calibration, but never a camera or a matching aircraft:
@@ -1569,22 +1573,27 @@ DWORD run_impl() {
                                                                             : settings.manual_mask) &
                                     sides;
     // What is requested and ready, before the watchdog gate.
-    const unsigned wanted = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready()
-                                ? requested_mask
-                                : 0;
-    const unsigned mask = degraded ? 0u : wanted;
+    const bool admitted = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready();
+    const unsigned wanted = admitted ? requested_mask : 0;
+    // The door camera takes its side over from the taxi cameras while it is on.
+    const unsigned door_side = profile && profiles::door_camera(*profile) && settings.door_on && settings.door_side < MaxDisplaySides
+                                   ? 1u << settings.door_side
+                                   : 0;
+    const unsigned door_wanted = admitted ? door_side & sides : 0;
+    const unsigned mask = degraded ? 0u : wanted & ~door_wanted;
+    const unsigned door = degraded ? 0u : door_wanted;
     const bool wanted_test_scene =
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test;
     const bool test_scene = wanted_test_scene && !degraded;
     // Trips count toward a repeated-stall hold only while cameras are wanted;
     // the hold lasts until the pilot turns them off (a known OFF, never a
     // readiness lapse or a stale button reading).
-    cameras_wanted.store(wanted || wanted_test_scene, std::memory_order_release);
+    cameras_wanted.store(wanted || door_wanted || wanted_test_scene, std::memory_order_release);
     request_hold_release(
         stall_hold_known_off(connected, settings.enabled != 0, settings.scene_test != 0, requested_mask, uses_buttons, buttons.valid),
         status);
     const auto intent_observed_ms = GetTickCount64();
-    if (!mask && !test_scene && !prewarm.active())
+    if (!mask && !door && !test_scene && !prewarm.active())
       failed = false;
     const auto targets = win::target_ids();
     unsigned assigned = 0;
@@ -1650,8 +1659,12 @@ DWORD run_impl() {
         log_status(status, detail);
       }
     }
-    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup && !degraded);
-    unsigned active = demand.stamp_mask;
+    // A snapshot stops rendering once taken; its page stays on the display.
+    const auto door_page = scene_runtime::door_page(key);
+    const bool door_render = door_snapshot.observe(door != 0, settings.door_live != 0, door_page.pages);
+    const auto demand =
+        win::scene_demand(mask | (door_render ? door : 0u), test_scene, assigned, requested, failed, background_warmup && !degraded);
+    unsigned active = demand.stamp_mask | (failed ? 0u : door & assigned);
     const unsigned calibration =
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && !degraded ? settings.calibration_mask : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
@@ -1660,13 +1673,21 @@ DWORD run_impl() {
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
     win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
+    win::set_door_mask(door & active);
+    scene_runtime::set_door(key, door != 0, settings.door_live != 0);
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
     // Only the schedule rate changes here. The pair, its gates and the saved
     // camera_rate are untouched; configure() on a live pair retains its grid.
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
-    const unsigned desired_feeds = rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u;
+    // Every set has its taxi cameras and, on two-camera aircraft, the door
+    // camera; only the wanted ones render and share the rate.
+    const unsigned set_feeds = rate_profile ? profiles::camera_views(*rate_profile) : 3u;
+    const unsigned taxi_bits = (1u << (rate_profile ? profiles::taxi_feeds(*rate_profile) : 2u)) - 1;
+    const unsigned wanted_feeds = (mask || test_scene || background_warmup ? taxi_bits : 0u) |
+                                  (door_render && rate_profile && profiles::door_camera(*rate_profile) ? 1u << profiles::DoorFeed : 0u);
+    const unsigned desired_feeds = std::max(1u, static_cast<unsigned>(std::popcount(wanted_feeds ? wanted_feeds : taxi_bits)));
     const unsigned pfd_refresh_hz = rate_profile ? rate_profile->pfd_refresh_hz : 0;
     const double update_hz = update_meter.update(now, native_camera::scene_update_count());
     if (!demand.suspend) {
@@ -1705,11 +1726,13 @@ DWORD run_impl() {
                                                                    : reachable_camera_rate(effective_rate.rate, update_hz);
     if (!automatic && std::isfinite(reachable) && reachable + 0.5 < effective_rate.rate)
       effective_rate.reasons |= kRateLimitSimulator;
-    if (connected && (rate != effective_rate.rate || feeds != desired_feeds || scheduled_per_frame != per_frame)) {
+    if (connected &&
+        (rate != effective_rate.rate || feeds != desired_feeds || scheduled_per_frame != per_frame || scheduled_wanted != wanted_feeds)) {
       rate = effective_rate.rate;
       feeds = desired_feeds;
       scheduled_per_frame = per_frame;
-      native_camera::request_scene_rate(rate, feeds, per_frame);
+      scheduled_wanted = wanted_feeds;
+      native_camera::request_scene_rate(rate, set_feeds, per_frame, wanted_feeds);
     }
     // Capture spacing follows the measured frame time, so a camera rendering
     // on every frame above 120 fps keeps every image (PR #135 review).
@@ -1941,6 +1964,7 @@ DWORD run_impl() {
     status.hook_failures = graphics.hook_failures;
     status.scene_ready = scene.ready[0] && scene.ready[1] && (!scene.pair.owned_ids[2] || scene.ready[2]);
     status.taxi_mask = active;
+    status.door_state = static_cast<std::uint32_t>(win::door_state(door != 0, settings.door_live != 0, door_page.ready));
     status.left_id = targets[0];
     status.right_id = targets[1];
     status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
@@ -2304,7 +2328,7 @@ DWORD run_impl() {
       std::snprintf(retention_detail, sizeof(retention_detail),
                     "Camera retention: created_total=%llu snapshot_bytes=%llu snapshot_allocations=%llu quarantined=%llu prewarm=%s "
                     "patch_requests=%u patch_draws=%llu "
-                    "waiting_pages=%llu "
+                    "waiting_pages=%llu door=%u/%llu/%llu "
                     "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
                     "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
                     "rt_holds=%llu",
@@ -2312,6 +2336,8 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(output.capture.allocations),
                     static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
                     static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(output.waiting_pages),
+                    status.door_state, static_cast<unsigned long long>(output.door_pages),
+                    static_cast<unsigned long long>(output.accepted_frames[profiles::DoorFeed]),
                     static_cast<unsigned long long>(scene.retirement_deferrals), scene.retirement_waiting, scene.retirement_status,
                     scene.retirement_queue_counts[0], scene.retirement_queue_counts[1], static_cast<unsigned long long>(scene.flags[0][0]),
                     static_cast<unsigned long long>(scene.flags[0][1]), static_cast<unsigned long long>(scene.flags[1][0]),

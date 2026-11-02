@@ -194,7 +194,8 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // (Auto). A rate at or above the simulator's renders every camera every frame.
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
-void request_scene_rate(unsigned rate, unsigned feeds = 2, unsigned per_frame = 0) noexcept;
+// wanted: a bit per feed that renders (RenderSchedule::configure); 0 renders every feed.
+void request_scene_rate(unsigned rate, unsigned feeds = 2, unsigned per_frame = 0, unsigned wanted = 0) noexcept;
 // Validated configuration mailbox only. The observer applies separate mounts
 // with a fresh verified aircraft pose before their next activation.
 bool request_scene_profile(std::uint32_t id) noexcept;

@@ -346,6 +346,20 @@ bool SceneFrameOutput::prepare_waiting() noexcept {
   return true;
 }
 
+bool SceneFrameOutput::prepare_patches_only() noexcept {
+  if (calibration_only_ || !submitted_ || !idle() || prepared_)
+    return false;
+  if (FAILED(device_->GetDeviceRemovedReason()))
+    return fail("The retained page device was removed.");
+  if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_, nullptr)))
+    return fail("Resetting the private patch list failed.");
+  gpu_timing_.discard_unsubmitted();
+  if (!prepare_patches() || FAILED(list_->Close()))
+    return fail("Closing the private patch list failed.");
+  prepared_ = true;
+  return true;
+}
+
 bool SceneFrameOutput::patches_pending() const noexcept {
   for (const auto& patch : patches_)
     if (patch.width && !patch.written)

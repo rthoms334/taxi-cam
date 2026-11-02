@@ -479,5 +479,16 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"Trigger", L"触发方式"},
     {L"Use letters, digits, underscores and dots for L:var names, for example S_PED_COCKPIT_DOOR_VIDEO.", L"L:var 名称只能使用字母、数字、下划线和点，例如 S_PED_COCKPIT_DOOR_VIDEO。"},
     {L"{0}: a bound L:var works like its action's shortcut. Momentary: each press turns the cameras on or off. Latched: the cameras are on while the variable is not 0. Taxi Cam only reads these variables.", L"{0}：绑定的 L:var 与其操作的快捷键作用相同。瞬时式：每按一次开关摄像头。保持式：变量不为 0 时摄像头开启。Taxi Cam 只读取这些变量。"},
+    {L"Display: {0}", L"显示屏：{0}"},
+    {L"Door camera", L"舱门摄像头"},
+    {L"Door camera requested off.", L"已请求关闭舱门摄像头。"},
+    {L"Door camera requested on.", L"已请求打开舱门摄像头。"},
+    {L"None", L"无"},
+    {L"OWN DISPLAY", L"独立显示屏"},
+    {L"Picture: Live", L"画面：实时"},
+    {L"Picture: Snapshot", L"画面：快照"},
+    {L"This aircraft has no door camera display. Choose one on Camera views.", L"此机型没有舱门摄像头显示屏。请在“摄像头视角”中选择一个。"},
+    {L"This aircraft has no door camera.", L"此机型没有舱门摄像头。"},
+    {L"Door", L"舱门"},
 };
 }  // namespace taxi_camera::standalone

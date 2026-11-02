@@ -13,8 +13,8 @@ namespace taxi_camera::standalone {
 // shortcut on every press (zero to non-zero); a latched binding turns the
 // action's displays on when it becomes non-zero and off when it returns to zero.
 inline constexpr std::size_t LvarNameSize = 64;
-// One binding per CameraAction: left, right, both, lower.
-inline constexpr std::size_t LvarBindingCount = 4;
+// One binding per CameraAction: left, right, both, lower, door camera.
+inline constexpr std::size_t LvarBindingCount = 5;
 enum class LvarTrigger : std::uint32_t { momentary, latched };
 struct LvarBinding {
   char name[LvarNameSize]{};  // Without the "L:" prefix; empty when the action is not bound.

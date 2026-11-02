@@ -81,6 +81,11 @@ class SceneFrameOutput {
   // inputs, into this output's buffer and every requested patch. Same private
   // submission lifetime and manager timeline contract as prepare().
   bool prepare_waiting() noexcept;
+  // Every requested patch again from the image already in this output's
+  // buffer, after at least one submitted composition: a door camera snapshot
+  // keeps serving displays that ask for a new patch after its camera stopped.
+  // Same private submission lifetime and manager timeline contract as prepare().
+  bool prepare_patches_only() noexcept;
   // A requested patch has not yet been written by a submitted recording.
   bool patches_pending() const noexcept;
   // Discard a closed prepared list which was NEVER submitted (e.g. the manager

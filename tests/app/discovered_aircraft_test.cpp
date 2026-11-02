@@ -211,8 +211,17 @@ void settings_files(const std::wstring& root) {
   Settings sibling;
   require(load_settings(sibling, L"missing", profiles::DiscoveredProfileId, Fenix321Key), "A new preset starts from its family");
   auto expected = fenix_layout(Fenix321);
-  require(profiles::same_layout(sibling.discovered, expected) && sibling.mounts == profiles::DiscoveredMounts,
+  // The Fenix ships a door camera template: its lower ECAM becomes the lower
+  // display and the pedestal VIDEO button turns the door camera on.
+  const auto* door = profiles::door_template(Fenix321Key);
+  require(door && profiles::add_door_display(expected, *door), "The Fenix has a door camera template");
+  require(profiles::same_layout(sibling.discovered, expected) && sibling.mounts == profiles::DiscoveredMounts &&
+              sibling.mounts[profiles::DoorFeed] == door->mount,
           "It takes the family's displays and the starting camera mounts");
+  require(sibling.door_side == 2 && !sibling.door_live &&
+              std::strcmp(sibling.lvar_bindings[CameraDoor].name, "S_PED_COCKPIT_DOOR_VIDEO") == 0 &&
+              sibling.lvar_bindings[CameraDoor].trigger == static_cast<std::uint32_t>(LvarTrigger::momentary),
+          "and the door camera template");
   // Setup: a new layout replaces the saved one; the variant keeps its saved
   // calibration, and a variant never saved starts from the starting mounts.
   auto changed = fenix_layout();

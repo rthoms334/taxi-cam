@@ -250,6 +250,8 @@ void set_target_mask(unsigned mask) noexcept;
 // Active sides inside their minimum PLEASE WAIT time. Only narrows what an
 // admitted side draws; it never admits a side for display writes.
 void set_waiting_mask(unsigned mask) noexcept;
+// Active sides that show the door camera page (two-camera aircraft only).
+void set_door_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
 std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept;
 // Sides whose route came from the panel-name table (bit per side).

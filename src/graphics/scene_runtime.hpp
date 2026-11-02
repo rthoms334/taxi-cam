@@ -18,6 +18,9 @@ struct QueuePatchConfig {
   // Camera sides still inside their minimum PLEASE WAIT time. The runtime also
   // shows the page, on profiles that have one, while the image is missing or stale.
   unsigned waiting_mask = 0;
+  // Camera sides showing the door camera page (set_door) instead of the taxi
+  // cameras: the waiting page until it has an image, never the taxi image.
+  unsigned door_mask = 0;
   bool operator==(const QueuePatchConfig&) const = default;
 };
 struct QueuePatch {
@@ -48,7 +51,8 @@ bool set_patch_profile(std::uint64_t device_key, std::uint32_t profile);
 // A validated cold request reserves bounded metadata and returns false without
 // GPU work. service() builds that exact patch for subsequent copy opportunities.
 // waiting marks a side inside its minimum PLEASE WAIT time; the retained
-// waiting page is also used when the camera image is missing or stale.
+// waiting page is also used when the camera image is missing or stale. door
+// marks a side showing the door camera page.
 bool copy_patch(ID3D12GraphicsCommandList*,
                 std::uint64_t device_key,
                 ID3D12Resource* target,
@@ -57,7 +61,8 @@ bool copy_patch(ID3D12GraphicsCommandList*,
                 const D3D12_RECT& destination,
                 const D3D12_RECT& content,
                 ID3D12GraphicsCommandList7* enhanced = nullptr,
-                bool waiting = false);
+                bool waiting = false,
+                bool door = false);
 struct Snapshot {
   std::uint64_t session_generation = 0;
   bool session_active = false;
@@ -78,6 +83,10 @@ struct Snapshot {
   std::array<std::uint64_t, 3> accepted_frames{};
   // Submitted renders of the retained PLEASE WAIT page.
   std::uint64_t waiting_pages = 0;
+  // Submitted door camera pages composed from a new door image, and whether
+  // the door page has one to show.
+  std::uint64_t door_pages = 0;
+  bool door_ready = false;
   std::uint32_t patch_requests = 0;
   std::uint64_t patch_draws = 0;
   float display_exposure_ev = -8.8f;
@@ -122,9 +131,22 @@ void reset_feed(std::uint64_t key);
 std::uint64_t reset_session(std::uint64_t key);
 bool resume_session(std::uint64_t key, std::uint64_t generation);
 void set_composition(std::uint64_t key, const profiles::Composition& layout);
+// The door camera page of a two-camera aircraft: feed profiles::DoorFeed alone,
+// composed into its own retained output for the sides in door_mask. Each new
+// door image is composed; a snapshot (live false) keeps its last image until
+// the page is turned off, a live page shows the waiting page when its image is
+// stale. Off discards door images and the page.
+void set_door(std::uint64_t key, bool enabled, bool live);
 void set_reference_guides(std::uint64_t key, bool enabled);
 void service();
 Snapshot snapshot(std::uint64_t key);
+// The door page's counters alone, without the GPU timing and capture
+// statistics a snapshot gathers.
+struct DoorPage {
+  std::uint64_t pages = 0;
+  bool ready = false;
+};
+DoorPage door_page(std::uint64_t key);
 // Terminal DIRECT-list entry only: immediately before native Close, after all
 // application commands. Caller supplies the guarded retained RTV; successful
 // recording intentionally leaves our state bound and never replays app roots.
@@ -138,5 +160,6 @@ bool stamp_at_recording_end(ID3D12GraphicsCommandList*,
                             DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
                             const D3D12_RECT* destination = nullptr,
                             const D3D12_RECT* content = nullptr,
-                            bool waiting = false);
+                            bool waiting = false,
+                            bool door = false);
 }  // namespace taxi_camera::scene_runtime

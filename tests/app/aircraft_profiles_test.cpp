@@ -619,6 +619,22 @@ int main() {
     const auto content = profiles::display_content_rect(profiles::A380, side);
     assert(content.left == 16 && content.right == 752 && content.top == 12 && content.bottom == 763);
   }
+  // Two-camera aircraft have the door camera as their third view, at the
+  // working image's size and on the shared approximate mount; the PMDG 777's
+  // three views are all taxi cameras. Every set has three views.
+  for (const auto* profile : profiles::Catalog) {
+    const bool split = profile->composition.split_bottom != 0;
+    assert(profiles::door_camera(*profile) == !split && profiles::taxi_feeds(*profile) == (split ? 3u : 2u));
+    assert(profiles::camera_views(*profile) == 3);
+    if (!split)
+      assert(profile->camera_panes[profiles::DoorFeed] == profiles::DoorPane && profile->mounts[profiles::DoorFeed] == profiles::DoorMount);
+  }
+  {
+    // A reshaped camera area scales the taxi panes, never the door pane.
+    auto shaped = profiles::A380;
+    profiles::shape_cameras(shaped, profiles::A380.camera_panes, {0, 0, 368, 763}, 1, {1, 1, 1});
+    assert(shaped.camera_panes[profiles::DoorFeed] == profiles::DoorPane);
+  }
   for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
     assert(profile->composition.guide_color == profiles::A380.composition.guide_color && profile->composition.square_nose_markers);
     const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1);
@@ -627,8 +643,8 @@ int main() {
     const auto left_content = profiles::display_content_rect(*profile, 0), right_content = profiles::display_content_rect(*profile, 1);
     assert(left_content.left == 16 && left_content.right == 790 && right_content.left == 854 && right_content.right == 1628);
     assert(left_content.top == 12 && right_content.top == 12 && left_content.bottom == 763 && right_content.bottom == 763);
-    for (const auto& pane : profile->camera_panes)
-      assert(pane[0] == 774);
+    for (unsigned feed = 0; feed < profiles::taxi_feeds(*profile); ++feed)
+      assert(profile->camera_panes[feed][0] == 774);
     // iniBuilds 1.2.6 variant flight_model.cfg contact_points are feet:
     // NLG forward/up 79.46/-15.6 (-900), 92.045/-15.5 (-1000);
     // left MLG right/up/forward -20.200737/-16.45/-17.63 for both.
@@ -660,7 +676,7 @@ int main() {
     assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > 0.85 && gear[1] < 0.90);
     // The calibrated bracket corner sits outboard of the projected tyre contact.
     assert(a346.composition.tail_corner[0] < gear[0] && std::abs(a346.composition.tail_corner[1] - gear[1]) < 0.03);
-    assert(a346.mounts[1] == a346.mounts[2]);
+    assert(a346.mounts[2] == profiles::DoorMount);
   }
 
   for (const auto* profile : profiles::Catalog) {

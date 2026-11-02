@@ -85,7 +85,7 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.tail_inner = {0.4375f, 0.25f};
   value.mounts[0] = {1.25, 2.5, 3.75, -12.5, 4.25, 0.75};
   value.mounts[1] = {-2.25, 5.5, -7.75, -25.5, 1.75, 0.875};
-  value.mounts[2] = value.mounts[1];
+  value.mounts[2] = {0.5, 2.25, 8.75, -9.5, 179.5, 1.125};  // The door camera on two-camera aircraft.
   require(valid_settings(value), "Custom fixture preferences are valid");
   return value;
 }
@@ -272,6 +272,39 @@ void lvar_bindings_persist() {
           "A hand-edited L: prefix is dropped and an unsafe name unbinds only its action");
 }
 
+// Two-camera aircraft keep the door camera's mount in [door] and its display
+// and picture in [door_camera]; the PMDG 777's third mount stays [wing_right].
+void door_camera_persists() {
+  select_fixture(L"door-camera");
+  auto saved = customized(profiles::A380);
+  saved.door_side = 1;
+  saved.door_live = 1;
+  saved.door_on = 1;
+  require(save_settings(saved), "Save a profile with a door camera");
+  const auto path = settings_path(saved);
+  require(ini(path, L"door", L"yaw") == L"179.5" && ini(path, L"door_camera", L"display") == L"1" &&
+              ini(path, L"door_camera", L"live") == L"1" && ini(path, L"wing_right", L"yaw") == L"<missing>",
+          "The door camera has its own sections");
+  Settings loaded;
+  require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) && loaded.door_side == 1 &&
+              loaded.door_live == 1 && !loaded.door_on,
+          "It survives a save; turning it on is not saved");
+  patch(path, L"door_camera", L"display", L"2");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.door_side == DoorSideNone,
+          "A side the aircraft does not have leaves it without a display");
+  // Before the door camera, two-camera files kept a copy of the tail in [wing_right].
+  patch(path, L"door", L"right", nullptr);
+  patch(path, L"wing_right", L"right", L"-2.25");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.mounts[2] == profiles::DoorMount,
+          "An older file's [wing_right] is not the door camera");
+  auto wing = customized(profiles::Pmdg777300ER);
+  require(save_settings(wing), "Save a 777 profile");
+  const auto wing_path = settings_path(wing);
+  require(ini(wing_path, L"wing_right", L"yaw") == L"179.5" && ini(wing_path, L"door", L"yaw") == L"<missing>" &&
+              ini(wing_path, L"door_camera", L"display") == L"<missing>",
+          "The 777 keeps its right wing camera");
+}
+
 void rejected_preferences_are_left_unchanged() {
   select_fixture(L"invalid-preferences");
   const auto expected = customized(profiles::A359);
@@ -347,6 +380,7 @@ int main() {
     retired_lighting_keys_are_ignored();
     saved_enabled_key_is_ignored();
     lvar_bindings_persist();
+    door_camera_persists();
     rejected_preferences_are_left_unchanged();
     legacy_import_preserves_original();
     settings_override.clear();

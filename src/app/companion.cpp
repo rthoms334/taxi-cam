@@ -237,6 +237,11 @@ bool pmdg_cam_control(const win::Settings& s) noexcept {
 const wchar_t* side_toggle_name(const win::Settings& s, unsigned side) {
   return side == 0 ? tr(L"Left") : side == 1 ? tr(L"Right") : pmdg_cam_control(s) ? tr(L"Lower") : tr(L"SD");
 }
+// The door camera's display: a side of this aircraft, or none.
+constexpr int DoorDisplayId = 356, DoorPictureId = 357;
+std::wstring door_display_label(const win::Settings& s) {
+  return tr_format(L"Display: {0}", {s.door_side < MaxDisplaySides ? side_toggle_name(s, s.door_side) : tr(L"None")});
+}
 // PFD routing's Preview and Calibrate rows, from the current request.
 void refresh_side_toggles(const win::Settings& s) {
   constexpr int previews[]{224, 225, 232}, calibrations[]{226, 227, 233};
@@ -650,7 +655,7 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     hotkey_draft = hotkey_saved;
     button_draft = button_saved;
     button_capture = -1;
-    place_dialog(hwnd, tr(L"Taxi Cam — Flight-deck shortcuts and buttons"), 940, 568);
+    place_dialog(hwnd, tr(L"Taxi Cam — Flight-deck shortcuts and buttons"), 940, 652);
     const auto make = [&](const wchar_t* type, const wchar_t* label, int id, int x, int y, int width, int height, DWORD style = 0,
                           HFONT font = nullptr) { return dialog_control(hwnd, type, label, id, x, y, width, height, style, font); };
     make(L"STATIC", tr(L"Flight-deck shortcuts and buttons"), -1, 20, 17, 900, 28, 0, heading);
@@ -677,10 +682,10 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
          tr(L"Both turns the captain and first-officer displays on; press again to turn both off. SD is the lower ECAM or, on the "
             L"PMDG 777, the lower DU. Shortcuts and buttons apply to all aircraft and work while Taxi Cam is hidden. MSFS also receives "
             L"controller buttons, so leave a button you set here unassigned in the simulator."),
-         660, 20, 450, 900, 56, 0, small);
-    make(L"BUTTON", tr(L"Reset shortcuts"), 640, 20, 514, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
-    make(L"BUTTON", tr(L"Save changes"), IDOK, 660, 514, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
-    make(L"BUTTON", tr(L"Close"), IDCANCEL, 822, 514, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+         660, 20, 534, 900, 56, 0, small);
+    make(L"BUTTON", tr(L"Reset shortcuts"), 640, 20, 598, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"BUTTON", tr(L"Save changes"), IDOK, 660, 598, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", tr(L"Close"), IDCANCEL, 822, 598, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
     refresh_shortcut_status();
     return TRUE;
   }
@@ -796,6 +801,11 @@ bool save_lvar_bindings(const win::LvarBindings& bindings) {
   publish(s);
   return true;
 }
+// The door camera action needs a two-camera aircraft; the others need the
+// displays they turn on.
+bool lvar_action_available(const profiles::AircraftProfile* profile, unsigned action) {
+  return profile && (action == win::CameraDoor ? profiles::door_camera(*profile) : win::camera_action_sides(*profile, action) != 0);
+}
 void refresh_lvar_status(HWND hwnd) {
   win::Status sample;
   {
@@ -807,8 +817,10 @@ void refresh_lvar_status(HWND hwnd) {
   for (unsigned i = 0; i < win::LvarBindingCount; ++i) {
     const auto& read = sample.lvars[i];
     std::wstring line;
-    if (!profile || !win::camera_action_sides(*profile, i)) {
-      line = tr(L"This aircraft has no lower ECAM (SD) camera.");
+    if (!lvar_action_available(profile, i)) {
+      line = i == win::CameraDoor ? tr(L"This aircraft has no door camera.") : tr(L"This aircraft has no lower ECAM (SD) camera.");
+    } else if (i == win::CameraDoor && !win::door_camera_set_up(s)) {
+      line = tr(L"This aircraft has no door camera display. Choose one on Camera views.");
     } else if (!s.lvar_bindings[i].name[0]) {
       line = tr(L"Not bound");
     } else if (!sample.heartbeat || !sample.lvar_generation || !read.read) {
@@ -825,7 +837,7 @@ INT_PTR CALLBACK lvar_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   if (message == WM_INITDIALOG) {
     const auto s = draft();
     const auto* profile = profiles::find(s.profile);
-    place_dialog(hwnd, tr(L"Taxi Cam — Cockpit L:vars"), 700, 560);
+    place_dialog(hwnd, tr(L"Taxi Cam — Cockpit L:vars"), 700, 636);
     const auto make = [&](const wchar_t* type, const wchar_t* label, int id, int x, int y, int width, int height, DWORD style = 0,
                           HFONT font = nullptr) { return dialog_control(hwnd, type, label, id, x, y, width, height, style, font); };
     make(L"STATIC", tr(L"Cockpit L:vars"), -1, 20, 17, 660, 28, 0, heading);
@@ -838,7 +850,7 @@ INT_PTR CALLBACK lvar_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     make(L"STATIC", tr(L"Trigger"), -1, 470, 116, 210, 22, 0, small);
     for (unsigned i = 0; i < win::LvarBindingCount; ++i) {
       const int y = 142 + static_cast<int>(i) * 76;
-      const bool available = profile && win::camera_action_sides(*profile, i);
+      const bool available = lvar_action_available(profile, i);
       make(L"STATIC", tr(win::CameraHotkeyNames[i]), -1, 20, y + 5, 180, 26);
       const auto& binding = s.lvar_bindings[i];
       const std::wstring name(binding.name, binding.name + std::strlen(binding.name));
@@ -852,9 +864,9 @@ INT_PTR CALLBACK lvar_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       EnableWindow(trigger, available);
       make(L"STATIC", L"", LvarStatusId + i, 205, y + 36, 475, 34, 0, small);
     }
-    make(L"STATIC", L"", LvarMessageId, 20, 448, 660, 44, 0, small);
-    make(L"BUTTON", tr(L"Save changes"), IDOK, 420, 506, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
-    make(L"BUTTON", tr(L"Close"), IDCANCEL, 582, 506, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"STATIC", L"", LvarMessageId, 20, 524, 660, 44, 0, small);
+    make(L"BUTTON", tr(L"Save changes"), IDOK, 420, 582, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", tr(L"Close"), IDCANCEL, 582, 582, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
     refresh_lvar_status(hwnd);
     SetTimer(hwnd, 1, 250, nullptr);
     return TRUE;
@@ -1931,6 +1943,7 @@ void apply_setup_trial() {
     setup.before = s;
   s.profile = profiles::DiscoveredProfileId;
   s.discovered = layout;
+  win::fit_door_camera(s);
   s.calibration_mask = setup.testing & ((1u << setup.sides) - 1);
   s.manual_mask = s.taxi_selected_mask = s.taxi_desired_mask = 0;
   s.lower_id = 0;
@@ -2040,11 +2053,14 @@ struct LiveView {
   bool camera_taken{};
   decltype(win::Settings::follow_taxi) follow_before{};
   decltype(win::Settings::manual_mask) manual_before{}, manual_set{};
+  // The door camera, turned on live while it is selected, as it was before.
+  bool door_taken{};
+  decltype(win::Settings::door_on) door_on_before{}, door_live_before{};
   // The aircraft's saved settings when the window opened: Undo returns there.
   // Changes are saved when the window closes.
   win::Settings saved{};
   bool changed{};
-  unsigned feed{};  // Selected camera: 0 nose, 1 tail or left wing, 2 right wing.
+  unsigned feed{};  // Selected camera: 0 nose, 1 tail or left wing, 2 right wing or the door camera.
   int step = 1;     // 0 fine, 1 normal, 2 coarse.
   enum class Drag { none, aim, guide, area } drag{};
   // Display area mode: the whole texture of area_side, with its area drawn;
@@ -2108,13 +2124,36 @@ void live_keep_camera(const win::Settings& s, const win::Status& sample, const p
   refresh_side_toggles(next);
   InvalidateRect(window, nullptr, FALSE);
 }
-// The display side shown: the first with a camera on, else the first routed.
+// The door camera is the selected camera.
+bool live_door(const profiles::AircraftProfile& profile) {
+  return profiles::door_camera(profile) && live_view.feed == profiles::DoorFeed;
+}
+// While it is selected the door camera is on, rendering live, on its display.
+void live_keep_door(const win::Settings& s) {
+  if (!win::door_camera_set_up(s) || (s.door_on && s.door_live))
+    return;
+  auto next = s;
+  next.door_on = next.door_live = 1;
+  if (!win::valid_settings(next))
+    return;
+  if (!live_view.door_taken) {
+    live_view.door_taken = true;
+    live_view.door_on_before = s.door_on;
+    live_view.door_live_before = s.door_live;
+  }
+  publish(next);
+  InvalidateRect(window, nullptr, FALSE);
+}
+// The display side shown: the door camera's display while it is selected;
+// otherwise the first with a camera on, else the first routed.
 std::pair<unsigned, std::uint64_t> live_view_target(const win::Settings& s,
                                                     const win::Status& sample,
                                                     const profiles::AircraftProfile& profile) {
   const auto routed = routed_texture_ids(sample, profile);
   if (live_view.area_mode && live_view.area_side < profile.sides && live_view.area_side < MaxDisplaySides)
     return {live_view.area_side, routed[live_view.area_side]};
+  if (live_door(profile) && win::door_camera_set_up(s))
+    return {s.door_side, routed[s.door_side]};
   const unsigned on = live_cameras_on(s, sample, profile);
   for (unsigned side = 0; side < profile.sides && side < MaxDisplaySides; ++side)
     if (routed[side] && (on & (1u << side)))
@@ -2166,7 +2205,9 @@ void service_live_view() {
     live_view.side = side;
     InvalidateRect(live_view.window, nullptr, FALSE);
   }
-  if (profile && id)
+  if (profile && live_door(*profile))
+    live_keep_door(s);
+  else if (profile && id)
     live_keep_camera(s, sample, *profile, side);
   if (!id || !fresh_status(sample) || !sample.graphics_ready || now - live_view.requested_ms < LiveViewIntervalMs)
     return;
@@ -2616,6 +2657,19 @@ void toggle_camera_from_hotkey(unsigned action) {
     sample = status;
   }
   const auto now = GetTickCount64();
+  if (action == win::CameraDoor) {
+    if (!win::toggle_door_camera(s)) {
+      notice = tr(L"This aircraft has no door camera display. Choose one on Camera views.");
+      InvalidateRect(window, nullptr, FALSE);
+      return;
+    }
+    publish(s);
+    notice = !s.enabled  ? std::wstring(tr(L"Camera request updated. Choose Connect to enable camera output."))
+             : s.door_on ? std::wstring(tr(L"Door camera requested on."))
+                         : std::wstring(tr(L"Door camera requested off."));
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
   if (const auto* profile = profiles::find(s.profile); profile && !win::camera_action_sides(*profile, action)) {
     notice = tr(L"This aircraft has no lower ECAM (SD) camera.");
     InvalidateRect(window, nullptr, FALSE);
@@ -2770,9 +2824,11 @@ std::vector<LiveButton> live_buttons;
 // texture with the camera area inside it.
 struct LiveLayout {
   RECT picture{}, drawn{};
+  // The page of the selected camera: the taxi cameras', or the door camera's
+  // own (one pane over the whole picture).
   profiles::Composition c{};
   unsigned feeds = 2;
-  bool guides{};
+  bool guides{}, split{}, door{};
 };
 POINT live_point(const LiveLayout& l, float x, float y) {
   return {l.drawn.left + static_cast<LONG>(x * (l.drawn.right - l.drawn.left) / 768.f),
@@ -2789,6 +2845,8 @@ float live_split_pane(const LiveLayout& l) {
 int live_feed_at(const LiveLayout& l, float x, float y) {
   if (x < 0 || x >= 768 || y < 0 || y >= 763)
     return -1;
+  if (l.door)
+    return static_cast<int>(profiles::DoorFeed);
   if (y < l.c.nose_height)
     return 0;
   if (y < l.c.tail_top)
@@ -2843,8 +2901,12 @@ LiveLayout live_layout(HWND hwnd, const profiles::AircraftProfile* profile) {
   LiveLayout l;
   if (profile) {
     l.c = profile->composition;
-    l.feeds = profile->composition.split_bottom != 0 ? 3 : 2;
-    l.guides = profile->reference_guides;
+    l.feeds = profiles::camera_views(*profile);
+    l.split = profile->composition.split_bottom != 0;
+    l.door = live_door(*profile);
+    l.guides = profile->reference_guides && !l.door;
+    if (l.door)
+      l.c.nose_height = l.c.divider_top = l.c.divider_bottom = l.c.tail_top = 763;
   }
   RECT client{};
   GetClientRect(hwnd, &client);
@@ -2899,13 +2961,14 @@ void live_text(HDC dc, const wchar_t* value, RECT r, HFONT font, COLORREF color,
   SetBkMode(dc, TRANSPARENT);
   DrawTextW(dc, value, -1, &r, flags | DT_END_ELLIPSIS);
 }
-const wchar_t* live_feed_name(unsigned feeds, unsigned feed) {
-  return feed == 0 ? tr(L"Nose") : feeds == 3 ? (feed == 1 ? tr(L"Left wing") : tr(L"Right wing")) : tr(L"Tail");
+const wchar_t* live_feed_name(bool split, unsigned feed) {
+  return feed == 0 ? tr(L"Nose") : split ? (feed == 1 ? tr(L"Left wing") : tr(L"Right wing")) : feed == 1 ? tr(L"Tail") : tr(L"Door");
 }
-const wchar_t* live_camera_title(unsigned feeds, unsigned feed) {
-  return feed == 0    ? tr(L"Nose camera")
-         : feeds == 3 ? (feed == 1 ? tr(L"Left wing camera") : tr(L"Right wing camera"))
-                      : tr(L"Tail camera");
+const wchar_t* live_camera_title(bool split, unsigned feed) {
+  return feed == 0   ? tr(L"Nose camera")
+         : split     ? (feed == 1 ? tr(L"Left wing camera") : tr(L"Right wing camera"))
+         : feed == 1 ? tr(L"Tail camera")
+                     : tr(L"Door camera");
 }
 // Corner and edge handles of the area: 0-3 corners, 4-7 edge midpoints.
 std::array<POINT, 8> live_area_handles(const LiveLayout& l, const profiles::DisplayRect& a) {
@@ -2969,7 +3032,7 @@ void paint_live_view(HWND hwnd, HDC dc) {
   // Toolbar: camera, step size, display area, undo and defaults.
   int x = scale(16);
   for (unsigned feed = 0; feed < l.feeds; ++feed) {
-    live_button(dc, {x, scale(14), x + scale(118), scale(50)}, live_feed_name(l.feeds, feed), live_feed + static_cast<int>(feed),
+    live_button(dc, {x, scale(14), x + scale(118), scale(50)}, live_feed_name(l.split, feed), live_feed + static_cast<int>(feed),
                 feed == live_view.feed);
     x += scale(126);
   }
@@ -3051,7 +3114,9 @@ void paint_live_view(HWND hwnd, HDC dc) {
     // The selected camera's pane.
     const float pane = live_split_pane(l);
     std::array<float, 4> box{0, 0, 768, l.c.nose_height};
-    if (live_view.feed == 1)
+    if (l.door)
+      box = {0, 0, 768, 763};
+    else if (live_view.feed == 1)
       box = {0, l.c.tail_top, l.c.split_bottom ? pane : 768.f, 763};
     else if (live_view.feed == 2)
       box = {pane + l.c.bottom_gap, l.c.tail_top, 768, 763};
@@ -3152,7 +3217,7 @@ void paint_live_view(HWND hwnd, HDC dc) {
     live_button(dc, {px, y + scale(104), px + pw, y + scale(138)}, tr(L"Reset area"), live_area_reset);
     y += scale(152);
   }
-  live_text(dc, live_camera_title(l.feeds, live_view.feed), {px, y, px + pw, y + scale(30)}, heading, Text);
+  live_text(dc, live_camera_title(l.split, live_view.feed), {px, y, px + pw, y + scale(30)}, heading, Text);
   const auto& mount = s.mounts[live_view.feed];
   for (int j = 0; j < 6; ++j) {
     const int row = y + scale(40 + j * 44);
@@ -3391,9 +3456,9 @@ void live_drag(HWND hwnd, POINT p) {
   }
   // Aim: the picture follows the pointer. The lens is the vertical field of
   // view, so a pane's height in pixels spans that many degrees.
-  const float pane_rows = live_view.feed == 0 ? l.c.nose_height
-                          : l.c.split_bottom  ? (l.c.bottom_pane_height > 0 ? l.c.bottom_pane_height : live_split_pane(l))
-                                              : 763 - l.c.tail_top;
+  const float pane_rows = live_view.feed == 0 || l.door ? l.c.nose_height
+                          : l.c.split_bottom            ? (l.c.bottom_pane_height > 0 ? l.c.bottom_pane_height : live_split_pane(l))
+                                                        : 763 - l.c.tail_top;
   const double rows_on_screen = std::max(1.0, pane_rows * double(l.drawn.bottom - l.drawn.top) / 763.0);
   auto& mount = s.mounts[live_view.feed];
   const double degrees_per_pixel = mount[5] * 180.0 / 3.14159265358979323846 / rows_on_screen;
@@ -3515,7 +3580,7 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
           return 0;
         case VK_TAB: {
           const auto* profile = profiles::find(draft().profile);
-          const unsigned feeds = profile && profile->composition.split_bottom != 0 ? 3 : 2;
+          const unsigned feeds = profile ? profiles::camera_views(*profile) : 2;
           live_view.feed = (live_view.feed + 1) % feeds;
           InvalidateRect(hwnd, nullptr, FALSE);
           break;
@@ -3571,6 +3636,16 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
           }
         }
         live_view.camera_taken = false;
+      }
+      // The door camera too: closing never saves the live picture it was
+      // given while selected.
+      if (live_view.door_taken) {
+        auto s = draft();
+        s.door_on = live_view.door_on_before;
+        s.door_live = live_view.door_live_before;
+        if (win::valid_settings(s))
+          publish(s);
+        live_view.door_taken = false;
       }
       // Closing saves what was adjusted, like Save changes.
       if (live_view.changed)
@@ -3982,7 +4057,8 @@ void build_controls() {
     update_setup_buttons();
   } else if (page == 1) {
     const auto* profile = profiles::find(s.profile);
-    const int feed_count = profile && profile->composition.split_bottom != 0 ? 3 : 2;
+    const bool door = profile && profiles::door_camera(*profile);
+    const int feed_count = profile ? static_cast<int>(profiles::camera_views(*profile)) : 2;
     for (int i = 0; i < feed_count; ++i) {
       // One card per camera across the column (draw_page): fields three to a
       // row, step buttons two to a row.
@@ -3990,6 +4066,12 @@ void build_controls() {
       const int field = (inner - 20) / 3, half = (inner - 10) / 2;
       for (int j = 0; j < 6; ++j)
         edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * (field + 10), 222 + (j / 3) * 64, field);
+      if (door && i == static_cast<int>(profiles::DoorFeed)) {
+        // The door camera: its display and its picture instead of steps.
+        button(door_display_label(s).c_str(), DoorDisplayId, x, 358, inner);
+        button(s.door_live ? tr(L"Picture: Live") : tr(L"Picture: Snapshot"), DoorPictureId, x, 404, inner);
+        continue;
+      }
       button(tr(L"Lower 0.25 m"), 330 + i * 10, x, 358, half);
       button(tr(L"Raise 0.25 m"), 331 + i * 10, x + half + 10, 358, half);
       button(tr(L"Aft 1 m"), 332 + i * 10, x, 404, half);
@@ -4308,11 +4390,14 @@ void draw_page(HDC dc) {
     const wchar_t* labels[]{tr(L"Right (m)"), tr(L"Up (m)"), tr(L"Forward (m)"), tr(L"Pitch (deg)"), tr(L"Yaw (deg)"), tr(L"Lens (rad)")};
     const auto* profile = profiles::find(draft().profile);
     const bool split = profile && profile->composition.split_bottom != 0;
-    const int feed_count = split ? 3 : 2;
-    const wchar_t* titles[]{tr(L"Nose-wheel camera"), split ? tr(L"Left wing camera") : tr(L"Tail camera"), tr(L"Right wing camera")};
-    const wchar_t* views[]{tr(L"UPPER VIEW"), split ? tr(L"LOWER LEFT") : tr(L"LOWER VIEW"), tr(L"LOWER RIGHT")};
+    const bool door = profile && profiles::door_camera(*profile);
+    const int feed_count = profile ? static_cast<int>(profiles::camera_views(*profile)) : 2;
+    const wchar_t* titles[]{tr(L"Nose-wheel camera"), split ? tr(L"Left wing camera") : tr(L"Tail camera"),
+                            door ? tr(L"Door camera") : tr(L"Right wing camera")};
+    const wchar_t* views[]{tr(L"UPPER VIEW"), split ? tr(L"LOWER LEFT") : tr(L"LOWER VIEW"),
+                           door ? tr(L"OWN DISPLAY") : tr(L"LOWER RIGHT")};
     for (int i = 0; i < feed_count; ++i) {
-      const int card = split ? 246 : 376, x = 244 + i * (card + 14), inner = card - 36, field = (inner - 20) / 3;
+      const int card = feed_count == 3 ? 246 : 376, x = 244 + i * (card + 14), inner = card - 36, field = (inner - 20) / 3;
       panel(dc, x, 124, card, 334);
       text(dc, titles[i], x + 18, 140, inner, 30, heading);
       const auto& dimensions = (profile ? *profile : profiles::A380).camera_panes[i];
@@ -5438,6 +5523,31 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         publish(s);
         dirty_notice();
         build_controls();
+        return 0;
+      }
+      if (id == DoorDisplayId || id == DoorPictureId) {
+        if (!apply(false))
+          return 0;
+        auto s = draft();
+        const auto* profile = profiles::find(s.profile);
+        if (!profile || !profiles::door_camera(*profile))
+          return 0;
+        if (id == DoorPictureId) {
+          s.door_live ^= 1u;
+        } else {
+          // Each of the aircraft's sides in turn, then none.
+          auto side = s.door_side < MaxDisplaySides ? s.door_side + 1 : 0u;
+          while (side < MaxDisplaySides && !(profiles::side_mask(*profile) & (1u << side)))
+            ++side;
+          s.door_side = side < MaxDisplaySides ? side : win::DoorSideNone;
+          if (s.door_side == win::DoorSideNone)
+            s.door_on = 0;
+        }
+        if (win::valid_settings(s)) {
+          publish(s);
+          dirty_notice();
+          build_controls();
+        }
         return 0;
       }
       if ((id >= 330 && id <= 333) || (id >= 340 && id <= 343) || (id >= 350 && id <= 353)) {
