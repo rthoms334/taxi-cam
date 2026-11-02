@@ -483,5 +483,7 @@ inline constexpr Translation FrenchTranslations[]{
     {L"Options", L"Options"},
     {L"Camera off", L"Caméra éteinte"},
     {L"Choose display…", L"Choisir l'écran…"},
+    {L"The lower display needs a panel the size of this aircraft's displays. Pick another.", L"L'écran inférieur doit être un panneau de la taille des écrans de cet avion. Choisissez-en un autre."},
+    {L"Place the lower display in Setup > Displays to show the door camera there.", L"Placez l'écran inférieur dans Configuration > Écrans pour y afficher la caméra de porte."},
 };
 }  // namespace taxi_camera::standalone

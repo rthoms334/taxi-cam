@@ -383,6 +383,39 @@ void display_choices(const std::wstring& root) {
   settings_override.clear();
   profiles::publish_override(&profiles::A380, none);
 }
+// Every aircraft has a lower display: a pilot pair's is the panel the user
+// places there (Displays), a third side found by its name, where the door
+// camera goes.
+void placed_lower_display() {
+  profiles::DisplayOverride lower{};
+  std::strcpy(lower.textures[2], "SCREEN_DU_SD");
+  require(profiles::override_sides(profiles::A380, lower) == 3 && profiles::valid_override(profiles::A380, lower),
+          "A pilot pair takes a placed lower display");
+  require(!profiles::valid_override(2, false, profiles::A380.camera_padding, lower), "Two sides alone still refuse a third");
+  require(profiles::override_sides(profiles::Pmdg777, {}) == profiles::Pmdg777.sides && profiles::override_sides(profiles::A380, {}) == 2,
+          "Without one, a profile keeps its sides");
+  profiles::DisplayOverride area_only{};
+  area_only.areas[2] = {0, 0, 768, 900};
+  require(!profiles::valid_override(profiles::A380, area_only), "An area alone adds no display");
+  const auto* chosen = profiles::publish_override(&profiles::A380, lower);
+  require(chosen && chosen->sides == 3 && profiles::named_lower_side(*chosen) && !profiles::named_lower_side(profiles::A380) &&
+              std::strcmp(chosen->panel_textures[2], "SCREEN_DU_SD") == 0 &&
+              chosen->display_regions[2].bottom == profiles::A380.display_regions[0].bottom && chosen->taxi_lvars[2] &&
+              !chosen->taxi_lvars[2][0] && chosen->taxi_events[2] && !chosen->taxi_events[2][0] &&
+              chosen->camera_panes == profiles::A380.camera_panes,
+          "The lower display takes side 0's region, no cockpit control, and the same cameras");
+  Settings s;
+  s.display_override = lower;
+  s.door_side = 2;
+  s.manual_mask = 4;
+  require(valid_settings(s), "The door camera and a lower camera may use the placed lower display");
+  s.display_override = {};
+  s.manual_mask = 0;
+  require(!valid_settings(s), "Not without it");
+  fit_door_camera(s);
+  require(s.door_side == DoorSideNone && valid_settings(s), "Removing the lower display leaves the door camera without one");
+  profiles::publish_override(&profiles::A380, {});
+}
 // The cameras render at the shape of side 0's camera area (shape_cameras).
 void camera_shapes() {
   const auto same = [](const profiles::DisplayRect& a, profiles::DisplayRect b) {
@@ -470,6 +503,7 @@ int main() {
     learning();
     trimming();
     display_choices(root);
+    placed_lower_display();
     camera_shapes();
     std::printf("PASS: %u discovered aircraft checks (variant keys, layouts, detection, settings files, learning).\n", checks);
     return 0;

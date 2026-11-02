@@ -168,6 +168,16 @@ inline constexpr unsigned taxi_feeds(const AircraftProfile& p) noexcept {
 inline constexpr bool separate_lower_texture(const AircraftProfile& p) noexcept {
   return p.sides > 2 && p.pfd_detection == PfdDetectionPolicy::single_display && p.lower_display_texture[0] != '\0';
 }
+// A catalog profile with a pilot pair of displays can take a third: the lower
+// display the user placed in Displays (apply_choices), a panel of the pair's
+// shape on its own texture, found by its name only. Used for the door camera.
+inline constexpr bool pair_detection(const AircraftProfile& p) noexcept {
+  return !p.fit_texture &&
+         (p.pfd_detection == PfdDetectionPolicy::dominant_activity || p.pfd_detection == PfdDetectionPolicy::ini_a380_allocation_group);
+}
+inline constexpr bool named_lower_side(const AircraftProfile& p) noexcept {
+  return p.sides > 2 && pair_detection(p);
+}
 // Sides drawn from the shared single-display texture.
 inline constexpr unsigned shared_texture_sides(const AircraftProfile& p) noexcept {
   return separate_lower_texture(p) ? side_mask(p) & ~4u : side_mask(p);

@@ -1222,7 +1222,7 @@ void release_snapshot_image() {
 std::array<std::uint64_t, MaxDisplaySides> routed_texture_ids(const win::Status& sample, const profiles::AircraftProfile& profile) {
   const bool single = profile.pfd_detection == profiles::PfdDetectionPolicy::single_display;
   return {sample.left_id, single ? sample.left_id : sample.right_id,
-          profiles::separate_lower_texture(profile) ? sample.lower_id : sample.left_id};
+          profiles::separate_lower_texture(profile) || profiles::named_lower_side(profile) ? sample.lower_id : sample.left_id};
 }
 const wchar_t* snapshot_side_name(const win::Settings& s, unsigned side) {
   return side_toggle_name(s, side);
@@ -1643,7 +1643,7 @@ void choose_texture(unsigned list, std::uint64_t id) {
 // Each camera's step has the controls that turn it on.
 constexpr int OverviewPage = 0, CamerasPage = 1, OptionsPage = 2, RoutingPage = 3, DiagnosticsPage = 4, GuidesPage = 5, SetupPage = 6,
               DoorPage = 7;
-constexpr int SetupPreviousId = 452, SetupNextId = 453, SetupSidesId = 454, SetupRefreshId = 456, SetupTestId = 458, SetupBuiltInId = 461,
+constexpr int SetupPreviousId = 452, SetupNextId = 453, SetupRefreshId = 456, SetupTestId = 458, SetupBuiltInId = 461,
               SetupCardButtonId = 750, SetupPlaceId = 754;
 // The step pills (Overview and every step), Advanced, and a step's Back and
 // Next.
@@ -1694,7 +1694,10 @@ const wchar_t* step_name(unsigned step) {
 struct AircraftSetup {
   profiles::VariantKey key{};
   std::array<std::string, MaxDisplaySides> names;
-  unsigned sides = 2, gallery_page = 0;
+  // Every aircraft shows all three displays; an empty lower one is none.
+  unsigned sides = MaxDisplaySides, gallery_page = 0;
+  // The picks were loaded for this opening of Displays (sync_setup).
+  bool synced{};
   std::array<std::uint64_t, GalleryColumns> ids{};
   std::array<std::string, GalleryColumns> card_names;
   bool positioning{};  // Taxi cameras shows the positioning step after a save.
@@ -1704,6 +1707,8 @@ struct AircraftSetup {
   bool dragging{};
   int drag_slot = -1;
   POINT drag_from{};
+  // The display under the cursor while dragging, -1 for none.
+  int drop_side = -1;
   std::array<RECT, MaxDisplaySides> slot_areas{};
   // Cockpit test: sides showing the calibration pattern, and the settings in
   // use before the picks ran as an unsaved trial profile.
@@ -1754,28 +1759,35 @@ std::vector<win::PanelTexture> setup_items(const win::Status& sample) {
   return items;
 }
 // Picks belong to one variant: another aircraft starts again, and an aircraft
-// already set up starts from its saved displays.
+// already set up starts from its saved displays. They load when Displays
+// opens, before its controls are made, whether or not the simulator reports
+// the aircraft yet.
 void sync_setup(const win::Status& sample) {
   const auto key = loaded_variant(sample);
-  if (key == setup.key)
+  if (setup.synced && key == setup.key)
     return;
+  setup.synced = true;
   setup.key = key;
   setup.names = {};
-  setup.sides = 2;
+  setup.sides = MaxDisplaySides;
   setup.gallery_page = 0;
   const auto s = draft();
-  // A built-in profile starts from the displays it uses now.
+  // A built-in profile starts from the displays it uses now. Every aircraft
+  // has a lower display: a pilot pair's is the one the user places there
+  // (named_lower_side), where the door camera goes.
   if (const auto* built_in = setup.built_in ? profiles::find(setup.built_in) : nullptr) {
-    setup.sides = std::min<unsigned>(built_in->sides, MaxDisplaySides);
-    for (unsigned side = 0; side < setup.sides; ++side)
-      setup.names[side] = built_in->panel_textures[side] ? built_in->panel_textures[side] : "";
+    for (unsigned side = 0; side < MaxDisplaySides; ++side)
+      setup.names[side] = side < built_in->sides && built_in->panel_textures[side] ? built_in->panel_textures[side] : "";
     return;
   }
-  if (s.profile == profiles::DiscoveredProfileId && key[0] && profiles::same_variant(key.data(), s.discovered.key)) {
-    setup.sides = s.discovered.sides;
+  // The selected set-up aircraft, when it is the one loaded or none is yet.
+  if (s.profile == profiles::DiscoveredProfileId && (!key[0] || profiles::same_variant(key.data(), s.discovered.key)))
     for (unsigned side = 0; side < s.discovered.sides && side < MaxDisplaySides; ++side)
       setup.names[side] = s.discovered.textures[side];
-  }
+}
+// A set-up aircraft's displays: the lower one only when a panel is on it.
+unsigned placed_sides() {
+  return setup.names[MaxDisplaySides - 1].empty() ? MaxDisplaySides - 1 : MaxDisplaySides;
 }
 // The aircraft a step sets up: on Displays the one loaded, else the selected
 // profile's.
@@ -1815,11 +1827,13 @@ std::wstring setup_blocker(const win::Status& sample) {
 // A built-in profile's choices from the picks: a pick that is the profile's
 // own panel is no choice, so the profile stays as it comes.
 profiles::DisplayOverride built_in_choices(const profiles::AircraftProfile& base, profiles::DisplayOverride choices) {
+  // A pilot pair's side 2: the lower display the user placed.
+  const unsigned sides = base.sides == 2 && profiles::pair_detection(base) ? MaxDisplaySides : base.sides;
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     std::fill(std::begin(choices.textures[side]), std::end(choices.textures[side]), '\0');
     const auto& pick = setup.names[side];
     const std::string own = side < base.sides && base.panel_textures[side] ? base.panel_textures[side] : "";
-    if (side < base.sides && !pick.empty() && pick != own && pick.size() < profiles::MaxPanelName)
+    if (side < sides && !pick.empty() && pick != own && pick.size() < profiles::MaxPanelName)
       pick.copy(choices.textures[side], pick.size());
   }
   return choices;
@@ -1862,7 +1876,8 @@ void apply_setup_trial() {
     if (!setup.trial)
       setup.before = s;
     s.display_override = built_in_choices(*base, s.display_override);
-    s.calibration_mask = setup.testing & profiles::side_mask(*base);
+    win::fit_door_camera(s);
+    s.calibration_mask = setup.testing & ((1u << profiles::override_sides(*base, s.display_override)) - 1);
     s.manual_mask = s.taxi_selected_mask = s.taxi_desired_mask = 0;
     s.panel_setup = 1;
     route_picks(s, setup_items(sample));
@@ -1880,13 +1895,14 @@ void apply_setup_trial() {
   }
   std::array<const char*, MaxDisplaySides> names{};
   const char* fallback = nullptr;
-  for (unsigned side = 0; side < setup.sides; ++side)
+  const unsigned sides = placed_sides();
+  for (unsigned side = 0; side < sides; ++side)
     if (!setup.names[side].empty())
       fallback = fallback ? fallback : setup.names[side].c_str();
-  for (unsigned side = 0; side < setup.sides; ++side)
+  for (unsigned side = 0; side < sides; ++side)
     names[side] = setup.names[side].empty() ? fallback : setup.names[side].c_str();
   profiles::DiscoveredLayout layout;
-  if (!fallback || win::learn_layout(sample, names, setup.sides, layout, false) != win::LayoutLearning::learned) {
+  if (!fallback || win::learn_layout(sample, names, sides, layout, false) != win::LayoutLearning::learned) {
     setup.testing = 0;
     notice = fallback ? tr(L"The cockpit test needs the panel list. Wait for the pictures, then try again.") : tr(L"Pick a panel first.");
     InvalidateRect(window, nullptr, FALSE);
@@ -1897,7 +1913,7 @@ void apply_setup_trial() {
   s.profile = profiles::DiscoveredProfileId;
   s.discovered = layout;
   win::fit_door_camera(s);
-  s.calibration_mask = setup.testing & ((1u << setup.sides) - 1);
+  s.calibration_mask = setup.testing & ((1u << sides) - 1);
   s.manual_mask = s.taxi_selected_mask = s.taxi_desired_mask = 0;
   s.lower_id = 0;
   route_picks(s, setup_items(sample));
@@ -1926,6 +1942,23 @@ void place_setup_panel(unsigned side) {
   if (side >= setup.sides || setup.picked.empty())
     return;
   const auto name = setup.picked;
+  // A built-in profile's added lower display is found by name on a panel of
+  // its displays' shape: another shape would never be drawn on.
+  if (const auto* base = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr; base && side >= base->sides) {
+    win::Status sample;
+    {
+      const std::lock_guard lock(app_mutex);
+      sample = status;
+    }
+    const auto items = setup_items(sample);
+    const auto item = std::find_if(items.begin(), items.end(), [&](const auto& panel) { return panel_name(panel) == name; });
+    if (item == items.end() || !profiles::matches_display(*base, item->width, item->height, item->mips, profiles::DiscoveredFormat)) {
+      setup.picked.clear();
+      notice = tr(L"The lower display needs a panel the size of this aircraft's displays. Pick another.");
+      InvalidateRect(window, nullptr, FALSE);
+      return;
+    }
+  }
   // Built-in profiles may share a texture between sides (the PMDG 777's DUS).
   for (unsigned other = 0; other < MaxDisplaySides && !setup.built_in; ++other)
     if (other != side && setup.names[other] == name)
@@ -1991,10 +2024,13 @@ LRESULT CALLBACK card_drag(HWND control, UINT message, WPARAM w, LPARAM l, UINT_
         slot < GalleryColumns && !setup.card_names[slot].empty()) {
       setup.picked = setup.card_names[slot];
       setup.dragging = true;
+      setup.drop_side = -1;
       SendMessageW(control, BM_SETSTATE, FALSE, 0);
       SetCapture(window);
       SetCursor(LoadCursorW(nullptr, IDC_HAND));
       refresh_setup_picking();
+      // The displays show as drop targets, the card as picked.
+      RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
       return 0;
     }
   } else if (message == WM_LBUTTONUP) {
@@ -2006,16 +2042,22 @@ LRESULT CALLBACK card_drag(HWND control, UINT message, WPARAM w, LPARAM l, UINT_
 }
 // Ends a drag: over a display, the panel is placed there; elsewhere it stays
 // picked for Place here.
+// The display a drag is over, -1 for none.
+int drop_side_at(POINT point) {
+  for (unsigned side = 0; side < setup.sides && side < MaxDisplaySides; ++side)
+    if (PtInRect(&setup.slot_areas[side], point))
+      return static_cast<int>(side);
+  return -1;
+}
 void end_card_drag(POINT point) {
   setup.dragging = false;
   setup.drag_slot = -1;
+  setup.drop_side = -1;
   ReleaseCapture();
-  for (unsigned side = 0; side < setup.sides && side < MaxDisplaySides; ++side)
-    if (PtInRect(&setup.slot_areas[side], point)) {
-      place_setup_panel(side);
-      break;
-    }
+  if (const int side = drop_side_at(point); side >= 0)
+    place_setup_panel(static_cast<unsigned>(side));
   refresh_setup_picking();
+  RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 // Camera adjustment window (open_live_view): a live picture of a display's
 // camera area, retaken through the snapshot request as fast as it answers
@@ -2646,9 +2688,12 @@ void draw_setup(HDC dc, const win::Status& sample) {
     const int x = 262 + side * (width + gap), y = SetupSlotTop, inner = width - 20;
     const auto unsigned_side = static_cast<unsigned>(side);
     setup.slot_areas[unsigned_side] = rectangle(x, y, width, SetupSlotHeight);
-    panel(dc, x, y, width, SetupSlotHeight, setup.picked.empty() ? Background : RGB(22, 48, 47));
+    // A picked panel marks every display as a drop target; the one a drag is
+    // over lights up.
+    const bool over = setup.dragging && setup.drop_side == side;
+    panel(dc, x, y, width, SetupSlotHeight, over ? RGB(30, 64, 63) : setup.picked.empty() ? Background : RGB(22, 48, 47));
     if (!setup.picked.empty()) {
-      HPEN pen = CreatePen(PS_DOT, 1, Accent);
+      HPEN pen = CreatePen(over ? PS_SOLID : PS_DOT, over ? scale(2) : 1, Accent);
       const auto old_pen = SelectObject(dc, pen);
       const auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
       const auto r = setup.slot_areas[unsigned_side];
@@ -3911,6 +3956,7 @@ void open_aircraft_setup() {
   // Otherwise set up the aircraft loaded (or change a set-up aircraft's).
   setup.built_in = !unsupported_aircraft(sample) && s.profile != profiles::DiscoveredProfileId ? s.profile : 0;
   setup.key = {};  // Start again from the displays in use.
+  setup.synced = false;
   // The bridge tracks every panel texture while the setup is open.
   s.panel_setup = 1;
   publish(s);
@@ -3939,7 +3985,12 @@ void save_built_in_displays(bool built_in_only) {
     win::update_target_assignment(s.left_id, s.right_id, s.route_request, 0, 0);
   } else {
     route_picks(s, setup_items(sample));
+    // A newly placed lower display is where the door camera goes.
+    if (s.door_side == win::DoorSideNone && profiles::override_sides(*base, s.display_override) > base->sides)
+      s.door_side = MaxDisplaySides - 1;
   }
+  // Without its placed lower display the door camera has none.
+  win::fit_door_camera(s);
   s.panel_setup = 0;
   if (!win::valid_settings(s) || !win::save_settings(s)) {
     notice = tr(L"Could not save these displays. Check access to your local settings folder.");
@@ -3950,6 +4001,7 @@ void save_built_in_displays(bool built_in_only) {
   dirty = false;
   if (built_in_only) {
     setup.key = {};  // The picks start again from the profile's own.
+    setup.synced = false;
     s.panel_setup = 1;
     publish(s);
   } else {
@@ -3980,10 +4032,11 @@ void save_aircraft_setup() {
     return;
   }
   std::array<const char*, MaxDisplaySides> names{};
-  for (unsigned side = 0; side < setup.sides; ++side)
+  const unsigned sides = placed_sides();
+  for (unsigned side = 0; side < sides; ++side)
     names[side] = setup.names[side].c_str();
   profiles::DiscoveredLayout layout;
-  switch (win::learn_layout(sample, names, setup.sides, layout)) {
+  switch (win::learn_layout(sample, names, sides, layout)) {
     case win::LayoutLearning::learned:
       break;
     case win::LayoutLearning::unknown_panel:
@@ -4078,9 +4131,9 @@ bool display_picks_changed() {
     return false;
   }
   if (s.profile != profiles::DiscoveredProfileId || !setup.key[0] || !profiles::same_variant(setup.key.data(), s.discovered.key) ||
-      setup.sides != s.discovered.sides)
+      placed_sides() != s.discovered.sides)
     return true;
-  for (unsigned side = 0; side < setup.sides && side < MaxDisplaySides; ++side)
+  for (unsigned side = 0; side < placed_sides(); ++side)
     if (setup.names[side] != s.discovered.textures[side])
       return true;
   return false;
@@ -4677,14 +4730,21 @@ void build_controls() {
   } else if (page == SetupPage) {
     // The displays, each with its cockpit test or, while a picture is picked,
     // a Place here; then the gallery of the cockpit's panels.
+    // The picks load first, so the buttons sit on the displays drawn.
+    {
+      win::Status sample;
+      {
+        const std::lock_guard lock(app_mutex);
+        sample = status;
+      }
+      sync_setup(sample);
+    }
     const int slot_width = (730 - 10 * (static_cast<int>(setup.sides) - 1)) / static_cast<int>(setup.sides);
     for (unsigned side = 0; side < setup.sides; ++side) {
       const int x = 262 + static_cast<int>(side) * (slot_width + 10) + 10, w = slot_width - 20, y = SetupSlotTop + SetupSlotHeight - 40;
       button(switch_label(tr(L"Test in cockpit"), (setup.testing >> side) & 1).c_str(), SetupTestId + static_cast<int>(side), x, y, w, 30);
       button(tr(L"Place here"), SetupPlaceId + static_cast<int>(side), x, y, w, 30);
     }
-    if (!setup.built_in)
-      button(switch_label(tr(L"Lower display"), setup.sides == 3).c_str(), SetupSidesId, 468, SetupGalleryTop + 8, 170, 30);
     button(tr(L"Refresh pictures"), SetupRefreshId, 646, SetupGalleryTop + 8, 150, 30);
     button(L"‹", SetupPreviousId, 872, SetupGalleryTop + 8, 56, 30);
     button(L"›", SetupNextId, 936, SetupGalleryTop + 8, 56, 30);
@@ -5009,8 +5069,12 @@ void draw_page(HDC dc) {
     text(dc, tr(L"Where it shows"), 262, 182, 400, 26, heading);
     const bool shares =
         profile && s.door_side < MaxDisplaySides && win::camera_action_sides(*profile, win::CameraSd) && s.door_side == MaxDisplaySides - 1;
+    // A pilot pair without its lower display placed yet: that comes first.
+    const auto* base = profiles::base_profile(s.profile);
+    const bool place_lower = base && profile && profile->sides < MaxDisplaySides && profiles::pair_detection(*base);
     text(dc,
-         s.door_side == win::DoorSideNone ? tr(L"Choose the display it fills. The lower display is the usual place.")
+         s.door_side == win::DoorSideNone && place_lower ? tr(L"Place the lower display in Setup > Displays to show the door camera there.")
+         : s.door_side == win::DoorSideNone              ? tr(L"Choose the display it fills. The lower display is the usual place.")
          : shares ? tr(L"While it is on it takes this display over from its taxi camera, and hands it back when it turns off.")
                   : tr(L"While it is on it fills this display; the other displays are unchanged."),
          262, 256, 400, 36, small, Muted, DT_LEFT | DT_WORDBREAK);
@@ -5711,6 +5775,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case WM_MOUSEMOVE:
       if (setup.dragging) {
         SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        // The display under the cursor lights up.
+        if (const int side = drop_side_at({static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))}); side != setup.drop_side) {
+          setup.drop_side = side;
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
       }
       break;
@@ -5718,7 +5787,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (setup.dragging && reinterpret_cast<HWND>(l) != hwnd) {
         setup.dragging = false;
         setup.drag_slot = -1;
+        setup.drop_side = -1;
         refresh_setup_picking();
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
       }
       break;
     case WM_LBUTTONUP: {
@@ -5821,10 +5892,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return TRUE;
       }
       const bool disabled = (item->itemState & ODS_DISABLED) != 0;
-      const bool selected =
-          !disabled && ((id >= 100 && id < 106 && navigation_selected(id)) || is_on(id, draft()) || page_button_selected(id) ||
-                        (id >= 420 && id < 428 && gallery_button_routed(id)) || (id == SetupSidesId && setup.sides == 3) ||
-                        (id >= SetupTestId && id < SetupTestId + 3 && ((setup.testing >> (id - SetupTestId)) & 1)));
+      const bool selected = !disabled && ((id >= 100 && id < 106 && navigation_selected(id)) || is_on(id, draft()) ||
+                                          page_button_selected(id) || (id >= 420 && id < 428 && gallery_button_routed(id)) ||
+                                          (id >= SetupTestId && id < SetupTestId + 3 && ((setup.testing >> (id - SetupTestId)) & 1)));
       HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || (id >= 512 && id <= 515) ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
@@ -6024,7 +6094,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (id == DoorChooseId) {
-        open_step(2);
+        // A pilot pair places its lower display first, in Displays.
+        const auto* base = profiles::base_profile(draft().profile);
+        const auto* profile = profiles::find(draft().profile);
+        open_step(base && profile && profile->sides < MaxDisplaySides && profiles::pair_detection(*base) ? 0 : 2);
         return 0;
       }
       if (handle_controls_command(id, HIWORD(w)))
@@ -6059,16 +6132,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           ++setup.gallery_page;
         update_setup_buttons();
         InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-      }
-      if (id == SetupSidesId) {
-        setup.sides = setup.sides == 3 ? 2 : 3;
-        if (setup.sides == 2)
-          setup.names[2].clear();
-        setup.testing &= (1u << setup.sides) - 1;
-        if (setup.testing)
-          apply_setup_trial();
-        build_controls();
         return 0;
       }
       if (id >= SetupTestId && id < SetupTestId + 3) {

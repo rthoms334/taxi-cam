@@ -222,9 +222,10 @@ inline bool valid_settings(const Settings& s) noexcept {
       return false;
     sides = (1u << s.discovered.sides) - 1;
   } else if (const auto* profile = profiles::base_profile(s.profile)) {
-    if (!profiles::valid_override(profile->sides, profile->fit_texture, profile->camera_padding, s.display_override))
+    if (!profiles::valid_override(*profile, s.display_override))
       return false;
-    sides = profiles::side_mask(*profile);
+    // A lower display the user placed is a side too (override_sides).
+    sides = (1u << profiles::override_sides(*profile, s.display_override)) - 1;
     separate_lower = profiles::separate_lower_texture(*profile);
   } else {
     return false;
@@ -257,7 +258,9 @@ inline bool valid_settings(const Settings& s) noexcept {
 // display then, and is off.
 inline void fit_door_camera(Settings& s) noexcept {
   const auto* profile = s.profile == profiles::DiscoveredProfileId ? nullptr : profiles::base_profile(s.profile);
-  const unsigned sides = s.profile == profiles::DiscoveredProfileId ? s.discovered.sides : profile ? profile->sides : 0;
+  const unsigned sides = s.profile == profiles::DiscoveredProfileId ? s.discovered.sides
+                         : profile                                  ? profiles::override_sides(*profile, s.display_override)
+                                                                    : 0;
   if (s.door_side >= sides) {
     s.door_side = DoorSideNone;
     s.door_on = 0;

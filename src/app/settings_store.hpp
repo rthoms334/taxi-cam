@@ -389,7 +389,7 @@ inline bool load_settings(Settings& s,
   // display where the aircraft has one, as door camera pages usually do.
   const auto default_door_display = [&] {
     constexpr unsigned lower = MaxDisplaySides - 1;
-    if (value.door_side == DoorSideNone && (profiles::side_mask(*profile) & (1u << lower)))
+    if (value.door_side == DoorSideNone && profiles::override_sides(*profile, value.display_override) > lower)
       value.door_side = lower;
   };
   const auto destination = settings_path(value);
@@ -524,7 +524,8 @@ inline bool load_settings(Settings& s,
   wchar_t door_saved[8]{};
   GetPrivateProfileStringW(L"door_camera", L"display", L"", door_saved, 8, path.c_str());
   const UINT door_side = integer(L"door_camera", L"display", DoorSideNone);
-  value.door_side = door_side < MaxDisplaySides && (profiles::side_mask(*profile) & (1u << door_side)) ? door_side : DoorSideNone;
+  // A lower display the user placed (override_sides) is one of its displays.
+  value.door_side = door_side < profiles::override_sides(*profile, value.display_override) ? door_side : DoorSideNone;
   value.door_live = integer(L"door_camera", L"live", 0) == 1 ? 1u : 0u;
   // [bindings]: cockpit L:vars bound to the camera actions. A name that is not
   // a valid L:var leaves its action unbound.

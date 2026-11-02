@@ -1295,10 +1295,11 @@ DWORD run_impl() {
     if (choices_changed && !layout_changed) {
       const auto* base = profiles::base_profile(settings.profile);
       const auto* current = profiles::find(settings.profile);
-      if (base && current && profiles::valid_override(base->sides, base->fit_texture, base->camera_padding, settings.display_override)) {
+      if (base && current && profiles::valid_override(*base, settings.display_override)) {
         auto next = *base;
         profiles::apply_choices(next, *base, settings.display_override);
-        reshaped = next.camera_panes != current->camera_panes;
+        // A placed or removed lower display changes the sides: a transition too.
+        reshaped = next.camera_panes != current->camera_panes || next.sides != current->sides;
       }
     }
     // Display choices alone (same profile and layout, same camera shape)
@@ -1964,7 +1965,9 @@ DWORD run_impl() {
     status.door_state = static_cast<std::uint32_t>(win::door_state(door != 0, settings.door_live != 0, door_page.ready));
     status.left_id = targets[0];
     status.right_id = targets[1];
-    status.lower_id = selected_profile_separate_lower ? targets[2] : 0;
+    // Side 2's own texture: the 777 lower DU, or a lower display placed on a
+    // pilot-pair profile.
+    status.lower_id = selected_profile_separate_lower || (profile && profiles::named_lower_side(*profile)) ? targets[2] : 0;
     status.named_mask = win::named_target_mask();
     // The companion's aircraft setup also needs every panel texture tracked.
     win::set_panel_discovery(native_camera::next_panel_discovery(win::panel_discovery(), identity) || (connected && settings.panel_setup));

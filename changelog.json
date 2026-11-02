@@ -16,7 +16,7 @@
         },
         {
           "title": "Door camera",
-          "text": "Every aircraft, the PMDG 777 included, gets a door camera to look into the cabin, on a display of its own (the lower display where there is one). Choose the display and Snapshot or Live in Setup → Door camera, then aim it with Adjust live view. Ctrl + Shift + V, a controller button or a cockpit L:var turns it on. The Fenix A320 family starts on the lower ECAM with the pedestal VIDEO button.",
+          "text": "Every aircraft, the PMDG 777 included, gets a door camera that looks into the cabin on a display of its own: place the lower display in Setup → Displays, then choose Snapshot or Live in Setup → Door camera and aim it with Adjust live view. Ctrl + Shift + V, a controller button or a cockpit L:var turns it on. The Fenix A320 family starts on the lower ECAM with its VIDEO button.",
           "image": "docs/whats-new/1.3.0/door-camera.png"
         },
         {

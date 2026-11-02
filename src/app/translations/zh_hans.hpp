@@ -483,5 +483,7 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"Options", L"选项"},
     {L"Camera off", L"摄像头已关闭"},
     {L"Choose display…", L"选择显示屏…"},
+    {L"The lower display needs a panel the size of this aircraft's displays. Pick another.", L"下方显示屏需要与此机型显示屏尺寸相同的面板。请另选一个。"},
+    {L"Place the lower display in Setup > Displays to show the door camera there.", L"请在「设置 > 显示屏」中放置下方显示屏，舱门摄像头即可显示在那里。"},
 };
 }  // namespace taxi_camera::standalone

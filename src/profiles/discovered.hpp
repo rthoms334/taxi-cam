@@ -178,7 +178,8 @@ inline std::uint64_t discovered_generation() noexcept {
 // The user's display choices for a profile, saved with it: per side, another
 // panel to route by name (empty keeps the profile's) and a display area in
 // that texture's pixels (empty keeps the profile's region; on a set-up
-// aircraft, the whole panel). Travels in Settings for the selected profile.
+// aircraft, the whole panel). A pilot-pair profile's side 2 adds a lower
+// display (override_sides). Travels in Settings for the selected profile.
 struct DisplayOverride {
   char textures[MaxDisplaySides][MaxPanelName]{};
   DisplayRect areas[MaxDisplaySides]{};
@@ -206,6 +207,14 @@ inline bool valid_override(unsigned sides, bool fit_texture, const DisplayInsets
   }
   return true;
 }
+// The sides a catalog profile has with these choices: a pilot pair gains the
+// lower display the user placed (named_lower_side).
+inline unsigned override_sides(const AircraftProfile& base, const DisplayOverride& o) noexcept {
+  return base.sides == 2 && pair_detection(base) && o.textures[2][0] ? 3u : base.sides;
+}
+inline bool valid_override(const AircraftProfile& base, const DisplayOverride& o) noexcept {
+  return valid_override(override_sides(base, o), base.fit_texture, base.camera_padding, o);
+}
 struct OverrideProfile {
   DisplayOverride choices;
   const AircraftProfile* base{};
@@ -218,6 +227,13 @@ inline const OverrideProfile* override_published{};
 // in `choices`, which must outlive p), display areas, and the cameras shaped
 // for side 0's camera area (shape_cameras) from the ones base was made for.
 inline void apply_choices(AircraftProfile& p, const AircraftProfile& base, const DisplayOverride& choices) noexcept {
+  // A placed lower display: side 0's display region on the panel named for
+  // it, with no cockpit control of its own.
+  if (override_sides(base, choices) > base.sides) {
+    p.sides = 3;
+    p.display_regions[2] = base.display_regions[0];
+    p.taxi_lvars[2] = p.taxi_events[2] = p.pfd_labels[2] = "";
+  }
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     if (choices.textures[side][0])
       p.panel_textures[side] = choices.textures[side];
@@ -251,7 +267,7 @@ inline bool override_current(const AircraftProfile* base, const DisplayOverride&
 // Makes find(base->id) return base with these display choices. The same base
 // and choices keep their profile; nullptr when they are invalid.
 inline const AircraftProfile* publish_override(const AircraftProfile* base, const DisplayOverride& choices) noexcept {
-  if (!base || !valid_override(base->sides, base->fit_texture, base->camera_padding, choices))
+  if (!base || !valid_override(*base, choices))
     return nullptr;
   const std::lock_guard lock(discovered_detail::publish_mutex);
   if (const auto* current = discovered_detail::override_published;
