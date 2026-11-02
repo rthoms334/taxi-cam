@@ -3,10 +3,13 @@ name: Risk gate
 # Sets each pull request's risk tier from the paths it touches and waits for
 # the human approvals that tier needs:
 #   low     no approval
-#   medium  owner approval of this exact commit       (environment pr-approval)
-#   high    owner approval, then a live check in MSFS (environment pr-live-check)
+#   medium  owner approval of this exact commit (environment pr-approval)
+#   high    a live check in MSFS (environment pr-live-check), then owner
+#           approval
 # Approvals are GitHub environment reviews, which a person grants in the
-# Actions UI. A new push starts a new run, so an approval covers one commit.
+# Actions UI. The approval stage waits on every environment the tier needs at
+# once, so one Review deployments dialog lists them all. A new push starts a
+# new run, so an approval covers one commit.
 #
 # pull_request_target runs main's copy of this file, so a pull request cannot
 # change its own gate. This workflow must never check out or run pull-request
@@ -36,6 +39,7 @@ jobs:
       actions: read
     outputs:
       tier: ${{ steps.classify.outputs.tier }}
+      environments: ${{ steps.environments.outputs.environments }}
     steps:
       - name: Check out main's classifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,6 +66,7 @@ jobs:
             --expected "$CHANGED_FILES" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Require protected approval environments
+        id: environments
         # An environment without a required reviewer would approve itself.
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,9 +76,11 @@ jobs:
           case "$TIER" in
             low) exit 0 ;;
             medium) needed="pr-approval" ;;
-            high) needed="pr-approval pr-live-check" ;;
+            high) needed="pr-live-check pr-approval" ;;
             *) echo "::error::Unknown risk tier '$TIER'."; exit 1 ;;
           esac
+          # The approval stage's matrix, in the order the owner approves.
+          echo "environments=$(jq -nc '$ARGS.positional' --args $needed)" >> "$GITHUB_OUTPUT"
           failed=0
           for env in $needed; do
             # On an HTTP error gh prints the error body instead of the --jq result.
@@ -112,37 +119,33 @@ jobs:
           gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=risk: $TIER" >/dev/null
 
   approval:
-    name: Owner approval
+    # One stage: each environment the tier needs waits at the same time, so
+    # the high tier shows its live check and owner approval as two checkboxes.
+    name: Approval stage
     needs: classify
     if: needs.classify.outputs.tier == 'medium' || needs.classify.outputs.tier == 'high'
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(needs.classify.outputs.environments) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
-    environment: pr-approval
+    environment: ${{ matrix.environment }}
     steps:
-      - name: Record the approved commit
+      - name: Record the approval
         env:
+          ENVIRONMENT: ${{ matrix.environment }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: echo "Owner approved \`$HEAD_SHA\` after reading the change and its review." >> "$GITHUB_STEP_SUMMARY"
-
-  live-check:
-    name: Live check
-    needs: [classify, approval]
-    if: needs.classify.outputs.tier == 'high'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    environment: pr-live-check
-    steps:
-      - name: Record the live check
-        env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: echo "Owner ran \`$HEAD_SHA\`'s PR test build in MSFS and recorded the result in the pull request." >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          case "$ENVIRONMENT" in
+            pr-live-check) echo "Owner ran \`$HEAD_SHA\`'s PR test build in MSFS and recorded the result in the pull request." ;;
+            *) echo "Owner approved \`$HEAD_SHA\` after reading the change and its review." ;;
+          esac >> "$GITHUB_STEP_SUMMARY"
 
   gate:
     # Required status check.
     name: Risk gate
-    needs: [classify, approval, live-check]
+    needs: [classify, approval]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -157,18 +160,18 @@ jobs:
           TIER: ${{ needs.classify.outputs.tier }}
           CLASSIFY: ${{ needs.classify.result }}
           APPROVAL: ${{ needs.approval.result }}
-          LIVE: ${{ needs.live-check.result }}
         run: |
           set -euo pipefail
           if [ "$CLASSIFY" != success ]; then echo "::error::Risk classification did not pass."; exit 1; fi
           case "$TIER" in
             low) needed="" ;;
-            medium) needed="pr-approval"; ok=$([ "$APPROVAL" = success ] && echo yes || echo no) ;;
-            high) needed="pr-approval pr-live-check"; ok=$([ "$APPROVAL" = success ] && [ "$LIVE" = success ] && echo yes || echo no) ;;
+            medium) needed="pr-approval" ;;
+            high) needed="pr-live-check pr-approval" ;;
             *) echo "::error::Unknown risk tier '$TIER'."; exit 1 ;;
           esac
-          if [ -n "$needed" ] && [ "$ok" != yes ]; then
-            echo "::error::$TIER risk needs: $needed (owner approval: $APPROVAL, live check: $LIVE)."
+          # A matrix job succeeds only when every environment in it was approved.
+          if [ -n "$needed" ] && [ "$APPROVAL" != success ]; then
+            echo "::error::$TIER risk needs: $needed (approval stage: $APPROVAL)."
             exit 1
           fi
           approvals=$(gh api "repos/$REPO/actions/runs/$RUN_ID/approvals")
