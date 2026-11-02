@@ -53,9 +53,19 @@ void Pool::release_resources(Packet& packet) noexcept {
   if (packet.save)
     packet.save->Release();
   packet.target = packet.source = packet.save = nullptr;
-  packet.completed = nullptr;
+  packet.completed = packet.dropped = nullptr;
   packet.completed_value = 0;
   packet.covering_value = 0;
+}
+
+void Pool::report_dropped(Packet& packet) noexcept {
+  if (!packet.dropped)
+    return;
+  auto seen = packet.dropped->load(std::memory_order_relaxed);
+  while (seen < packet.completed_value &&
+         !packet.dropped->compare_exchange_weak(seen, packet.completed_value, std::memory_order_release, std::memory_order_relaxed)) {
+  }
+  packet.dropped = nullptr;
 }
 
 bool Pool::service(ID3D12Device* device, std::uint64_t completed) noexcept {
@@ -63,8 +73,11 @@ bool Pool::service(ID3D12Device* device, std::uint64_t completed) noexcept {
   if (!device || (device_ && device_ != device))
     return false;
   if (completed == std::numeric_limits<std::uint64_t>::max()) {
-    for (auto& packet : packets_)
+    for (auto& packet : packets_) {
+      if (packet.state == State::recorded || packet.state == State::submitted)
+        report_dropped(packet);
       packet.state = State::quarantined;
+    }
     return false;
   }
   if (!device_) {
@@ -79,6 +92,7 @@ bool Pool::service(ID3D12Device* device, std::uint64_t completed) noexcept {
                                                     seen, packet.completed_value, std::memory_order_release, std::memory_order_relaxed)) {
         }
       }
+      packet.dropped = nullptr;
       packet.state = State::retired;
     }
     if (packet.state == State::retired) {
@@ -123,7 +137,7 @@ bool Pool::valid_copy(const Copy& copy) const noexcept {
       footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 || copy.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 ||
       copy.x > target.Width || copy.width > target.Width - copy.x || copy.y > target.Height || copy.height > target.Height - copy.y)
     return false;
-  if (copy.completed && !copy.completed_value)
+  if ((copy.completed || copy.dropped) && !copy.completed_value)
     return false;
   if (copy.readback && (copy.save || copy.shadow_source))
     return false;
@@ -169,6 +183,7 @@ Pool::Recording Pool::record(const Copy& copy) noexcept {
     packet.source = copy.source;
     packet.save = copy.save;
     packet.completed = copy.completed;
+    packet.dropped = copy.dropped;
     packet.completed_value = copy.completed_value;
     packet.state = State::recorded;
     const auto transition = [](ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept {
@@ -221,6 +236,7 @@ Pool::Recording Pool::record(const Copy& copy) noexcept {
     }
     if (FAILED(packet.list->Close())) {
       packet.state = State::quarantined;
+      report_dropped(packet);
       return {};
     }
     return {i, packet.list};
@@ -233,6 +249,8 @@ void Pool::submit(unsigned slot, std::uint64_t covering_value) noexcept {
     return;
   auto& packet = packets_[slot];
   if (packet.state != State::recorded || !covering_value || covering_value == std::numeric_limits<std::uint64_t>::max()) {
+    if (packet.state == State::recorded || packet.state == State::submitted)
+      report_dropped(packet);
     packet.state = State::quarantined;
     return;
   }
@@ -243,6 +261,8 @@ void Pool::submit(unsigned slot, std::uint64_t covering_value) noexcept {
 void Pool::cancel(unsigned slot) noexcept {
   if (slot < packets_.size()) {
     auto& packet = packets_[slot];
+    if (packet.state == State::recorded || packet.state == State::submitted)
+      report_dropped(packet);
     if (packet.state == State::recorded)
       packet.state = State::retired;
     else if (packet.state == State::submitted)
@@ -251,8 +271,12 @@ void Pool::cancel(unsigned slot) noexcept {
 }
 
 void Pool::quarantine(unsigned slot) noexcept {
-  if (slot < packets_.size())
-    packets_[slot].state = State::quarantined;
+  if (slot < packets_.size()) {
+    auto& packet = packets_[slot];
+    if (packet.state == State::recorded || packet.state == State::submitted)
+      report_dropped(packet);
+    packet.state = State::quarantined;
+  }
 }
 
 unsigned Pool::ready_count() const noexcept {

@@ -122,8 +122,10 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   const auto key = win::graphics_status().device;
   std::array<bool, 8> selected{};
   // partial: the selected displays repaint only this rectangle, in this
-  // colour, like an instrument that redraws what changed.
-  const auto record_frame = [&](bool discover_all, bool overwrite, const D3D12_RECT* partial = nullptr, const float* colour = nullptr) {
+  // colour, like an instrument that redraws what changed. views: the selected
+  // displays draw through these instead of their pre-hook views.
+  const auto record_frame = [&](bool discover_all, bool overwrite, const D3D12_RECT* partial = nullptr, const float* colour = nullptr,
+                                const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8>* views = nullptr) {
     for (auto& recording : recordings)
       recording.reset();
     if (mixed_exit) {
@@ -136,7 +138,7 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
       if (partial && selected[i])
         recordings[1].list->ClearRenderTargetView(rtvs[i], colour, 1, partial);
       else
-        generator.record(recordings[1].list.get(), rtvs[i], 768, 1024, false, 0, 0);
+        generator.record(recordings[1].list.get(), views && selected[i] ? (*views)[i] : rtvs[i], 768, 1024, false, 0, 0);
       transition(recordings[mixed_exit ? 3 : 2].list.get(), targets[i].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, display_state);
     }
     for (unsigned i = 0; i < count; ++i) {
@@ -359,6 +361,37 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   runtime::service();
   execute();
   pixels(false, false);
+  // Held Close-time stamps. Through views created after Connect the bridge
+  // sees the instrument draw the selected displays, so Close could stamp the
+  // camera inside the instrument's own list, where nothing can be saved first.
+  // These sides run on queue copies: Close holds its stamp, and the queue copy
+  // still shows the camera to the original consumer.
+  Reference<ID3D12DescriptorHeap> late_heap;
+  const D3D12_DESCRIPTOR_HEAP_DESC late_hd{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, count, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+  check(device->CreateDescriptorHeap(&late_hd, IID_PPV_ARGS(late_heap.put())), "RTV heap after Connect");
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> late_rtvs{};
+  for (unsigned i = 0; i < count; ++i) {
+    late_rtvs[i] = {late_heap->GetCPUDescriptorHandleForHeapStart().ptr +
+                    SIZE_T{i} * device->GetDescriptorHandleIncrementSize(late_hd.Type)};
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    device->CreateRenderTargetView(targets[i].get(), &view, late_rtvs[i]);
+  }
+  const auto held_before = win::graphics_status();
+  record_frame(false, false, nullptr, nullptr, &late_rtvs);
+  execute();
+  pixels(false, false);
+  const auto held = win::graphics_status();
+  if (held.shadow_held <= held_before.shadow_held)
+    std::fprintf(
+        stderr, "Held stamps: held=%llu->%llu end_draws=%llu->%llu copies=%llu->%llu\n",
+        static_cast<unsigned long long>(held_before.shadow_held), static_cast<unsigned long long>(held.shadow_held),
+        static_cast<unsigned long long>(held_before.recording_end_draws), static_cast<unsigned long long>(held.recording_end_draws),
+        static_cast<unsigned long long>(held_before.preferred_copy_stamps), static_cast<unsigned long long>(held.preferred_copy_stamps));
+  require(held.shadow_held > held_before.shadow_held && held.recording_end_draws == held_before.recording_end_draws &&
+              held.preferred_copy_stamps == held_before.preferred_copy_stamps,
+          "Close held its stamp on queue-copy sides, and the queue copy still showed the camera");
   // Display shadow. Under the camera the instrument repaints one rectangle
   // only; the shadow goes back under that repaint and is saved again before
   // the camera copy. When the camera stops, the shadow goes back before the
@@ -373,6 +406,11 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   pixels(false, false);
   runtime::service();
   const auto shadow = win::graphics_status();
+  if (shadow.shadow_modes[0] != 'q' || shadow.shadow_modes[1] != 'q' || shadow.shadow_fallbacks)
+    std::fprintf(stderr, "Shadow: modes=%s saves=%llu entry_restores=%llu lost_writes=%llu held=%llu fallbacks=%llu\n", shadow.shadow_modes,
+                 static_cast<unsigned long long>(shadow.shadow_saves), static_cast<unsigned long long>(shadow.shadow_entry_restores),
+                 static_cast<unsigned long long>(shadow.shadow_lost_writes), static_cast<unsigned long long>(shadow.shadow_held),
+                 static_cast<unsigned long long>(shadow.shadow_fallbacks));
   require(shadow.shadow_saves && shadow.shadow_modes[0] == 'q' && shadow.shadow_modes[1] == 'q' && !shadow.shadow_fallbacks,
           "Camera sides ran on queue copies and saved their shadows");
   require(common || shadow.shadow_entry_restores, "The shadow went back under the instrument's writes");

@@ -338,6 +338,9 @@ class SceneCaptureManager {
       // ahead of the instrument's draws). When that item is not recorded, this
       // one is recorded without its save; NoItem when there is none.
       UINT save_after = NoItem;
+      // Set once the pool holds this item's packet; the pool then reports a
+      // drop. An item never recorded reports copy.dropped when the plan ends.
+      bool recorded = false;
     };
     static constexpr UINT NoItem = ~UINT{0};
     std::uint64_t device_key = 0, generation = 0;

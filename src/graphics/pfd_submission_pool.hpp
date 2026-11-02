@@ -37,6 +37,10 @@ class Pool {
     // counter must outlive the packet.
     std::atomic<std::uint64_t>* completed = nullptr;
     std::uint64_t completed_value = 0;
+    // Raised to completed_value, like completed, when the packet will not run:
+    // cancelled before submission, or quarantined (uncertain work counts as
+    // not run). The caller's plan reports copies that were never recorded.
+    std::atomic<std::uint64_t>* dropped = nullptr;
     // Display shadow: before writing the source, copy the same target region
     // into this DEFAULT-heap buffer at save_footprint (same size and format
     // family). Not with readback.
@@ -84,11 +88,13 @@ class Pool {
     ID3D12Resource* source = nullptr;
     ID3D12Resource* save = nullptr;
     std::atomic<std::uint64_t>* completed = nullptr;
+    std::atomic<std::uint64_t>* dropped = nullptr;
     std::uint64_t completed_value = 0;
     std::uint64_t covering_value = 0;
     State state = State::empty;
   };
   static void release_resources(Packet&) noexcept;
+  static void report_dropped(Packet&) noexcept;
   bool valid_copy(const Copy&) const noexcept;
   ID3D12Device* device_ = nullptr;
   std::array<Packet, Capacity> packets_{};

@@ -413,13 +413,20 @@ struct Registry {
     // buffer holds panel pixels. clean: in planned order, the area holds panel
     // pixels (no camera copy since the start or the last restore).
     bool saved{}, confirmed{}, clean{};
-    // Serials of this side's shadow copies; shadow_completed[side] rises to
-    // each one whose covering fence has passed.
-    std::uint64_t serial{}, first_save_serial{}, restore_serial{};
+    // Serials of this side's shadow copies. shadow_completed[side] rises to
+    // each one whose covering fence has passed, shadow_dropped[side] to each
+    // one that will not run; handled_drop is the last drop acted on. Both are
+    // raised before the next plan on the submitting thread.
+    std::uint64_t serial{}, first_save_serial{}, restore_serial{}, handled_drop{};
     std::uint64_t started_ms{}, planned_ms{}, uncovered_ms{};
+    // The display dirty_id may still hold this side's camera: a camera copy or
+    // stamp was planned, and no restore has completed since. A camera that
+    // starts on it saves nothing before its shadow has gone back.
+    bool dirty{};
+    std::uint64_t dirty_id{};
   };
   std::array<DisplayShadow, MaxDisplaySides> shadows{};
-  std::array<std::atomic<std::uint64_t>, MaxDisplaySides> shadow_completed{};
+  std::array<std::atomic<std::uint64_t>, MaxDisplaySides> shadow_completed{}, shadow_dropped{};
   // Saves and restores planned (entry: before the instrument's first write
   // while the camera runs), instrument writes the shadow missed, Close-time
   // camera writes held for it, and sides that fell back to direct stamps.
@@ -2344,10 +2351,11 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
 // Display shadow timing. A camera write still uncovered this long after the
 // camera had something to show means queue copies do not reach this display:
 // the side goes back to direct stamps. A first save that never completes does
-// the same. A restore is planned again when it has not completed, and given up
-// when the display gives no chance at all. Shadows are kept only for areas up
-// to kShadowMaxBytes, so the buffers stay bounded while displays are routed.
-constexpr std::uint64_t kShadowCoverMs = 250, kShadowConfirmMs = 1000, kShadowReplanMs = 250, kShadowRestoreMs = 3000;
+// the same. A restore that was submitted but has not completed is planned
+// again; a restore keeps being planned until it completes or the camera
+// returns. Shadows are kept only for areas up to kShadowMaxBytes, so the
+// buffers stay bounded while displays are routed.
+constexpr std::uint64_t kShadowCoverMs = 250, kShadowConfirmMs = 1000, kShadowReplanMs = 250;
 constexpr std::uint64_t kShadowMaxBytes = 8u << 20;
 D3D12_RECT shadow_area(const Registry& r, unsigned side, const Resource& target) noexcept {
   const auto rect = profiles::side_rect(*r.profile, side, static_cast<unsigned>(target.desc.Width), target.desc.Height);
@@ -2369,13 +2377,17 @@ bool shadow_fits(const Registry::DisplayShadow& shadow, const D3D12_RECT& area, 
   return shadow.buffer && format != DXGI_FORMAT_UNKNOWN && footprint.Format == format &&
          footprint.Width == static_cast<UINT>(area.right - area.left) && footprint.Height == static_cast<UINT>(area.bottom - area.top);
 }
+// Keeps dirty: the display may still hold the camera when a restore did not run.
 void forget_shadow(Registry::DisplayShadow& shadow) noexcept {
   shadow.mode = Registry::ShadowMode::off;
   shadow.target.reset();
   shadow.queue = nullptr;
-  shadow.saved = shadow.confirmed = false;
-  shadow.clean = true;
+  shadow.saved = shadow.confirmed = shadow.clean = false;
   shadow.restore_serial = 0;
+}
+void mark_dirty(Registry::DisplayShadow& shadow, const Resource& target) noexcept {
+  shadow.dirty = true;
+  shadow.dirty_id = target.id;
 }
 // Registry lock held. Moves a side's shadow with its camera: camera on starts
 // it, on queue copies when the worker already has its buffer; camera off
@@ -2394,6 +2406,29 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
   const auto completed = r.shadow_completed[side].load(std::memory_order_acquire);
   if (shadow.saved && !shadow.confirmed && completed >= shadow.first_save_serial)
     shadow.confirmed = true;
+  // A copy planned for this shadow will not run (escaped, refused or not
+  // recorded). A dropped restore is planned again. A dropped first save took
+  // its camera copy with it, so the display is as the camera found it. After
+  // any other drop the area may hold the camera under the instrument's
+  // writes, which the shadow then misses: nothing is saved until it has gone
+  // back.
+  if (const auto dropped = r.shadow_dropped[side].load(std::memory_order_acquire); dropped > shadow.handled_drop) {
+    shadow.handled_drop = dropped;
+    if (shadow.mode == Mode::restoring && shadow.restore_serial && dropped >= shadow.restore_serial) {
+      shadow.restore_serial = 0;
+      shadow.clean = false;
+    } else if (shadow.saved && !shadow.confirmed && dropped >= shadow.first_save_serial) {
+      // On queue copies nothing else wrote the camera there.
+      shadow.saved = false;
+      shadow.clean = shadow.mode == Mode::queue;
+      if (shadow.clean)
+        shadow.dirty = false;
+    } else {
+      shadow.clean = false;
+      if (shadow.saved)
+        r.shadow_lost_writes.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   // Queue copies need the verified Close endpoint and the worker's buffer.
   const auto queue_ready = [&] { return r.close_forward_verified && shadow_fits(shadow, area, shadow_format(target)); };
   switch (shadow.mode) {
@@ -2403,7 +2438,7 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
         shadow.target = target;
         shadow.area = area;
         shadow.mode = queue_ready() ? Mode::queue : Mode::direct;
-        shadow.clean = shadow.mode == Mode::queue;
+        shadow.clean = shadow.mode == Mode::queue && !(shadow.dirty && shadow.dirty_id == target->id);
         shadow.started_ms = now;
         shadow.uncovered_ms = 0;
       }
@@ -2433,10 +2468,16 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
         if (shadow.mode == Mode::direct || (shadow.restore_serial && completed < shadow.restore_serial))
           shadow.clean = false;
         shadow.restore_serial = 0;
-      } else if ((shadow.restore_serial && completed >= shadow.restore_serial) || now - shadow.started_ms > kShadowRestoreMs) {
+      } else if (shadow.restore_serial && completed >= shadow.restore_serial) {
+        if (shadow.dirty_id == shadow.target->id)
+          shadow.dirty = false;
         forget_shadow(shadow);
+      } else if (!shadow.saved || (!shadow.confirmed && now - shadow.planned_ms > kShadowConfirmMs)) {
+        forget_shadow(shadow);  // No save ran: nothing to put back.
       } else if (shadow.restore_serial && now - shadow.planned_ms > kShadowReplanMs) {
-        shadow.restore_serial = 0;  // Not recorded or not submitted: plan it again.
+        // Submitted but not finished: plan it again, trusting neither copy.
+        shadow.restore_serial = 0;
+        shadow.clean = false;
       }
       break;
   }
@@ -2446,11 +2487,15 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
 // instrument's own list, where nothing can be saved before them: while a
 // shadow follows the side, only queue copies write it.
 bool shadow_holds_stamp(Registry& r, List& list, unsigned side) noexcept {
-  if (update_shadow(r, side, GetTickCount64()) == Registry::ShadowMode::queue) {
+  const auto mode = update_shadow(r, side, GetTickCount64());
+  if (mode == Registry::ShadowMode::queue) {
     r.shadow_held.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
   list.stamped_sides.fetch_or(1u << side, std::memory_order_relaxed);
+  // Only a camera side stamps here; calibration is delivered elsewhere.
+  if (const auto& target = r.selected_resources[side]; target && mode == Registry::ShadowMode::direct)
+    mark_dirty(r.shadows[side], *target);
   return false;
 }
 // Stage only actual typed RTVs established by a nonzero native draw.
@@ -3227,9 +3272,10 @@ void plan_display_submission(void*,
                    static_cast<UINT>(shadow.area.right - shadow.area.left),
                    static_cast<UINT>(shadow.area.bottom - shadow.area.top)};
       item.copy.shadow_source = true;
+      item.copy.completed = &r.shadow_completed[side];
+      item.copy.dropped = &r.shadow_dropped[side];
+      item.copy.completed_value = ++shadow.serial;
       if (modes[side] == ShadowMode::restoring) {
-        item.copy.completed = &r.shadow_completed[side];
-        item.copy.completed_value = ++shadow.serial;
         shadow.restore_serial = shadow.serial;
         shadow.planned_ms = now;
         // The panel shows again: a camera that starts before the instrument's
@@ -3302,6 +3348,7 @@ void plan_display_submission(void*,
       item.copy.save_footprint = shadow.footprint;
       item.copy.save->AddRef();
       item.copy.completed = &r.shadow_completed[side];
+      item.copy.dropped = &r.shadow_dropped[side];
       item.copy.completed_value = ++shadow.serial;
       item.save_after = restore_items[side];
       if (!shadow.saved) {
@@ -3312,8 +3359,10 @@ void plan_display_submission(void*,
       shadow.queue = queue;
       r.shadow_saves.fetch_add(1, std::memory_order_relaxed);
     }
-    if (modes[side] == ShadowMode::queue || modes[side] == ShadowMode::direct)
+    if (modes[side] == ShadowMode::queue || modes[side] == ShadowMode::direct) {
       shadow.clean = false;
+      mark_dirty(shadow, *target);
+    }
     if (cover_serial[side])
       target->covered_serial.store(cover_serial[side], std::memory_order_release);
     if (carried[side])

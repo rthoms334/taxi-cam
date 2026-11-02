@@ -831,6 +831,30 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     execute({last}, nullptr, {});
     require(restored.load() == 3, "Completed restore did not raise its serial");
     expect(false, true, "The restored panel lost its pixels or the instrument's redraw");
+    // A shadow copy that will not run raises its drop serial instead, so the
+    // planner learns before its next plan: cancelled before submission, or
+    // quarantined. A completed copy never raises it.
+    std::atomic<std::uint64_t> dropped{0};
+    auto doomed = restore;
+    doomed.dropped = &dropped;
+    doomed.completed_value = 0;
+    require(!context->pool.record(doomed), "A drop counter without a serial was recorded");
+    doomed.completed_value = 4;
+    const auto cancelled = context->pool.record(doomed);
+    require(static_cast<bool>(cancelled), "Record a shadow copy that is cancelled");
+    context->pool.cancel(cancelled.slot);
+    context->pool.service(device.p, fence->GetCompletedValue());
+    require(dropped.load() == 4 && restored.load() == 3, "A cancelled shadow copy did not report its drop, or reported completion");
+    doomed.completed_value = 5;
+    const auto uncertain_copy = context->pool.record(doomed);
+    require(static_cast<bool>(uncertain_copy), "Record a shadow copy that is quarantined");
+    context->pool.quarantine(uncertain_copy.slot);
+    require(dropped.load() == 5, "A quarantined shadow copy did not report its drop");
+    doomed.completed_value = 6;
+    const auto ran = context->pool.record(doomed);
+    require(static_cast<bool>(ran), "Record a shadow copy that runs");
+    execute({ran}, nullptr, {});
+    require(restored.load() == 6 && dropped.load() == 5, "A completed shadow copy reported a drop");
   }
   success(device->GetDeviceRemovedReason(), "D3D12 device removed");
   if (diagnostics.p) {
