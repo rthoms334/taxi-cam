@@ -1136,6 +1136,10 @@ DWORD run_impl() {
   std::uint64_t camera_off_window{};
   bool camera_off_settled = false;
   win::MainViewPause main_view_pause;
+  // Pauses that stopped requested cameras, not every non-cockpit view (flight
+  // loading shows the world map with nothing requested).
+  bool last_outside_pause = false;
+  std::uint64_t outside_pauses{};
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
   EffectiveCameraRate effective_rate;
@@ -1762,6 +1766,8 @@ DWORD run_impl() {
     const auto main_view = native_camera::get_camera_state();
     const bool main_view_outside = main_view_pause.observe(now, main_view.valid, main_view.state);
     const bool outside_pause = main_view_outside && !demand.suspend && !test_scene && !calibration && !snapshot_pending;
+    outside_pauses += outside_pause && !last_outside_pause;
+    last_outside_pause = outside_pause;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     // A taken door snapshot renders nothing but its page is still drawn.
@@ -2298,7 +2304,7 @@ DWORD run_impl() {
           scene.output_ready[1], scene.output_waits, scene.inspection_status[0], scene.inspection_status[1],
           static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
           demand.suspend, main_view.valid ? static_cast<int>(main_view.state) : -1, outside_pause,
-          static_cast<unsigned long long>(main_view_pause.pauses()), status.effective_rate, settings.camera_rate, settings.camera_mode,
+          static_cast<unsigned long long>(outside_pauses), status.effective_rate, settings.camera_rate, settings.camera_mode,
           status.auto_level, status.auto_floor, status.update_hz, spread.median, spread.p95, spread.slowest,
           std::isfinite(camera_off_hz) ? camera_off_hz : -1.0, status.reachable_rate, std::isfinite(view_ms) ? view_ms : -1.0,
           status.useful_rate, camera_rate_limit_name(status.rate_limits), speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1],

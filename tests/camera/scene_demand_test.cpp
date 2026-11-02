@@ -306,20 +306,20 @@ void main_view_pause() {
     require(!cockpit.observe(t, true, MainViewPause::kCockpit), "The cockpit view paused the cameras");
   for (std::uint64_t t = 20000; t < 40000; t += 250)
     require(!cockpit.observe(t, false, 3), "A missing CAMERA STATE paused the cameras");
-  require(cockpit.pauses() == 0, "Pauses counted without one");
+  require(!cockpit.paused(), "The cockpit view left a pause behind");
 
   MainViewPause outside;
   require(!outside.observe(1000, true, 3), "The first outside reading paused at once");
   require(!outside.observe(1000 + MainViewPause::kEnterMs - 1, true, 3), "The pause started before kEnterMs");
-  require(outside.observe(1000 + MainViewPause::kEnterMs, true, 3) && outside.pauses() == 1, "Chase view did not pause");
-  require(outside.observe(1750, true, 4) && outside.pauses() == 1, "Another outside camera started a second pause");
+  require(outside.observe(1000 + MainViewPause::kEnterMs, true, 3), "Chase view did not pause");
+  require(outside.observe(1750, true, 4), "Another outside camera ended the pause");
   require(!outside.observe(2000, true, MainViewPause::kCockpit) && !outside.paused(), "The cockpit did not end the pause at once");
 
   // A transition state that passes within kEnterMs does not close the cameras.
   MainViewPause transition;
   require(!transition.observe(1000, true, 27) && !transition.observe(1250, true, 27), "A passing transition paused");
   require(!transition.observe(1400, true, MainViewPause::kCockpit), "The cockpit after a transition paused");
-  require(!transition.observe(1600, true, 27) && transition.pauses() == 0, "The transition timer survived the cockpit reading");
+  require(!transition.observe(1600, true, 27), "The transition timer survived the cockpit reading");
 
   // A telemetry gap while paused (frames stall while the outside view loads)
   // holds the pause for kHoldMs after the last outside reading, then ends it.
@@ -329,8 +329,7 @@ void main_view_pause() {
   require(gap.observe(1500 + MainViewPause::kHoldMs, false, 0), "A short telemetry gap ended the pause");
   require(!gap.observe(1501 + MainViewPause::kHoldMs, false, 0), "A long telemetry gap kept the pause");
   require(!gap.observe(1600 + MainViewPause::kHoldMs, true, 3), "An outside reading after the gap paused without kEnterMs");
-  require(gap.observe(1600 + MainViewPause::kHoldMs + MainViewPause::kEnterMs, true, 3) && gap.pauses() == 2,
-          "Outside after the gap did not pause again");
+  require(gap.observe(1600 + MainViewPause::kHoldMs + MainViewPause::kEnterMs, true, 3), "Outside after the gap did not pause again");
   // A clock that runs backwards never holds a pause.
   require(!gap.observe(100, false, 0), "A backwards clock held the pause");
 }

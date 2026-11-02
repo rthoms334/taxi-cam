@@ -39,18 +39,14 @@ class MainViewPause {
     last_outside_ms_ = now_ms;
     if (!outside_since_ms_ || now_ms < outside_since_ms_)
       outside_since_ms_ = now_ms;
-    if (!paused_ && now_ms - outside_since_ms_ >= kEnterMs) {
+    if (!paused_ && now_ms - outside_since_ms_ >= kEnterMs)
       paused_ = true;
-      ++pauses_;
-    }
     return paused_;
   }
   bool paused() const noexcept { return paused_; }
-  // Pauses started since the bridge worker started, for bridge.log.
-  std::uint64_t pauses() const noexcept { return pauses_; }
 
  private:
   bool paused_ = false;
-  std::uint64_t outside_since_ms_ = 0, last_outside_ms_ = 0, pauses_ = 0;
+  std::uint64_t outside_since_ms_ = 0, last_outside_ms_ = 0;
 };
 }  // namespace taxi_camera::standalone
