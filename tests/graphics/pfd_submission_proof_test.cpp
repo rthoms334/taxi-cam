@@ -609,6 +609,58 @@ void carried_across_execute() {
   const Proof::Recording flashed[]{{&enter, 1}, {&exit, 1}};
   require(!Proof::carried_overlay(flashed, 2, left, psr), "Carried state was used on a batch that writes the display");
 }
+// The display shadow goes back before the first list that writes the display,
+// in the state that list found it, and only before a list in which nothing
+// could have sampled the display first.
+void shadow_entry() {
+  Proof other;
+  other.reset(1, true);
+  other.observe_legacy(right, rt, psr, 0);
+  other.close(1, true);
+  Proof exit = exit_recording();
+  Proof enter;
+  enter.reset(1, true);
+  enter.observe_legacy(left, psr, rt, 0);
+  enter.close(1, true);
+  Proof carried;
+  carried.reset(1, true);
+  carried.gpu_work(12);  // A draw into another target first: RT since entry, nothing sampled it.
+  carried.note_render_target_write(left, 12);
+  carried.close(1, true);
+  const Proof::Recording split[]{{&other, 1}, {&exit, 1}, {&enter, 1}, {&carried, 1}};
+  const auto entry = Proof::batch_entry(split, 4, left);
+  require(entry && entry.list == 2 && entry.state == psr && entry.insertable && entry.clean,
+          "The shadow did not go back before the first list that writes the display, in the state it found");
+  const auto left_state = Proof::batch_after(split, 4, left);
+  require(left_state.known && left_state.state == rt, "The state the batch leaves the display in was not its last list's");
+  require(!Proof::batch_after(split, 1, left).known, "A batch that never names the display reported its state");
+  const Proof::Recording draws_only[]{{&carried, 1}};
+  const auto kept = Proof::batch_entry(draws_only, 1, left);
+  require(kept && kept.list == 0 && kept.state == rt && kept.insertable && kept.clean,
+          "A draw in RT carried from an earlier list was not an entry");
+  require(!Proof::batch_entry(split, 2, left), "A list that only exits the display was taken for a write");
+  Proof sampled;
+  sampled.reset(1, true);
+  sampled.gpu_work(12);  // A draw that may sample the display before it becomes RT.
+  sampled.observe_legacy(left, psr, rt, 0);
+  sampled.close(1, true);
+  const Proof::Recording after_draw[]{{&sampled, 1}};
+  const auto unclean = Proof::batch_entry(after_draw, 1, left);
+  require(unclean && unclean.insertable && !unclean.clean, "A list that drew before taking the display was clean");
+  Proof promoted;
+  promoted.reset(1, true);
+  promoted.observe_legacy(left, D3D12_RESOURCE_STATE_COMMON, rt, 0);
+  promoted.close(1, true);
+  const Proof::Recording common[]{{&promoted, 1}};
+  const auto unsafe = Proof::batch_entry(common, 1, left);
+  require(unsafe && !unsafe.insertable, "A COMMON entry state became insertable");
+  Proof open;
+  open.reset(1, true);
+  open.observe_legacy(left, psr, rt, 0);
+  const Proof::Recording unclosed[]{{&open, 1}};
+  require(!Proof::batch_entry(unclosed, 1, left) && !Proof::batch_after(unclosed, 1, left).known,
+          "An unclosed recording gave a shadow entry");
+}
 }  // namespace
 
 int main() {
@@ -622,7 +674,9 @@ int main() {
     state_disjoint_prefix_work();
     later_list_overwrite();
     carried_across_execute();
-    std::printf("PASS PFD submission proof: %u lifecycle, final-state, GPU-work, whole-batch pass and bound checks.\n", checks);
+    shadow_entry();
+    std::printf("PASS PFD submission proof: %u lifecycle, final-state, GPU-work, whole-batch pass, shadow entry and bound checks.\n",
+                checks);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL PFD submission proof: %s\n", error.what());

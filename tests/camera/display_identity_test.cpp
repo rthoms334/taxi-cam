@@ -4,6 +4,7 @@
 #include <vector>
 #include "../../src/camera/display_panels.hpp"
 #include "../../src/graphics/taxi_button_routes.hpp"
+#include "../../src/profiles/catalog.hpp"
 
 namespace {
 using namespace taxi_camera::display_identity;
@@ -336,6 +337,110 @@ int main() {
             "A name of unknown shape pairs nothing");
     const char* none[]{"", "", ""};
     require(!resolve_by_shape(fenix, boot.data(), boot.size(), none, 3, saved, ids, out, pairs), "No names, nothing to pair");
+  }
+
+  {
+    // FlyByWire A380X flight of 2026-11-02 (bridge.log, MSFS pid 22596,
+    // session 20, door camera placed on SCREEN_DU_SD): its panel table, the
+    // load's newest multi-mip creations (older flights' before them can never
+    // pair) and the copies logged in the 20 s after, in which the simulator
+    // moved every display several times.
+    namespace profiles = taxi_camera::profiles;
+    Panels a380x;
+    const struct {
+      std::uint32_t index;
+      const char *section, *texture;
+      std::uint32_t canvas;
+    } table[]{{0, "VCockpit01", "SCREEN_DU_MFD", 1024},
+              {1, "VCockpit02", "NO_TEXTURE", 0},
+              {2, "VCockpit03", "SCREEN_DU_EWD", 1024},
+              {3, "VCockpit04", "SCREEN_DU_SD", 1024},
+              {4, "VCockpit05", "SCREEN_DU_PFDL", 1024},
+              {5, "VCockpit06", "SCREEN_DU_PFDR", 1024},
+              {6, "VCockpit07", "SCREEN_DU_NDL", 1024},
+              {7, "VCockpit08", "SCREEN_DU_NDR", 1024},
+              {8, "VCockpit09", "FCU", 1024},
+              {9, "VCockpit10", "SCREEN_ISIS_1", 512},
+              {10, "VCockpit11", "SCREEN_ISIS_2", 0},
+              {11, "VCockpit12", "Clock", 256},
+              {12, "VCockpit13", "RTPI", 512},
+              {13, "VCockpit14", "BAT", 256},
+              {14, "VCockpit15", "SCREEN_EFB", 1024},
+              {15, "VCockpit16", "SCREEN_DU_RMP_1", 1024},
+              {16, "VCockpit17", "SCREEN_DU_RMP_2", 1024},
+              {17, "VCockpit18", "SCREEN_DU_RMP_3", 1024},
+              {18, "VCockpit19", "SCREEN_OIT_LEFT", 1024},
+              {19, "VCockpit20", "SCREEN_OIT_RIGHT", 1024},
+              {20, "VCockpit21", "NO_TEXTURE", 256},
+              {21, "VCockpit22", "NO_TEXTURE", 256},
+              {22, "VCockpit23", "NO_TEXTURE", 256},
+              {23, "VCockpit24", "NO_TEXTURE", 1024}};
+    for (const auto& p : table)
+      add(a380x, p.index, p.section, p.texture, 4, p.canvas);
+    const std::uint32_t shapes[][4]{{1143, 768, 1024, 5},  {1144, 768, 1024, 5},  {1145, 768, 1024, 5},  {1146, 1333, 1000, 5},
+                                    {1147, 768, 1024, 5},  {1148, 768, 1024, 5},  {1149, 768, 1024, 5},  {1150, 768, 1024, 5},
+                                    {1151, 768, 1024, 5},  {1152, 768, 1024, 5},  {1153, 768, 1024, 5},  {1154, 640, 360, 5},
+                                    {1157, 768, 1024, 5},  {1158, 640, 360, 5},   {1161, 640, 360, 5},   {1162, 640, 360, 5},
+                                    {1166, 1333, 1000, 5}, {1167, 1333, 1000, 5}, {1169, 1664, 1024, 5}, {1170, 1664, 1024, 5},
+                                    {1171, 1664, 1024, 5}, {1172, 1430, 1000, 5}, {1175, 256, 256, 5},   {1176, 512, 512, 5},
+                                    {1177, 2560, 1280, 5}, {1178, 768, 1024, 5},  {1179, 768, 1024, 5},  {1180, 768, 1024, 5},
+                                    {1181, 768, 1024, 5},  {1182, 768, 1024, 5},  {1183, 768, 1024, 5},  {1184, 1646, 1024, 5}};
+    std::vector<Creation> load;
+    for (const auto& s : shapes)
+      load.push_back({s[0], load.size(), s[1], s[2], s[3], 28});
+    // The profile as the bridge had it: the door camera's lower display placed.
+    auto placed = profiles::A380;
+    placed.sides = 3;
+    placed.panel_textures[2] = "SCREEN_DU_SD";
+    const auto fit = [&](const Creation& c, std::size_t side) {
+      return profiles::side_display(placed, static_cast<unsigned>(side), c.width, c.height, c.mips, c.format);
+    };
+    const auto neighbours = [&](const char* panel, std::uint32_t& width, std::uint32_t& height) {
+      for (const auto& shape : placed.panel_shapes)
+        if (shape.name && std::strcmp(shape.name, panel) == 0) {
+          width = shape.width;
+          height = shape.height;
+          return true;
+        }
+      return false;
+    };
+    const char* names[]{"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", "SCREEN_DU_SD"};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    std::array<Assignment, kMaxPanels> out{};
+    require(resolve_names(a380x, load.data(), load.size(), names, 3, fit, neighbours, ids, out, pairs) == 0 && ids[0] == 1181 &&
+                ids[1] == 1180 && ids[2] == 1182 && pairs == 18,
+            "The A380X load pairs as logged (ids=1181,1180,1182)");
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> copies{
+        {1173, 1207}, {1183, 1208}, {1182, 1209}, {1181, 1210}, {1176, 1211}, {1180, 1212}, {1208, 1213}, {1209, 1214}, {1213, 1215},
+        {1210, 1216}, {1179, 1217}, {1216, 1218}, {1218, 1219}, {1212, 1220}, {1214, 1221}, {1215, 1222}, {1178, 1223}, {1217, 1224},
+        {1141, 1225}, {1219, 1226}, {1222, 1228}, {1220, 1229}, {1221, 1230}, {1223, 1231}, {1224, 1232}, {1226, 1233}, {1228, 1234},
+        {1184, 1235}, {1229, 1236}, {1201, 1237}, {1236, 1238}, {1234, 1239}, {1230, 1240}};
+    // Live: the copies' last destinations.
+    const auto alive = [&](std::uint64_t id) {
+      return std::none_of(copies.begin(), copies.end(), [&](const auto& copy) { return copy.first == id; });
+    };
+    const auto anywhere = [](std::uint64_t) { return true; };
+    const auto follow = [&](const char* panel) {
+      for (std::size_t i = 0; i < pairs; ++i)
+        if (std::strcmp(out[i].panel->texture.data(), panel) == 0)
+          return follow_copies(out[i].creation.id, copies.data(), copies.size(), alive, anywhere);
+      return std::uint64_t{};
+    };
+    require(follow("SCREEN_DU_PFDL") == 1233 && follow("SCREEN_DU_PFDR") == 1238 && follow("SCREEN_DU_SD") == 1240,
+            "The routed displays follow their copies to the textures logged at the end (1233,1238,1240)");
+    // The setup's pictures asked for the destroyed load textures of these.
+    require(follow("SCREEN_DU_EWD") == 1239 && follow("SCREEN_DU_NDL") == 1232 && follow("SCREEN_DU_NDR") == 1231 &&
+                follow("SCREEN_DU_MFD") == 1235 && follow("SCREEN_ISIS_1") == 1211,
+            "Every other moved panel follows its copies to a live texture");
+    require(!follow("FCU") && !follow("Clock"), "A panel nothing copied keeps no replacement");
+    const auto taken = [](std::uint64_t id) { return id != 1233; };
+    require(!follow_copies(1181, copies.data(), copies.size(), alive, taken), "A live texture another panel holds is never taken");
+    require(!follow_copies(1181, copies.data(), copies.size(), alive, anywhere, 5), "Following stops after max_steps copies");
+    // Limit, recorded for the follow-up: the user then routed the left camera
+    // to #1238 and the right to #1233, so on this load the two PFDs (same
+    // shape, same gauge, adjacent sections) were created the other way round
+    // from the 2026-10-04 load above. Creation order cannot tell them apart.
   }
 
   std::array<char, 8> name{};

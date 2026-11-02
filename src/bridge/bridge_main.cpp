@@ -418,8 +418,10 @@ void service_panel_identity(PanelIdentityLog& state,
     if (std::any_of(state.map.begin(), state.map.end(), [](const auto& panel) { return !panel.id; })) {
       auto entries = state.map_creations;
       win::resolve_creation_ids(entries.data(), entries.size());
+      // Only the missing ones: a followed replacement keeps its ID.
       for (std::size_t i = 0; i < entries.size() && i < state.map.size(); ++i)
-        state.map[i].id = entries[i].id;
+        if (!state.map[i].id)
+          state.map[i].id = entries[i].id;
     }
   } catch (...) {
   }
@@ -447,18 +449,10 @@ void service_panel_identity(PanelIdentityLog& state,
       const auto& shape = state.locked_shapes[side];
       // The simulator copies a display into its replacement (FlyByWire
       // A380: #1522 -> #1528); follow that chain to a live texture first.
-      std::uint64_t replacement = 0, successor = destroyed;
       const auto feeds = win::display_feed_pairs();
-      for (unsigned step = 0; step < 8; ++step) {
-        const auto next = std::find_if(feeds.begin(), feeds.end(), [&](const auto& feed) { return feed.first == successor; });
-        if (next == feeds.end())
-          break;
-        successor = next->second;
-        if (alive(successor) && !paired_elsewhere(successor) && std::find(named.begin(), named.end(), successor) == named.end()) {
-          replacement = successor;
-          break;
-        }
-      }
+      std::uint64_t replacement = display_identity::follow_copies(destroyed, feeds.data(), feeds.size(), alive, [&](std::uint64_t id) {
+        return !paired_elsewhere(id) && std::find(named.begin(), named.end(), id) == named.end();
+      });
       // Otherwise the newest live texture of the same shape created later.
       for (std::size_t i = 0; !replacement && i < n; ++i) {
         const auto& e = entries[n - 1 - i];
@@ -478,10 +472,47 @@ void service_panel_identity(PanelIdentityLog& state,
   const auto rename_recreated = [&](const std::array<std::uint64_t, MaxDisplaySides>& from,
                                     const std::array<std::uint64_t, MaxDisplaySides>& to) {
     for (unsigned side = 0; side < MaxDisplaySides; ++side)
-      if (from[side] && to[side] != from[side])
+      if (from[side] && to[side] != from[side]) {
         for (auto& panel : state.map)
           if (panel.id == from[side])
             panel.id = to[side];
+        for (auto& name : state.names)
+          if (name.first == from[side])
+            name.first = to[side];
+      }
+  };
+  // Every other paired panel follows its copies too (the FlyByWire A380X
+  // moved all six of its displays on 2026-11-02 and the setup showed their
+  // destroyed textures), so the aircraft setup's pictures and names stay on
+  // live textures. Copies only: a same-shape guess could swap twin displays.
+  // A routed texture is left to follow_recreated, even one that died since
+  // its check: moving its names entry here would make that check refuse the
+  // routed side's own copy as paired elsewhere.
+  const auto follow_panels = [&](const std::array<std::uint64_t, MaxDisplaySides>& routed) {
+    const auto records = win::display_resource_records();
+    const auto alive = [&](std::uint64_t id) {
+      return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
+    };
+    const auto feeds = win::display_feed_pairs();
+    std::vector<std::string> moved;
+    for (auto& panel : state.map) {
+      if (!panel.id || alive(panel.id) || std::find(routed.begin(), routed.end(), panel.id) != routed.end())
+        continue;
+      const auto next = display_identity::follow_copies(panel.id, feeds.data(), feeds.size(), alive, [&](std::uint64_t id) {
+        return std::none_of(state.map.begin(), state.map.end(), [&](const auto& other) { return other.id == id; });
+      });
+      if (!next)
+        continue;
+      for (auto& name : state.names)
+        if (name.first == panel.id)
+          name.first = next;
+      panel.id = next;
+      char item[96];
+      std::snprintf(item, sizeof(item), " %s=#%llu", panel.name, static_cast<unsigned long long>(next));
+      moved.emplace_back(item);
+    }
+    if (!moved.empty())
+      log_chunks(status, "Display panels recreated", moved);
   };
   if (state.locked && profile == state.named_profile) {
     // Keep the frozen mapping, following recreated textures.
@@ -498,6 +529,7 @@ void service_panel_identity(PanelIdentityLog& state,
                       static_cast<unsigned long long>(named[1]), static_cast<unsigned long long>(named[2]));
         log_status(status, detail);
       }
+      follow_panels(named);
     } catch (...) {
     }
     return;
@@ -676,6 +708,7 @@ void service_panel_identity(PanelIdentityLog& state,
       const auto paired = named;
       named = follow_recreated(named);
       rename_recreated(paired, named);
+      follow_panels(named);
     }
     win::set_named_targets(named);
     if (named != state.named || profile != state.named_profile) {
@@ -2557,6 +2590,15 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.dynamic_depth_bias_calls),
                     static_cast<unsigned long long>(graphics.dynamic_strip_cut_calls),
                     static_cast<unsigned long long>(graphics.sample_position_calls));
+      log_status(status, copy_detail);
+      std::snprintf(copy_detail, sizeof(copy_detail),
+                    "PFD shadow: modes=%s saves=%llu entry_restores=%llu restores=%llu lost_writes=%llu held=%llu fallbacks=%llu "
+                    "baselines=%llu",
+                    graphics.shadow_modes, static_cast<unsigned long long>(graphics.shadow_saves),
+                    static_cast<unsigned long long>(graphics.shadow_entry_restores),
+                    static_cast<unsigned long long>(graphics.shadow_restores), static_cast<unsigned long long>(graphics.shadow_lost_writes),
+                    static_cast<unsigned long long>(graphics.shadow_held), static_cast<unsigned long long>(graphics.shadow_fallbacks),
+                    static_cast<unsigned long long>(graphics.shadow_baselines));
       log_status(status, copy_detail);
       log_contention(status, graphics, output);
       log_hook_timing(status);

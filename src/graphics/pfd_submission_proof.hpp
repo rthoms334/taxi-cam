@@ -240,6 +240,7 @@ class PfdSubmissionProof {
       slot = &slots_[used_++];
       slot->key = key;
       slot->first_before = before;
+      slot->entry_clean = !prefix_interference_;
     }
     if (!slot || (slot->seen && slot->after != before)) {
       invalidate(slot ? Refusal::transition_chain : Refusal::capacity);
@@ -470,6 +471,42 @@ class PfdSubmissionProof {
     }
     return count;
   }
+  // The first list in this Execute that writes the display, and the state that
+  // list found it in: the before-state of its first transition, or the RT/UAV
+  // state its first draw or clear kept from an earlier list. When insertable, a
+  // copy inserted before that list and returning to that state lands under
+  // every write of this Execute (COMMON is not: it promotes on use). clean: no
+  // draw or clear earlier in that list could have sampled the display.
+  struct Entry {
+    std::size_t list = static_cast<std::size_t>(-1);
+    D3D12_RESOURCE_STATES state{};
+    bool clean{}, insertable{};
+    explicit operator bool() const noexcept { return list != static_cast<std::size_t>(-1); }
+  };
+  static Entry batch_entry(const Recording* batch, std::size_t count, Key key) noexcept {
+    if (!batch_allows(batch, count) || !key.resource || !key.generation)
+      return {};
+    for (std::size_t i = 0; i < count; ++i)
+      for (const auto& slot : batch[i].proof->occupied())
+        if (slot.key == key && slot.seen && slot.wrote)
+          return {i, slot.first_before, slot.entry_clean, insertable_after(slot.first_before)};
+    return {};
+  }
+  // The base-mip state the last list in this Execute that names the display
+  // leaves it in. known is false when no list names it.
+  struct After {
+    D3D12_RESOURCE_STATES state{};
+    bool known{};
+  };
+  static After batch_after(const Recording* batch, std::size_t count, Key key) noexcept {
+    if (!batch_allows(batch, count) || !key.resource || !key.generation)
+      return {};
+    for (std::size_t i = count; i-- > 0;)
+      for (const auto& slot : batch[i].proof->occupied())
+        if (slot.key == key && slot.seen)
+          return {slot.after, true};
+    return {};
+  }
   // Copy after the last list only when this batch does not touch the display.
   static Overlay carried_overlay(const Recording* batch, std::size_t count, Key key, D3D12_RESOURCE_STATES carried) noexcept {
     if (!batch_allows(batch, count) || !key.resource || !key.generation || !insertable_after(carried))
@@ -487,6 +524,8 @@ class PfdSubmissionProof {
     UINT subresource{};
     UINT prefix_blocker = UINT_MAX;
     bool seen{}, exit{}, prefix_exit{}, leading_exit{}, wrote{};
+    // No draw or clear in this list preceded the first event for this key.
+    bool entry_clean{};
   };
   static bool copy_restorable(D3D12_RESOURCE_STATES state) noexcept {
     // COMMON is exact only because an explicit full RT exit established it and
@@ -544,6 +583,8 @@ class PfdSubmissionProof {
       slot->first_before = state;
       slot->after = state;
       slot->seen = true;
+      // RT since list entry: nothing earlier in this list could sample it.
+      slot->entry_clean = state == D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
     slot->wrote = true;
     if (slot->prefix_exit && slot->prefix_blocker == UINT_MAX)
