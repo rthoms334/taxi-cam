@@ -644,7 +644,9 @@ DWORD WINAPI worker(void*) noexcept {
   const bool manual_only = profile.taxi_control == profiles::TaxiControl::manual_only;
   const bool pmdg_dsp = profile.taxi_control == profiles::TaxiControl::pmdg_dsp_cam;
   const bool commandable = profiles::commandable_buttons(profile);
-  bool taxi_defined = !manual_only && last_packet != nullptr;
+  // One latch per TAXI button, not per display: a placed lower display has none.
+  const unsigned taxi_sides = profiles::taxi_latches(profile);
+  bool taxi_defined = !manual_only && last_packet != nullptr && (pmdg_dsp || taxi_sides >= 2);
   if (pmdg_dsp) {
     for (const auto name : PmdgDspLvars) {
       if (!taxi_defined)
@@ -659,7 +661,7 @@ DWORD WINAPI worker(void*) noexcept {
       remember_taxi_packet();
     }
   } else {
-    for (unsigned side = 0; side < profile.sides; ++side) {
+    for (unsigned side = 0; side < taxi_sides; ++side) {
       if (!taxi_defined)
         break;
       taxi_defined = SUCCEEDED(define(session, 3, profile.taxi_lvars[side], "number", 4, 0, 0xffffffffu));
@@ -673,13 +675,13 @@ DWORD WINAPI worker(void*) noexcept {
   // the aircraft's real input event; its own controller updates the light.
 #if !defined(TAXI_BODY_POSE_PROVIDER_VALIDATION) && !defined(TAXI_BODY_POSE_PROVIDER_EXTERNAL_VALIDATION)
   if (profile.taxi_control == profiles::TaxiControl::push_event && map_event && transmit_event) {
-    for (unsigned side = 0; side < profile.sides; ++side) {
+    for (unsigned side = 0; side < taxi_sides; ++side) {
       taxi_events[side] = SUCCEEDED(map_event(session, 10 + side, profile.taxi_events[side]));
       remember_taxi_packet();
     }
   }
   if (profile.taxi_control == profiles::TaxiControl::lvar_off && set_data) {
-    for (unsigned side = 0; side < profile.sides; ++side) {
+    for (unsigned side = 0; side < taxi_sides; ++side) {
       // iniBuilds uses this exact latch for TAXI state and its lamp. A separate
       // single-field definition permits idempotent OFF without touching the
       // opposite side or generating a second toggle while awaiting an ACK.
@@ -900,7 +902,7 @@ DWORD WINAPI worker(void*) noexcept {
             lighting_failure("lighting_packet_layout");
         } else if (bytes >= 40 && (header[3] == 3 || header[5] == 3)) {
           if (!(pmdg_dsp ? accept_pmdg_dsp_packet(raw, bytes, GetTickCount64())
-                         : accept_taxi_packet(raw, bytes, GetTickCount64(), profile.sides)))
+                         : accept_taxi_packet(raw, bytes, GetTickCount64(), taxi_sides)))
             taxi_failure("taxi_packet_layout");
         } else {
           accept_aircraft_packet(raw, bytes, GetTickCount64());

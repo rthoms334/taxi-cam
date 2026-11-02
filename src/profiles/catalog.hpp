@@ -209,6 +209,15 @@ inline constexpr unsigned shared_texture_sides(const AircraftProfile& p) noexcep
 inline constexpr bool commandable_buttons(const AircraftProfile& p) noexcept {
   return p.taxi_control == TaxiControl::push_event || p.taxi_control == TaxiControl::lvar_off;
 }
+// TAXI latches read for a profile: its leading sides that name a TAXI L:var.
+// A lower display placed on a two-display aircraft (apply_choices) adds a side
+// with no TAXI button of its own, so it adds no latch.
+inline constexpr unsigned taxi_latches(const AircraftProfile& p) noexcept {
+  unsigned count = 0;
+  while (count < p.sides && count < MaxDisplaySides && p.taxi_lvars[count] && p.taxi_lvars[count][0])
+    ++count;
+  return count;
+}
 // Minimum PLEASE WAIT time after a side starts drawing, and the camera-image
 // age that brings the page back while the side stays on.
 inline constexpr std::uint64_t WaitingPageMinimumMs = 750;
