@@ -15,6 +15,10 @@
           "image": "docs/whats-new/1.3.0/door-camera-setup.png"
         },
         {
+          "title": "Film grain and black and white",
+          "text": "Any camera can look more like a real camera: the two icons at the top right of its picture in Setup add film grain with darker edges, and take its colour out. The door camera starts with film grain, in colour; the taxi cameras start with neither. Both are saved for each aircraft."
+        },
+        {
           "title": "Guided setup",
           "text": "Settings is simpler. Overview shows how the cameras are doing, with quick controls, and Setup takes you through three steps: Displays, Taxi cameras and Door camera, each with the controls that turn its cameras on. Place a display by selecting or dragging its picture. Exact values, texture routing and guide values are under Advanced. Display is now Options.",
           "image": "docs/whats-new/1.3.0/guided-setup.png"

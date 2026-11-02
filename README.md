@@ -81,6 +81,8 @@ With the aircraft parked and the cameras on, open **Setup → Taxi cameras**. Ea
 
 Choose **Next** to apply and keep your adjustments. **Defaults** on a card restores that camera's default view; choose **Next** afterwards to keep the reset.
 
+The icons at the top of a card's picture turn its camera on or off (left) and give it a look (right): **film grain**, with darker edges like a real camera, and **black and white**. They apply at once; choose **Next** to keep them. The door camera's picture on **Setup → Door camera** has the same icons, and it starts with film grain, in colour.
+
 **Adjust live view** on a card opens a window on that camera with the display as the cameras draw it: drag a camera to aim it (it turns the way you drag, like the simulator's mouse look), use the arrow keys and Page Up / Page Down to move it, use the wheel to zoom, and drag the guide points. **Display area** shows the whole display texture with the camera area as a white rectangle; drag its handles to resize it or its frame to move it. A new shape renders the cameras at that shape after a few seconds, so nothing is stretched; the cameras follow the left display's area, and the other display shows them at that shape inside its own area, with black either side if its shape differs. Changes save when the window closes.
 
 ### Reference guides

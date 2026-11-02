@@ -40,7 +40,8 @@ namespace taxi_camera::standalone {
 // lvar_bindings (cockpit L:vars bound to camera actions) and the door camera
 // (door_side, door_live, door_on); Status gains lvar_generation/lvars (what the
 // bridge reads from them) and door_state.
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 27;
+// Protocol 28: Settings film_grain and black_and_white (the cameras' looks).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 28;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 // Settings::door_side of an aircraft without a door camera display.
 inline constexpr std::uint32_t DoorSideNone = MaxDisplaySides;
@@ -106,7 +107,13 @@ struct Settings {
   // keeps it rendering, 0 shows one snapshot taken each time it is turned on.
   // Both are saved per aircraft profile. door_on, session-only, turns it on.
   std::uint32_t door_side = DoorSideNone, door_live = 0, door_on = 0;
+  // Protocol 28: the cameras' looks, a bit per camera view (nose, tail, third
+  // view, door): film grain with darker edges, and black and white. The door
+  // camera starts with film grain, in colour. Saved per aircraft profile.
+  std::uint32_t film_grain = 1u << profiles::DoorFeed, black_and_white = 0;
 };
+// Every camera view's look bit.
+inline constexpr std::uint32_t CameraLookMask = (1u << profiles::CameraViews) - 1;
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
   settings.nose_dot = profile.composition.nose_dot;
@@ -235,6 +242,8 @@ inline bool valid_settings(const Settings& s) noexcept {
       s.calibration_budget > 16384)
     return false;
   if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides) || !valid_lvar_bindings(s.lvar_bindings))
+    return false;
+  if ((s.film_grain & ~CameraLookMask) || (s.black_and_white & ~CameraLookMask))
     return false;
   if (s.door_live > 1 || s.door_on > 1 ||
       (s.door_side != DoorSideNone && (s.door_side >= MaxDisplaySides || !(sides & (1u << s.door_side)))))

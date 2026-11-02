@@ -345,6 +345,8 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"This texture's format or size cannot be snapshotted.", L"无法为此纹理的格式或尺寸截取快照。"},
     {L"Turn the door camera on or off", L"打开或关闭舱门摄像头"},
     {L"Turn the left and right cameras on or off", L"打开或关闭左右摄像头"},
+    {L"Film grain: grain and darker edges, like a camera", L"胶片颗粒：颗粒感和较暗的边缘，像摄像机一样"},
+    {L"Black and white", L"黑白"},
     {L"UPPER VIEW", L"上方视角"},
     {L"Windows error {0}", L"Windows 错误 {0}"},
     {L"In use by another app", L"已被其他程序占用"},

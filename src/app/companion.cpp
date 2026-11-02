@@ -1688,6 +1688,9 @@ constexpr int LiveFeedId = 720, DisplayAreaId = 724, DefaultsId = 725, RoutingOp
 // Power buttons on the live pictures: each taxi camera card's (790 + feed)
 // turns the taxi cameras on or off, the door camera step's the door camera.
 constexpr int CameraPowerId = 790, DoorPowerId = 793;
+// Look icons on the same pictures (+ camera view): film grain and black and
+// white for that camera.
+constexpr int LookGrainId = 850, LookMonoId = 860;
 // The door camera step's Display area: its display's area in the live view.
 constexpr int DoorAreaId = 747;
 // Taxi cameras: its camera cards, Advanced's guide row and the controls card
@@ -4734,8 +4737,13 @@ bool save_controls() {
 RECT power_icon_rect(const RECT& well) {
   return {well.left + scale(6), well.top + scale(6), well.left + scale(34), well.top + scale(34)};
 }
-// Its tooltip, for a picture well at these logical coordinates.
-void power_tooltip(int id, int x, int y, int w, int h, const wchar_t* tip) {
+// The look icons in its top right corner: black and white in the corner (slot
+// 0), film grain beside it (slot 1).
+RECT look_icon_rect(const RECT& well, int slot) {
+  const int right = well.right - scale(6) - slot * scale(32);
+  return {right - scale(28), well.top + scale(6), right, well.top + scale(34)};
+}
+void icon_tooltip(int id, const RECT& bounds, const wchar_t* tip) {
   if (!sidebar_tooltip)
     return;
   TOOLINFOW info{};
@@ -4743,9 +4751,19 @@ void power_tooltip(int id, int x, int y, int w, int h, const wchar_t* tip) {
   info.uFlags = TTF_SUBCLASS;
   info.hwnd = window;
   info.uId = static_cast<UINT_PTR>(id);
-  info.rect = power_icon_rect(rectangle(x, y, w, h));
+  info.rect = bounds;
   info.lpszText = const_cast<wchar_t*>(tip);
   SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
+}
+// Its tooltip, for a picture well at these logical coordinates.
+void power_tooltip(int id, int x, int y, int w, int h, const wchar_t* tip) {
+  icon_tooltip(id, power_icon_rect(rectangle(x, y, w, h)), tip);
+}
+// The look icons' tooltips, for camera view `view`'s picture well.
+void look_tooltips(unsigned view, int x, int y, int w, int h) {
+  const auto well = rectangle(x, y, w, h);
+  icon_tooltip(LookGrainId + static_cast<int>(view), look_icon_rect(well, 1), tr(L"Film grain: grain and darker edges, like a camera"));
+  icon_tooltip(LookMonoId + static_cast<int>(view), look_icon_rect(well, 0), tr(L"Black and white"));
 }
 // On for the taxi cameras when the left and right cameras both are, as the
 // Both action turns them off then; for the door camera while it is on.
@@ -4796,6 +4814,67 @@ void draw_power_icon(HDC dc, const RECT& well, int id) {
     DeleteObject(pen);
   }
   SelectObject(dc, old_brush);
+}
+bool camera_look_on(int id) {
+  const auto s = draft();
+  return id >= LookMonoId ? (s.black_and_white >> (id - LookMonoId) & 1u) != 0 : (s.film_grain >> (id - LookGrainId) & 1u) != 0;
+}
+// A look icon flips its camera's film grain or black and white at once; it
+// saves with the step's other values (Next).
+void toggle_camera_look(int id) {
+  if (!apply(false))
+    return;
+  auto s = draft();
+  if (id >= LookMonoId)
+    s.black_and_white ^= 1u << (id - LookMonoId);
+  else
+    s.film_grain ^= 1u << (id - LookGrainId);
+  publish(s);
+  dirty_notice();
+}
+// Camera view `view`'s look icons in its picture's top right corner, drawn
+// like the power icon: scattered grain, and a circle half filled for black
+// and white; the accent while on, light while off, outlined in black.
+void draw_look_icons(HDC dc, const RECT& well, unsigned view) {
+  const int grain_id = LookGrainId + static_cast<int>(view), mono_id = LookMonoId + static_cast<int>(view);
+  const auto grain = look_icon_rect(well, 1), mono = look_icon_rect(well, 0);
+  power_areas.push_back({grain, grain_id});
+  power_areas.push_back({mono, mono_id});
+  const auto dot = [&](int x, int y, int radius, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    const auto old_brush = SelectObject(dc, brush);
+    const auto old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    Ellipse(dc, x - radius, y - radius, x + radius + 1, y + radius + 1);
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
+    DeleteObject(brush);
+  };
+  // Grain: seven specks, each on a black one a little larger.
+  constexpr int specks[][2]{{-6, -6}, {2, -7}, {7, -1}, {-1, -1}, {-7, 4}, {4, 6}, {-2, 7}};
+  const int gx = (grain.left + grain.right) / 2, gy = (grain.top + grain.bottom) / 2;
+  const COLORREF grain_color = camera_look_on(grain_id) ? Accent : Text;
+  for (const bool outline : {true, false})
+    for (const auto& s : specks)
+      dot(gx + scale(s[0]), gy + scale(s[1]), outline ? scale(3) : scale(2), outline ? RGB(0, 0, 0) : grain_color);
+  // Black and white: a ring with its left half filled.
+  const int mx = (mono.left + mono.right) / 2, my = (mono.top + mono.bottom) / 2, radius = scale(8);
+  const COLORREF mono_color = camera_look_on(mono_id) ? Accent : Text;
+  const auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+  for (const bool outline : {true, false}) {
+    HPEN pen = CreatePen(PS_SOLID, outline ? scale(5) : scale(2), outline ? RGB(0, 0, 0) : mono_color);
+    const auto old_pen = SelectObject(dc, pen);
+    Ellipse(dc, mx - radius, my - radius, mx + radius, my + radius);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+  }
+  HBRUSH fill = CreateSolidBrush(mono_color);
+  SelectObject(dc, fill);
+  const auto old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+  // Counterclockwise from the top to the bottom: the left half.
+  Chord(dc, mx - radius, my - radius, mx + radius + 1, my + radius + 1, mx, my - radius, mx, my + radius);
+  SelectObject(dc, old_pen);
+  SelectObject(dc, old_brush);
+  DeleteObject(fill);
 }
 void build_controls() {
   refreshing = true;
@@ -4913,8 +4992,10 @@ void build_controls() {
         for (int j = 0; j < 6; ++j)
           edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * (field + 10), 246 + (j / 3) * 50, field);
       }
-      if (!advanced)
+      if (!advanced) {
         power_tooltip(CameraPowerId + i, x, 212, inner, CameraCardHeight - 90, tr(L"Turn the left and right cameras on or off"));
+        look_tooltips(static_cast<unsigned>(i), x, 212, inner, CameraCardHeight - 90);
+      }
       const int half = (inner - 10) / 2;
       button(tr(L"Adjust live view"), LiveFeedId + i, x, 172 + height - 42, half, 32);
       button(tr(L"Defaults"), DefaultsId + i, x + half + 10, 172 + height - 42, half, 32);
@@ -4959,8 +5040,10 @@ void build_controls() {
              width);
     button(tr(L"Snapshot"), DoorSnapshotId, 262, 352, 196);
     button(tr(L"Live"), DoorLiveId, 466, 352, 196);
-    if (s.door_side < MaxDisplaySides)
+    if (s.door_side < MaxDisplaySides) {
       power_tooltip(DoorPowerId, 712, 236, 280, advanced ? 150 : 276, tr(L"Turn the door camera on or off"));
+      look_tooltips(profiles::DoorFeed, 712, 236, 280, advanced ? 150 : 276);
+    }
     button(tr(L"Adjust live view"), LiveFeedId + static_cast<int>(profiles::DoorFeed), 712, 528, 136);
     button(tr(L"Defaults"), DefaultsId + static_cast<int>(profiles::DoorFeed), 856, 528, 136);
     if (advanced) {
@@ -5348,6 +5431,7 @@ void draw_page(HDC dc) {
       } else {
         draw_feed_picture(dc, sample, static_cast<unsigned>(i), rectangle(x + 18, 212, inner, CameraCardHeight - 90));
         draw_power_icon(dc, rectangle(x + 18, 212, inner, CameraCardHeight - 90), CameraPowerId + i);
+        draw_look_icons(dc, rectangle(x + 18, 212, inner, CameraCardHeight - 90), static_cast<unsigned>(i));
       }
     }
     if (advanced) {
@@ -5432,6 +5516,7 @@ void draw_page(HDC dc) {
       if (id)
         hit_areas.push_back({box, id});
       draw_power_icon(dc, box, DoorPowerId);
+      draw_look_icons(dc, box, profiles::DoorFeed);
     } else {
       draw_thumbnail(dc, box, 0, tr(L"No display chosen"));
     }
@@ -6118,9 +6203,12 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         end_card_drag(point);
         return 0;
       }
-      // A picture's power icon comes before the picture under it.
+      // A picture's power and look icons come before the picture under it.
       if (const auto* power = power_area_at(point)) {
-        toggle_camera_from_hotkey(power->id == DoorPowerId ? win::CameraDoor : win::CameraBoth);
+        if (power->id >= LookGrainId)
+          toggle_camera_look(power->id);
+        else
+          toggle_camera_from_hotkey(power->id == DoorPowerId ? win::CameraDoor : win::CameraBoth);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }

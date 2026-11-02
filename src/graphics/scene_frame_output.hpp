@@ -53,6 +53,8 @@ class SceneFrameOutput {
   bool hide_ground_speed() noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
   bool set_reference_guides(bool enabled) noexcept;
+  // CameraCompositorD3D12::set_camera_look, for the next recording.
+  bool set_camera_look(std::uint32_t look) noexcept;
   bool set_patch_profile(std::uint32_t profile) noexcept;
   // Metadata-only demand, admitted against the current profile's exact shape.
   // Requests never allocate or record GPU work. Every admitted slot remains

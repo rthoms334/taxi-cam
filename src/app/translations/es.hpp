@@ -345,6 +345,8 @@ inline constexpr Translation SpanishTranslations[]{
     {L"This texture's format or size cannot be snapshotted.", L"No se puede tomar una instantánea de esta textura por su formato o tamaño."},
     {L"Turn the door camera on or off", L"Encender o apagar la cámara de la puerta"},
     {L"Turn the left and right cameras on or off", L"Encender o apagar las cámaras izquierda y derecha"},
+    {L"Film grain: grain and darker edges, like a camera", L"Grano de película: grano y bordes más oscuros, como una cámara"},
+    {L"Black and white", L"Blanco y negro"},
     {L"UPPER VIEW", L"VISTA SUPERIOR"},
     {L"Windows error {0}", L"Error de Windows {0}"},
     {L"In use by another app", L"En uso por otra aplicación"},

@@ -89,6 +89,12 @@ class CameraCompositorD3D12 {
   void set_composition(const profiles::Composition& layout) noexcept { composition_ = layout; }
   bool reference_guides() const noexcept { return reference_guides_; }
   void set_reference_guides(bool enabled) noexcept { reference_guides_ = enabled; }
+  // The cameras' looks, a recorded root constant: LookGrain << n gives input n
+  // (nose, tail left, tail right) film grain and darker edges, and
+  // LookBlackAndWhite << n takes its colour out. The grain moves with each
+  // composition.
+  static constexpr UINT LookGrain = 1, LookBlackAndWhite = 256;
+  void set_camera_look(UINT look) noexcept { look_ = look & (7 * LookGrain | 7 * LookBlackAndWhite); }
   void set_ground_speed(float knots, bool valid) noexcept {
     const auto display = ground_speed_display(knots, valid);
     ground_speed_hidden_ = false;
@@ -653,7 +659,7 @@ class CameraCompositorD3D12 {
   static constexpr DXGI_FORMAT ToneFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
   static constexpr UINT ToneRowPitch = 256;  // 64 texels x 4 bytes, already D3D12-aligned
   static constexpr UINT ToneBit = 256;
-  static constexpr UINT RootConstants = 41;
+  static constexpr UINT RootConstants = 43;
   HRESULT initialize_tone_curve() noexcept {
     D3D12_HEAP_PROPERTIES properties{};
     properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -716,7 +722,9 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-    } display{hdr, exposure, reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
+      UINT look;
+      UINT grain_seed;
+    } display{hdr, exposure, reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_, look_, grain_seed_++};
     static_assert(sizeof(display) == RootConstants * sizeof(UINT));
     private_list->SetGraphicsRoot32BitConstants(1, RootConstants, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1088,7 +1096,7 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
  float SquareNoseMarkers; float SplitBottom; float BottomGap; float BottomPaneHeight; float FrameBorder;
  float TailCornerRX; float TailCornerRY; float TailUpperRX; float TailUpperRY; float TailInnerRX; float TailInnerRY;
- float UiAspect; };
+ float UiAspect; uint LookMask; uint GrainSeed; };
 // Alpha 0 flags an overlay colour for the PFD stamp; see camera_pixel.
 float4 ui_pixel(float3 rgb) { return float4(rgb, 0); }
 float segment_distance(float2 sample_position, float2 first, float2 last) {
@@ -1291,9 +1299,40 @@ float3 feed_rgb(Texture2D<float4> image, Texture2D<float4> bloom, float2 uv, uin
   if ((HdrMask & (17u << feed)) != (17u << feed) || !all(isfinite(rgb))) return rgb;
   return lerp(rgb, bloom.SampleLevel(LinearClamp, uv, 0).rgb, BloomMix);
 }
+float srgb_light(float code) {
+  return code <= 0.04045 ? code / 12.92 : pow(max((code + 0.055) / 1.055, 0), 2.4);
+}
+// One value in [-0.5, 0.5] per output pixel and composition (GrainSeed).
+float grain_noise(float2 position) {
+  uint2 p = uint2(position);
+  uint h = p.x * 1973u + p.y * 9277u + GrainSeed * 26699u;
+  h = (h ^ (h >> 15)) * 0x2c1b3c6du;
+  h = (h ^ (h >> 12)) * 0x297a2d39u;
+  h ^= h >> 15;
+  return float(h & 0xffffu) / 65535.0 - 0.5;
+}
+// The camera looks on a display-referred camera code (LookMask): black and
+// white takes the luminance; film grain darkens the edges of its picture (uv)
+// and adds grain, strongest in the mid tones. Off, the code is unchanged.
+float3 camera_look(float3 code, uint feed, float2 uv, float2 position) {
+  if ((LookMask & (257u << feed)) == 0) return code;
+  if ((LookMask & (256u << feed)) != 0) {
+    float light = dot(float3(srgb_light(code.r), srgb_light(code.g), srgb_light(code.b)), float3(0.2126, 0.7152, 0.0722));
+    float gray = srgb_code(saturate(light));
+    code = float3(gray, gray, gray);
+  }
+  if ((LookMask & (1u << feed)) != 0) {
+    code *= 1 - 0.4 * smoothstep(0.55, 1.4, length((uv - 0.5) * 2));
+    float luma = dot(saturate(code), float3(0.299, 0.587, 0.114));
+    code += grain_noise(position) * 0.1 * (0.35 + 2.6 * luma * (1 - luma));
+  }
+  return saturate(code);
+}
 // Alpha 1 flags a display-referred camera code: the PFD stamp stores this byte
 // on UNORM and sRGB views alike. Overlays use ui_pixel.
-float4 camera_pixel(float3 rgb, uint feed) { return float4(display_rgb(rgb, feed), 1); }
+float4 camera_pixel(float3 rgb, uint feed, float2 uv, float2 position) {
+  return float4(camera_look(display_rgb(rgb, feed), feed, uv, position), 1);
+}
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
@@ -1377,7 +1416,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float right = side_borders ? 768.0 - nose_border : 768.0;
     float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
     float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
-    return camera_pixel(feed_rgb(Nose, NoseBloom, uv, 0), 0);
+    return camera_pixel(feed_rgb(Nose, NoseBloom, uv, 0), 0, uv, position.xy);
   }
   if (position.y < TailTop) return ui_pixel(float3(0, 0, 0));
   if (SplitBottom != 0) {
@@ -1392,11 +1431,11 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
                        (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
-      return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
-    return camera_pixel(feed_rgb(TailRight, TailRightBloom, uv, 2), 2);
+      return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1, uv, position.xy);
+    return camera_pixel(feed_rgb(TailRight, TailRightBloom, uv, 2), 2, uv, position.xy);
   }
   float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
-  return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1);
+  return camera_pixel(feed_rgb(TailLeft, TailLeftBloom, uv, 1), 1, uv, position.xy);
 }
 )";
 
@@ -1423,6 +1462,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   Statistics statistics_;
   float exposure_ev_ = DefaultExposureEv;
   bool reference_guides_ = true;
+  UINT look_ = 0, grain_seed_ = 0;
   profiles::Composition composition_{};
   UINT ground_speed_ = 0;
   bool ground_speed_valid_ = false;

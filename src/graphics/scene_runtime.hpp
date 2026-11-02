@@ -141,6 +141,10 @@ void set_composition(std::uint64_t key, const profiles::Composition& layout);
 // stale. Off discards door images and the page.
 void set_door(std::uint64_t key, bool enabled, bool live);
 void set_reference_guides(std::uint64_t key, bool enabled);
+// The cameras' looks, a bit per profiles camera view (nose, tail, third view,
+// door): film grain with darker edges, and black and white. The taxi cameras'
+// apply to the camera composition, the door camera's to the door page.
+void set_camera_look(std::uint64_t key, std::uint32_t grain, std::uint32_t black_and_white);
 void service();
 Snapshot snapshot(std::uint64_t key);
 // The door page's counters alone, without the GPU timing and capture

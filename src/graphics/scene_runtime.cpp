@@ -545,6 +545,20 @@ void set_reference_guides(std::uint64_t key, bool enabled) {
   if (auto* item = find(key))
     item->output.set_reference_guides(enabled);
 }
+void set_camera_look(std::uint64_t key, std::uint32_t grain, std::uint32_t black_and_white) {
+  // The composition's inputs are the taxi feeds 0-2; the door page's first
+  // input is the door feed.
+  const auto look = [](std::uint32_t grain_bits, std::uint32_t mono_bits) {
+    return grain_bits * CameraCompositorD3D12::LookGrain | mono_bits * CameraCompositorD3D12::LookBlackAndWhite;
+  };
+  constexpr std::uint32_t taxi = (1u << profiles::DoorFeed) - 1;
+  static_assert(profiles::DoorFeed == 3);
+  const std::lock_guard lock(runtime().mutex);
+  if (auto* item = find(key)) {
+    item->output.set_camera_look(look(grain & taxi, black_and_white & taxi));
+    item->door_output.set_camera_look(look(grain >> profiles::DoorFeed & 1, black_and_white >> profiles::DoorFeed & 1));
+  }
+}
 void reset_feed(std::uint64_t key) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key); item && !item->status.failed) {

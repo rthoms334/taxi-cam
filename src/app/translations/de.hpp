@@ -345,6 +345,8 @@ inline constexpr Translation GermanTranslations[]{
     {L"This texture's format or size cannot be snapshotted.", L"Für Format oder Größe dieser Textur ist keine Momentaufnahme möglich."},
     {L"Turn the door camera on or off", L"Türkamera ein- oder ausschalten"},
     {L"Turn the left and right cameras on or off", L"Linke und rechte Kamera ein- oder ausschalten"},
+    {L"Film grain: grain and darker edges, like a camera", L"Filmkorn: Körnung und dunklere Ränder wie bei einer Kamera"},
+    {L"Black and white", L"Schwarzweiß"},
     {L"UPPER VIEW", L"OBERE ANSICHT"},
     {L"Windows error {0}", L"Windows-Fehler {0}"},
     {L"In use by another app", L"Von einer anderen App belegt"},

@@ -31,6 +31,7 @@ std::array<float, 4> packed_color(UINT, UINT source, bool night = false) {
 
 struct Result {
   std::uint64_t door_pixels = 0;
+  std::uint64_t look_pixels = 0;
   bool warp = false;
   bool debug_layer = false;
   std::uint64_t debug_errors = 0;
@@ -605,6 +606,110 @@ void door_case(ID3D12Device* device, Result& result) {
   compositor.release();
 }
 
+// The camera looks on a door page of one colour: black and white leaves equal
+// channels, film grain darkens the corners and varies from pixel to pixel and
+// from one composition to the next; with no look the picture is unchanged.
+void look_case(ID3D12Device* device, Result& result) {
+  Compositor compositor;
+  check(compositor.initialize(device), compositor.last_error());
+  Reference<ID3D12Resource> source;
+  create_texture(device, texture_description(768, 763, DXGI_FORMAT_R8G8B8A8_UNORM), source.put());
+  auto layout = taxi_camera::profiles::A350Etacs;
+  layout.split_bottom = 0;
+  layout.nose_height = layout.divider_top = layout.divider_bottom = layout.tail_top = Compositor::Height;
+  compositor.set_composition(layout);
+  compositor.set_reference_guides(false);
+  compositor.hide_ground_speed();
+  check(compositor.set_inputs(source.get(), DXGI_FORMAT_R8G8B8A8_UNORM, source.get(), DXGI_FORMAT_R8G8B8A8_UNORM, source.get(),
+                              DXGI_FORMAT_R8G8B8A8_UNORM),
+        compositor.last_error());
+  D3D12_DESCRIPTOR_HEAP_DESC heap{};
+  heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  heap.NumDescriptors = 1;
+  Reference<ID3D12DescriptorHeap> rtvs;
+  check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtvs.put())), "Create look-test RTV");
+  const auto handle = rtvs->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(source.get(), nullptr, handle);
+  const auto output_description = texture_description(Compositor::Width, Compositor::Height, DXGI_FORMAT_R8G8B8A8_UNORM);
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  UINT64 bytes = 0;
+  device->GetCopyableFootprints(&output_description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = bytes;
+  buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  const auto readback_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+  Reference<ID3D12Resource> readback;
+  check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(readback.put())),
+        "Create look-test readback");
+  constexpr std::array<float, 4> Orange{0.8f, 0.5f, 0.2f, 1};
+  std::vector<unsigned char> first;
+  for (UINT pass = 0; pass < 3; ++pass) {
+    compositor.set_camera_look(pass < 2 ? Compositor::LookGrain | Compositor::LookBlackAndWhite : 0);
+    PrivateSubmission submission(device);
+    auto* list = submission.list();
+    list->ClearRenderTargetView(handle, Orange.data(), 0, nullptr);
+    check(
+        compositor.record(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        compositor.last_error());
+    D3D12_TEXTURE_COPY_LOCATION from{};
+    from.pResource = compositor.output();
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION to{};
+    to.pResource = readback.get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    submission.finish(compositor);
+    void* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+    check(readback->Map(0, &range, &mapped), "Map look-test readback");
+    const auto pixel = [&](UINT x, UINT y) {
+      return static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch + 4 * x;
+    };
+    if (pass == 2) {
+      for (UINT y = 0; y < Compositor::Height; y += 7)
+        for (UINT x = 0; x < Compositor::Width; x += 7) {
+          const auto* rgba = pixel(x, y);
+          require(std::abs(rgba[0] - 204) <= 1 && std::abs(rgba[1] - 128) <= 1 && std::abs(rgba[2] - 51) <= 1 && rgba[3] == 255,
+                  "A camera with no look was changed");
+          ++result.look_pixels;
+        }
+    } else {
+      // The centre 64 x 64 against the top left corner's.
+      double centre = 0, corner = 0, square = 0;
+      unsigned count = 0, moved = 0;
+      for (UINT y = 0; y < 64; ++y)
+        for (UINT x = 0; x < 64; ++x) {
+          const auto* c = pixel(352 + x, 350 + y);
+          const auto* k = pixel(x, y);
+          require(c[0] == c[1] && c[1] == c[2] && k[0] == k[1] && k[1] == k[2] && c[3] == 255,
+                  "Black and white left colour in the picture");
+          centre += c[0];
+          corner += k[0];
+          square += double(c[0]) * c[0];
+          if (pass == 0)
+            first.push_back(c[0]);
+          else
+            moved += first[count] != c[0] ? 1u : 0u;
+          ++count;
+        }
+      centre /= count;
+      corner /= count;
+      const double deviation = std::sqrt(std::max(square / count - centre * centre, 0.0));
+      require(centre - corner > 30, "Film grain did not darken the corners");
+      require(deviation > 3, "Film grain added no grain");
+      require(pass == 0 || moved > count / 2, "The grain did not move between compositions");
+      result.look_pixels += 2 * count;
+    }
+    readback->Unmap(0, nullptr);
+  }
+  compositor.release();
+}
+
 // The simulator tone mapping with an identity table: an independent CPU
 // model of its chain (exposure, log2 table coordinate, 10-bit texels with
 // linear filtering, decode, shoulder, sRGB) must match within two codes.
@@ -784,6 +889,7 @@ Result run(bool force_warp) {
   compositor.release();
   bloom_case(device.get(), result);
   door_case(device.get(), result);
+  look_case(device.get(), result);
   tone_case(device.get(), result);
   if (messages.get()) {
     for (UINT64 index = 0; index < messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++index) {
@@ -814,7 +920,7 @@ int wmain(int argc, wchar_t** argv) {
         "\"msaaRejectionChecks\":%llu,\"shaderCompiles\":%llu,\"descriptorWrites\":%llu,\"inputChanges\":%llu,\"floatPixels\":%llu,"
         "\"packedFloatPixels\":%llu,\"exposureChecks\":%llu,\"magentaPixels\":%llu,\"nightRgbChecks\":%llu,\"referenceOverlay\":true,"
         "\"hdrDisplayConversion\":true,\"liveGuideColor\":true,\"recoloredGuidePixels\":%llu,\"bloomCodes\":[%d,%d,%d,%d],\"toneCodes\":[%"
-        "d,%d,%d],\"toneChecks\":%llu}"
+        "d,%d,%d],\"toneChecks\":%llu,\"lookPixels\":%llu}"
         "\n",
         result.warp ? "true" : "false", result.debug_layer ? "true" : "false", static_cast<unsigned long long>(result.debug_errors),
         static_cast<unsigned long long>(result.frames), static_cast<unsigned long long>(result.checked_pixels),
@@ -827,7 +933,7 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<unsigned long long>(result.magenta_pixels), static_cast<unsigned long long>(result.night_rgb_checks),
         static_cast<unsigned long long>(result.recolored_guide_pixels), result.bloom_codes[0], result.bloom_codes[1], result.bloom_codes[2],
         result.bloom_codes[3], result.tone_codes[0], result.tone_codes[1], result.tone_codes[2],
-        static_cast<unsigned long long>(result.tone_checks));
+        static_cast<unsigned long long>(result.tone_checks), static_cast<unsigned long long>(result.look_pixels));
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());

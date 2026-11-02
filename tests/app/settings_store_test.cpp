@@ -282,6 +282,36 @@ void lvar_bindings_persist() {
           "An equals binding without a whole value falls back to momentary");
 }
 
+// Each camera's look sits with its mount: film grain on the door camera by
+// default, black and white nowhere; a saved choice is kept and a bad value
+// keeps that camera's default.
+void camera_looks_persist() {
+  select_fixture(L"camera-looks");
+  auto saved = customized(profiles::Pmdg777);
+  require(saved.film_grain == 1u << profiles::DoorFeed && saved.black_and_white == 0,
+          "A fresh profile gives the door camera film grain, in colour, and the taxi cameras neither");
+  saved.film_grain = 1u << 0;
+  saved.black_and_white = 1u << 1 | 1u << profiles::DoorFeed;
+  require(save_settings(saved), "Save a profile with camera looks");
+  const auto path = settings_path(saved);
+  require(ini(path, L"nose", L"film_grain") == L"1" && ini(path, L"door", L"film_grain") == L"0" &&
+              ini(path, L"tail", L"black_and_white") == L"1" && ini(path, L"door", L"black_and_white") == L"1" &&
+              ini(path, L"wing_right", L"black_and_white") == L"0",
+          "Each camera's section holds its looks");
+  Settings loaded;
+  require(load_settings(loaded, L"missing-installation", saved.profile) && same_preferences(loaded, saved) &&
+              loaded.film_grain == saved.film_grain && loaded.black_and_white == saved.black_and_white,
+          "Camera looks survive a save");
+  patch(path, L"door", L"film_grain", L"2");
+  patch(path, L"nose", L"black_and_white", L"yes");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.film_grain == (1u << 0 | 1u << profiles::DoorFeed) &&
+              loaded.black_and_white == saved.black_and_white,
+          "An unreadable look keeps that camera's default");
+  auto invalid = saved;
+  invalid.film_grain = 1u << profiles::CameraViews;
+  require(!valid_settings(invalid), "A look for a camera that does not exist is refused");
+}
+
 // Every aircraft keeps the door camera's mount in [door] and its display and
 // picture in [door_camera]; the third mount stays [wing_right].
 void door_camera_persists() {
@@ -419,6 +449,7 @@ int main() {
     retired_lighting_keys_are_ignored();
     saved_enabled_key_is_ignored();
     lvar_bindings_persist();
+    camera_looks_persist();
     door_camera_persists();
     rejected_preferences_are_left_unchanged();
     legacy_import_preserves_original();

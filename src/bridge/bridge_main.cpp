@@ -1870,6 +1870,7 @@ DWORD run_impl() {
         log_startup(status, start_timing, "request_begin");
         scene_runtime::set_composition(key, composition);
         scene_runtime::set_reference_guides(key, drawing->reference_guides);
+        scene_runtime::set_camera_look(key, settings.film_grain, settings.black_and_white);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
@@ -1909,6 +1910,7 @@ DWORD run_impl() {
     // source leases. The profile-change transaction above still owns teardown.
     scene_runtime::set_composition(key, composition);
     scene_runtime::set_reference_guides(key, drawing->reference_guides);
+    scene_runtime::set_camera_look(key, settings.film_grain, settings.black_and_white);
     const auto light = native_camera::get_lighting();
     // The fallback exposure, used while the tone curve is not: automatic from
     // the ambient light with a fixed night boost.
@@ -2438,6 +2440,30 @@ DWORD run_impl() {
       std::snprintf(fog_detail, sizeof(fog_detail), "Camera fog: resets=%llu volumes=%u", static_cast<unsigned long long>(fog.resets),
                     fog.volumes);
       log_status(status, fog_detail);
+      // Camera look: film grain and black and white, a bit per camera view.
+      char look_detail[96];
+      std::snprintf(look_detail, sizeof(look_detail), "Camera look: film_grain=0x%x black_and_white=0x%x", settings.film_grain,
+                    settings.black_and_white);
+      log_status(status, look_detail);
+      // Cockpit L:vars: the stream and each bound name as read (value, changes
+      // to on and to off this stream; unread until the simulator sends it).
+      const auto lvar_read = native_camera::get_lvar_bindings();
+      char lvar_detail[640];
+      auto lvar_used =
+          static_cast<std::size_t>(std::snprintf(lvar_detail, sizeof(lvar_detail), "Cockpit L:vars: generation=%u error=%s",
+                                                 lvar_read.generation, lvar_read.error && *lvar_read.error ? lvar_read.error : "none"));
+      for (std::size_t i = 0; i < win::LvarBindingCount && lvar_used < sizeof(lvar_detail); ++i) {
+        const auto& binding = settings.lvar_bindings[i];
+        if (!binding.name[0])
+          continue;
+        const auto& read = lvar_read.states[i];
+        const auto appended = std::snprintf(lvar_detail + lvar_used, sizeof(lvar_detail) - lvar_used, " %.63s=%.6g/%u/%u%s", binding.name,
+                                            static_cast<double>(read.value), read.rises, read.falls, read.read ? "" : "(unread)");
+        if (appended < 0 || static_cast<std::size_t>(appended) >= sizeof(lvar_detail) - lvar_used)
+          break;
+        lvar_used += static_cast<std::size_t>(appended);
+      }
+      log_status(status, lvar_detail);
       // Capture phase, per feed nose/left/right since the bridge started:
       // ordered batches that drew the camera image, those that drew it once
       // (the deferred lighting) and the most draws in one batch; captures after

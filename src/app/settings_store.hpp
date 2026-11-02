@@ -572,6 +572,15 @@ inline bool load_settings(Settings& s,
   for (unsigned i = 0; i < sections.size(); ++i)
     for (unsigned j = 0; j < 6; ++j)
       value.mounts[i][j] = read(sections[i], names[j], value.mounts[i][j]);
+  // Each camera's look (film_grain, black_and_white: 1 or 0); a camera without
+  // the key keeps its default, film grain on the door camera.
+  for (unsigned i = 0; i < sections.size(); ++i)
+    for (auto* mask : {&value.film_grain, &value.black_and_white}) {
+      const std::uint32_t bit = 1u << i;
+      const UINT on = integer(sections[i], mask == &value.film_grain ? L"film_grain" : L"black_and_white", *mask & bit ? 1 : 0);
+      if (on <= 1)
+        *mask = on ? *mask | bit : *mask & ~bit;
+    }
   // Pre-protocol-13 files only stored nose/tail, and files before the door
   // camera have no [door]: keep the profile's mount where a section is absent.
   std::array<bool, profiles::CameraViews> mount_saved{};
@@ -604,24 +613,30 @@ inline bool save_settings(const Settings& s) {
   const auto& t = s.mounts[1];
   const auto& w = s.mounts[2];
   const auto& d = s.mounts[profiles::DoorFeed];
-  const int count =
-      std::swprintf(text, 4096,
-                    L"[service]\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
-                    L"[display]\r\ncamera_mode=%u\r\ncamera_rate=%u\r\n"
-                    L"calibration_budget=%u\r\nday_brightness=%.9g\r\nnight_brightness=%.9g\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\n"
-                    L"speed_blue=%.9g\r\n"
-                    L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
-                    L"nose_dot_x=%.9g\r\nnose_dot_y=%.9g\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\n"
-                    L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
-                    L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
-                    L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
-                    L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
-                    L"[door]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
-                    s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_mode, s.camera_rate, s.calibration_budget, s.day_brightness,
-                    s.night_brightness, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1],
-                    s.guide_color[2], s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1],
-                    s.tail_inner[0], s.tail_inner[1], n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5], w[0], w[1],
-                    w[2], w[3], w[4], w[5], d[0], d[1], d[2], d[3], d[4], d[5]);
+  const auto grain = [&](unsigned view) { return s.film_grain >> view & 1u; };
+  const auto mono = [&](unsigned view) { return s.black_and_white >> view & 1u; };
+  const int count = std::swprintf(
+      text, 4096,
+      L"[service]\r\nfollow_taxi=%u\r\nauto_detect=%u\r\ncam_button_revision=%u\r\n"
+      L"[display]\r\ncamera_mode=%u\r\ncamera_rate=%u\r\n"
+      L"calibration_budget=%u\r\nday_brightness=%.9g\r\nnight_brightness=%.9g\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\n"
+      L"speed_blue=%.9g\r\n"
+      L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
+      L"nose_dot_x=%.9g\r\nnose_dot_y=%.9g\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\n"
+      L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
+      L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
+      L"film_grain=%u\r\nblack_and_white=%u\r\n"
+      L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
+      L"film_grain=%u\r\nblack_and_white=%u\r\n"
+      L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
+      L"film_grain=%u\r\nblack_and_white=%u\r\n"
+      L"[door]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
+      L"film_grain=%u\r\nblack_and_white=%u\r\n",
+      s.follow_taxi, s.auto_detect, kCamButtonRevision, s.camera_mode, s.camera_rate, s.calibration_budget, s.day_brightness,
+      s.night_brightness, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0], s.guide_color[1], s.guide_color[2],
+      s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1],
+      n[0], n[1], n[2], n[3], n[4], n[5], grain(0), mono(0), t[0], t[1], t[2], t[3], t[4], t[5], grain(1), mono(1), w[0], w[1], w[2], w[3],
+      w[4], w[5], grain(2), mono(2), d[0], d[1], d[2], d[3], d[4], d[5], grain(profiles::DoorFeed), mono(profiles::DoorFeed));
   if (count <= 0)
     return false;
   const auto write = [](const std::wstring& destination, const std::wstring& body) {
