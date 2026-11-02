@@ -131,9 +131,11 @@ struct GraphicsStatus {
   // Display shadow per side ('-' off, 'q' queue copies, 'd' direct stamps,
   // 'r' restoring), and its saves, restores before the instrument's writes
   // while the camera runs, restores after it stops, instrument writes it
-  // missed, Close-time camera writes held for it and fallbacks.
+  // missed, Close-time camera writes held for it, fallbacks, and saves taken
+  // while the area may hold a camera picture.
   char shadow_modes[MaxDisplaySides + 1]{};
-  std::uint64_t shadow_saves{}, shadow_entry_restores{}, shadow_restores{}, shadow_lost_writes{}, shadow_held{}, shadow_fallbacks{};
+  std::uint64_t shadow_saves{}, shadow_entry_restores{}, shadow_restores{}, shadow_lost_writes{}, shadow_held{}, shadow_fallbacks{},
+      shadow_baselines{};
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
   const char* target_detection = "warming_up";

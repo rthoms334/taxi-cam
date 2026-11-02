@@ -2550,11 +2550,13 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.sample_position_calls));
       log_status(status, copy_detail);
       std::snprintf(copy_detail, sizeof(copy_detail),
-                    "PFD shadow: modes=%s saves=%llu entry_restores=%llu restores=%llu lost_writes=%llu held=%llu fallbacks=%llu",
+                    "PFD shadow: modes=%s saves=%llu entry_restores=%llu restores=%llu lost_writes=%llu held=%llu fallbacks=%llu "
+                    "baselines=%llu",
                     graphics.shadow_modes, static_cast<unsigned long long>(graphics.shadow_saves),
                     static_cast<unsigned long long>(graphics.shadow_entry_restores),
                     static_cast<unsigned long long>(graphics.shadow_restores), static_cast<unsigned long long>(graphics.shadow_lost_writes),
-                    static_cast<unsigned long long>(graphics.shadow_held), static_cast<unsigned long long>(graphics.shadow_fallbacks));
+                    static_cast<unsigned long long>(graphics.shadow_held), static_cast<unsigned long long>(graphics.shadow_fallbacks),
+                    static_cast<unsigned long long>(graphics.shadow_baselines));
       log_status(status, copy_detail);
       log_contention(status, graphics, output);
       log_hook_timing(status);
