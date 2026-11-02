@@ -185,14 +185,16 @@ class CameraHotkeyRegistration {
     if (!chords_[i].key)
       return ui_text(L"Disabled");
     if (preview_)
-      return ui_text(L"Preview only — shortcut not registered");
+      return ui_text(L"Preview only");
     if (registered_[i])
-      return ui_text(L"Ready — works while Taxi Cam is hidden");
+      return ui_text(L"Ready");
     if (errors_[i] == ERROR_HOTKEY_ALREADY_REGISTERED)
-      return ui_text(L"Unavailable — another app uses this shortcut");
-    return ui_text(L"Unavailable — Windows error {0}");
+      return ui_text(L"In use by another app");
+    return ui_text(L"Windows error {0}");
   }
   DWORD error(size_t i) const noexcept { return errors_[i]; }
+  // A shortcut that is set but did not register; status_wording says why.
+  bool unavailable(size_t i) const noexcept { return chords_[i].key && !preview_ && !registered_[i]; }
   std::wstring status(size_t i) const {
     std::wstring text = status_wording(i);
     if (const auto at = text.find(L"{0}"); at != std::wstring::npos)

@@ -25,14 +25,25 @@ LRESULT CALLBACK host(HWND h, UINT m, WPARAM w, LPARAM l) {
 void command(int id) {
   procedure(window, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
 }
+// Setup > Taxi cameras holds the taxi cameras' shortcuts and buttons.
 HWND shortcut_fixture() {
-  const DialogTemplate layout;
-  const auto editor = CreateDialogIndirectParamW(instance, &layout.dialog, window, shortcut_dialog, 0);
-  require(editor != nullptr, "Create own hidden native shortcut editor");
-  return editor;
+  page = CamerasPage;
+  advanced = false;  // Advanced leaves out the status lines.
+  build_controls();
+  require(shortcut_window == window, "Taxi cameras hosts the shortcut editor");
+  return window;
 }
-void shortcut_command(HWND editor, int id) {
-  shortcut_dialog(editor, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
+void shortcut_command(HWND, int id) {
+  procedure(window, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
+}
+// Next's saving of the shortcuts and buttons, without leaving the step.
+void shortcut_save() {
+  save_controls();
+}
+// Leaving Setup closes the editor.
+void close_shortcuts() {
+  page = OverviewPage;
+  build_controls();
 }
   struct FakeRegistration {
   inline static std::array<bool, 5> active{};
@@ -345,8 +356,9 @@ void ui_checks() {
   hotkey_draft = hotkey_saved = win::DefaultCameraHotkeys;
   hotkey_registration.configure(window, hotkey_saved, preview_ui);
   build_controls();
-  require(GetDlgItem(window, 645) && !GetDlgItem(window, 106),
-          "Shortcut editor opens from Flight-deck control without adding another navigation page");
+  require(GetDlgItem(window, StepPillId + 2) && !GetDlgItem(window, StepPillId + 3) && !GetDlgItem(window, 100 + RoutingPage) &&
+              !GetDlgItem(window, 100 + GuidesPage),
+          "Overview opens the three steps from its pills; Setup is one navigation entry");
   // The custom camera target lives on Display (Overview shows the display cards).
   page = 2;
   build_controls();
@@ -364,45 +376,42 @@ void ui_checks() {
                 settings.camera_rate <= taxi_camera::kMaximumCameraRate,
             "Camera settings UI keeps the custom target in range");
   }
-  // An unfinished brightness edit stands in for unrelated camera edits.
-  const auto brightness = GetDlgItem(window, 201);
-  SetWindowTextW(brightness, L"-");
-  dirty = true;
   const auto original_rate = current.camera_rate;
   const auto editor = shortcut_fixture();
-  require(GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622) && GetDlgItem(editor, 623) &&
-              GetDlgItem(editor, 624) && !GetDlgItem(editor, 625),
-          "Flight-deck shortcut editor exposes Left, Right, Both, SD and the door camera");
+  require(
+      GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622) && !GetDlgItem(editor, 623) && !GetDlgItem(editor, 624),
+      "Taxi cameras has shortcuts for Left, Right and Both on an aircraft without a lower display");
+  page = DoorPage;
+  build_controls();
+  require(GetDlgItem(window, 624) && !GetDlgItem(window, 620) && shortcut_window == window,
+          "Door camera has the door camera's shortcut, and the drafts carry over between the steps");
+  page = CamerasPage;
+  build_controls();
   shortcut_command(editor, 631);
   require(!hotkey_draft[1].key && hotkey_draft != hotkey_saved, "Clear marks a shortcut disabled without applying it early");
-  shortcut_command(editor, IDOK);
+  shortcut_save();
   require(hotkey_draft == hotkey_saved && !hotkey_saved[1].key,
           "Save applies disabled shortcuts in UI preview without global registration");
   win::CameraHotkeys loaded;
   require(win::load_camera_hotkeys(loaded, win::settings_override) && loaded == hotkey_saved,
           "Shortcut UI uses the application preferences file");
-  wchar_t rate_text[64]{};
-  GetWindowTextW(brightness, rate_text, 64);
-  require(dirty && GetDlgItem(window, 201) == brightness && std::wstring(rate_text) == L"-" && current.camera_rate == original_rate,
-          "Saving shortcuts preserves unrelated unfinished camera edits");
+  require(current.camera_rate == original_rate, "Saving shortcuts leaves the camera settings as they are");
   SendDlgItemMessageW(editor, 620, HKM_SETHOTKEY, win::hotkey_control_value({'B', MOD_SHIFT | MOD_CONTROL}), 0);
-  shortcut_dialog(editor, WM_COMMAND, MAKEWPARAM(620, EN_CHANGE), 0);
+  procedure(window, WM_COMMAND, MAKEWPARAM(620, EN_CHANGE), 0);
   require(hotkey_draft != hotkey_saved && hotkey_draft[0] == hotkey_draft[2], "Native editor changes are captured as a draft");
-  shortcut_command(editor, IDOK);
-  wchar_t error[256]{};
-  GetDlgItemTextW(editor, 660, error, 256);
-  require(
-      hotkey_draft != hotkey_saved && std::wstring(error).find(L"different shortcut") != std::wstring::npos && hotkey_saved[0].key == 'L',
-      "Duplicate UI bindings show an error and preserve working preferences");
+  shortcut_save();
+  require(hotkey_draft != hotkey_saved && notice.find(L"different shortcut") != std::wstring::npos && hotkey_saved[0].key == 'L',
+          "Duplicate UI bindings show an error and preserve working preferences");
   shortcut_command(editor, 640);
-  shortcut_command(editor, IDOK);
+  shortcut_save();
   require(hotkey_saved == win::DefaultCameraHotkeys && hotkey_draft == hotkey_saved, "Reset becomes effective only after Save");
   shortcut_command(editor, 630);
-  DestroyWindow(editor);
+  close_shortcuts();
   require(hotkey_draft == hotkey_saved && hotkey_saved[0].key == 'L' && !shortcut_window,
-          "Closing the editor discards unsaved shortcut changes and retains saved bindings");
-  SetWindowTextW(brightness, L"+0.00");
-  command(101);
+          "Leaving Setup discards unsaved shortcut changes and retains saved bindings");
+  // Taxi cameras shows the mount values with Advanced.
+  advanced = true;
+  command(StepPillId + 1);
   auto field = GetDlgItem(window, 302);
   SetWindowTextW(field, L"-");
   const auto mounts = current.mounts;
@@ -423,7 +432,7 @@ void ui_checks() {
   require(!IsWindowEnabled(GetDlgItem(window, 221)), "INOP aircraft does not offer automatic TAXI-button control");
   command(221);
   require(!current.follow_taxi, "Manual-only aircraft ignores automatic-control commands");
-  command(103);
+  command(100 + DiagnosticsPage);
   command(226);
   command(226);
   require(!current.calibration_mask && !current.follow_taxi, "Ending INOP-aircraft calibration retains manual control");
@@ -466,15 +475,16 @@ void button_ui_checks() {
   using win::CameraButton;
   constexpr CameraButton quadrant{0x044f, 0x0405, 5}, engine_master{0x4098, 0xb920, 2};
   const auto editor = shortcut_fixture();
-  require(
-      GetDlgItem(editor, 670) && GetDlgItem(editor, 675) && GetDlgItem(editor, 684) && GetDlgItem(editor, 694) && !GetDlgItem(editor, 685),
-      "Shortcut editor exposes a controller button for Left, Right, Both, SD and the door camera");
+  const bool lower = taxi_actions(profiles::find(current.profile)).size() == 4;
+  require(GetDlgItem(editor, 680) && GetDlgItem(editor, 675) && GetDlgItem(editor, 682) && GetDlgItem(editor, 692) &&
+              (GetDlgItem(editor, 683) != nullptr) == lower && !GetDlgItem(editor, 684),
+          "Taxi cameras has a controller button for each of the aircraft's taxi camera actions, not the door camera's");
   wchar_t text[256]{};
-  GetDlgItemTextW(editor, 670, text, 256);
+  GetDlgItemTextW(editor, 680, text, 256);
   require(std::wstring(text) == L"No button" && button_saved == win::CameraButtons{}, "Controller buttons start unbound");
   shortcut_command(editor, 681);
-  require(button_capture == 1 && button_input.enabled(), "Set button listens for the next controller press");
-  GetDlgItemTextW(editor, 671, text, 256);
+  require(button_capture == 1 && button_input.enabled(), "Selecting the controller field listens for the next controller press");
+  GetDlgItemTextW(editor, 681, text, 256);
   require(std::wstring(text).find(L"Press and release a controller button") == 0, "The editor asks for a full controller press");
   const auto mask = current.manual_mask;
   // WinWing throttles report switch positions, such as an engine master OFF,
@@ -486,18 +496,17 @@ void button_ui_checks() {
   require(button_capture == -1 && button_draft[1] == quadrant && !button_saved[1].button && current.manual_mask == mask,
           "The captured press becomes an unsaved binding and toggles nothing");
   require(!button_input.enabled(), "UI preview stops listening once the press is captured");
-  GetDlgItemTextW(editor, 671, text, 256);
+  GetDlgItemTextW(editor, 681, text, 256);
   require(std::wstring(text).find(L"Button 5 · ") == 0, "The captured binding names its button");
   shortcut_command(editor, 680);
   release(engine_master);
   require(button_capture == 0 && !button_draft[0].button, "A release without a press while waiting sets nothing");
   click(quadrant);
-  shortcut_command(editor, IDOK);
-  GetDlgItemTextW(editor, 660, text, 256);
-  require(std::wstring(text).find(L"different controller button") != std::wstring::npos && button_saved == win::CameraButtons{},
+  shortcut_save();
+  require(notice.find(L"different controller button") != std::wstring::npos && button_saved == win::CameraButtons{},
           "One button on two actions shows an error and saves nothing");
   shortcut_command(editor, 690);
-  shortcut_command(editor, IDOK);
+  shortcut_save();
   win::CameraButtons loaded;
   require(button_saved[1] == quadrant && !button_saved[0].button && button_draft == button_saved &&
               win::load_camera_buttons(loaded, win::settings_override) && loaded == button_saved,
@@ -510,9 +519,9 @@ void button_ui_checks() {
   require(button_capture == -1 && !button_draft[2].button && !button_input.enabled(), "Clear cancels a pending button capture");
   shortcut_command(editor, 693);
   shortcut_command(editor, 681);
-  DestroyWindow(editor);
+  close_shortcuts();
   require(button_draft == button_saved && button_capture == -1 && !button_input.enabled() && button_saved[1] == quadrant,
-          "Closing the editor discards unsaved button changes and stops waiting for a press");
+          "Leaving Setup discards unsaved button changes and stops waiting for a press");
 }
 void native_registration_checks() {
   using namespace win;
@@ -565,10 +574,10 @@ void native_registration_checks() {
   require(RegisterHotKey(window, blocker, fixture[0].modifiers | MOD_NOREPEAT, fixture[0].key),
           "Editor focus actually releases the binding in Windows");
   UnregisterHotKey(window, blocker);
-  SendMessageW(editor, WM_KILLFOCUS, reinterpret_cast<WPARAM>(GetDlgItem(dialog, IDOK)), 0);
+  SendMessageW(editor, WM_KILLFOCUS, reinterpret_cast<WPARAM>(GetDlgItem(dialog, 630)), 0);
   require(!hotkey_editor_focused && hotkey_registration.action(CameraHotkeyFirstId, MAKELPARAM(fixture[0].modifiers, fixture[0].key)) == 0,
           "Leaving the shortcut editor restores the saved binding");
-  DestroyWindow(dialog);
+  close_shortcuts();
   hotkey_registration.clear();
   require(RegisterHotKey(window, blocker, fixture[0].modifiers | MOD_NOREPEAT, fixture[0].key),
           "Shutdown releases the native combination for other apps");

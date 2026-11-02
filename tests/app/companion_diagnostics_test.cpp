@@ -75,7 +75,7 @@ void marking_controls_tests() {
     bool matching = true;
     for (const bool right : {false, true}) {
       const int x = 817 + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
-      const int y = 177 + static_cast<int>(std::lround(current.nose_dot[1] * 45));
+      const int y = 225 + static_cast<int>(std::lround(current.nose_dot[1] * 45));  // Below the step pills.
       // The corner is inside a square and outside the former circular marker.
       matching = matching && GetPixel(dc, x, y) == marking_color && GetPixel(dc, x + 6, y + 6) == marking_color;
     }
@@ -142,6 +142,58 @@ void stale_color_selection_tests() {
   }
 }
 }  // namespace
+// Setup's three steps: the pills on every page, Advanced and its pages,
+// Next saving a step (its L:vars too) and going on, and the door camera's
+// display and picture.
+void setup_step_tests() {
+  current = {};
+  current.profile = profiles::A359.id;
+  current.auto_profile = 0;
+  current.mounts = profiles::A359.mounts;
+  dirty = false;
+  advanced = false;
+  page = OverviewPage;
+  build_controls();
+  require(GetDlgItem(window, StepPillId) && GetDlgItem(window, StepPillId + 2) && !GetDlgItem(window, StepPillId + 3) &&
+              !GetDlgItem(window, NextId),
+          "Overview opens each of the three steps");
+  command(StepPillId + 1);
+  require(page == CamerasPage && GetDlgItem(window, LiveFeedId) && !GetDlgItem(window, 300) && GetDlgItem(window, 620) &&
+              GetDlgItem(window, LvarNameId) && !GetDlgItem(window, 624),
+          "Taxi cameras has its cameras and their controls, and its values only with Advanced");
+  command(AdvancedId);
+  require(advanced && GetDlgItem(window, 300) && GetDlgItem(window, GuidesOpenId), "Advanced adds the values and the guides");
+  command(GuidesOpenId);
+  require(page == GuidesPage && setup_step(page) == 1 && GetDlgItem(window, 370), "Guide values is Taxi cameras' Advanced page");
+  command(AdvancedId);
+  require(!advanced && page == CamerasPage, "Turning Advanced off returns to the step's own page");
+  current.mounts[0][1] += 1;
+  command(DefaultsId);
+  require(current.mounts[0] == profiles::A359.mounts[0], "Defaults restores that camera's mount");
+  SetDlgItemTextW(window, LvarNameId, L"NOT AN LVAR");
+  command(NextId);
+  require(page == CamerasPage && notice.find(L"L:var") != std::wstring::npos, "A name that is not an L:var keeps the step");
+  SetDlgItemTextW(window, LvarNameId, L"A32NX_TAXI");
+  command(NextId);
+  win::Settings loaded;
+  require(page == DoorPage && std::strcmp(current.lvar_bindings[0].name, "A32NX_TAXI") == 0 &&
+              win::load_settings(loaded, L"", profiles::A359.id) && std::strcmp(loaded.lvar_bindings[0].name, "A32NX_TAXI") == 0,
+          "Next saves the step with its L:vars and goes on to Door camera");
+  require(GetDlgItem(window, 624) && GetDlgItem(window, LvarNameId + 4) && !GetDlgItem(window, 620),
+          "Door camera has the door camera's own controls");
+  command(DoorWhereId + 1);
+  require(current.door_side == 0, "Where it shows picks a display");
+  command(DoorLiveId);
+  require(current.door_live == 1, "Live keeps the door camera rendering");
+  command(DoorWhereId);
+  require(current.door_side == win::DoorSideNone && !current.door_on, "None leaves the door camera without a display");
+  command(BackId);
+  require(page == CamerasPage, "Back goes to the step before");
+  command(StepPillId + 2);
+  command(NextId);
+  require(page == OverviewPage && !dirty && !shortcut_window && win::load_settings(loaded, L"", profiles::A359.id) && loaded.door_live == 1,
+          "The last step saves and finishes on Overview");
+}
 int main() {
   try {
     instance = GetModuleHandleW(nullptr);
@@ -348,6 +400,7 @@ int main() {
             "Profile selection clears temporary camera requests");
     marking_controls_tests();
     stale_color_selection_tests();
+    setup_step_tests();
     DestroyWindow(window);
     for (const auto* profile : profiles::Catalog) {
       win::Settings saved;
@@ -355,6 +408,7 @@ int main() {
       DeleteFileW(win::settings_path(saved).c_str());
     }
     DeleteFileW((win::settings_override + L"\\settings.ini").c_str());
+    DeleteFileW((win::settings_override + L"\\hotkeys.ini").c_str());
     RemoveDirectoryW((win::settings_override + L"\\profiles").c_str());
     RemoveDirectoryW(win::settings_override.c_str());
     std::printf("PASS production diagnostic controls: %u checks; hidden own-window only.\n", checks);
