@@ -10,6 +10,7 @@
 #include "../profiles/aircraft_variant.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/rotating_log.hpp"
 #include "report_bundle.hpp"
 #include "system_details.hpp"
 
@@ -161,12 +162,13 @@ struct BugReportForm {
   std::string simulator, aircraft, environment, logs;
 };
 
-// The snapshot's leading whole lines whose query encoding fits `budget`. The
-// report file keeps the full snapshot.
-inline std::string bug_report_fit(const std::string& snapshot, std::size_t budget) {
+// The snapshot's leading whole lines whose query encoding fits `budget`. A
+// saved report file keeps the full snapshot.
+inline std::string bug_report_fit(const std::string& snapshot, std::size_t budget, bool report_saved = true) {
   if (bug_report_query_value(snapshot).size() <= budget)
     return snapshot;
-  constexpr std::string_view suffix = "[Snapshot shortened; the full snapshot is in report-info.txt.]";
+  const std::string_view suffix =
+      report_saved ? "[Snapshot shortened; the full snapshot is in report-info.txt.]" : "[Snapshot shortened to fit the form.]";
   const auto suffix_bytes = bug_report_query_value(suffix).size();
   if (suffix_bytes > budget)
     return {};
@@ -183,7 +185,7 @@ inline std::string bug_report_fit(const std::string& snapshot, std::size_t budge
   return snapshot.substr(0, kept) + std::string(suffix);
 }
 
-inline std::wstring bug_report_url(const BugReportContext& context, const BugReportForm& form = {}) {
+inline std::wstring bug_report_url(const BugReportContext& context, const BugReportForm& form = {}, bool report_saved = true) {
   const auto version = std::string(TAXI_CAM_VERSION) + "-build." + std::to_string(TAXI_CAM_BUILD_NUMBER);
   auto url = std::string(BugReportPage) + "&taxi_cam_version=" + bug_report_query_value(std::string_view(version).substr(0, 64));
   const struct {
@@ -204,7 +206,7 @@ inline std::wstring bug_report_url(const BugReportContext& context, const BugRep
   constexpr std::string_view snapshot_field = "&runtime_snapshot=";
   static_assert(BugReportPage.size() + 3 * (64 + 120 + 240 + 1000 + 300) + 128 < BugReportUrlLimit - 1500);
   const auto budget = BugReportUrlLimit - url.size() - snapshot_field.size();
-  url += std::string(snapshot_field) + bug_report_query_value(bug_report_fit(bug_report_snapshot(context), budget));
+  url += std::string(snapshot_field) + bug_report_query_value(bug_report_fit(bug_report_snapshot(context), budget, report_saved));
   return std::wstring(url.begin(), url.end());
 }
 
@@ -232,10 +234,21 @@ inline std::vector<Redaction> report_redactions() {
     const DWORD n = GetEnvironmentVariableW(name, value.data(), 32768);
     return n && n < 32768 ? report_utf8(std::wstring_view(value.data(), n)) : std::string{};
   };
-  std::vector<Redaction> rules{{variable(L"USERPROFILE"), "%USERPROFILE%", false}};
+  // The profile folder as written plainly, JSON-escaped (installation.json)
+  // and with forward slashes: these hold its name even when the account name
+  // is too short to replace on its own or differs from the folder's.
+  const auto profile = variable(L"USERPROFILE");
+  std::string escaped, forward;
+  for (const char c : profile) {
+    escaped += c == '\\' ? std::string("\\\\") : std::string(1, c);
+    forward += c == '\\' ? '/' : c;
+  }
+  std::vector<Redaction> rules{{escaped, "%USERPROFILE%", false}, {profile, "%USERPROFILE%", false}, {forward, "%USERPROFILE%", false}};
   // A very short name would also match ordinary words in the logs.
   if (auto user = variable(L"USERNAME"); user.size() >= 3)
     rules.push_back({std::move(user), "<user>", true});
+  if (const auto slash = profile.find_last_of('\\'); slash != std::string::npos && profile.size() - slash - 1 >= 3)
+    rules.push_back({profile.substr(slash + 1), "<user>", true});
   if (auto computer = variable(L"COMPUTERNAME"); computer.size() >= 3)
     rules.push_back({std::move(computer), "<computer>", true});
   return rules;
@@ -288,10 +301,15 @@ inline std::uint64_t file_time(const FILETIME& t) {
 }  // namespace report_detail
 
 // Writes <data>\reports\taxi-cam-report-<local time>.zip: `info`, the logs,
-// saved settings, MSFS graphics options and recent renderer-fault records,
-// with the account details above replaced in every text file. Keeps the newest
-// few reports.
-inline ReportBundle write_report_bundle(const std::wstring& data, const SystemDetails& details, const std::string& info) {
+// saved settings, Setup's files from the install folder, MSFS graphics options
+// and recent renderer-fault records, with the account details above replaced
+// in every text file. Keeps the newest few reports. Each file keeps its last
+// `file_limit` bytes.
+inline ReportBundle write_report_bundle(const std::wstring& data,
+                                        const std::wstring& install,
+                                        const SystemDetails& details,
+                                        const std::string& info,
+                                        std::uint64_t file_limit = BugReportFileLimit) {
   using namespace report_detail;
   ReportBundle result;
   if (data.empty()) {
@@ -301,21 +319,44 @@ inline ReportBundle write_report_bundle(const std::wstring& data, const SystemDe
   const auto rules = report_redactions();
   std::vector<ZipEntry> entries;
   std::string included, missing;
-  const auto add = [&](const std::wstring& path, const std::string& name) {
-    bool cut = false;
-    auto content = read_file_tail(path, BugReportFileLimit, &cut);
+  const auto cut_note =
+      " (last " + (file_limit % (1 << 20) ? std::to_string(file_limit) + " bytes)" : std::to_string(file_limit >> 20) + " MiB)");
+  const auto add_content = [&](std::string content, bool cut, const std::string& name) {
     if (content.empty()) {
       missing += "  " + name + "\n";
       return;
     }
-    included += "  " + name + (cut ? " (last 16 MiB)" : "") + "\n";
+    included += "  " + name + (cut ? cut_note : "") + "\n";
     entries.push_back({name, redact(std::move(content), rules)});
   };
-  add(data + L"\\bridge.log", "logs/bridge.log");
-  add(data + L"\\bridge.log.1", "logs/bridge.log.1");
+  const auto add = [&](const std::wstring& path, const std::string& name) {
+    bool cut = false;
+    auto content = read_file_tail(path, file_limit, &cut);
+    add_content(std::move(content), cut, name);
+  };
+  // Both bridge logs under the writer's lock, so a rotation between the reads
+  // cannot copy the same records into both. The bridge drops records while it
+  // is held; without it within a moment, the logs are read anyway.
+  {
+    const auto log = data + L"\\bridge.log";
+    wchar_t mutex_name[80]{};
+    std::swprintf(mutex_name, 80, L"Local\\TaxiCam.Log.%016llx", static_cast<unsigned long long>(log_detail::path_key(log)));
+    const HANDLE mutex = CreateMutexW(nullptr, FALSE, mutex_name);
+    const DWORD wait = mutex ? WaitForSingleObject(mutex, 250) : WAIT_FAILED;
+    const bool locked = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    bool cut = false, older_cut = false;
+    auto current = read_file_tail(log, file_limit, &cut);
+    auto older = read_file_tail(log + L".1", file_limit, &older_cut);
+    if (locked)
+      ReleaseMutex(mutex);
+    if (mutex)
+      CloseHandle(mutex);
+    add_content(std::move(current), cut, "logs/bridge.log");
+    add_content(std::move(older), older_cut, "logs/bridge.log.1");
+  }
   add(data + L"\\launcher.log", "logs/launcher.log");
-  add(data + L"\\app\\setup-diagnostics.log", "logs/setup-diagnostics.log");
-  add(data + L"\\app\\installation.json", "settings/installation.json");
+  add(install + L"\\setup-diagnostics.log", "logs/setup-diagnostics.log");
+  add(install + L"\\installation.json", "settings/installation.json");
   for (const auto* name : {L"settings.ini", L"hotkeys.ini", L"buttons.ini"})
     add(data + L"\\" + name, "settings/" + report_utf8(name));
   std::vector<std::pair<std::wstring, std::string>> saved_profiles;
@@ -331,8 +372,11 @@ inline ReportBundle write_report_bundle(const std::wstring& data, const SystemDe
   const std::uint64_t age_limit = std::uint64_t{BugReportCrashDays} * 24 * 3600 * 10000000;
   unsigned crashes = 0;
   for (const auto& file : files(data, L"renderer-fault-*.bin")) {
-    if (crashes >= BugReportCrashRecords || file_time(now) - file_time(file.written) > age_limit)
+    if (crashes >= BugReportCrashRecords)
       break;
+    // A write time after now (the clock was set back) counts as new.
+    if (file_time(file.written) < file_time(now) && file_time(now) - file_time(file.written) > age_limit)
+      continue;
     auto record = read_file_tail(file.path, 64 << 10);
     std::uint32_t magic{}, state{};
     if (record.size() < 20)
@@ -379,9 +423,11 @@ inline ReportBundle write_report_bundle(const std::wstring& data, const SystemDe
   }
   result.path = path;
   result.name = name;
+  // Never the report just written, even when the clock went back.
   const auto saved = files(folder, L"taxi-cam-report-*.zip");
   for (std::size_t i = BugReportKeep; i < saved.size(); ++i)
-    DeleteFileW(saved[i].path.c_str());
+    if (_wcsicmp(saved[i].path.c_str(), path.c_str()))
+      DeleteFileW(saved[i].path.c_str());
   return result;
 }
 

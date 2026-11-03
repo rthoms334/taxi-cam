@@ -1,5 +1,6 @@
 #include "../../src/app/bug_report.hpp"
 #include <cassert>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -194,49 +195,125 @@ static void system_detail_text() {
   assert(user_config_summary("").empty() && user_config_summary("{Video\nWindowed").empty());
 }
 
+// Sets a file's last-write time to now plus `offset` (negative: earlier).
+static void write_time(const std::wstring& path, long long offset_seconds) {
+  FILETIME now{};
+  GetSystemTimeAsFileTime(&now);
+  ULARGE_INTEGER t{};
+  t.LowPart = now.dwLowDateTime;
+  t.HighPart = now.dwHighDateTime;
+  t.QuadPart += static_cast<std::uint64_t>(offset_seconds * 10000000);
+  const FILETIME written{t.LowPart, t.HighPart};
+  const auto file = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+  assert(file != INVALID_HANDLE_VALUE && SetFileTime(file, nullptr, nullptr, &written));
+  CloseHandle(file);
+}
+static bool exists(const std::wstring& path) {
+  return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+static std::map<std::string, std::string> bundle_files(const ReportBundle& bundle) {
+  const auto zip = read_file_tail(bundle.path, 1 << 20);
+  const auto entries = unzip(zip);
+  assert(!entries.empty() && entries.front().first == "report-info.txt");
+  return {entries.begin(), entries.end()};
+}
+
 static void report_file() {
   wchar_t temp[MAX_PATH]{};
   assert(GetTempPathW(MAX_PATH, temp));
   const std::wstring data = std::wstring(temp) + L"taxi-cam-bug-report-test-" + std::to_wstring(GetCurrentProcessId());
+  const auto install = data + L"\\install", reports = data + L"\\reports";
   remove_tree(data);
   assert(CreateDirectoryW(data.c_str(), nullptr));
-  CreateDirectoryW((data + L"\\profiles").c_str(), nullptr);
-  CreateDirectoryW((data + L"\\profiles\\discovered").c_str(), nullptr);
-  SetEnvironmentVariableW(L"USERPROFILE", L"C:\\Users\\private-account");
-  SetEnvironmentVariableW(L"USERNAME", L"private-account");
+  for (const auto* folder : {L"\\profiles", L"\\profiles\\discovered", L"\\install", L"\\reports"})
+    CreateDirectoryW((data + folder).c_str(), nullptr);
+  // An account name too short to replace on its own, renamed away from its
+  // profile folder's name.
+  SetEnvironmentVariableW(L"USERPROFILE", L"C:\\Users\\private-folder");
+  SetEnvironmentVariableW(L"USERNAME", L"Al");
   SetEnvironmentVariableW(L"COMPUTERNAME", L"PRIVATE-PC");
-  write_file(data + L"\\bridge.log", "100 | Started from C:\\Users\\private-account\\AppData on private-pc.\n");
+  write_file(
+      data + L"\\bridge.log",
+      "100 | From C:\\Users\\private-folder\\AppData on private-pc; C:/Users/Private-Folder/x; D:\\Backup\\private-folder\\y; Al.\n");
+  const std::string older(5000, 'o');
+  write_file(data + L"\\bridge.log.1", older + "end");
+  write_file(install + L"\\installation.json", "{\"destination\": \"C:\\\\Users\\\\private-folder\\\\AppData\\\\Local\"}");
+  write_file(install + L"\\setup-diagnostics.log", "Setup ok\n");
   write_file(data + L"\\settings.ini", "[companion]\nlanguage=de\n");
   write_file(data + L"\\profiles\\discovered\\variant.ini", "[layout]\nsides=2\n");
   write_file(data + L"\\profiles\\notes.txt", "not settings");
-  std::string record(8192, '\0');
+
+  // Faulted records (state 2) newest first: one dated after now (clock set
+  // back), two within 14 days, one older; plus a record that never faulted.
+  std::string record(8192, '\0'), faulted;
   const std::uint32_t magic = 0x54434352, complete = 2;
   std::memcpy(record.data(), &magic, 4);
-  write_file(data + L"\\renderer-fault-1-1.bin", record);  // Never faulted.
-  std::memcpy(record.data() + 16, &complete, 4);
-  write_file(data + L"\\renderer-fault-2-2.bin", record);
+  faulted = record;
+  std::memcpy(faulted.data() + 16, &complete, 4);
+  const struct {
+    const wchar_t* name;
+    bool fault;
+    long long offset;
+  } records[]{{L"9-9", true, 86400}, {L"1-1", false, -1800}, {L"2-2", true, -3600}, {L"3-3", true, -7200}, {L"4-4", true, -20 * 86400}};
+  for (const auto& r : records) {
+    const auto path = data + L"\\renderer-fault-" + r.name + L".bin";
+    write_file(path, r.fault ? faulted : record);
+    write_time(path, r.offset);
+  }
+  // Five reports dated after now and one older: rotation keeps the five
+  // newest by write time and never the report it just wrote.
+  for (int i = 1; i <= 5; ++i) {
+    const auto path = reports + L"\\taxi-cam-report-29990101-00000" + std::to_wstring(i) + L".zip";
+    write_file(path, "old");
+    write_time(path, i * 3600);
+  }
+  write_file(reports + L"\\taxi-cam-report-20000101-000000.zip", "old");
+  write_time(reports + L"\\taxi-cam-report-20000101-000000.zip", -86400);
+
   SystemDetails details;
   details.user_config = data + L"\\missing-UserCfg.opt";
-  const auto bundle = write_report_bundle(data, details, "Report for private-account");
+  auto bundle = write_report_bundle(data, install, details, "Report for private-folder", 4096);
   assert(bundle.error.empty() && bundle.name.starts_with("taxi-cam-report-") && bundle.name.ends_with(".zip"));
-  assert(bundle.path == data + L"\\reports\\" + std::wstring(bundle.name.begin(), bundle.name.end()));
-  const auto zip = read_file_tail(bundle.path, 1 << 20);
-  std::map<std::string, std::string> files;
-  for (auto& [name, content] : unzip(zip))
-    files[name] = content;
-  assert(unzip(zip).front().first == "report-info.txt");
-  assert(files.at("logs/bridge.log") == "100 | Started from %USERPROFILE%\\AppData on <computer>.\n");
+  assert(bundle.path == reports + L"\\" + std::wstring(bundle.name.begin(), bundle.name.end()) && exists(bundle.path));
+  for (int i = 1; i <= 5; ++i)
+    assert(exists(reports + L"\\taxi-cam-report-29990101-00000" + std::to_wstring(i) + L".zip"));
+  assert(!exists(reports + L"\\taxi-cam-report-20000101-000000.zip"));
+
+  auto files = bundle_files(bundle);
+  assert(files.at("logs/bridge.log") == "100 | From %USERPROFILE%\\AppData on <computer>; %USERPROFILE%/x; D:\\Backup\\<user>\\y; Al.\n");
+  assert(files.at("logs/bridge.log.1") == (older + "end").substr(5003 - 4096));
+  assert(files.at("settings/installation.json") == "{\"destination\": \"%USERPROFILE%\\\\AppData\\\\Local\"}");
+  assert(files.at("logs/setup-diagnostics.log") == "Setup ok\n");
   assert(files.at("settings/settings.ini") == "[companion]\nlanguage=de\n");
   assert(files.at("settings/profiles/discovered/variant.ini") == "[layout]\nsides=2\n");
-  assert(files.at("crash/renderer-fault-2-2.bin") == record);
-  assert(!files.contains("crash/renderer-fault-1-1.bin") && !files.contains("settings/profiles/notes.txt"));
-  const auto& info = files.at("report-info.txt");
-  assert(info.starts_with("Report for <user>\n") && info.find("private") == std::string::npos);
-  assert(info.find("  logs/bridge.log\n") != std::string::npos && info.find("Not found:\n") != std::string::npos &&
-         info.find("  msfs/UserCfg.opt\n") != std::string::npos);
-  for (const auto& [name, content] : files)
-    assert(content.find("private-account") == std::string::npos && content.find("PRIVATE-PC") == std::string::npos);
+  assert(files.at("crash/renderer-fault-9-9.bin") == faulted && files.at("crash/renderer-fault-2-2.bin") == faulted);
+  for (const auto* absent :
+       {"crash/renderer-fault-1-1.bin", "crash/renderer-fault-3-3.bin", "crash/renderer-fault-4-4.bin", "settings/profiles/notes.txt"})
+    assert(!files.contains(absent));
+  auto info = files.at("report-info.txt");
+  assert(info.starts_with("Report for <user>\n"));
+  assert(info.find("  logs/bridge.log\n") != std::string::npos &&
+         info.find("  logs/bridge.log.1 (last 4096 bytes)\n") != std::string::npos);
+  assert(info.find("Not found:\n") != std::string::npos && info.find("  msfs/UserCfg.opt\n") != std::string::npos);
+  for (const auto& [name, content] : files) {
+    std::string lower = content;
+    for (auto& c : lower)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    assert(lower.find("private") == std::string::npos);
+  }
+
+  // With room for two records, the one older than 14 days still stays out.
+  DeleteFileW((data + L"\\renderer-fault-9-9.bin").c_str());
+  DeleteFileW((data + L"\\renderer-fault-2-2.bin").c_str());
+  bundle = write_report_bundle(data, install, details, "Again");
+  files = bundle_files(bundle);
+  assert(files.contains("crash/renderer-fault-3-3.bin") && !files.contains("crash/renderer-fault-4-4.bin"));
+  assert(files.at("logs/bridge.log.1") == older + "end" && files.at("report-info.txt").find("(last") == std::string::npos);
+  assert(exists(bundle.path));
   remove_tree(data);
+
+  ReportBundle unsaved = write_report_bundle({}, {}, details, "");
+  assert(unsaved.path.empty() && !unsaved.error.empty());
 }
 
 static std::string decode(std::string_view input) {
@@ -397,6 +474,9 @@ int main() {
   const auto kept = shortened.substr(0, shortened.find("[Snapshot shortened"));
   assert(!kept.empty() && kept.back() == '\n' && snapshot.starts_with(kept));
   assert(bug_report_fit(snapshot, 10).empty() && bug_report_fit(snapshot, 1 << 20) == snapshot);
+  // Without a saved report file the snapshot does not point to one.
+  fields = parameters(bug_report_url(context, form, false));
+  assert(fields[5].second.ends_with("[Snapshot shortened to fit the form.]") && fields[5].second.find("report-info") == std::string::npos);
 
   // The aircraft line names the profile and a valid SimObject path only.
   BugReportContext aircraft;

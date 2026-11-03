@@ -355,8 +355,8 @@ void report_bug() {
   const auto details = win::system_details(simulator_pid.load(), expected_simulator);
   win::BugReportForm form{
       details.simulator, win::bug_report_aircraft(context), win::bug_report_environment(details, win::bug_report_created(context.now)), {}};
-  const auto bundle =
-      win::write_report_bundle(win::settings_directory(), details, win::bug_report_info(form, win::bug_report_snapshot(context)));
+  const auto bundle = win::write_report_bundle(win::settings_directory(), installation, details,
+                                               win::bug_report_info(form, win::bug_report_snapshot(context)));
   form.logs = bundle.path.empty() ? "Taxi Cam could not save the report file (" + bundle.error +
                                         "). Attach bridge.log from Diagnostics > Open log folder instead."
                                   : "Report file: " + bundle.name +
@@ -373,7 +373,7 @@ void report_bug() {
       CoUninitialize();
     copy_text(bundle.path);
   }
-  const auto url = win::bug_report_url(context, form);
+  const auto url = win::bug_report_url(context, form, !bundle.path.empty());
   const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
   SetCursor(cursor);
   if (result <= 32) {
