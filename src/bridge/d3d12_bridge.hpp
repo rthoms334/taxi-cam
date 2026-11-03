@@ -9,6 +9,7 @@
 #include "../graphics/render_target_shapes.hpp"
 #include "../graphics/scene_runtime.hpp"
 #include "../shared/display_snapshot.hpp"
+#include "../shared/panel_marks.hpp"
 namespace taxi_camera::standalone {
 inline constexpr const char* pfd_gpu_operation_name(unsigned slot) noexcept {
   switch (slot) {
@@ -295,6 +296,10 @@ struct DisplaySnapshotPoll {
   unsigned width = 0, height = 0, format = 0;
   unsigned plans = 0;   // Copies planned for the request (none: no submission proved a site).
   SnapshotImage image;  // Only for ready: shrunk to kDisplaySnapshotMaxEdge.
+  // Panel marks found in the full-size copy (ready only).
+  std::array<panel_marks::Mark, 16> marks{};
+  std::size_t mark_count = 0;
+  std::uint64_t mark_us = 0;
 };
 // Control thread only. pending until the copy completes or fails; the final
 // result is returned once, then none until the next request.

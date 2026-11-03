@@ -5346,6 +5346,14 @@ DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
     try {
       poll.image =
           downsample_snapshot(bytes + footprint.Offset, layout.RowPitch, layout.Width, layout.Height, bgra, kDisplaySnapshotMaxEdge);
+      // Every picture is also read for panel marks, before it is shrunk.
+      LARGE_INTEGER frequency{}, begin{}, end{};
+      QueryPerformanceFrequency(&frequency);
+      QueryPerformanceCounter(&begin);
+      poll.mark_count = panel_marks::find_marks(bytes + footprint.Offset, layout.RowPitch, static_cast<unsigned>(layout.Width),
+                                                layout.Height, bgra, poll.marks.data(), poll.marks.size());
+      QueryPerformanceCounter(&end);
+      poll.mark_us = frequency.QuadPart ? static_cast<std::uint64_t>((end.QuadPart - begin.QuadPart) * 1000000 / frequency.QuadPart) : 0;
       if (poll.image.width)
         poll.result = DisplaySnapshotResult::ready;
     } catch (...) {

@@ -1400,6 +1400,28 @@ DWORD run_impl() {
         snapshot_save_error = 0;
         log_status(log_to, detail);
       };
+      // Panel marks in a picture (claudedocs/panel-mark-identification.md):
+      // which panel and gauge the texture holds, by the page's own names.
+      const auto log_panel_marks = [&](std::uint64_t id, const win::DisplaySnapshotPoll& poll) {
+        char detail[512];
+        std::snprintf(detail, sizeof(detail), "Display marks: id=%llu texture=%ux%u found=%zu read_us=%llu",
+                      static_cast<unsigned long long>(id), poll.width, poll.height, poll.mark_count,
+                      static_cast<unsigned long long>(poll.mark_us));
+        log_status(log_to, detail);
+        for (std::size_t i = 0; i < poll.mark_count; ++i) {
+          const auto& m = poll.marks[i];
+          panel_marks::Rect rect;
+          const bool scaled = panel_marks::texture_rect(m, poll.width, poll.height, rect);
+          std::snprintf(detail, sizeof(detail),
+                        "Display mark: id=%llu kind=%s name=%s gauge=%u gauge_name=%s page_rect=%u,%u,%ux%u panel=%ux%u "
+                        "texture_rect=%u,%u,%ux%u at=%u,%u pitch=%.2fx%.2f cell=%u info=%s",
+                        static_cast<unsigned long long>(id), m.kind == panel_marks::Kind::panel ? "panel" : "gauge", m.name.data(), m.gauge,
+                        m.gauge_name.data(), m.x, m.y, m.width, m.height, m.panel_width, m.panel_height, scaled ? rect.x : 0,
+                        scaled ? rect.y : 0, scaled ? rect.width : 0, scaled ? rect.height : 0, m.left, m.top, m.pitch_x, m.pitch_y, m.cell,
+                        m.info.data());
+          log_status(log_to, detail);
+        }
+      };
       // A copy never planned (FSLabs A321 setup, 2026-11-03: every picture
       // timed out with no other line): the Executes refused since the request.
       const auto log_refusals = [&](const char* how) {
@@ -1454,6 +1476,8 @@ DWORD run_impl() {
           if (snapshot.result == win::DisplaySnapshotResult::ready)
             write_display_candidates(snapshot.id, win::target_ids());
           log_snapshot();
+          if (snapshot.result == win::DisplaySnapshotResult::ready)
+            log_panel_marks(snapshot.id, poll);
         }
       }
     };

@@ -140,6 +140,7 @@ if ($Validate) {
         @{Name='camera-rate-migration'; Sources=@('tests/app/camera_rate_migration_test.cpp')},
         @{Name='display-snapshot'; Sources=@('tests/app/display_snapshot_test.cpp')},
         @{Name='display-identity'; Sources=@('tests/camera/display_identity_test.cpp')},
+        @{Name='panel-marks'; Sources=@('tests/graphics/panel_marks_test.cpp')},
         @{Name='notification-settings'; Sources=@('tests/app/notification_settings_test.cpp')},
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='startup-state'; Sources=@('tests/app/startup_state_test.cpp')},

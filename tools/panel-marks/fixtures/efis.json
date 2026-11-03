@@ -1,0 +1,2 @@
+{"sName":"VCockpit02","sConfigFile":"SimObjects/Airplanes/A350/attachments/inibuilds/Function_Interior_A350/panel/panel.xml","vLogicalSize":{"x":1644,"y":1024},"vDisplaySize":{"x":1644,"y":1024},"daAttributes":[{"name":"quality","value":"high"}],"daInstruments":[
+{"iGUId":0,"sParameters":"L","sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=inibuilds-A350.wasm&wasm_gauge=EFIS","vPosAndSize":{"x":0,"y":0,"z":1644,"w":1024}}]}
