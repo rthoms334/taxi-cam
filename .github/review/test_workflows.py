@@ -66,15 +66,20 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("claude-code-action", gate)
         self.assertIn("python3 .github/review/review.py classify --files", gate)
         self.assertIn("--old-names", gate)
-        for name in ("classify", "label", "approval", "live-check", "gate"):
+        for name in ("classify", "label", "approval", "gate"):
             job(gate, name)
 
     def test_gate_tiers_and_environments(self):
         gate = read("pr-risk-gate.yml")
-        self.assertIn("environment: pr-approval", job(gate, "approval"))
-        self.assertIn("environment: pr-live-check", job(gate, "live-check"))
+        approval = job(gate, "approval")
+        self.assertIn("name: Approval stage", approval)
+        self.assertIn("environment: ${{ fromJSON(needs.classify.outputs.environments) }}", approval)
+        self.assertIn("environment: ${{ matrix.environment }}", approval)
+        # Both high-risk environments wait in the same stage, live check first.
+        self.assertIn('high) needed="pr-live-check pr-approval" ;;', job(gate, "classify"))
+        self.assertIn('high) needed="pr-live-check pr-approval" ;;', job(gate, "gate"))
         self.assertIn("name: Risk gate", job(gate, "gate"))
-        self.assertIn("needs: [classify, approval, live-check]", job(gate, "gate"))
+        self.assertIn("needs: [classify, approval]", job(gate, "gate"))
         self.assertIn("if: ${{ !cancelled() }}", job(gate, "gate"))
         self.assertIn('.user.type == "User"', job(gate, "gate"))
         self.assertIn("required_reviewers", job(gate, "classify"))
