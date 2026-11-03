@@ -616,6 +616,11 @@ inline bool load_settings(Settings& s,
     apply_door_template(mount_saved[profiles::DoorFeed]);
     place_door_lower();
     default_door_display();
+  } else if (profile->id == profiles::DiscoveredProfileId && value.door_side == DoorSideNone &&
+             profiles::override_sides(*profile, value.display_override) > MaxDisplaySides - 1) {
+    // No door display is never a choice: a set-up aircraft saved before its
+    // lower display was placed kept none (FSLabs A321, 2026-11-03).
+    value.door_side = MaxDisplaySides - 1;
   }
   if (!valid_settings(value))
     return false;

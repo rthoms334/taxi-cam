@@ -23,7 +23,7 @@ If you find Taxi Cam useful, please consider donating.
 
 ## Supported aircraft
 
-Taxi Cam works with **any aircraft** whose displays are cockpit panels. For an aircraft without a built-in profile, open **Setup**: in **Displays**, pick each camera's display from pictures of the cockpit panels (**Test in cockpit** shows which screen a pick is), then **Next** saves them and opens **Taxi cameras** with the live view to position the cameras. Each aircraft variant, such as the Fenix A320 and A321, is saved separately, and **Overview → Saved aircraft…** copies a setup to another variant or removes it. A set-up aircraft's cameras are turned on with the keyboard shortcuts or the camera switches under **Overview → Cockpit displays**, because Taxi Cam does not know its cockpit buttons. See [Aircraft without a profile](docs/aircraft-profiles.md#aircraft-without-a-profile).
+Taxi Cam works with **any aircraft** whose displays are cockpit panels. For an aircraft without a built-in profile, open **Setup**: in **Displays**, pick each camera's display from pictures of the cockpit panels (**Test in cockpit** shows which screen a pick is), each display saves as soon as it is placed and its camera shows there, then **Next** opens **Taxi cameras** with the live view to position the cameras. Each aircraft variant, such as the Fenix A320 and A321, is saved separately, and **Overview → Saved aircraft…** copies a setup to another variant or removes it. A set-up aircraft's cameras are turned on with the keyboard shortcuts or the camera switches under **Overview → Cockpit displays**, because Taxi Cam does not know its cockpit buttons. See [Aircraft without a profile](docs/aircraft-profiles.md#aircraft-without-a-profile).
 
 These aircraft have built-in profiles, with camera positions, reference guides and cockpit camera controls ready to use. **Setup → Displays** can still pick other panels or display areas for them.
 
@@ -69,7 +69,7 @@ Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles th
 
 Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved separately for each aircraft profile.
 
-**Setup** has three steps, **Displays**, **Taxi cameras** and **Door camera**, which the step pills on **Overview** also open. **Next** saves a step and goes on to the next (the last step's is **Save and finish**); **Back**, **Cancel** and the step pills move without saving. **Advanced** in the header shows each step's extra values and pages; it is not saved. **Overview**, **Options** and **Diagnostics** keep **Save changes**.
+**Setup** has three steps, **Displays**, **Taxi cameras** and **Door camera**, which the step pills on **Overview** also open. Every change saves by itself, a moment after you stop typing; there is no Save button. **Next** goes on to the next step (the last step's is **Finish**), and **Back**, **Cancel** and the step pills move between pages. **Advanced** in the header shows each step's extra values and pages; it is not saved.
 
 To use another language, choose **Language** in the tray menu or under **Menu** in Settings. **Follow Windows** returns to the Windows display language. Aircraft names, status messages from the simulator, logs and bug reports stay in English.
 
@@ -101,7 +101,7 @@ On **Options**, choose the camera frame rate and the ground-speed text colour (w
 - **Smooth**: 30 fps per camera. Costs the most simulator time.
 - **Custom**: set your own target with the slider, 5–60 fps per camera.
 
-Each card shows its target and, once the simulator is running, what each camera gets right now. Below the cards, **Now** shows the frame rate each camera actually gets and why, when it is less than the target. The cameras keep the same frame rate while the aircraft is parked. Profiles saved by earlier versions start on Auto; a camera frame rate you had lowered starts on Performance, and one you had raised starts on Custom at that rate. Choose **Save changes** when finished.
+Each card shows its target and, once the simulator is running, what each camera gets right now. Below the cards, **Now** shows the frame rate each camera actually gets and why, when it is less than the target. The cameras keep the same frame rate while the aircraft is parked. Profiles saved by earlier versions start on Auto; a camera frame rate you had lowered starts on Performance, and one you had raised starts on Custom at that rate.
 
 **Marking colour**, on **Setup → Taxi cameras** with **Advanced** on and on **Guide values…**, changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Next** to retain the colour for the selected aircraft profile.
 

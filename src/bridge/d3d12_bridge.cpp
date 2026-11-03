@@ -5263,6 +5263,7 @@ DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
     poll.width = static_cast<unsigned>(snapshot.target->desc.Width);
     poll.height = snapshot.target->desc.Height;
     poll.format = static_cast<unsigned>(snapshot.target->desc.Format);
+    poll.plans = snapshot.plans;
     if (snapshot.plans && r.snapshot_completed.load(std::memory_order_acquire) >= (snapshot.serial << 8 | snapshot.plans)) {
       footprint = snapshot.footprint;
       bgra = snapshot.bgra;

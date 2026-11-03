@@ -365,6 +365,11 @@ void fenix_template_other_lower(const std::wstring& root) {
               std::strcmp(loaded.discovered.textures[2], "$A320_ECAM_Upper") == 0 && loaded.door_side == 2 &&
               profiles::empty_area(loaded.display_override.areas[2]) && valid_settings(loaded),
           "The user's lower display keeps its whole area under the Fenix template");
+  // Saved first with two displays, then with the lower one: the door camera
+  // stored as none (FSLabs A321, 2026-11-03) loads on the lower display.
+  require(WritePrivateProfileStringW(L"door_camera", L"display", L"3", variant.c_str()), "Save no door display");
+  require(load_settings(loaded, L"missing", profiles::DiscoveredProfileId, Fenix320Key) && loaded.door_side == 2 && valid_settings(loaded),
+          "A saved no door display with a lower display placed loads the door camera there");
 }
 
 void display_choices(const std::wstring& root) {
