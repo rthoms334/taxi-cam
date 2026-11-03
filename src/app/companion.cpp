@@ -4472,6 +4472,11 @@ void open_live_view(unsigned feed = 0, bool area = false, unsigned area_side = M
   service_live_view();
 }
 void open_aircraft_setup() {
+  // No camera adjustment window stays open through the setup: it gives its
+  // cameras back now, before a trial or a save records them, and positioning
+  // opens a window of its own.
+  if (live_view.window)
+    DestroyWindow(live_view.window);
   auto s = draft();
   win::Status sample;
   {

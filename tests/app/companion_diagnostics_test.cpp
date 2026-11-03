@@ -470,6 +470,15 @@ void autosave_setup_tests() {
     require(current.manual_mask == 1 && !current.door_on, "Closing the positioning window gives back the user's cameras");
     live_view = {};
   }
+  // Opening Displays closes the window before a trial can copy its previews.
+  current.manual_mask = 1;
+  current.door_on = 0;
+  open_live_view();
+  require(live_view.window && (current.manual_mask & 3) == 3, "The window shows the previews");
+  open_aircraft_setup();
+  require(!live_view.window && current.manual_mask == 1 && !current.door_on,
+          "Opening Displays closes it and gives back the user's cameras");
+  live_view = {};
 
   // A built-in profile: picks save at once, and the door camera's None stays.
   current = {};
