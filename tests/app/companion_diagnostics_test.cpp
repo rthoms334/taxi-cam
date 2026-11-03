@@ -460,9 +460,24 @@ void autosave_setup_tests() {
           "The window opened first takes the user's cameras and shows the previews");
   setup.manual_before = current.manual_mask;
   setup.door_on_before = current.door_on;
+  current.manual_mask = 7;  // A save meanwhile publishes other previews.
   start_positioning();
   DestroyWindow(live_view.window);
   require(current.manual_mask == 1 && !current.door_on, "Closing it gives back the user's cameras, not the previews");
+  live_view = {};
+  // A window open on the door camera takes no taxi cameras: positioning
+  // gives back the cameras from before the setup.
+  current.manual_mask = 1;
+  current.door_on = 0;
+  open_live_view(profiles::DoorFeed);
+  require(live_view.window && !live_view.camera_taken, "The door feed takes no taxi cameras");
+  setup.manual_before = 1;
+  setup.door_on_before = 0;
+  current.manual_mask = 3;
+  current.door_on = 1;
+  start_positioning();
+  DestroyWindow(live_view.window);
+  require(current.manual_mask == 1 && !current.door_on, "Positioning with the door feed open gives back the setup's cameras");
   live_view = {};
 
   // A built-in profile: picks save at once, and the door camera's None stays.

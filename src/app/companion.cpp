@@ -2480,6 +2480,7 @@ void live_keep_camera(const win::Settings& s, const win::Status& sample, const p
       live_view.follow_before = s.follow_taxi;
       live_view.manual_before = live_view.manual_set = s.manual_mask;
       live_view.door_preview = false;
+      live_view.door_on_before_preview = s.door_on;
       return;
     }
   } else {
@@ -4635,21 +4636,24 @@ void start_positioning() {
   publish(s);
   page = CamerasPage;
   build_controls();
-  const bool opened_here = !live_view.window;
+  // A window that had taken the cameras before this setup holds the user's own.
+  const bool taken_before = live_view.window && live_view.camera_taken;
   open_live_view();
   // The previews are the window's, as a camera it turns on is: closing it
-  // turns them off again (a lower display kept its taxi cameras), back to the
-  // cameras from before the setup's first save. When this opened the window,
-  // its first pass has already taken the previews as if they were the user's.
-  // A window already open keeps what it took when it opened: the user's
-  // cameras, which the setup's saves may only have seen as previews.
-  if (live_view.window && opened_here) {
+  // turns them off again (a lower display kept its taxi cameras). It gives
+  // back what the window took before the setup, or else the cameras from
+  // before the setup's first save (a window opened here has just taken the
+  // previews as if they were the user's; one on the door feed took none).
+  // Either way the window now holds the previews, so closing restores.
+  if (live_view.window) {
+    if (!taken_before) {
+      live_view.follow_before = s.follow_taxi;
+      live_view.manual_before = setup.manual_before;
+      live_view.door_on_before_preview = setup.door_on_before;
+    }
     live_view.camera_taken = true;
-    live_view.follow_before = s.follow_taxi;
-    live_view.manual_before = setup.manual_before;
     live_view.manual_set = s.manual_mask;
-    live_view.door_preview = s.door_on != 0;
-    live_view.door_on_before_preview = setup.door_on_before;
+    live_view.door_preview = true;
   }
   notice = tr(L"The cameras start from default positions. Adjust each one in the live view.");
   InvalidateRect(window, nullptr, FALSE);
