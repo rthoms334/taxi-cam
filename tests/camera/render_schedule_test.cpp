@@ -7,6 +7,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 using taxi_camera::EffectiveCameraRate;
@@ -232,7 +234,7 @@ struct AutoDrive {
     step(fps, false);
     step(fps, false);
   }
-  unsigned step(double fps, bool active = true, bool helps = true) {
+  unsigned step(double fps, bool active = true, bool helps = true, bool paused = false) {
     now += 2000;
     ++window;
     taxi_camera::AutoCameraPolicy::Input in;
@@ -240,6 +242,7 @@ struct AutoDrive {
     in.window = window;
     in.fps = fps;
     in.cameras_active = active;
+    in.paused = paused;
     in.next_helps = helps;
     const auto next = policy.update(in);
     require(next < taxi_camera::kAutoCameraLevels && (next == level || next + 1 == level || next == level + 1),
@@ -349,6 +352,49 @@ void auto_camera_policy() {
     settle.off(60);
     require(settle.step(10) == 0, "The activation window was not discarded");
     require(settle.policy.floor() == 54, "The discarded window changed the reference");
+  }
+  // Paused outside the cockpit (issue 97): the slow outside view is neither the
+  // camera-off rate nor a camera cost. The level and reference hold, and the
+  // first window back in the cockpit spans the switch and is discarded.
+  {
+    AutoDrive drive;
+    drive.off(60);
+    drive.run(90, 60, cheap);
+    require(drive.level == 2, "Pause fixture did not reach the top level");
+    const double floor_before = drive.policy.floor();
+    for (int i = 0; i < 20; ++i)
+      require(drive.step(15, true, true, true) == 2, "A paused window moved the level");
+    require(drive.policy.floor() == floor_before, "A paused window changed the camera-off reference");
+    require(drive.step(15) == 2 && drive.policy.floor() == floor_before, "The first window after the pause was judged");
+    require(drive.step(15) < 2, "Auto stopped judging windows after the pause");
+    AutoDrive paused_off;
+    paused_off.off(60);
+    paused_off.step(20, false, true, true);
+    require(paused_off.step(20, false) == 0 && paused_off.policy.floor() == 54,
+            "The first camera-off window after a pause set the reference");
+  }
+  // The bridge samples the pause every 250 ms tick; Auto judges a window once.
+  // A pause that starts and ends inside one window still pauses that window.
+  {
+    taxi_camera::WindowPauseLatch latch;
+    auto window_at = [](std::uint64_t ms) { return ms / 2000; };
+    std::vector<std::pair<std::uint64_t, bool>> judged;  // window, paused
+    std::uint64_t last = 0;
+    for (std::uint64_t ms = 0; ms <= 10000; ms += 250) {
+      const bool paused = (ms >= 750 && ms <= 1500) || ms == 6000;
+      const bool latched = latch.observe(window_at(ms), paused);
+      if (window_at(ms) != last) {
+        judged.emplace_back(last, latched);
+        last = window_at(ms);
+      }
+    }
+    // Windows: 0 has the 0.75-1.5 s pause; 1 has none; the 6 s tick completes
+    // window 2 and starts window 3, so both count it; 4 has none.
+    require(judged.size() == 5, "Latch fixture judged the wrong number of windows");
+    require(judged[0].second, "A pause inside one window was not reported when the window completed");
+    require(!judged[1].second && !judged[4].second, "A window without a pause was reported paused");
+    require(judged[2].second, "A pause on the tick that completed a window was not reported");
+    require(judged[3].second, "A pause on the tick that started a window was not carried into it");
   }
 }
 }  // namespace
