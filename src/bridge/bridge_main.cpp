@@ -598,9 +598,14 @@ void service_panel_identity(PanelIdentityLog& state,
         }
       return false;
     };
-    const auto resolve = [&](display_identity::PanelOrder by) {
-      return profile ? display_identity::resolve_names(state.panels, burst.data(), burst.size(), names.data(), name_count, fit, expected,
-                                                       named.data(), proposal, paired, 8, by)
+    // The burst without the simulator's moves of panels it had just created
+    // (drop_copy_destinations).
+    const auto copies = win::display_feed_pairs();
+    auto settled = burst;
+    const auto moved = display_identity::drop_copy_destinations(settled, copies.data(), copies.size());
+    const auto resolve = [&](const std::vector<display_identity::Creation>& creations, display_identity::PanelOrder by) {
+      return profile ? display_identity::resolve_names(state.panels, creations.data(), creations.size(), names.data(), name_count, fit,
+                                                       expected, named.data(), proposal, paired, 8, by)
                      : -1;
     };
     // No window fits (a cockpit whose display boot keeps or adds textures):
@@ -623,10 +628,11 @@ void service_panel_identity(PanelIdentityLog& state,
     };
     // The table's index order first (every catalog aircraft's), else the
     // panel.cfg section order, for a table listing a section's panels apart:
-    // the names that fit no shift in index order are then paired right; else
-    // by shape.
+    // the names that fit no shift in index order are then paired right; then
+    // both without the moves, as a set-up aircraft that moves its panels was
+    // learned; else by shape.
     int shift = -1;
-    bool by_section = false, by_shape = false, lower_left_out = false;
+    bool by_section = false, by_shape = false, without_moves = false, lower_left_out = false;
     for (const bool with_lower : {true, false}) {
       if (!with_lower) {
         if (!profile || !profiles::lower_any_panel(*profile) || !names[MaxDisplaySides - 1] || !names[MaxDisplaySides - 1][0])
@@ -634,8 +640,13 @@ void service_panel_identity(PanelIdentityLog& state,
         names[MaxDisplaySides - 1] = "";
         lower_left_out = true;
       }
-      shift = resolve(display_identity::PanelOrder::index);
-      by_section = shift < 0 && (shift = resolve(display_identity::PanelOrder::section)) >= 0;
+      shift = resolve(burst, display_identity::PanelOrder::index);
+      by_section = shift < 0 && (shift = resolve(burst, display_identity::PanelOrder::section)) >= 0;
+      if (shift < 0 && moved) {
+        without_moves = (shift = resolve(settled, display_identity::PanelOrder::index)) >= 0;
+        by_section = !without_moves && (shift = resolve(settled, display_identity::PanelOrder::section)) >= 0;
+        without_moves = without_moves || by_section;
+      }
       by_shape = shift < 0 && profile &&
                  display_identity::resolve_by_shape(state.panels, burst.data(), burst.size(), names.data(), name_count, shape, named.data(),
                                                     proposal, paired);
@@ -646,20 +657,22 @@ void service_panel_identity(PanelIdentityLog& state,
     }
     const bool resolved = shift >= 0;
     bool complete = resolved;
+    // No names (aircraft discovery): one creation per panel, so the names the
+    // setup shows and learns are the panels'.
     if (!resolved) {
-      display_identity::trim_trailing_ui(burst);
-      if (burst.size() > textured)
-        burst.erase(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(textured));
-      paired = display_identity::propose(state.panels, burst.data(), burst.size(), proposal, complete);
+      display_identity::trim_trailing_ui(settled);
+      if (settled.size() > textured)
+        settled.erase(settled.begin(), settled.end() - static_cast<std::ptrdiff_t>(textured));
+      paired = display_identity::propose(state.panels, settled.data(), settled.size(), proposal, complete);
     }
     std::vector<std::string> pairs;
-    char summary[128];
-    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s%s",
+    char summary[160];
+    std::snprintf(summary, sizeof(summary), " rule=reverse_index_last_multimip_f28 complete=%d paired=%zu shift=%d order=%s moved=%zu%s%s",
                   complete ? 1 : 0, paired, shift,
                   by_shape     ? "shape"
                   : by_section ? "section"
                                : "index",
-                  lower_left_out ? " lower=unresolved" : "");
+                  moved, resolved && !without_moves ? "" : " burst=without_moves", lower_left_out ? " lower=unresolved" : "");
     pairs.emplace_back(summary);
     state.names.clear();
     for (std::size_t i = 0; i < paired; ++i) {
@@ -710,6 +723,9 @@ void service_panel_identity(PanelIdentityLog& state,
       named = follow_recreated(named);
       rename_recreated(paired, named);
       follow_panels(named);
+    } else {
+      // Paired without the moves, so some panels hold moved textures.
+      follow_panels({});
     }
     win::set_named_targets(named);
     if (named != state.named || profile != state.named_profile) {
@@ -1113,7 +1129,11 @@ DWORD run_impl() {
   struct SnapshotState {
     std::uint64_t serial{}, id{};
     win::DisplaySnapshotResult result = win::DisplaySnapshotResult::none;
-    unsigned width{}, height{}, format{};
+    unsigned width{}, height{}, format{}, plans{};
+    // Submission counters when the request started: a timeout logs what
+    // refused the Executes it waited on.
+    decltype(win::GraphicsStatus::queue_outcomes) outcomes{};
+    decltype(win::GraphicsStatus::queue_proof_refusals) refusals{};
   } snapshot;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
   const auto service_scene = [&] {
@@ -1346,14 +1366,48 @@ DWORD run_impl() {
         snapshot_save_error = 0;
         log_status(log_to, detail);
       };
+      // A copy never planned (FSLabs A321 setup, 2026-11-03: every picture
+      // timed out with no other line): the Executes refused since the request.
+      const auto log_refusals = [&](const char* how) {
+        const auto graphics = win::graphics_status();
+        char detail[1024];
+        auto used = static_cast<std::size_t>(
+            std::snprintf(detail, sizeof(detail), "Display snapshot %s: serial=%llu id=%llu plans=%u admission:", how,
+                          static_cast<unsigned long long>(snapshot.serial), static_cast<unsigned long long>(snapshot.id), snapshot.plans));
+        const auto add = [&](const char* name, std::uint64_t now_count, std::uint64_t then) {
+          if (now_count <= then || used >= sizeof(detail))
+            return;
+          const auto written =
+              std::snprintf(detail + used, sizeof(detail) - used, " %s=%llu", name, static_cast<unsigned long long>(now_count - then));
+          if (written > 0 && static_cast<std::size_t>(written) < sizeof(detail) - used)
+            used += static_cast<std::size_t>(written);
+        };
+        for (unsigned i = 0; i < graphics.queue_outcomes.size(); ++i)
+          add(win::display_submission_outcome_name(static_cast<win::DisplaySubmissionOutcome>(i)), graphics.queue_outcomes[i],
+              snapshot.outcomes[i]);
+        if (used < sizeof(detail))
+          used += static_cast<std::size_t>(std::snprintf(detail + used, sizeof(detail) - used, " proof:"));
+        for (unsigned i = 0; i < graphics.queue_proof_refusals.size(); ++i)
+          add(win::PfdSubmissionProof::refusal_name(static_cast<win::PfdSubmissionProof::Refusal>(i)), graphics.queue_proof_refusals[i],
+              snapshot.refusals[i]);
+        log_status(log_to, detail);
+      };
       if (allowed && settings.snapshot_request && settings.snapshot_request != snapshot.serial) {
+        if (snapshot.result == win::DisplaySnapshotResult::pending)
+          log_refusals("replaced");
+        const auto graphics = win::graphics_status();
         snapshot = {settings.snapshot_request, settings.snapshot_id, win::request_display_snapshot(settings.snapshot_id, now)};
+        snapshot.outcomes = graphics.queue_outcomes;
+        snapshot.refusals = graphics.queue_proof_refusals;
         if (snapshot.result != win::DisplaySnapshotResult::pending)
           log_snapshot();
       }
       if (snapshot.result == win::DisplaySnapshotResult::pending) {
         auto poll = win::poll_display_snapshot(now);
+        snapshot.plans = poll.plans;  // As of this poll: a replacement logs it.
         if (poll.result != win::DisplaySnapshotResult::pending) {
+          if (poll.result == win::DisplaySnapshotResult::timeout || poll.result == win::DisplaySnapshotResult::lost)
+            log_refusals(poll.result == win::DisplaySnapshotResult::timeout ? "timeout" : "lost");
           snapshot.width = poll.width;
           snapshot.height = poll.height;
           snapshot.format = poll.format;

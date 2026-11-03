@@ -5,6 +5,7 @@
 #include <cstring>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace taxi_camera::display_identity {
 // The panel.cfg reader creates one 0x690-byte panel per [VCockpitNN]/
@@ -299,6 +300,33 @@ std::uint64_t follow_copies(std::uint64_t id,
       return id;
   }
   return 0;
+}
+// The FSLabs A321 (2026-11-03) created its 17 panel textures (#241-#257) and
+// about a second later 9 more (#258-#266), each a copy of one before it
+// (#241 -> #266, #243 -> #259 -> ... -> #265, #245 -> #258 -> ... -> #264):
+// the same panels moved, not others. Counted as panels, they moved every
+// pairing back 9 creations and put $EFB-FO on the captain's PFD. Drops each
+// creation an earlier one of the burst was copied into, leaving one per
+// panel, and returns how many it dropped. Allocates: callers catch.
+template <class Creations>
+std::size_t drop_copy_destinations(Creations& burst, const std::pair<std::uint64_t, std::uint64_t>* copies, std::size_t count) {
+  const auto before = [&](std::uint64_t from, std::size_t at) {
+    for (std::size_t i = 0; i < at; ++i)
+      if (burst[i].id && burst[i].id == from)
+        return true;
+    return false;
+  };
+  std::vector<char> copied(burst.size());
+  for (std::size_t c = 0; c < burst.size(); ++c)
+    for (std::size_t i = 0; burst[c].id && i < count && !copied[c]; ++i)
+      copied[c] = copies[i].second == burst[c].id && before(copies[i].first, c);
+  std::size_t kept = 0;
+  for (std::size_t c = 0; c < burst.size(); ++c)
+    if (!copied[c])
+      burst[kept++] = burst[c];
+  const auto dropped = burst.size() - kept;
+  burst.resize(kept);
+  return dropped;
 }
 // Pairing with no profile names (aircraft discovery). Every cockpit panel
 // texture logged so far has 5 mips; UI textures (EFB, toolbar: 10-12 mips)

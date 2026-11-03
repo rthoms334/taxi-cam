@@ -171,6 +171,41 @@ void draw_bug_icon(HDC dc, const RECT& bounds, COLORREF color) {
   SelectObject(dc, old_pen);
   DeleteObject(pen);
 }
+// The Displays swap button: a round button on the slot group's card, like the
+// slots it sits between, with two opposed arrows (drawn, not a font glyph).
+void draw_swap_button(const DRAWITEMSTRUCT& item) {
+  const auto& r = item.rcItem;
+  HDC dc = item.hDC;
+  HBRUSH surround = CreateSolidBrush(Card);
+  FillRect(dc, &r, surround);
+  DeleteObject(surround);
+  const bool down = (item.itemState & ODS_SELECTED) != 0, focus = (item.itemState & ODS_FOCUS) != 0;
+  HBRUSH fill = CreateSolidBrush(down ? RGB(30, 64, 63) : Background);
+  HPEN outline = CreatePen(PS_SOLID, scale(1), down || focus ? Accent : Border);
+  auto old_brush = SelectObject(dc, fill);
+  auto old_pen = SelectObject(dc, outline);
+  Ellipse(dc, r.left, r.top, r.right, r.bottom);
+  const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, size = r.right - r.left;
+  const int arm = size * 3 / 10, offset = size / 9, head = size / 8;
+  HPEN arrow = CreatePen(PS_SOLID, scale(2), Accent);
+  SelectObject(dc, arrow);
+  const auto line = [&](int x1, int y1, int x2, int y2) {
+    MoveToEx(dc, x1, y1, nullptr);
+    LineTo(dc, x2, y2);
+  };
+  // To the right above, to the left below.
+  for (const int direction : {1, -1}) {
+    const int y = cy - direction * offset, tip = cx + direction * arm;
+    line(cx - direction * arm, y, tip, y);
+    line(tip, y, tip - direction * head, y - head);
+    line(tip, y, tip - direction * head, y + head);
+  }
+  SelectObject(dc, old_brush);
+  SelectObject(dc, old_pen);
+  DeleteObject(fill);
+  DeleteObject(outline);
+  DeleteObject(arrow);
+}
 void frame_field(HWND control);
 void edit(double value, int id, int x, int y, int w = 110) {
   wchar_t buffer[64];
@@ -387,9 +422,13 @@ void report_bug() {
                                : tr(L"Bug report opened. Drag the selected report file from File Explorer into the form's Logs box.");
   InvalidateRect(window, nullptr, FALSE);
 }
+// Every change saves by itself (there is no Save button): an edit saves once
+// typing pauses (autosave), so a number is not saved half typed.
+constexpr ULONGLONG AutosaveDelayMs = 700;
+ULONGLONG autosave_due = 0;
 void dirty_notice() {
   dirty = true;
-  notice = tr(L"Unsaved changes");
+  autosave_due = GetTickCount64() + AutosaveDelayMs;
   InvalidateRect(window, nullptr, FALSE);
 }
 bool apply_color_selection(const win::Settings& expected, bool markings, COLORREF color) {
@@ -433,7 +472,7 @@ constexpr CameraMode CameraModeOrder[]{CameraMode::automatic, CameraMode::perfor
 static_assert(std::size(CameraModeNames) == kCameraModeCount && std::size(CameraModeHints) == kCameraModeCount &&
               std::size(CameraModeOrder) == kCameraModeCount);
 // Display page mode cards (270 + CameraMode) and the custom target slider
-// (205). The chosen card is unsaved until Save changes, like the other fields.
+// (205). The chosen card saves like the other fields (autosave).
 constexpr int CameraModeCardId = 270, CameraTargetId = 205;
 unsigned pending_camera_mode = static_cast<unsigned>(kDefaultCameraMode);
 unsigned selected_camera_mode() {
@@ -621,8 +660,8 @@ void refresh_shortcut_status() {
     // Status lines speak only when something needs attention: a shortcut that
     // works, or none, says nothing.
     const bool editing = hotkey_editor_focused && GetFocus() == GetDlgItem(shortcut_window, 620 + static_cast<int>(i));
-    const auto state = hotkey_draft[i] != hotkey_saved[i] ? std::wstring(tr(L"Unsaved — Next saves it"))
-                       : editing                          ? std::wstring(tr(L"Editing — shortcuts paused"))
+    // A shortcut saves once its editor loses focus (autosave).
+    const auto state = editing ? std::wstring(tr(L"Editing — shortcuts paused"))
                        : !hotkey_editor_focused && hotkey_registration.unavailable(i)
                            ? tr_format(hotkey_registration.status_wording(i), {std::to_wstring(hotkey_registration.error(i))})
                            : std::wstring();
@@ -637,7 +676,6 @@ void refresh_shortcut_status() {
                   : tr_format(win::camera_button_wording(binding, device), {std::to_wstring(binding.button), tr(controller.c_str())});
     SetDlgItemTextW(shortcut_window, 680 + i, label.c_str());
     const auto button_state = capturing                       ? std::wstring(tr(L"Waiting — × cancels"))
-                              : binding != button_saved[i]    ? std::wstring(tr(L"Unsaved — Next saves it"))
                               : !binding.button || preview_ui ? std::wstring()
                               : !button_input.enabled()       ? tr_format(L"Windows error {0}", {std::to_wstring(button_input.error())})
                               : device.empty()                ? std::wstring(tr(L"Controller not connected"))
@@ -1735,7 +1773,7 @@ void choose_texture(unsigned list, std::uint64_t id) {
 // Each camera's step has the controls that turn it on.
 constexpr int OverviewPage = 0, CamerasPage = 1, OptionsPage = 2, RoutingPage = 3, DiagnosticsPage = 4, GuidesPage = 5, SetupPage = 6,
               DoorPage = 7;
-constexpr int SetupPreviousId = 452, SetupNextId = 453, SetupRefreshId = 456, SetupTestId = 458, SetupBuiltInId = 461,
+constexpr int SetupPreviousId = 452, SetupNextId = 453, SetupRefreshId = 456, SetupSwapId = 457, SetupTestId = 458, SetupBuiltInId = 461,
               SetupCardButtonId = 750, SetupPlaceId = 754;
 // The step pills (Overview and every step), Advanced, and a step's Back and
 // Next.
@@ -1801,6 +1839,15 @@ struct AircraftSetup {
   std::array<std::uint64_t, GalleryColumns> ids{};
   std::array<std::string, GalleryColumns> card_names;
   bool positioning{};  // Taxi cameras shows the positioning step after a save.
+  // Displays saved since Displays opened (each drop that completes them
+  // saves), and the cameras the user had on before the first of those saves.
+  bool stored{};
+  unsigned manual_before{}, door_on_before{};
+  // A drop not saved yet: the panel map was not ready (a save restarts the
+  // cameras and pairs the names again), so it is saved once it is.
+  bool unsaved{};
+  // Leaving Displays was refused once for it; the next try leaves anyway.
+  bool leave_warned{};
   // The panel picked from the gallery for a display (Place here), and a drag
   // of it from its card onto a display. picked_texture is the picture's own
   // texture, and textures what each display was given by picture: this
@@ -1823,6 +1870,14 @@ struct AircraftSetup {
   // aircraft of its own). Its choices save as the profile's DisplayOverride.
   std::uint32_t built_in{};
 } setup;
+// The Displays slots side by side over 730 logical pixels, the pilot
+// displays held apart by the swap button's gap. Returns a slot's x and width.
+constexpr int SetupSlotGap = 10, SetupSwapGap = 48, SetupSwapSize = 36;
+std::pair<int, int> setup_slot_x(unsigned side) {
+  const int sides = std::max(1, static_cast<int>(setup.sides)), swap = sides >= 2 ? SetupSwapGap - SetupSlotGap : 0;
+  const int width = (730 - SetupSlotGap * (sides - 1) - swap) / sides;
+  return {262 + static_cast<int>(side) * (width + SetupSlotGap) + (side >= 1 ? swap : 0), width};
+}
 bool fresh_status(const win::Status& sample) {
   const auto now = GetTickCount64();
   return sample.heartbeat && now >= sample.heartbeat && now - sample.heartbeat <= 3000;
@@ -1830,6 +1885,18 @@ bool fresh_status(const win::Status& sample) {
 // A loaded aircraft no profile matches; the bridge tracks its panels.
 bool unsupported_aircraft(const win::Status& sample) {
   return fresh_status(sample) && sample.panel_discovery && !sample.detected_profile && sample.identity_sample_ms;
+}
+// The built-in profile a setup changes: the selected one, unless the aircraft
+// loaded has no built-in profile. Auto aircraft keeps the last profile while
+// such an aircraft is loaded, and the bridge still reports one set up earlier
+// in this session as set up after its settings are gone (FSLabs A321 under
+// the FlyByWire A380X, 2026-11-03).
+std::uint32_t setup_built_in(const win::Settings& s, const win::Status& sample) {
+  if (s.profile == profiles::DiscoveredProfileId)
+    return 0;
+  const bool loaded_none = fresh_status(sample) && sample.identity_sample_ms &&
+                           (!sample.detected_profile || sample.detected_profile == profiles::DiscoveredProfileId);
+  return loaded_none ? 0 : s.profile;
 }
 profiles::VariantKey loaded_variant(const win::Status& sample) {
   profiles::VariantKey key{};
@@ -1877,13 +1944,21 @@ void sync_setup(const win::Status& sample) {
   if (setup.synced && (!key[0] || key == setup.key))
     return;
   const auto s = draft();
-  if (setup.synced && !setup.key[0] &&
+  // The aircraft reported decides again whether the built-in profile is the
+  // one set up.
+  const auto built_in = setup_built_in(s, sample);
+  if (setup.synced && !setup.key[0] && built_in == setup.built_in &&
       (setup.built_in || (s.profile == profiles::DiscoveredProfileId && profiles::same_variant(key.data(), s.discovered.key)))) {
     setup.key = key;
     return;
   }
   setup.synced = true;
   setup.key = key;
+  setup.built_in = built_in;
+  // Saves and the cameras to give back belong to the aircraft they were made
+  // for: another one starts without them.
+  setup.stored = setup.unsaved = setup.leave_warned = false;
+  setup.manual_before = setup.door_on_before = 0;
   setup.names = {};
   // Each display starts on the texture it uses in this flight: the one the
   // user placed, else the bridge's.
@@ -1921,7 +1996,9 @@ std::wstring setup_aircraft_name() {
 bool names_unpaired(const win::Status& sample) {
   if (sample.panel_shift >= 0 || static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::paired)
     return false;
-  const auto s = draft();
+  // The saved profile: a setup's trial runs the picks themselves, which are
+  // not names saved for this aircraft.
+  const auto s = setup.trial ? setup.before : draft();
   if (const auto* built_in = setup.built_in ? profiles::find(setup.built_in) : nullptr)
     return built_in->panel_textures[0] && built_in->panel_textures[0][0];
   return s.profile == profiles::DiscoveredProfileId && setup.key[0] && profiles::same_variant(setup.key.data(), s.discovered.key);
@@ -1991,10 +2068,22 @@ void route_picks(win::Settings& s, const std::vector<win::PanelTexture>& items) 
   const std::uint64_t left = picked_id(items, 0), right = setup.sides > 1 ? picked_id(items, 1) : 0;
   win::update_target_assignment(s.left_id, s.right_id, s.route_request, left, right == left ? 0 : right);
 }
+// Setup previews on the placed displays: a taxi camera on each, but the door
+// camera on its own display, as in flight, rather than a taxi camera there
+// until Door is picked in the live view. A door camera set to no display (the
+// user's choice in Setup → Door camera) leaves that display a taxi camera.
+void preview_cameras(win::Settings& s, unsigned placed) {
+  const unsigned door = s.door_side < MaxDisplaySides && (placed & (1u << s.door_side)) ? 1u << s.door_side : 0u;
+  s.manual_mask = placed & ~door;
+  s.door_on = door ? 1u : 0u;
+}
 // Cockpit test: the picks run as an unsaved trial profile with the
 // calibration pattern on each tested side, so the cockpit shows which screen
 // a panel is even where panel names do not say. A side not picked yet uses
 // a picked side's panel. Leaving the setup unsaved restores the settings.
+// An aircraft being set up runs the trial from its first placed display,
+// with the cameras on every placed display not tested: they show before the
+// setup is saved, and saving that layout keeps them running (no restart).
 void apply_setup_trial() {
   win::Status sample;
   {
@@ -2002,7 +2091,7 @@ void apply_setup_trial() {
     sample = status;
   }
   auto s = draft();
-  if (!setup.testing) {
+  if (!setup.testing && setup.built_in) {
     if (setup.trial && s.calibration_mask) {
       s.calibration_mask = 0;
       publish(s);
@@ -2042,30 +2131,45 @@ void apply_setup_trial() {
     names[side] = setup.names[side].empty() ? fallback : setup.names[side].c_str();
   profiles::DiscoveredLayout layout;
   if (!fallback || win::learn_layout(sample, names, sides, layout, false) != win::LayoutLearning::learned) {
+    // Without a test asked for, the cameras wait for a placed display, and a
+    // test just turned off takes its bars down (the map may be pairing again).
+    if (!setup.testing) {
+      if (setup.trial && s.calibration_mask) {
+        s.calibration_mask = 0;
+        publish(s);
+      }
+      return;
+    }
     setup.testing = 0;
     notice = fallback ? tr(L"The cockpit test needs the panel list. Wait for the pictures, then try again.") : tr(L"Pick a panel first.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
+  unsigned placed = 0;
+  for (unsigned side = 0; side < sides; ++side)
+    placed |= setup.names[side].empty() ? 0u : 1u << side;
   if (!setup.trial)
     setup.before = s;
   s.profile = profiles::DiscoveredProfileId;
   s.discovered = layout;
   win::fit_door_camera(s);
   s.calibration_mask = setup.testing & ((1u << sides) - 1);
-  s.manual_mask = s.taxi_selected_mask = s.taxi_desired_mask = 0;
+  preview_cameras(s, placed & ~s.calibration_mask);
+  s.taxi_selected_mask = s.taxi_desired_mask = 0;
   s.lower_id = 0;
   route_picks(s, setup_items(sample));
   s.panel_setup = 1;
   if (!win::valid_settings(s)) {
+    if (setup.testing)
+      notice = tr(L"The cockpit test could not start.");
     setup.testing = 0;
-    notice = tr(L"The cockpit test could not start.");
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
   publish(s);
   setup.trial = true;
-  notice = tr(L"Test bars show on the tested panels in the cockpit after a few seconds.");
+  if (setup.testing)
+    notice = tr(L"Test bars show on the tested panels in the cockpit after a few seconds.");
   InvalidateRect(window, nullptr, FALSE);
 }
 // Leaving the setup without saving: the settings from before the test,
@@ -2096,6 +2200,10 @@ void route_placed_displays() {
   if (s.left_id != left || s.right_id != right)
     publish(s);
 }
+bool store_aircraft_setup(const win::Status& sample, bool quiet);
+bool save_setup_picks(const win::Status& sample, bool quiet);
+void apply_setup_picks();
+void refresh_setup_picking();
 // One panel per side: placing another side's panel swaps the two.
 void place_setup_panel(unsigned side) {
   if (side >= setup.sides || setup.picked.empty())
@@ -2131,9 +2239,37 @@ void place_setup_panel(unsigned side) {
   setup.textures[side] = setup.picked_texture;
   setup.picked.clear();
   setup.picked_texture = 0;
-  // A running cockpit test follows the new picks; otherwise they are this
-  // flight's routes at once.
-  if (setup.testing)
+  apply_setup_picks();
+}
+// Swaps the two pilot displays: their pictures look alike, so the setup can
+// put each on the other's side (FSLabs A321, 2026-11-03).
+void swap_pilot_displays() {
+  if (setup.sides < 2 || setup.names[0].empty() || setup.names[1].empty())
+    return;
+  std::swap(setup.names[0], setup.names[1]);
+  std::swap(setup.textures[0], setup.textures[1]);
+  setup.testing = (setup.testing & ~3u) | ((setup.testing & 1u) << 1) | ((setup.testing >> 1) & 1u);
+  apply_setup_picks();
+  refresh_setup_picking();
+  RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+// The picks changed (a drop or a swap): they save at once, like every other
+// change, so an aircraft's cameras run there and stay whichever step comes
+// next. Picks that cannot save yet stay unsaved and save once they can
+// (retry_unsaved_setup, leaving Displays), a cockpit test's after it ends.
+// Meanwhile an aircraft being set up runs them as the trial, and a built-in
+// profile's are this flight's routes.
+void apply_setup_picks() {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  setup.unsaved = true;
+  setup.leave_warned = false;
+  if (!setup.testing && save_setup_picks(sample, true))
+    return;
+  if (!setup.built_in || setup.testing)
     apply_setup_trial();
   else
     route_placed_displays();
@@ -2147,6 +2283,9 @@ void refresh_setup_picking() {
     if (HWND place = GetDlgItem(window, SetupPlaceId + static_cast<int>(side)))
       ShowWindow(place, shown && !setup.picked.empty() ? SW_SHOWNA : SW_HIDE);
   }
+  // The swap needs both pilot displays placed.
+  if (HWND swap = GetDlgItem(window, SetupSwapId))
+    ShowWindow(swap, setup.sides >= 2 && !setup.names[0].empty() && !setup.names[1].empty() ? SW_SHOWNA : SW_HIDE);
   for (unsigned slot = 0; slot < GalleryColumns; ++slot)
     if (HWND card = GetDlgItem(window, SetupCardButtonId + static_cast<int>(slot)))
       InvalidateRect(card, nullptr, FALSE);
@@ -2246,6 +2385,12 @@ struct LiveView {
   HWND window{};
   std::uint64_t id{}, serial{};
   ULONGLONG requested_ms{}, taken_ms{};
+  // A camera asked for (the window opened, or turned one on): its display's
+  // pictures wait until the bridge has drawn cameras since (Status::stamps),
+  // so the bare display does not stand in for a camera still starting.
+  bool awaiting{};
+  std::uint64_t stamps_from{}, request_stamps{};
+  ULONGLONG awaiting_ms{};
   HBITMAP image{};
   int width{}, height{};
   unsigned texture_width{}, texture_height{}, side{};
@@ -2254,6 +2399,9 @@ struct LiveView {
   bool camera_taken{};
   decltype(win::Settings::follow_taxi) follow_before{};
   decltype(win::Settings::manual_mask) manual_before{}, manual_set{};
+  // A setup's door camera preview, which ends with the other previews.
+  bool door_preview{};
+  decltype(win::Settings::door_on) door_on_before_preview{};
   // The door camera, turned on live while it is selected, as it was before,
   // and the aircraft and flight it was taken in.
   bool door_taken{};
@@ -2292,6 +2440,16 @@ void release_live_image() {
   live_view.image = nullptr;
   live_view.width = live_view.height = 0;
 }
+// The window shows "Waiting for the camera picture…" until a camera has drawn.
+void live_await_camera(std::uint64_t stamps) {
+  live_view.awaiting = true;
+  live_view.stamps_from = stamps;
+  live_view.awaiting_ms = GetTickCount64();
+  live_view.taken_ms = 0;
+  release_live_image();
+}
+// A camera that never draws (refused, stopped) shows the display after this.
+constexpr ULONGLONG LiveAwaitMs = 20000;
 // Displays with a camera on, or asked for: automatic TAXI control shows what
 // the aircraft's buttons select and ignores manual requests; the PMDG 777's
 // manual previews add to its CAM page (bridge_main.cpp).
@@ -2307,24 +2465,45 @@ unsigned live_cameras_on(const win::Settings& s, const win::Status& sample, cons
 // over to manual control for it, keeping the displays it shows.
 void live_keep_camera(const win::Settings& s, const win::Status& sample, const profiles::AircraftProfile& profile, unsigned side) {
   // Not while a cockpit test or calibration owns the displays.
-  if (side >= MaxDisplaySides || !fresh_status(sample) || !sample.graphics_ready || s.calibration_mask || s.scene_test ||
-      (live_cameras_on(s, sample, profile) & (1u << side)))
+  if (side >= MaxDisplaySides || !fresh_status(sample) || !sample.graphics_ready || s.calibration_mask || s.scene_test)
     return;
   auto next = s;
-  if (next.follow_taxi && profile.taxi_control != profiles::TaxiControl::manual_only &&
-      profile.taxi_control != profiles::TaxiControl::pmdg_dsp_cam) {
-    next.manual_mask = sample.taxi_mask & profiles::side_mask(profile);
-    next.follow_taxi = 0;
+  if (s.profile == profiles::DiscoveredProfileId && !live_view.camera_taken) {
+    // A set-up aircraft previews every display it was set up on, the door
+    // camera on its own display, as its setup does (one PFD only showed a
+    // camera, 2026-11-03). Once: a camera turned off meanwhile stays off,
+    // and afterwards only the display shown is kept on, as below.
+    preview_cameras(next, profiles::side_mask(profile));
+    if (next.manual_mask == s.manual_mask && next.door_on == s.door_on) {
+      // Already all on: taken as they are, so this pass is the only one.
+      live_view.camera_taken = true;
+      live_view.follow_before = s.follow_taxi;
+      live_view.manual_before = live_view.manual_set = s.manual_mask;
+      live_view.door_preview = false;
+      live_view.door_on_before_preview = s.door_on;
+      return;
+    }
+  } else {
+    if (live_cameras_on(s, sample, profile) & (1u << side))
+      return;
+    if (next.follow_taxi && profile.taxi_control != profiles::TaxiControl::manual_only &&
+        profile.taxi_control != profiles::TaxiControl::pmdg_dsp_cam) {
+      next.manual_mask = sample.taxi_mask & profiles::side_mask(profile);
+      next.follow_taxi = 0;
+    }
+    next.manual_mask |= 1u << side;
   }
-  next.manual_mask |= 1u << side;
   if (!win::valid_settings(next))
     return;
   if (!live_view.camera_taken) {
     live_view.camera_taken = true;
     live_view.follow_before = s.follow_taxi;
     live_view.manual_before = s.manual_mask;
+    live_view.door_preview = next.door_on != s.door_on;
+    live_view.door_on_before_preview = s.door_on;
   }
   live_view.manual_set = next.manual_mask;
+  live_await_camera(sample.stamps);
   publish(next);
   refresh_side_toggles(next);
   InvalidateRect(window, nullptr, FALSE);
@@ -2381,6 +2560,10 @@ void live_keep_door(const win::Settings& loaded) {
     live_view.door_session = s.aircraft_session_epoch;
     std::memcpy(live_view.door_variant, s.discovered.key, sizeof(live_view.door_variant));
   }
+  {
+    const std::lock_guard lock(app_mutex);
+    live_await_camera(status.stamps);
+  }
   publish(next);
   InvalidateRect(window, nullptr, FALSE);
 }
@@ -2429,7 +2612,12 @@ void service_live_view() {
       auto* image = static_cast<HBITMAP>(
           LoadImageW(nullptr, win::display_snapshot_path().c_str(), IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION));
       BITMAP bitmap{};
-      if (image && GetObjectW(image, sizeof(bitmap), &bitmap) && bitmap.bmWidth > 0 && bitmap.bmHeight) {
+      const bool drawn = !live_view.awaiting || live_view.area_mode || live_view.request_stamps > live_view.stamps_from ||
+                         now - live_view.awaiting_ms > LiveAwaitMs;
+      if (image && !drawn) {
+        DeleteObject(image);  // Taken before any camera drew: the bare display.
+      } else if (image && GetObjectW(image, sizeof(bitmap), &bitmap) && bitmap.bmWidth > 0 && bitmap.bmHeight) {
+        live_view.awaiting = false;
         release_live_image();
         live_view.image = image;
         live_view.width = bitmap.bmWidth;
@@ -2445,6 +2633,12 @@ void service_live_view() {
     InvalidateRect(live_view.window, nullptr, FALSE);
   }
   if (id != live_view.id || side != live_view.side) {
+    // Another display (the door camera's after a taxi camera's): its picture
+    // is loading, so the last one does not stand in for it.
+    if (id != live_view.id) {
+      release_live_image();
+      live_view.taken_ms = live_view.requested_ms = 0;
+    }
     live_view.id = id;
     live_view.side = side;
     InvalidateRect(live_view.window, nullptr, FALSE);
@@ -2456,6 +2650,7 @@ void service_live_view() {
   if (!id || !fresh_status(sample) || !sample.graphics_ready || now - live_view.requested_ms < LiveViewIntervalMs)
     return;
   live_view.serial = request_display_snapshot(id);
+  live_view.request_stamps = sample.stamps;
   live_view.requested_ms = now;
 }
 // Takes the next missing or stale picture. Requests go one at a time; the
@@ -2979,10 +3174,11 @@ void draw_setup(HDC dc, const win::Status& sample) {
        : !setup.picked.empty() ? Accent
                                : Muted,
        DT_LEFT | DT_WORDBREAK);
-  const int sides = static_cast<int>(setup.sides), gap = 10, width = (730 - gap * (sides - 1)) / sides;
+  const int sides = static_cast<int>(setup.sides);
   for (int side = 0; side < sides; ++side) {
-    const int x = 262 + side * (width + gap), y = SetupSlotTop, inner = width - 20;
     const auto unsigned_side = static_cast<unsigned>(side);
+    const auto [x, width] = setup_slot_x(unsigned_side);
+    const int y = SetupSlotTop, inner = width - 20;
     setup.slot_areas[unsigned_side] = rectangle(x, y, width, SetupSlotHeight);
     // A picked panel marks every display as a drop target; the one a drag is
     // over lights up.
@@ -3135,13 +3331,16 @@ bool apply(bool save = true) {
   auto saved = settings;
   if (door_hold_aircraft(saved) && saved.door_live)
     saved.door_live = live_view.door_live_before;
-  if (save && !win::save_settings(saved)) {
+  // Every change is saved; a setup's unsaved trial is not the user's profile.
+  if (!setup.trial && !win::save_settings(saved)) {
     notice = tr(L"Could not save settings. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
   publish(settings);
   dirty = false;
+  autosave_due = 0;
+  // save: the user changed a setting (else a switch applied pending fields).
   notice = save ? tr(L"Saved. Adjustments apply while the cameras are running.") : tr(L"Settings updated.");
   if (save && hotkey_registration.conflicts())
     notice = tr(L"Saved. Some shortcuts are unavailable; check Setup > Taxi cameras.");
@@ -3311,8 +3510,9 @@ void auto_profile() {
 }
 // Camera adjustment window. Everything is painted here and hit-tested, so
 // the keyboard always reaches the window. Changes apply live like the Camera
-// views buttons; Save writes them, and the main window's fields follow them so
-// a later Save changes cannot write back older values.
+// views buttons and save by themselves (autosave); the main window's fields
+// follow them so a later save cannot write back older values. Undo returns
+// to the values from when the window opened.
 constexpr wchar_t LiveViewClass[] = L"TaxiCamLiveView";
 // Mount steps (right, up, forward m; pitch, yaw deg; lens rad), scaled by
 // live_view.step: fine x0.2, normal x1, coarse x5.
@@ -3596,6 +3796,12 @@ void paint_live_view(HWND hwnd, HDC dc) {
     caption = tr(L"No aircraft profile selected.");
   else if (!fresh_status(sample) || !sample.graphics_ready)
     caption = tr(L"Choose Connect with a flight loaded to see the cameras.");
+  // The door camera without a display: the picture stays on a taxi camera's.
+  // With a lower display placed, none is the user's choice in Door camera.
+  else if (live_door(*profile) && !win::door_camera_set_up(s))
+    caption = profiles::side_mask(*profile) & (1u << (MaxDisplaySides - 1))
+                  ? tr(L"Choose the display it fills. The lower display is the usual place.")
+                  : tr(L"Place the lower display in Setup > Displays to show the door camera there.");
   else if (!live_view.id)
     caption = tr(L"Waiting for a display to be found for this aircraft.");
   else {
@@ -3780,8 +3986,8 @@ void paint_live_view(HWND hwnd, HDC dc) {
                 : tr(L"Drag a camera picture to aim it; the wheel zooms. Arrows move right and forward, Page Up/Down up and down, "
                      L"Ctrl+arrows aim, + and − zoom, Tab changes camera, Shift is fine. Drag the white points to move the guides; "
                      L"a tail point snaps level with the other side's, and to the same distance from its edge (hold Alt to place "
-                     L"it freely).\n\nChanges show live and are saved when you close this window. Undo changes returns to how they "
-                     L"were saved; Defaults restores this camera's and the guides' starting values."),
+                     L"it freely).\n\nChanges show live and are saved at once. Undo changes returns to how they were when this "
+                     L"window opened; Defaults restores this camera's and the guides' starting values."),
             {px, y, px + pw, client.bottom - scale(16)}, small, Muted, DT_LEFT | DT_WORDBREAK | DT_TOP);
 }
 // Applies a live change: in bounds, published, marked unsaved, and shown in
@@ -4184,6 +4390,8 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
         if (s.manual_mask == live_view.manual_set) {
           s.follow_taxi = live_view.follow_before;
           s.manual_mask = live_view.manual_before;
+          if (live_view.door_preview)
+            s.door_on = live_view.door_on_before_preview;
           if (win::valid_settings(s)) {
             publish(s);
             refresh_side_toggles(s);
@@ -4198,7 +4406,7 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
         if (win::valid_settings(s))
           publish(s);
       }
-      // Closing saves what was adjusted, like Save changes.
+      // Closing saves what is still waiting for the autosave.
       if (live_view.changed)
         apply();
       live_view.changed = false;
@@ -4233,6 +4441,11 @@ void open_live_view(unsigned feed = 0, bool area = false, unsigned area_side = M
   live_view = {};
   live_view.feed = feed < profiles::CameraViews ? feed : 0;
   live_view.area_mode = area;
+  // The cameras may still be starting (opened right after a setup's save).
+  if (!area) {
+    const std::lock_guard lock(app_mutex);
+    live_await_camera(status.stamps);
+  }
   if (area_side < MaxDisplaySides)
     live_view.area_side = area_side;
   // Undo returns to the saved settings, not to unsaved edits.
@@ -4259,6 +4472,11 @@ void open_live_view(unsigned feed = 0, bool area = false, unsigned area_side = M
   service_live_view();
 }
 void open_aircraft_setup() {
+  // No camera adjustment window stays open through the setup: it gives its
+  // cameras back now, before a trial or a save records them, and positioning
+  // opens a window of its own.
+  if (live_view.window)
+    DestroyWindow(live_view.window);
   auto s = draft();
   win::Status sample;
   {
@@ -4267,9 +4485,10 @@ void open_aircraft_setup() {
   }
   // The selected built-in profile's own aircraft: change its displays.
   // Otherwise set up the aircraft loaded (or change a set-up aircraft's).
-  setup.built_in = !unsupported_aircraft(sample) && s.profile != profiles::DiscoveredProfileId ? s.profile : 0;
+  setup.built_in = setup_built_in(s, sample);
   setup.key = {};  // Start again from the displays in use.
   setup.synced = false;
+  setup.stored = setup.unsaved = setup.leave_warned = false;
   // The bridge tracks every panel texture while the setup is open.
   s.panel_setup = 1;
   publish(s);
@@ -4279,10 +4498,12 @@ void open_aircraft_setup() {
 // A built-in profile's display choices: saved with the profile and applied
 // at once. Saved picks go on to Taxi cameras; the profile's own displays stay
 // on Displays to show them.
-void save_built_in_displays(bool built_in_only) {
+// stay: a drop's save, which keeps Displays open and the bridge tracking every
+// panel for its gallery. False when nothing was saved.
+bool save_built_in_displays(bool built_in_only, bool stay = false) {
   const auto* base = profiles::base_profile(setup.built_in);
   if (!base)
-    return;
+    return false;
   win::Status sample;
   {
     const std::lock_guard lock(app_mutex);
@@ -4291,6 +4512,7 @@ void save_built_in_displays(bool built_in_only) {
   auto s = setup.trial ? setup.before : draft();
   setup.trial = false;
   setup.testing = 0;
+  const unsigned sides_before = profiles::override_sides(*base, s.display_override);
   s.display_override = built_in_choices(*base, s.display_override);
   if (built_in_only) {
     for (auto& texture : s.display_override.textures)
@@ -4298,36 +4520,170 @@ void save_built_in_displays(bool built_in_only) {
     win::update_target_assignment(s.left_id, s.right_id, s.route_request, 0, 0);
   } else {
     route_picks(s, setup_items(sample));
-    // A newly placed lower display is where the door camera goes.
-    if (s.door_side == win::DoorSideNone && profiles::override_sides(*base, s.display_override) > base->sides)
+    // A newly placed lower display is where the door camera goes. None with
+    // the lower display already placed is the user's choice and stays (a
+    // drop or swap saves too).
+    if (s.door_side == win::DoorSideNone && profiles::override_sides(*base, s.display_override) > base->sides &&
+        sides_before <= base->sides)
       s.door_side = MaxDisplaySides - 1;
   }
   // Without its placed lower display the door camera has none.
   win::fit_door_camera(s);
-  s.panel_setup = 0;
+  s.panel_setup = stay ? 1 : 0;
   if (!win::valid_settings(s) || !win::save_settings(s)) {
     notice = tr(L"Could not save these displays. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
-    return;
+    return false;
   }
   publish(s);
   dirty = false;
+  setup.unsaved = false;
   if (built_in_only) {
     setup.key = {};  // The picks start again from the profile's own.
     setup.synced = false;
     s.panel_setup = 1;
     publish(s);
-  } else {
+  } else if (!stay) {
     page = CamerasPage;
   }
-  build_controls();
+  if (!stay)
+    build_controls();
   notice =
       built_in_only ? tr(L"The profile's own displays are back.") : tr(L"Saved. These displays are used for this aircraft from now on.");
   InvalidateRect(window, nullptr, FALSE);
+  return true;
 }
 // Learns the layout from the picks and the bridge's panel map, saves it for
-// this variant and selects it, then opens Taxi cameras with previews on so
+// this variant and selects it with the cameras on every placed display.
+// Quiet (a drop on Displays) leaves out the notices of picks not finished and
+// keeps the bridge tracking every panel for the gallery. False when nothing
+// was saved.
+bool store_aircraft_setup(const win::Status& sample, bool quiet) {
+  std::array<const char*, MaxDisplaySides> names{};
+  const unsigned sides = placed_sides();
+  for (unsigned side = 0; side < sides; ++side)
+    names[side] = setup.names[side].c_str();
+  profiles::DiscoveredLayout layout;
+  const auto learned = win::learn_layout(sample, names, sides, layout);
+  switch (learned) {
+    case win::LayoutLearning::learned:
+      break;
+    // Not placed yet, or the map is pairing again: a quiet save waits.
+    case win::LayoutLearning::unknown_panel:
+    case win::LayoutLearning::not_paired:
+      if (!quiet) {
+        notice = learned == win::LayoutLearning::not_paired
+                     ? tr(L"This cockpit's panel list is not complete. Wait a few seconds after the cockpit has loaded.")
+                     : tr(L"Pick a panel for every display.");
+        InvalidateRect(window, nullptr, FALSE);
+      }
+      return false;
+    default:
+      setup.unsaved = false;  // These picks never save: the user picks again.
+      notice = tr(L"These panels cannot be saved for this aircraft. Pick other panels.");
+      InvalidateRect(window, nullptr, FALSE);
+      return false;
+  }
+  // An open adjustment window gives its cameras back first (its own close
+  // rules), so the cameras recorded below are the user's, not its previews.
+  if (live_view.window)
+    DestroyWindow(live_view.window);
+  // A cockpit test is not the user's profile: keep the one from before it.
+  const auto earlier = setup.trial ? setup.before : draft();
+  if (setup.trial ? !win::save_settings(setup.before) : !apply())
+    return false;
+  setup.trial = false;
+  setup.testing = 0;
+  const auto s = draft();
+  win::Settings next;
+  if (!win::load_settings(next, installation, profiles::DiscoveredProfileId, layout.key, &layout)) {
+    notice = tr(L"Could not prepare this aircraft's settings.");
+    InvalidateRect(window, nullptr, FALSE);
+    return false;
+  }
+  next.enabled = s.enabled;
+  const bool same = earlier.profile == profiles::DiscoveredProfileId && profiles::same_variant(layout.key, earlier.discovered.key);
+  // A newly placed lower display is where the door camera goes, as on a
+  // built-in profile: saved first without one, the variant kept no door
+  // display (FSLabs A321, 2026-11-03). A door camera set to none with the
+  // lower display already placed is the user's choice and stays.
+  if (next.door_side == win::DoorSideNone && layout.sides == MaxDisplaySides && (!same || earlier.discovered.sides < MaxDisplaySides))
+    next.door_side = MaxDisplaySides - 1;
+  if (!win::prepare_profile_selection(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
+    notice = tr(L"Could not save this aircraft. Check access to your local settings folder.");
+    InvalidateRect(window, nullptr, FALSE);
+    return false;
+  }
+  // The cameras the user had on come back when positioning ends: only those
+  // from before this setup's first save (later saves start from its previews).
+  if (!setup.stored) {
+    setup.manual_before = same ? earlier.manual_mask : 0;
+    setup.door_on_before = same ? earlier.door_on : 0;
+  }
+  setup.stored = true;
+  setup.unsaved = false;
+  // Previews draw every camera on the picked displays while positioning.
+  preview_cameras(next, (1u << layout.sides) - 1);
+  next.panel_setup = quiet ? 1 : 0;
+  next.left_id = s.left_id;
+  next.right_id = s.right_id;
+  next.lower_id = 0;
+  next.route_request = s.route_request;
+  route_picks(next, setup_items(sample));
+  publish(next);
+  dirty = false;
+  notice = tr(L"Saved. These displays are used for this aircraft from now on.");
+  InvalidateRect(window, nullptr, FALSE);
+  return true;
+}
+// Taxi cameras with the previews on and the camera adjustment window open, so
 // the cameras can be positioned from their starting mounts.
+void start_positioning() {
+  setup.positioning = true;
+  // Always a window of its own, so what it gives back is only the setup's.
+  if (live_view.window)
+    DestroyWindow(live_view.window);
+  auto s = draft();
+  s.panel_setup = 0;
+  publish(s);
+  page = CamerasPage;
+  build_controls();
+  open_live_view();
+  // The previews are the window's, as a camera it turns on is: closing it
+  // turns them off again (a lower display kept its taxi cameras), back to the
+  // cameras from before the setup's first save. Its first pass has just taken
+  // the previews as if they were the user's.
+  if (live_view.window) {
+    live_view.camera_taken = true;
+    live_view.follow_before = s.follow_taxi;
+    live_view.manual_before = setup.manual_before;
+    live_view.manual_set = s.manual_mask;
+    live_view.door_preview = true;
+    live_view.door_on_before_preview = setup.door_on_before;
+  }
+  notice = tr(L"The cameras start from default positions. Adjust each one in the live view.");
+  InvalidateRect(window, nullptr, FALSE);
+}
+// A drop saved late, on Displays: once nothing blocks it (the map pairs again
+// after a save restarts the cameras). Picks not complete stay the trial.
+// Saves the picks where nothing blocks them: a built-in profile's display
+// choices, or the aircraft being set up. Quiet: a drop's or a retry's save,
+// which stays on Displays. False when nothing was saved.
+bool save_setup_picks(const win::Status& sample, bool quiet) {
+  if (!setup_blocker(sample).empty())
+    return false;
+  return setup.built_in ? save_built_in_displays(false, true) : store_aircraft_setup(sample, quiet);
+}
+void retry_unsaved_setup() {
+  if (!setup.unsaved || page != SetupPage || setup.testing || setup.dragging)
+    return;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  save_setup_picks(sample, true);
+}
 void save_aircraft_setup() {
   win::Status sample;
   {
@@ -4344,57 +4700,8 @@ void save_aircraft_setup() {
     save_built_in_displays(false);
     return;
   }
-  std::array<const char*, MaxDisplaySides> names{};
-  const unsigned sides = placed_sides();
-  for (unsigned side = 0; side < sides; ++side)
-    names[side] = setup.names[side].c_str();
-  profiles::DiscoveredLayout layout;
-  switch (win::learn_layout(sample, names, sides, layout)) {
-    case win::LayoutLearning::learned:
-      break;
-    case win::LayoutLearning::unknown_panel:
-      notice = tr(L"Pick a panel for every display.");
-      InvalidateRect(window, nullptr, FALSE);
-      return;
-    default:
-      notice = tr(L"These panels cannot be saved for this aircraft. Pick other panels.");
-      InvalidateRect(window, nullptr, FALSE);
-      return;
-  }
-  // A cockpit test is not the user's profile: keep the one from before it.
-  if (setup.trial ? !win::save_settings(setup.before) : !apply())
-    return;
-  setup.trial = false;
-  setup.testing = 0;
-  const auto s = draft();
-  win::Settings next;
-  if (!win::load_settings(next, installation, profiles::DiscoveredProfileId, layout.key, &layout)) {
-    notice = tr(L"Could not prepare this aircraft's settings.");
-    InvalidateRect(window, nullptr, FALSE);
-    return;
-  }
-  next.enabled = s.enabled;
-  if (!win::prepare_profile_selection(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
-    notice = tr(L"Could not save this aircraft. Check access to your local settings folder.");
-    InvalidateRect(window, nullptr, FALSE);
-    return;
-  }
-  // Previews draw every camera on the picked displays while positioning.
-  next.manual_mask = (1u << layout.sides) - 1;
-  next.panel_setup = 0;
-  next.left_id = s.left_id;
-  next.right_id = s.right_id;
-  next.lower_id = 0;
-  next.route_request = s.route_request;
-  route_picks(next, setup_items(sample));
-  publish(next);
-  dirty = false;
-  setup.positioning = true;
-  page = CamerasPage;
-  build_controls();
-  open_live_view();
-  notice = tr(L"Saved. Position each camera in the camera adjustment window, then choose Save.");
-  InvalidateRect(window, nullptr, FALSE);
+  if (store_aircraft_setup(sample, false))
+    start_positioning();
 }
 // Leaves the page shown for next: unfinished fields keep it. Leaving the
 // aircraft setup ends an unsaved cockpit test and the bridge's panel tracking.
@@ -4405,6 +4712,38 @@ bool leave_page(int next) {
     notice = field_error ? tr(field_error) : tr(L"Finish the current values before changing pages.");
     InvalidateRect(window, nullptr, FALSE);
     return false;
+  }
+  // Placed displays not saved yet (a drop while the map paired again) are
+  // saved before Displays is left. If they cannot be now, the first try says
+  // why and stays; the next one leaves without them.
+  if (page == SetupPage && next != SetupPage && !setup.built_in && setup.unsaved && !setup.names[0].empty() && !setup.names[1].empty() &&
+      !setup.leave_warned) {
+    win::Status sample;
+    {
+      const std::lock_guard lock(app_mutex);
+      sample = status;
+    }
+    const auto blocker = setup_blocker(sample);
+    if (!blocker.empty() || !store_aircraft_setup(sample, false)) {
+      if (!blocker.empty())
+        notice = blocker;
+      setup.leave_warned = true;
+      InvalidateRect(window, nullptr, FALSE);
+      return false;
+    }
+    s = draft();
+  }
+  // A built-in profile's picks not saved yet (made during a cockpit test)
+  // save on the way out; where something blocks that, they stay this
+  // flight's routes, and leaving is never held up.
+  if (page == SetupPage && next != SetupPage && setup.built_in && setup.unsaved) {
+    win::Status sample;
+    {
+      const std::lock_guard lock(app_mutex);
+      sample = status;
+    }
+    if (save_setup_picks(sample, true))
+      s = draft();
   }
   if (page == SetupPage && next != SetupPage)
     end_setup_trial(s);
@@ -4427,6 +4766,12 @@ void open_step(unsigned step) {
     return;
   if (next == SetupPage) {
     open_aircraft_setup();
+    return;
+  }
+  // Displays saved as they were placed: their cameras are positioned next.
+  if (page == SetupPage && next == CamerasPage && setup.stored && !setup.built_in) {
+    setup.stored = false;
+    start_positioning();
     return;
   }
   page = next;
@@ -4866,6 +5211,26 @@ bool save_controls() {
   refresh_shortcut_status();
   return true;
 }
+// Saves every change by itself (main window timer): settings once edits pause
+// (dirty_notice), shortcuts and controller buttons once no editor is open. A
+// setup's unsaved trial is not saved, and shortcuts refused once (a clash)
+// wait for the next edit rather than repeating the notice.
+win::CameraHotkeys refused_hotkeys{};
+win::CameraButtons refused_buttons{};
+bool controls_refused{};
+void autosave() {
+  if (dirty && autosave_due && GetTickCount64() >= autosave_due && !setup.trial) {
+    autosave_due = 0;
+    apply();
+  }
+  if (shortcut_window != window || hotkey_editor_focused || button_capture >= 0 ||
+      (hotkey_draft == hotkey_saved && button_draft == button_saved) ||
+      (controls_refused && hotkey_draft == refused_hotkeys && button_draft == refused_buttons))
+    return;
+  controls_refused = !save_controls();
+  refused_hotkeys = hotkey_draft;
+  refused_buttons = button_draft;
+}
 // The power icon in a live picture's top left corner (device pixels).
 RECT power_icon_rect(const RECT& well) {
   return {well.left + scale(6), well.top + scale(6), well.left + scale(34), well.top + scale(34)};
@@ -5073,8 +5438,8 @@ void build_controls() {
   }
   button(tr(L"Menu"), 602, 930, 37, 80, 34);
   button(tr(L"Hide to tray"), 501, 800, 37, 120, 34);
-  // A step has Back and Next (the last saves and finishes) and the step
-  // pills; the other pages save with Save changes.
+  // A step has Back and Next (the last finishes) and the step pills. Every
+  // change saves by itself (autosave), so no page has a Save button.
   const int step = setup_step(page);
   if (step >= 0) {
     button(switch_label(tr(L"Advanced"), advanced).c_str(), AdvancedId, 670, 37, 120, 34);
@@ -5083,10 +5448,8 @@ void build_controls() {
     const auto back = step == 0 ? std::wstring(tr(L"Cancel")) : tr_format(L"Back: {0}", {step_name(static_cast<unsigned>(step) - 1)});
     button(back.c_str(), BackId, 244, 686, 190, 42);
     const auto next = step + 1 < static_cast<int>(SetupSteps) ? tr_format(L"Next: {0}", {step_name(static_cast<unsigned>(step) + 1)})
-                                                              : std::wstring(tr(L"Save and finish"));
+                                                              : std::wstring(tr(L"Finish"));
     button(next.c_str(), NextId, 835, 686, 175, 42);
-  } else {
-    button(tr(L"Save changes"), 500, 835, 686, 175, 42);
   }
   if (page == OverviewPage) {
     button(switch_label(tr(L"Auto-connect"), auto_connect.load(std::memory_order_acquire)).c_str(), 240, 686, 132, 150);
@@ -5286,11 +5649,24 @@ void build_controls() {
       }
       sync_setup(sample);
     }
-    const int slot_width = (730 - 10 * (static_cast<int>(setup.sides) - 1)) / static_cast<int>(setup.sides);
     for (unsigned side = 0; side < setup.sides; ++side) {
-      const int x = 262 + static_cast<int>(side) * (slot_width + 10) + 10, w = slot_width - 20, y = SetupSlotTop + SetupSlotHeight - 40;
+      const auto [slot_x, slot_width] = setup_slot_x(side);
+      const int x = slot_x + 10, w = slot_width - 20, y = SetupSlotTop + SetupSlotHeight - 40;
       button(switch_label(tr(L"Test in cockpit"), (setup.testing >> side) & 1).c_str(), SetupTestId + static_cast<int>(side), x, y, w, 30);
       button(tr(L"Place here"), SetupPlaceId + static_cast<int>(side), x, y, w, 30);
+    }
+    // In the gap between the pilot displays, level with their pictures
+    // (painted round with a drawn icon: draw_swap_button).
+    const auto [left_x, left_width] = setup_slot_x(0);
+    if (HWND swap = button(tr(L"Swap the left and right PFDs"), SetupSwapId, left_x + left_width + (SetupSwapGap - SetupSwapSize) / 2,
+                           SetupSlotTop + 40 + SetupSlotPicture / 2 - SetupSwapSize / 2, SetupSwapSize, SetupSwapSize)) {
+      TOOLINFOW tip{};
+      tip.cbSize = sizeof(tip);
+      tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+      tip.hwnd = window;
+      tip.uId = reinterpret_cast<UINT_PTR>(swap);
+      tip.lpszText = const_cast<wchar_t*>(tr(L"Swap the left and right PFDs"));
+      SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
     button(tr(L"Refresh pictures"), SetupRefreshId, 646, SetupGalleryTop + 8, 150, 30);
     button(L"‹", SetupPreviousId, 872, SetupGalleryTop + 8, 56, 30);
@@ -5488,7 +5864,7 @@ void draw_page(HDC dc) {
       : page == CamerasPage
           ? (setup.positioning ? tr(L"The cameras start from default positions. Adjust each one in the live view.")
                                : tr(L"Adjust each taxi camera in the live view: drag to aim, arrows to move, the wheel to zoom."))
-      : page == GuidesPage ? tr(L"Advanced: move the guide points, preview them live, then save for this aircraft.")
+      : page == GuidesPage ? tr(L"Advanced: move the guide points; they show live and are saved for this aircraft.")
       : page == DoorPage   ? tr(L"A cabin camera on a cockpit display, turned on from the flight deck.")
                            : tr(L"Turn cameras on from the flight deck, the keyboard or a controller.");
   // A translation can outgrow the line: the title and subtitle then step down
@@ -5790,9 +6166,7 @@ void draw_page(HDC dc) {
          draw_guides ? tr(L"X from the nearest side, 0–50%; Y from the top, 0–100% of each camera view. The nose guide mirrors.")
                      : tr(L"This aircraft does not use alignment markers."),
          244, 577, 766, 26, small, Muted);
-    text(dc,
-         draw_guides ? tr(L"Preview is temporary until saved. Reset restores guide positions and colour.")
-                     : tr(L"No marker calibration is required for this profile."),
+    text(dc, draw_guides ? tr(L"Reset restores guide positions and colour.") : tr(L"No marker calibration is required for this profile."),
          244, 602, 766, 23, small, Muted);
     if (draw_guides) {
       auto preview = draft();
@@ -6285,6 +6659,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         show();
       poll_updates();
       service_thumbnails();
+      retry_unsaved_setup();
+      autosave();
       return 0;
     case WM_HOTKEY: {
       const int action = hotkey_registration.action(w, l);
@@ -6432,6 +6808,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id >= StepPillId && id < StepPillId + static_cast<int>(SetupSteps)) {
         draw_step_pill(*item, static_cast<unsigned>(id - StepPillId), page == OverviewPage);
+        return TRUE;
+      }
+      if (id == SetupSwapId) {
+        draw_swap_button(*item);
         return TRUE;
       }
       if (draw_page_button(*item))
@@ -6702,6 +7082,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         build_controls();
         return 0;
       }
+      if (id == SetupSwapId) {
+        swap_pilot_displays();
+        return 0;
+      }
       if (id == SetupRefreshId) {
         thumbnails.fresh_after = GetTickCount64();
         service_thumbnails();
@@ -6956,10 +7340,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         const auto* guide_profile = profiles::find(draft().profile);
         if (guide_profile && !guide_profile->reference_guides)
           return 0;
-        if (apply(false)) {
-          dirty_notice();
-          notice = tr(L"Preview applied. Save changes to keep these guides.");
-        }
+        apply();
         return 0;
       }
       if (id == 371) {
@@ -6970,7 +7351,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           win::reset_guide_settings(s, *profile);
           publish(s);
           dirty_notice();
-          notice = tr(L"Profile guide positions and colour restored. Save changes to keep them.");
+          notice = tr(L"Profile guide positions and colour restored.");
           build_controls();
         }
         return 0;

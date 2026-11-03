@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <vector>
 #include "../../src/camera/display_panels.hpp"
 #include "../../src/graphics/taxi_button_routes.hpp"
@@ -441,6 +442,77 @@ int main() {
     // to #1238 and the right to #1233, so on this load the two PFDs (same
     // shape, same gauge, adjacent sections) were created the other way round
     // from the 2026-10-04 load above. Creation order cannot tell them apart.
+  }
+
+  {
+    // FSLabs A321-NEO PW, 2026-11-03: its table, the load's 17 panel
+    // creations (#241-#257), the 9 it moved a second later and the copies
+    // logged. The setup's pictures showed #251-#256 as the captain's PFD, ND,
+    // the system display, E/WD, the first officer's ND and PFD.
+    Panels fsl;
+    add(fsl, 0, "VCockpit01", "NO_TEXTURE", 4, 32);
+    const char* table[]{"$MainPanel1",  "$DU1",          "$DU2",          "$DU3",   "$DU4",   "$DU5",     "$DU6",    "MIP-Btns", "$ISIS",
+                        "PED-gauges-1", "$MCDU-gauge-1", "$MCDU-gauge-2", "$DCDU1", "$DCDU2", "$EFB-CPT", "$EFB-FO", "$DRAIMS"};
+    const char* sections[]{"VCockpit02", "VCockpit03", "VCockpit04", "VCockpit05", "VCockpit06", "VCockpit07",
+                           "VCockpit08", "VCockpit09", "VCockpit10", "VCockpit11", "VCockpit12", "VCockpit13",
+                           "VCockpit14", "VCockpit15", "VCockpit16", "VCockpit17", "VCockpit18"};
+    for (std::uint32_t i = 0; i < 17; ++i)
+      add(fsl, i + 1, sections[i], table[i], 4, 1024);
+    const std::uint32_t shapes[][3]{
+        {241, 2048, 2048}, {242, 1280, 1280}, {243, 1280, 1280}, {244, 1024, 1024}, {245, 1024, 1024}, {246, 512, 1024},  {247, 512, 1024},
+        {248, 1024, 1024}, {249, 512, 512},   {250, 1024, 1024}, {251, 768, 768},   {252, 768, 768},   {253, 768, 768},   {254, 768, 768},
+        {255, 768, 768},   {256, 768, 768},   {257, 1024, 512},  {258, 1024, 1024}, {259, 1280, 1280}, {260, 1280, 1280}, {261, 1280, 1280},
+        {262, 1024, 1024}, {263, 1280, 1280}, {264, 1024, 1024}, {265, 1280, 1280}, {266, 2048, 2048}};
+    // The previous aircraft's leftovers come first, as logged.
+    std::vector<Creation> load{{143, 0, 768, 768, 10, 28}, {234, 1, 768, 768, 10, 28}, {237, 2, 768, 768, 10, 28}};
+    for (const auto& s : shapes)
+      load.push_back({s[0], load.size(), s[1], s[2], 5, 28});
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> copies{{232, 236}, {231, 238}, {245, 258}, {243, 259}, {259, 260},
+                                                                      {260, 261}, {258, 262}, {261, 263}, {262, 264}, {263, 265},
+                                                                      {241, 266}, {240, 452}, {242, 453}, {244, 455}};
+    const auto name_of = [](const std::array<Assignment, kMaxPanels>& pairs, std::size_t n, std::uint64_t id) {
+      for (std::size_t i = 0; i < n; ++i)
+        if (pairs[i].creation.id == id)
+          return std::string_view(pairs[i].panel->texture.data());
+      return std::string_view{};
+    };
+    // As the bridge paired it: the last 17 creations, moves included.
+    auto all = load;
+    trim_trailing_ui(all);
+    all.erase(all.begin(), all.end() - 17);
+    std::array<Assignment, kMaxPanels> out{};
+    bool complete = false;
+    auto n = propose(fsl, all.data(), all.size(), out, complete);
+    require(n == 17 && name_of(out, n, 256) == "$MCDU-gauge-1" && name_of(out, n, 251) == "$EFB-FO",
+            "Counting the moves puts MCDU and EFB names on the FSLabs PFDs (as logged)");
+    auto settled = load;
+    require(
+        drop_copy_destinations(settled, copies.data(), copies.size()) == 9 && settled.size() == load.size() - 9 && settled.back().id == 257,
+        "The nine moved creations are dropped, the panels' own kept");
+    trim_trailing_ui(settled);
+    settled.erase(settled.begin(), settled.end() - 17);
+    n = propose(fsl, settled.data(), settled.size(), out, complete);
+    require(n == 17 && complete && name_of(out, n, 256) == "$DU1" && name_of(out, n, 255) == "$DU2" && name_of(out, n, 254) == "$DU3" &&
+                name_of(out, n, 253) == "$DU4" && name_of(out, n, 252) == "$DU5" && name_of(out, n, 251) == "$DU6",
+            "Without the moves the six 768 x 768 displays are DU1-DU6, as their pictures showed");
+    require(name_of(out, n, 249) == "$ISIS" && name_of(out, n, 241) == "$DRAIMS", "Every other panel pairs one creation earlier per move");
+    // A set-up FSLabs with those names: the moves need shift 9 (beyond 8),
+    // so only the burst without them resolves.
+    const auto square = [](const Creation& c) { return c.width == 768 && c.height == 768 && c.mips == 5; };
+    const char* names[]{"$DU1", "$DU6", "$DU4"};
+    std::uint64_t ids[3]{};
+    std::size_t pairs = 0;
+    require(resolve_names(fsl, load.data(), load.size(), names, 3, square, any, ids, out, pairs) == -1,
+            "The burst with the moves does not resolve the saved names");
+    auto unmoved = load;
+    drop_copy_destinations(unmoved, copies.data(), copies.size());
+    require(resolve_names(fsl, unmoved.data(), unmoved.size(), names, 3, square, any, ids, out, pairs) == 0 && ids[0] == 256 &&
+                ids[1] == 251 && ids[2] == 253,
+            "Without the moves the saved names resolve to the PFDs and the system display");
+    // A burst with no copies among its own creations is unchanged.
+    auto plain = load;
+    plain.resize(20);
+    require(drop_copy_destinations(plain, copies.data(), copies.size()) == 0 && plain.size() == 20, "Without moves nothing is dropped");
   }
 
   std::array<char, 8> name{};

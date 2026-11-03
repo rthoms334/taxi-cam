@@ -1,6 +1,19 @@
 {
   "releases": [
     {
+      "version": "1.3.1",
+      "date": "2026-11-03",
+      "fixes": [
+        "Setup now sets up the aircraft you have loaded. An aircraft without a profile was set up as the last one you used, such as the FlyByWire A380X, so its changes never saved.",
+        "Setup → Displays now names and shows every display of the FSLabs A321 correctly, so its PFDs, NDs and ECAMs are easy to find.",
+        "Placing a display in Setup now saves it straight away and shows its camera there, so you can see the cameras before going on. On an aircraft you set up, that starts once both PFDs are placed. A display placed while the cameras restart is no longer lost.",
+        "A new ↔ button between the Left and Right PFDs swaps them in one click.",
+        "The door camera now shows on the lower display of an aircraft you set up, even if you placed that display last.",
+        "The camera adjustment window now previews every display of an aircraft you set up, the door camera on its own, and says when a camera picture is still loading. Closing it turns the previews off again.",
+        "Every change now saves by itself, so Save changes is gone. Undo changes in the camera adjustment window still takes you back to where you started."
+      ]
+    },
+    {
       "version": "1.3.0",
       "date": "2026-11-02",
       "features": [

@@ -293,6 +293,7 @@ struct DisplaySnapshotPoll {
   DisplaySnapshotResult result = DisplaySnapshotResult::none;
   std::uint64_t id = 0;
   unsigned width = 0, height = 0, format = 0;
+  unsigned plans = 0;   // Copies planned for the request (none: no submission proved a site).
   SnapshotImage image;  // Only for ready: shrunk to kDisplaySnapshotMaxEdge.
 };
 // Control thread only. pending until the copy completes or fails; the final

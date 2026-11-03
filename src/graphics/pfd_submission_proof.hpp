@@ -37,7 +37,11 @@ namespace taxi_camera::standalone {
 class PfdSubmissionProof {
  public:
   static constexpr std::size_t maximum_batch = 256;
-  static constexpr std::size_t maximum_resources = 16;
+  // Display textures one recording can prove. Aircraft discovery tracks every
+  // panel texture, and the FSLabs A321 draws more than 16 in one list
+  // (2026-11-03: every Execute refused for capacity, no snapshot or camera
+  // write possible). Scans cover only the slots a recording used.
+  static constexpr std::size_t maximum_resources = 64;
   enum class Refusal : unsigned {
     none,
     unobserved,
