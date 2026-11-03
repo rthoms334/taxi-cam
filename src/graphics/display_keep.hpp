@@ -21,10 +21,15 @@ namespace taxi_camera::standalone::display_keep {
 // the gauge corners and camera-area corners of the routed displays. A mark
 // that lands on another texture costs that texture two unwritten pixels.
 inline constexpr unsigned MarkWidth = 2, MarkHeight = 1, MaxMarks = 16;
-// One writer (the bridge worker); readers on any thread. version is odd while
-// the list is being rewritten, so a reader never acts on a half-written list.
-inline std::array<std::atomic<std::uint32_t>, MaxMarks> marks{};  // x << 16 | y
-inline std::atomic<unsigned> mark_count{};
+// One writer (the bridge worker) and readers on simulator threads, which
+// never wait for it. List k of the published generations lives in buffer
+// k & 1; version is 2g after g publications and 2g + 1 while generation g + 1
+// is written into the other buffer.
+struct MarkList {
+  std::array<std::atomic<std::uint32_t>, MaxMarks> marks{};  // x << 16 | y
+  std::atomic<unsigned> count{};
+};
+inline std::array<MarkList, 2> lists{};
 inline std::atomic<std::uint32_t> version{};
 struct Point {
   unsigned x = 0, y = 0;
@@ -32,27 +37,38 @@ struct Point {
 // Worker only. An empty list writes every area whole.
 inline void set_marks(const Point* points, unsigned count) noexcept {
   count = std::min(count, MaxMarks);
-  version.fetch_add(1, std::memory_order_relaxed);
+  const auto published = version.load(std::memory_order_relaxed) >> 1;
+  auto& list = lists[(published + 1) & 1];
+  version.store(2 * published + 1, std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_release);
   for (unsigned i = 0; i < count; ++i)
-    marks[i].store((std::min(points[i].x, 0xffffu) << 16) | std::min(points[i].y, 0xffffu), std::memory_order_relaxed);
-  mark_count.store(count, std::memory_order_relaxed);
-  version.fetch_add(1, std::memory_order_release);
+    list.marks[i].store((std::min(points[i].x, 0xffffu) << 16) | std::min(points[i].y, 0xffffu), std::memory_order_relaxed);
+  list.count.store(count, std::memory_order_relaxed);
+  version.store(2 * published + 2, std::memory_order_release);
 }
-// A consistent copy of the list. The worker rewrites it at most once a
-// second in well under a microsecond, so a retry is rare and short.
+// The latest published list. The worker writes the other buffer, so a reader
+// never waits; only a second rewrite during one read, at most once a second,
+// can change the buffer under it. Then it tries again, and after a few tries
+// uses the last list this thread read whole.
 inline unsigned read_marks(std::array<std::uint32_t, MaxMarks>& out) noexcept {
-  for (;;) {
-    const auto before = version.load(std::memory_order_acquire);
-    if (before & 1)
-      continue;
-    const auto count = std::min(mark_count.load(std::memory_order_relaxed), MaxMarks);
+  thread_local std::array<std::uint32_t, MaxMarks> last{};
+  thread_local unsigned last_count = 0;
+  for (unsigned attempt = 0; attempt < 4; ++attempt) {
+    const auto published = version.load(std::memory_order_acquire) >> 1;
+    const auto& list = lists[published & 1];
+    const auto count = std::min(list.count.load(std::memory_order_relaxed), MaxMarks);
     for (unsigned i = 0; i < count; ++i)
-      out[i] = marks[i].load(std::memory_order_relaxed);
+      out[i] = list.marks[i].load(std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_acquire);
-    if (version.load(std::memory_order_relaxed) == before)
+    // Writing generation published + 2, into this buffer, starts at 2 * published + 3.
+    if (version.load(std::memory_order_relaxed) < 2 * published + 3) {
+      last = out;
+      last_count = count;
       return count;
+    }
   }
+  out = last;
+  return last_count;
 }
 // The pieces of an area that leave out every mark inside it, in rows from
 // top to bottom. Without a mark inside, the area itself is the only piece.

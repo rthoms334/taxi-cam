@@ -744,7 +744,7 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     // Panel marks inside the patch: its corner, inside the redraw, and one
     // clipped by the patch's right edge.
     const keep::Point marks[]{{8, 4}, {12, 7}, {8 + PatchWidth - 1, 9}};
-    bool marks_listed = false;
+    bool marks_listed = false, marks_painted = false;
     const auto marked = [&](UINT x, UINT y) {
       if (marks_listed)
         for (const auto& m : marks)
@@ -771,7 +771,7 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
         for (UINT x = 0; x < Width; ++x) {
           const auto* pixel = bytes + panel_footprint.Offset + y * panel_footprint.Footprint.RowPitch + x * 4;
           const bool patch = x >= 8 && x < 8 + PatchWidth && y >= 4 && y < 4 + PatchHeight;
-          const bool redrawn = redraw && x >= 10 && x < 14 && y >= 5 && y < 9;
+          const bool redrawn = (redraw && x >= 10 && x < 14 && y >= 5 && y < 9) || (marks_painted && marked(x, y));
           const auto own = panel_pixel(x, y);
           const std::array<std::uint8_t, 4> wanted =
               patch && camera && !marked(x, y)
@@ -868,31 +868,40 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     require(static_cast<bool>(ran), "Record a shadow copy that runs");
     execute({ran}, nullptr, {});
     require(restored.load() == 6 && dropped.load() == 5, "A completed shadow copy reported a drop");
-    // Panel marks. A camera copy made before the marks are listed covers
-    // them; a restore after they are listed still puts every pixel back.
+    // Panel marks. With marks listed, a camera copy leaves each of them on the
+    // panel and writes every other pixel of its area.
     auto plain = stamp;
     plain.save = nullptr;
     plain.completed = nullptr;
     plain.completed_value = 0;
-    const auto unmarked = context->pool.record(plain);
-    require(static_cast<bool>(unmarked), "Record a camera copy before the marks");
-    execute({unmarked}, nullptr, {});
-    expect(true, true, "A camera copy before the marks left the wrong pixels");
     keep::set_marks(marks, 3);
     marks_listed = true;
-    restore.completed = nullptr;
-    restore.completed_value = 0;
-    const auto whole = context->pool.record(restore);
-    require(static_cast<bool>(whole), "Record a restore with marks listed");
-    execute({whole}, nullptr, {});
-    expect(false, true, "A restore with marks listed left camera pixels on the marks");
-    // With marks listed, a camera copy leaves each of them on the panel.
     const auto around = context->pool.record(plain);
     require(static_cast<bool>(around), "Record a camera copy around the marks");
     execute({around}, nullptr, {});
     expect(true, true, "A camera copy wrote a panel mark or missed a camera pixel");
+    // A mark painted while the camera runs (here: the panel pattern turned to
+    // the redraw colour at each mark) is not in the shadow; the restore keeps
+    // it and puts back every other pixel.
+    auto* paint = record(0);
+    transition(paint, panel.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    for (const auto& m : marks) {
+      const D3D12_RECT dot{static_cast<LONG>(m.x), static_cast<LONG>(m.y), static_cast<LONG>(m.x + keep::MarkWidth),
+                           static_cast<LONG>(m.y + keep::MarkHeight)};
+      paint->ClearRenderTargetView(panel_rtv, colour, 1, &dot);
+    }
+    transition(paint, panel.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    success(paint->Close(), "Close mark painting");
+    execute({}, paint, {});
+    restore.completed = nullptr;
+    restore.completed_value = 0;
+    const auto kept = context->pool.record(restore);
+    require(static_cast<bool>(kept), "Record a restore around the marks");
+    execute({kept}, nullptr, {});
+    marks_painted = true;
+    expect(false, true, "A restore erased a panel mark or left a camera pixel");
     keep::set_marks(nullptr, 0);
-    marks_listed = false;
+    marks_listed = marks_painted = false;
   }
   success(device->GetDeviceRemovedReason(), "D3D12 device removed");
   if (diagnostics.p) {

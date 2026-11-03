@@ -57,11 +57,28 @@ void pieces() {
   keep::set_marks(nullptr, 0);
   require(keep::pieces(small).count == 1, "An empty list writes the area whole");
 }
+// A reader takes the published list without waiting, even while the worker
+// is writing the next one.
+void publication() {
+  const keep::Point first[]{{1, 2}, {3, 4}}, second[]{{5, 6}};
+  std::array<std::uint32_t, keep::MaxMarks> out{};
+  keep::set_marks(first, 2);
+  require(keep::read_marks(out) == 2 && out[0] == (1u << 16 | 2) && out[1] == (3u << 16 | 4), "The published list");
+  const auto stable = keep::version.load();
+  keep::version.store(stable + 1);  // The worker is writing the other buffer.
+  require(keep::read_marks(out) == 2 && out[0] == (1u << 16 | 2), "The published list while the next is written");
+  keep::version.store(stable);
+  keep::set_marks(second, 1);
+  require(keep::read_marks(out) == 1 && out[0] == (5u << 16 | 6), "The next list once published");
+  keep::set_marks(nullptr, 0);
+  require(keep::read_marks(out) == 0, "An empty list");
+}
 }  // namespace
 
 int main() {
   try {
     pieces();
+    publication();
     std::printf("Display keep checks: %u passed\n", checks);
     return 0;
   } catch (const std::exception& error) {
