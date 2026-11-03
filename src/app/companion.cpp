@@ -4579,6 +4579,10 @@ bool store_aircraft_setup(const win::Status& sample, bool quiet) {
       InvalidateRect(window, nullptr, FALSE);
       return false;
   }
+  // An open adjustment window gives its cameras back first (its own close
+  // rules), so the cameras recorded below are the user's, not its previews.
+  if (live_view.window)
+    DestroyWindow(live_view.window);
   // A cockpit test is not the user's profile: keep the one from before it.
   const auto earlier = setup.trial ? setup.before : draft();
   if (setup.trial ? !win::save_settings(setup.before) : !apply())
@@ -4631,29 +4635,26 @@ bool store_aircraft_setup(const win::Status& sample, bool quiet) {
 // the cameras can be positioned from their starting mounts.
 void start_positioning() {
   setup.positioning = true;
+  // Always a window of its own, so what it gives back is only the setup's.
+  if (live_view.window)
+    DestroyWindow(live_view.window);
   auto s = draft();
   s.panel_setup = 0;
   publish(s);
   page = CamerasPage;
   build_controls();
-  // A window that had taken the cameras before this setup holds the user's own.
-  const bool taken_before = live_view.window && live_view.camera_taken;
   open_live_view();
   // The previews are the window's, as a camera it turns on is: closing it
-  // turns them off again (a lower display kept its taxi cameras). It gives
-  // back what the window took before the setup, or else the cameras from
-  // before the setup's first save (a window opened here has just taken the
-  // previews as if they were the user's; one on the door feed took none).
-  // Either way the window now holds the previews, so closing restores.
+  // turns them off again (a lower display kept its taxi cameras), back to the
+  // cameras from before the setup's first save. Its first pass has just taken
+  // the previews as if they were the user's.
   if (live_view.window) {
-    if (!taken_before) {
-      live_view.follow_before = s.follow_taxi;
-      live_view.manual_before = setup.manual_before;
-      live_view.door_on_before_preview = setup.door_on_before;
-    }
     live_view.camera_taken = true;
+    live_view.follow_before = s.follow_taxi;
+    live_view.manual_before = setup.manual_before;
     live_view.manual_set = s.manual_mask;
     live_view.door_preview = true;
+    live_view.door_on_before_preview = setup.door_on_before;
   }
   notice = tr(L"The cameras start from default positions. Adjust each one in the live view.");
   InvalidateRect(window, nullptr, FALSE);
