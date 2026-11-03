@@ -124,6 +124,17 @@ class PfdStampD3D12 {
   void abandon() noexcept;
 
  private:
+  // keep_marks: a display draw, which leaves display_keep's marks alone.
+  bool record_patch(ID3D12GraphicsCommandList*,
+                    ID3D12Device* buffer_device,
+                    D3D12_GPU_VIRTUAL_ADDRESS address,
+                    UINT width,
+                    UINT height,
+                    const D3D12_RECT* destination,
+                    const D3D12_RECT* content,
+                    bool draw,
+                    PfdStateGroup group,
+                    bool keep_marks) noexcept;
   ID3D12Device* device_ = nullptr;
   ID3D12RootSignature* root_ = nullptr;
   ID3D12PipelineState* pipeline_ = nullptr;
