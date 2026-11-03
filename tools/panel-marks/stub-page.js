@@ -14,7 +14,13 @@ const ctx = {
   setInterval: () => 1,
   document: {
     body: { appendChild: c => canvases.push(c) },
-    getElementById: () => ({}),
+    // Gauge elements as VCockpit.js leaves them: a Guid attribute and
+    // BaseInstrument's identifier and urlConfig.
+    getElementById: () => ({ children: data.daInstruments.map((d, i) => ({
+      getAttribute: name => (name === "Guid" ? String(d.iGUId) : null),
+      instrumentIdentifier: "stub_gauge_" + i,
+      urlConfig: { index: /[?&]Index=(\d+)/.test(d.sUrl) ? Number(/[?&]Index=(\d+)/.exec(d.sUrl)[1]) : null },
+    })) }),
     createElement: () => {
       const ops = [];
       const c = { style: {}, ops, parentNode: null, getContext: () => ({ set fillStyle(v) { ops.push(["s", v]); }, fillRect: (x, y, w, h) => ops.push(["r", x, y, w, h]) }) };

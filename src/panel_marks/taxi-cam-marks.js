@@ -90,13 +90,38 @@
     }
     // A gauge's text fields other than its URL (panel.cfg's parameters after
     // the rectangle, if the page gets them), for the experiment.
+    // Also what the gauge's BaseInstrument element says about itself (its
+    // identifier and urlConfig index), read from the element without owning
+    // BaseInstrument.js: whichever copy is loaded, stock or another add-on's.
     function gaugeInfo(instrument) {
         var url = instrument.sUrl || "", parts = [query(url)];
         Object.keys(instrument).forEach(function (key) {
             if (key !== "sUrl" && key !== "templateName" && typeof instrument[key] === "string" && instrument[key])
                 parts.push(key + "=" + instrument[key]);
         });
+        var element = gaugeElement(instrument.iGUId);
+        if (element) {
+            try {
+                if (element.instrumentIdentifier)
+                    parts.push("id=" + element.instrumentIdentifier);
+                if (element.urlConfig && element.urlConfig.index != null)
+                    parts.push("index=" + element.urlConfig.index);
+            } catch (e) {
+            }
+        }
         return parts.join("|");
+    }
+    // VCockpit.js gives each gauge element a Guid attribute.
+    function gaugeElement(guid) {
+        var panel = document.getElementById("panel");
+        if (!panel || !panel.children)
+            return null;
+        for (var i = 0; i < panel.children.length; i++) {
+            var child = panel.children[i];
+            if (child && child.getAttribute && child.getAttribute("Guid") == String(guid))
+                return child;
+        }
+        return null;
     }
     // What the page knows about its panel, for the experiment: the panel
     // data's keys and a gauge's keys first (the block keeps about 110

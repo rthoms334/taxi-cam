@@ -70,14 +70,60 @@ facts read from the installed files on 2026-11-03:
   - `setupInstrument` places each gauge at `vPosAndSize × vDisplaySize /
     vLogicalSize`, rounded.
 
-We don't touch `BaseInstrument.js`. Our page still loads it by the same path,
+We don't override `BaseInstrument.js` (trade-off below). Our page still loads it by the same path,
 so GlassOut's copy (package `zzz-glassout-hook`) keeps working unchanged.
 
-Other load points, and why they were rejected:
+### Why not own `BaseInstrument.js`? (re-weighed 2026-11-03)
+
+Avoiding GlassOut's file was a hard rule at first. It is now a trade-off,
+weighed on what is best for Taxi Cam first. Owning `BaseInstrument.js` still
+loses on Taxi Cam's own terms:
+
+- **What it would add.** Every gauge class extends `BaseInstrument`, so owning
+  it would give per-gauge hooks: the gauge's lifecycle and update loop, its
+  `instrumentIdentifier`, and `urlConfig` (`index`, `style`). The marks don't
+  need hooks, only those facts. The gauges are DOM elements under
+  `<vcockpit-panel>` with a `Guid` attribute, so the helper reads
+  `element.instrumentIdentifier` and `element.urlConfig.index` from them at
+  paint time. The prototype now does this. If a hook were ever needed, the
+  helper could wrap `BaseInstrument.prototype` at runtime from our own file,
+  since it loads after `BaseInstrument.js`. That works on whichever copy is
+  loaded, stock or GlassOut's.
+- **Stale-copy surface.** Stock `BaseInstrument.js` is 33,744 bytes of logic:
+  screen state L:vars, flow events, the update loop. EFB and UI pages load it
+  too (`fs-base-efb`, `fs-base-ui`, not only `asobo-vcockpits-core`). A stale
+  copy after an update would break gauges in every aircraft and the EFB. A
+  stale `VCockpit.html` is one declarative page, one line off stock, used by
+  panels only.
+- **Behaviour with GlassOut installed.** This decides it. GlassOut's
+  `zzz-glassout-hook` overrides `BaseInstrument.js` and loads last. Its engine
+  rewrites the hook on boot and warns about competing overrides. We would
+  either lose the file to it, so Taxi Cam identification would silently stop
+  for every GlassOut user (the users in issues 171/172), or win it, which
+  breaks GlassOut. Editing GlassOut's files is ruled out. Neither outcome is
+  acceptable.
+
+With the `VCockpit.html` choice, GlassOut installed changes nothing for Taxi
+Cam:
+
+- Our page loads `BaseInstrument.js` by path and gets GlassOut's copy.
+- Our helper reads gauge elements the same way on either copy.
+- The two overrides are different files, so neither package needs the other.
+
+What stays to check live (E7):
+- whether GlassOut's competing-override warning also looks at
+  `Pages/VCockpit/Core/VCockpit.html` (its docs don't say);
+- whether its markers and ours ever overlap in a frame. Ours are centred in
+  gauges and theirs are at the gauge origin.
+
+If GlassOut ever overrides `VCockpit.html` too, it loads last and wins. Taxi
+Cam then finds no marks, falls back, and says so. We don't fight for the file.
+
+### Other load points
 
 | Load point | Problem |
 |---|---|
-| `Instruments/Shared/BaseInstrument.js` | GlassOut owns it. Only one package can override a file. |
+| `Instruments/Shared/BaseInstrument.js` | See above. Loses to GlassOut (or breaks it), and has the largest stale-copy surface. |
 | `Core/VCockpit.js` | 23.5 KB of logic. A stale copy would break more, and Asobo is more likely to change it. |
 | `/JS/common.js`, `simvar.js`, `avionics.js`, `GenericDataListener.js` | Every UI page loads them (toolbar, EFB, menus), so the helper would run everywhere and a stale copy would hurt everywhere. |
 | A gauge added to each aircraft's `panel.cfg` | Edits third-party aircraft files, and aircraft updates overwrite it. |
