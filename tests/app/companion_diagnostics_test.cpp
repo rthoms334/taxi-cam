@@ -429,6 +429,27 @@ void autosave_setup_tests() {
     require(!(current.manual_mask & 2), "A camera turned off while the window is open stays off");
     live_view = {};
   }
+  // Positioning after the setup's saves: closing the window gives back the
+  // cameras from before the setup (none here), though the window's first
+  // pass found the previews already on.
+  current.manual_mask = 3;
+  current.door_on = 1;
+  {
+    // The displays routed, so the window's first pass runs at once.
+    const std::lock_guard lock(app_mutex);
+    status.heartbeat = GetTickCount64();
+    status.left_id = 802;
+    status.right_id = 801;
+    status.lower_id = 803;
+  }
+  start_positioning();
+  require(page == CamerasPage && live_view.window && live_view.camera_taken && live_view.manual_before == setup.manual_before &&
+              live_view.door_preview,
+          "Positioning hands the window the cameras from before the setup");
+  DestroyWindow(live_view.window);
+  require(!live_view.window && !current.manual_mask && current.door_on == setup.door_on_before,
+          "Closing the window after positioning turns the previews off");
+  live_view = {};
 
   // A built-in profile: picks save at once, and the door camera's None stays.
   current = {};

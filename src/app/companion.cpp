@@ -4638,8 +4638,9 @@ void start_positioning() {
   open_live_view();
   // The previews are the window's, as a camera it turns on is: closing it
   // turns them off again (a lower display kept its taxi cameras), back to the
-  // cameras from before the setup's first save.
-  if (live_view.window && !live_view.camera_taken) {
+  // cameras from before the setup's first save. Always: the window's first
+  // pass has already taken the previews as if they were the user's.
+  if (live_view.window) {
     live_view.camera_taken = true;
     live_view.follow_before = s.follow_taxi;
     live_view.manual_before = setup.manual_before;
