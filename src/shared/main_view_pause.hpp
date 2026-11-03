@@ -9,16 +9,37 @@ namespace taxi_camera::standalone {
 // the simulator's graphics memory rose from 9.2 to 12.2 GB; the cameras' share
 // of that is not measured).
 //
-// Input is the public CAMERA STATE SimVar, where 2 is Cockpit:
-// https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simvars/camera-variables/
-// Every other documented value is a camera outside the cockpit (chase, drone,
-// fixed on plane, showcase, replay, world map, transitions). A reading that is
-// missing or stale never starts a pause, so a simulator without the SimVar keeps
-// today's behaviour. A non-cockpit reading must persist kEnterMs before the
-// pause starts, so a passing transition state does not close the cameras; a
-// cockpit reading ends it at once. While paused, a telemetry gap keeps the pause
-// for kHoldMs after the last outside reading (frames stall while the simulator
-// loads the outside view) and then ends it.
+// Input is the public CAMERA STATE SimVar, where 2 is Cockpit. The value table
+// is MSFS 2020's (the MSFS 2024 page is gone), which says not every value is
+// listed: https://docs.flightsimulator.com/html/Programming_Tools/SimVars/Camera_Variables.htm
+// Only the exterior cameras listed there are outside (outside_camera_state).
+// Any other value counts as no reading: MSFS 2024 reported 7 (listed as "Six
+// DoF") for the whole time the user sat in the PMDG 777's cockpit after a fresh
+// flight load, and 29 and 34 while loading (2026-11-03), and pausing on 7 froze
+// the displays on their first picture. A reading that is missing, stale or not
+// an exterior camera never starts a pause, so a simulator without the SimVar
+// keeps today's behaviour. An outside reading must persist kEnterMs before the
+// pause starts, so a passing view does not close the cameras; a cockpit reading
+// ends it at once. While paused, no outside reading (a telemetry gap while
+// frames stall loading the outside view, or a state between two exterior
+// cameras) keeps the pause for kHoldMs after the last outside reading and then
+// ends it.
+inline bool outside_camera_state(unsigned state) noexcept {
+  switch (state) {
+    case 3:   // External/Chase
+    case 4:   // Drone
+    case 5:   // Fixed on Plane
+    case 6:   // Environment
+    case 9:   // Showcase
+    case 10:  // Drone Aircraft
+    case 17:  // Replay
+    case 19:  // Drone Top-Down
+    case 25:  // Follow Traffic Aircraft
+      return true;
+    default:
+      return false;
+  }
+}
 class MainViewPause {
  public:
   static constexpr unsigned kCockpit = 2;
@@ -31,7 +52,7 @@ class MainViewPause {
       paused_ = false;
       return false;
     }
-    if (!valid) {
+    if (!valid || !outside_camera_state(state)) {
       outside_since_ms_ = 0;
       if (paused_ && (now_ms < last_outside_ms_ || now_ms - last_outside_ms_ > kHoldMs))
         paused_ = false;
