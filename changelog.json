@@ -40,6 +40,7 @@
         "Dragging in the live view now turns the camera the way you drag, just like the simulator's mouse look.",
         "Taxi Cam no longer makes one of the simulator's graphics queues wait for unfinished work from another, except on frames where it captures a camera picture. This targets the multi-second freezes reported on the PMDG 777.",
         "If the simulator keeps stalling, the cameras now switch off and stay off instead of flickering on and off, and Taxi Cam tells you. Turn them off and on again to retry.",
+        "The cameras now pause while you're in an outside view, where the cockpit displays can't be seen, and pick up again as soon as you're back in the cockpit.",
         "The First camera only setting, which stopped the cameras from starting, is gone. If you had it on, your cameras now start as normal.",
         "When the simulator starts Taxi Cam, Taxi Cam now closes shortly after the simulator does, so Steam no longer shows the simulator as still running. Unsaved Settings changes are discarded when it closes.",
         "The frames-stalled warning no longer pops up while the cameras are off, such as while a flight loads or the simulator quits."

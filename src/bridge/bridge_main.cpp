@@ -19,6 +19,7 @@
 #include "../shared/door_camera.hpp"
 #include "../shared/hook_timing.hpp"
 #include "../shared/lock_holder_priority.hpp"
+#include "../shared/main_view_pause.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
@@ -1134,6 +1135,12 @@ DWORD run_impl() {
   double camera_off_hz = std::numeric_limits<double>::quiet_NaN();
   std::uint64_t camera_off_window{};
   bool camera_off_settled = false;
+  win::MainViewPause main_view_pause;
+  // Pauses that stopped requested cameras, not every non-cockpit view (flight
+  // loading shows the world map with nothing requested).
+  bool last_outside_pause = false;
+  std::uint64_t outside_pauses{};
+  WindowPauseLatch window_pause;
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
   EffectiveCameraRate effective_rate;
@@ -1753,6 +1760,23 @@ DWORD run_impl() {
     unsigned active = demand.stamp_mask | (failed ? 0u : door & assigned);
     const unsigned calibration =
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && !degraded ? settings.calibration_mask : 0;
+    // Issue 97: the cockpit displays cannot be seen from outside the cockpit, so
+    // the camera views stop rendering there. Demand, the pair, its mounts and the
+    // display output stay as they are; rendering resumes in the cockpit. Background
+    // warmup, the scene test, calibration and display snapshots keep rendering
+    // wherever the view is (outside_view_pause).
+    const auto main_view = native_camera::get_camera_state();
+    win::OutsidePauseInput pause_input;
+    pause_input.main_view_outside = main_view_pause.observe(now, main_view.valid, main_view.state);
+    pause_input.cameras_requested = mask != 0 || door_render;
+    pause_input.demand_suspended = demand.suspend;
+    pause_input.background_warmup = background_warmup;
+    pause_input.test_scene = test_scene;
+    pause_input.calibration = calibration != 0;
+    pause_input.snapshot_pending = snapshot_pending;
+    const bool outside_pause = win::outside_view_pause(pause_input);
+    outside_pauses += outside_pause && !last_outside_pause;
+    last_outside_pause = outside_pause;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     // A taken door snapshot renders nothing but its page is still drawn.
@@ -1777,6 +1801,7 @@ DWORD run_impl() {
     const unsigned desired_feeds = std::max(1u, static_cast<unsigned>(std::popcount(wanted_feeds ? wanted_feeds : taxi_bits)));
     const unsigned pfd_refresh_hz = rate_profile ? rate_profile->pfd_refresh_hz : 0;
     const double update_hz = update_meter.update(now, native_camera::scene_update_count());
+    const bool window_paused = window_pause.observe(update_meter.windows(), outside_pause);
     if (!demand.suspend) {
       camera_off_settled = false;
     } else if (std::isfinite(update_hz) && update_meter.windows() != camera_off_window) {
@@ -1794,6 +1819,7 @@ DWORD run_impl() {
       auto_input.window = update_meter.windows();
       auto_input.fps = update_hz;
       auto_input.cameras_active = !demand.suspend;
+      auto_input.paused = window_paused;
       auto_input.next_helps = auto_cameras_per_frame(auto_policy.level(), desired_feeds) < desired_feeds;
       auto_policy.update(auto_input);
     }
@@ -1859,7 +1885,7 @@ DWORD run_impl() {
     // pairs or its bounded budget. Otherwise OFF, pause and heartbeat
     // loss close the render gates immediately.
     // Keep the owned pair and ordered source-state evidence for the next ON.
-    native_camera::suspend_scene_rendering(demand.suspend);
+    native_camera::suspend_scene_rendering(demand.suspend || outside_pause);
     const auto* drawing = profiles::find(applied_profile ? applied_profile : settings.profile);
     if (!drawing)  // A set-up aircraft is published before its transition starts.
       drawing = &profiles::A380;
@@ -1873,7 +1899,8 @@ DWORD run_impl() {
     composition.tail_upper_right = settings.tail_upper_right;
     composition.tail_corner_right = settings.tail_corner_right;
     composition.tail_inner_right = settings.tail_inner_right;
-    if (demand.start && !(background_warmup && GetTickCount64() < next_background_start)) {
+    // A first start waits for the cockpit: a paused probe creates no views.
+    if (demand.start && !outside_pause && !(background_warmup && GetTickCount64() < next_background_start)) {
       auto& start_timing = background_warmup ? warmup_startup : startup;
       if (background_warmup) {
         start_timing.observed = true;
@@ -1976,9 +2003,9 @@ DWORD run_impl() {
       scene_runtime::manager().rearm_source_states();
     }
     if (now >= next_recovery) {
-      const bool eligible = (mask || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
-                            scene.requested_feeds >= 2 && !scene.pose_waiting && !scene.view_waiting &&
-                            (scene.pose_session_proven || native_camera::sample_body_pose(now).valid);
+      const bool eligible = (mask || test_scene) && !outside_pause && !failed && !output.failed &&
+                            scene.pair.state == engine_camera::State::active && scene.requested_feeds >= 2 && !scene.pose_waiting &&
+                            !scene.view_waiting && (scene.pose_session_proven || native_camera::sample_body_pose(now).valid);
       if (eligible && output.frames != last_frames)
         native_camera::note_scene_capture_progress(now);
       last_frames = output.frames;
@@ -2024,7 +2051,7 @@ DWORD run_impl() {
     // simulator lost against its rate with the cameras off; includes Taxi
     // Cam's own work. Only while the cameras run and both rates are known.
     double view_ms = std::numeric_limits<double>::quiet_NaN();
-    if (!demand.suspend && std::isfinite(camera_off_hz) && std::isfinite(reached) && reached > 0 && feeds)
+    if (!demand.suspend && !outside_pause && std::isfinite(camera_off_hz) && std::isfinite(reached) && reached > 0 && feeds)
       view_ms = (1000.0 - update_meter.rate() * 1000.0 / camera_off_hz) / (reached * feeds);
     status.auto_level = auto_policy.level();
     status.auto_floor = std::isfinite(auto_policy.base()) ? static_cast<float>(auto_policy.floor()) : 0.f;
@@ -2268,7 +2295,7 @@ DWORD run_impl() {
           "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
           "stop_seq=%llu stop=%s "
           "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
-          "entries=%llu/%llu suspended=%u "
+          "entries=%llu/%llu suspended=%u main_view=%d outside_pause=%u outside_pauses=%llu "
           "rate=%u saved_rate=%u mode=%u auto_level=%u auto_floor=%.1f update_hz=%.1f frame_ms=%u/%u/%u off_hz=%.1f reachable=%.1f "
           "view_ms=%.1f "
           "useful_rate=%u rate_limit=%s speed_knots=%.2f "
@@ -2286,11 +2313,12 @@ DWORD run_impl() {
           scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0], scene.ready[1], scene.output_ready[0],
           scene.output_ready[1], scene.output_waits, scene.inspection_status[0], scene.inspection_status[1],
           static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
-          demand.suspend, status.effective_rate, settings.camera_rate, settings.camera_mode, status.auto_level, status.auto_floor,
-          status.update_hz, spread.median, spread.p95, spread.slowest, std::isfinite(camera_off_hz) ? camera_off_hz : -1.0,
-          status.reachable_rate, std::isfinite(view_ms) ? view_ms : -1.0, status.useful_rate, camera_rate_limit_name(status.rate_limits),
-          speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1], output.capture.tail_status,
-          static_cast<unsigned long long>(output.capture.source_draws),
+          demand.suspend, main_view.valid ? static_cast<int>(main_view.state) : -1, outside_pause,
+          static_cast<unsigned long long>(outside_pauses), status.effective_rate, settings.camera_rate, settings.camera_mode,
+          status.auto_level, status.auto_floor, status.update_hz, spread.median, spread.p95, spread.slowest,
+          std::isfinite(camera_off_hz) ? camera_off_hz : -1.0, status.reachable_rate, std::isfinite(view_ms) ? view_ms : -1.0,
+          status.useful_rate, camera_rate_limit_name(status.rate_limits), speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1],
+          output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
           static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
           static_cast<unsigned long long>(output.capture.invalid_source_recordings),
           static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
