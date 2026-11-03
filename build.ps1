@@ -85,7 +85,7 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/bridge/bridge_main.cpp')) {
     $compileJobs += New-TaxiJob -Name 'taxi-camera-bridge.dll' -File $compiler -Arguments @($common + '-shared' + (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') + $objects + $libs + '-Wl,--no-insert-timestamp' + '-o' + (Join-Path $out 'taxi-camera-bridge.dll')) -Failure 'Native bridge link failed.'
 }
 $companion = Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')
-$companionLibs = @('-lbcrypt','-lshell32','-lcomctl32','-lcomdlg32','-ladvapi32','-ldwmapi','-luxtheme','-lwinhttp','-lhid','-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lwindowscodecs')
+$companionLibs = @('-lbcrypt','-ldxgi','-lversion','-lshell32','-lcomctl32','-lcomdlg32','-ladvapi32','-ldwmapi','-luxtheme','-lwinhttp','-lhid','-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lwindowscodecs')
 $setupSources = @($setup | ForEach-Object { Join-Path $taskRoot $_ })
 if ($companion) {
     $windres = Join-Path (Split-Path -Parent $compiler) 'llvm-windres.exe'
@@ -143,7 +143,7 @@ if ($Validate) {
         @{Name='changelog'; Sources=@('tests/app/changelog_test.cpp'); Args=@((Join-Path $taskRoot 'changelog.json'))},
         @{Name='whats-new-image'; Sources=@('tests/app/whats_new_image_test.cpp'); Libs=@('-lole32','-lwindowscodecs','-lgdi32')},
         @{Name='camera-status'; Sources=@('tests/app/camera_status_test.cpp')},
-        @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
+        @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp'); Libs=@('-ldxgi','-lversion')},
         @{Name='scene-demand'; Sources=@('tests/camera/scene_demand_test.cpp','src/camera/entry_pair.cpp')},
         @{Name='scene-session-reset'; Sources=@('tests/camera/scene_session_reset_test.cpp','src/camera/entry_pair.cpp')},
         @{Name='view-creation-wait'; Sources=@('tests/camera/view_creation_wait_test.cpp','src/camera/entry_pair.cpp')},

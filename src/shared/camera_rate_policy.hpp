@@ -156,6 +156,9 @@ class UpdateRateMeter {
 //   on resumes the last level that fitted.
 // - The first window after a level change or activation spans both states
 //   and is discarded.
+// - Paused (requested, but the main view is outside the cockpit at any time in
+//   the window, see WindowPauseLatch): the window measures neither rate. It is skipped, and the first window after the pause
+//   is discarded like one after activation.
 // - Below the floor: back off one level at once and keep the level just left
 //   off for kCooldownMs, doubling per failure up to kMaximumCooldownMs, so a
 //   level that does not fit is not retried every few seconds.
@@ -180,6 +183,7 @@ class AutoCameraPolicy {
     std::uint64_t window = 0;  // UpdateRateMeter::windows()
     double fps = std::numeric_limits<double>::quiet_NaN();
     bool cameras_active = false;
+    bool paused = false;
     bool next_helps = true;
   };
 
@@ -187,6 +191,12 @@ class AutoCameraPolicy {
     if (in.window == window_)
       return level_;
     window_ = in.window;
+    if (in.paused) {
+      off_settled_ = false;
+      settled_ = false;
+      held_ = 0;
+      return level_;
+    }
     if (!std::isfinite(in.fps) || in.fps <= 0)
       return level_;
     if (!in.cameras_active) {
@@ -243,6 +253,30 @@ class AutoCameraPolicy {
   std::uint64_t window_ = 0;
   std::array<unsigned, kLevels> failures_{};
   std::array<std::uint64_t, kLevels> blocked_until_{};
+};
+
+// Auto judges each rate window once, when it completes, but the bridge samples
+// a pause on every control tick. A pause that starts and ends inside one window
+// still makes that window a paused one. Call on every tick after
+// UpdateRateMeter::update and pass the result as AutoCameraPolicy::Input::paused.
+class WindowPauseLatch {
+ public:
+  bool observe(std::uint64_t window, bool paused) noexcept {
+    const bool touched = seen_ || paused;
+    if (window != window_) {
+      // The completed window is reported; the tick that completed it also
+      // starts the next one.
+      window_ = window;
+      seen_ = paused;
+    } else {
+      seen_ = touched;
+    }
+    return touched;
+  }
+
+ private:
+  std::uint64_t window_ = 0;
+  bool seen_ = false;
 };
 
 }  // namespace taxi_camera

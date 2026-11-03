@@ -1,11 +1,18 @@
 #pragma once
+#include <windows.h>
+#include <cstring>
 #include <iomanip>
 #include <locale>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
+#include "../profiles/aircraft_variant.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/rotating_log.hpp"
+#include "report_bundle.hpp"
+#include "system_details.hpp"
 
 namespace taxi_camera::standalone {
 inline constexpr std::string_view BugReportPage = "https://github.com/rthoms334/taxi-cam/issues/new?template=bug_report.yml";
@@ -64,8 +71,10 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
   out << "Auto_detect=" << s.auto_detect << "; requested_PFDs=" << s.left_id << '/' << s.right_id << '/' << s.lower_id
       << "; calibration_budget=" << s.calibration_budget << '\n';
   out << "Brightness_EV day/night=" << s.day_brightness << '/' << s.night_brightness << '\n';
+  // Settings::mounts: nose, tail (or bottom left), bottom right, door.
+  constexpr const char* mount_names[]{"Nose", "Tail", "Bottom-right", "Door"};
   for (size_t i = 0; i < s.mounts.size(); ++i) {
-    out << (i ? "Tail" : "Nose") << " mount (right/up/forward m; pitch/yaw deg; lens rad):";
+    out << (i < std::size(mount_names) ? mount_names[i] : "Other") << " mount (right/up/forward m; pitch/yaw deg; lens rad):";
     for (const double value : s.mounts[i])
       out << ' ' << value;
     out << '\n';
@@ -102,13 +111,329 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
   return result;
 }
 
-inline std::wstring bug_report_url(const BugReportContext& context) {
+// The aircraft as the bridge identified it: the matched profile, the
+// SimObject path (a package path, never a disk path) and the ATC type.
+inline std::string bug_report_aircraft(const BugReportContext& context) {
+  const auto& sample = context.status;
+  const auto id = sample.heartbeat && sample.active_profile ? sample.active_profile : context.settings.profile;
+  std::string out;
+  if (const auto* profile = profiles::find(id))
+    out = report_text(std::wstring_view(profile->name), 80) + " profile";
+  const std::string_view path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
+  profiles::VariantKey key{};
+  if (profiles::variant_key(path, key))
+    out += (out.empty() ? "" : "; ") + std::string("SimObject ") + report_text(std::string_view(key.data()), 160);
+  const auto type = report_text(std::string_view(sample.aircraft_type, strnlen(sample.aircraft_type, sizeof(sample.aircraft_type))), 60);
+  if (!type.empty())
+    out += (out.empty() ? "" : "; ") + std::string("type ") + type;
+  if (out.empty())
+    out = "No aircraft identified";
+  return out + "; add-on version: ";
+}
+
+// Local wall-clock time with its UTC offset, and the tick count bridge.log
+// lines start with, so a reported time can be found in the log.
+inline std::string bug_report_created(std::uint64_t tick) {
+  SYSTEMTIME utc{}, local{};
+  GetSystemTime(&utc);
+  if (!SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local))
+    local = utc;
+  FILETIME a{}, b{};
+  SystemTimeToFileTime(&utc, &a);
+  SystemTimeToFileTime(&local, &b);
+  const auto ticks = [](const FILETIME& t) {
+    return static_cast<long long>(static_cast<std::uint64_t>(t.dwHighDateTime) << 32 | t.dwLowDateTime);
+  };
+  const long long minutes = (ticks(b) - ticks(a)) / 600000000, offset = minutes < 0 ? -minutes : minutes;
+  char text[128];
+  std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u:%02u local, UTC%c%02lld:%02lld; bridge.log tick %llu", local.wYear,
+                local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond, minutes < 0 ? '-' : '+', offset / 60, offset % 60,
+                static_cast<unsigned long long>(tick));
+  return text;
+}
+
+inline std::string bug_report_environment(const SystemDetails& d, std::string_view created) {
+  return "Windows: " + d.windows + "\nCPU: " + d.cpu + "\nRAM: " + d.memory + "\nGPU: " + d.gpus + "\nMSFS graphics: " + d.graphics +
+         "\nGraphics hooks in MSFS: " + d.hooks + "\nOther tools running: " + d.tools + "\nReport created: " + std::string(created);
+}
+
+// Text for the form's other fields; English like the rest of the report.
+struct BugReportForm {
+  std::string simulator, aircraft, environment, logs;
+};
+
+// The snapshot's leading whole lines whose query encoding fits `budget`. A
+// saved report file keeps the full snapshot.
+inline std::string bug_report_fit(const std::string& snapshot, std::size_t budget, bool report_saved = true) {
+  if (bug_report_query_value(snapshot).size() <= budget)
+    return snapshot;
+  const std::string_view suffix =
+      report_saved ? "[Snapshot shortened; the full snapshot is in report-info.txt.]" : "[Snapshot shortened to fit the form.]";
+  const auto suffix_bytes = bug_report_query_value(suffix).size();
+  if (suffix_bytes > budget)
+    return {};
+  std::size_t kept = 0, used = 0;
+  for (std::size_t begin = 0; begin < snapshot.size();) {
+    auto end = snapshot.find('\n', begin);
+    end = end == std::string::npos ? snapshot.size() : end + 1;
+    const auto bytes = bug_report_query_value(std::string_view(snapshot).substr(begin, end - begin)).size();
+    if (used + bytes + suffix_bytes > budget)
+      break;
+    used += bytes;
+    kept = begin = end;
+  }
+  return snapshot.substr(0, kept) + std::string(suffix);
+}
+
+inline std::wstring bug_report_url(const BugReportContext& context, const BugReportForm& form = {}, bool report_saved = true) {
   const auto version = std::string(TAXI_CAM_VERSION) + "-build." + std::to_string(TAXI_CAM_BUILD_NUMBER);
-  const auto url = std::string(BugReportPage) + "&taxi_cam_version=" + bug_report_query_value(std::string_view(version).substr(0, 64)) +
-                   "&runtime_snapshot=" + bug_report_query_value(bug_report_snapshot(context));
-  // Reserve space for the template and field names as well as worst-case query
-  // encoding. Never hand the shell a partially encoded or truncated URL.
-  static_assert(3 * (BugReportSnapshotLimit + 64) + BugReportPage.size() + 64 <= BugReportUrlLimit);
+  auto url = std::string(BugReportPage) + "&taxi_cam_version=" + bug_report_query_value(std::string_view(version).substr(0, 64));
+  const struct {
+    std::string_view id;
+    const std::string& value;
+    std::size_t limit;
+    bool lines;
+  } fields[]{{"simulator_version", form.simulator, 120, false},
+             {"aircraft", form.aircraft, 240, false},
+             {"environment", form.environment, 1000, true},
+             {"logs", form.logs, 300, true}};
+  for (const auto& field : fields)
+    if (!field.value.empty())
+      url += "&" + std::string(field.id) + "=" + bug_report_query_value(report_text(field.value, field.limit, field.lines));
+  // The snapshot goes last and gets what is left, so the URL never exceeds the
+  // limit and is never cut inside an escape. Worst-case encoding of the other
+  // fields still leaves room for most of a snapshot.
+  constexpr std::string_view snapshot_field = "&runtime_snapshot=";
+  static_assert(BugReportPage.size() + 3 * (64 + 120 + 240 + 1000 + 300) + 128 < BugReportUrlLimit - 1500);
+  const auto budget = BugReportUrlLimit - url.size() - snapshot_field.size();
+  url += std::string(snapshot_field) + bug_report_query_value(bug_report_fit(bug_report_snapshot(context), budget, report_saved));
   return std::wstring(url.begin(), url.end());
+}
+
+// The ZIP the Report a bug button saves for the user to attach.
+inline constexpr std::uint64_t BugReportFileLimit = 16ull << 20;  // Tail kept of each file.
+inline constexpr unsigned BugReportKeep = 5, BugReportCrashRecords = 2, BugReportCrashDays = 14;
+
+struct ReportBundle {
+  std::wstring path;  // Empty when nothing was written.
+  std::string name, error;
+};
+
+inline std::string report_utf8(std::wstring_view text) {
+  const int n = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+  std::string out(n > 0 ? static_cast<std::size_t>(n) : 0, '\0');
+  if (n > 0)
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), n, nullptr, nullptr);
+  return out;
+}
+
+// The Windows profile folder, account name and computer name in shared files.
+inline std::vector<Redaction> report_redactions() {
+  const auto variable = [](const wchar_t* name) {
+    std::wstring value(32768, L'\0');
+    const DWORD n = GetEnvironmentVariableW(name, value.data(), 32768);
+    return n && n < 32768 ? report_utf8(std::wstring_view(value.data(), n)) : std::string{};
+  };
+  // The profile folder as written plainly, JSON-escaped (installation.json)
+  // and with forward slashes: these hold its name even when the account name
+  // is too short to replace on its own or differs from the folder's.
+  const auto profile = variable(L"USERPROFILE");
+  std::string escaped, forward;
+  for (const char c : profile) {
+    escaped += c == '\\' ? std::string("\\\\") : std::string(1, c);
+    forward += c == '\\' ? '/' : c;
+  }
+  std::vector<Redaction> rules{{escaped, "%USERPROFILE%", false}, {profile, "%USERPROFILE%", false}, {forward, "%USERPROFILE%", false}};
+  // A very short name would also match ordinary words in the logs.
+  if (auto user = variable(L"USERNAME"); user.size() >= 3)
+    rules.push_back({std::move(user), "<user>", true});
+  if (const auto slash = profile.find_last_of('\\'); slash != std::string::npos && profile.size() - slash - 1 >= 3)
+    rules.push_back({profile.substr(slash + 1), "<user>", true});
+  if (auto computer = variable(L"COMPUTERNAME"); computer.size() >= 3)
+    rules.push_back({std::move(computer), "<computer>", true});
+  return rules;
+}
+
+namespace report_detail {
+struct Found {
+  std::wstring path, name;
+  FILETIME written{};
+};
+// Files matching `pattern`, newest first.
+inline std::vector<Found> files(const std::wstring& folder, const wchar_t* pattern) {
+  std::vector<Found> out;
+  WIN32_FIND_DATAW entry{};
+  const auto search = FindFirstFileW((folder + L"\\" + pattern).c_str(), &entry);
+  if (search == INVALID_HANDLE_VALUE)
+    return out;
+  do
+    if (!(entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+      out.push_back({folder + L"\\" + entry.cFileName, entry.cFileName, entry.ftLastWriteTime});
+  while (out.size() < 1000 && FindNextFileW(search, &entry));
+  FindClose(search);
+  std::sort(out.begin(), out.end(), [](const Found& a, const Found& b) { return CompareFileTime(&a.written, &b.written) > 0; });
+  return out;
+}
+// Saved aircraft settings: the *.ini files below profiles.
+inline void profile_files(const std::wstring& folder,
+                          const std::string& name,
+                          unsigned depth,
+                          std::vector<std::pair<std::wstring, std::string>>& out) {
+  for (const auto& file : files(folder, L"*.ini"))
+    if (out.size() < 200)
+      out.push_back({file.path, name + "/" + report_utf8(file.name)});
+  if (depth >= 8)
+    return;
+  WIN32_FIND_DATAW entry{};
+  const auto search = FindFirstFileW((folder + L"\\*").c_str(), &entry);
+  if (search == INVALID_HANDLE_VALUE)
+    return;
+  do
+    if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+        std::wcscmp(entry.cFileName, L".") && std::wcscmp(entry.cFileName, L".."))
+      profile_files(folder + L"\\" + entry.cFileName, name + "/" + report_utf8(entry.cFileName), depth + 1, out);
+  while (FindNextFileW(search, &entry));
+  FindClose(search);
+}
+inline std::uint64_t file_time(const FILETIME& t) {
+  return static_cast<std::uint64_t>(t.dwHighDateTime) << 32 | t.dwLowDateTime;
+}
+}  // namespace report_detail
+
+// Writes <data>\reports\taxi-cam-report-<local time>.zip: `info`, the logs,
+// saved settings, Setup's files from the install folder, MSFS graphics options
+// and recent renderer-fault records, with the account details above replaced
+// in every text file. Keeps the newest few reports. Each file keeps its last
+// `file_limit` bytes.
+inline ReportBundle write_report_bundle(const std::wstring& data,
+                                        const std::wstring& install,
+                                        const SystemDetails& details,
+                                        const std::string& info,
+                                        std::uint64_t file_limit = BugReportFileLimit) {
+  using namespace report_detail;
+  ReportBundle result;
+  if (data.empty()) {
+    result.error = "no settings folder";
+    return result;
+  }
+  const auto rules = report_redactions();
+  std::vector<ZipEntry> entries;
+  std::string included, missing;
+  const auto cut_note =
+      " (last " + (file_limit % (1 << 20) ? std::to_string(file_limit) + " bytes)" : std::to_string(file_limit >> 20) + " MiB)");
+  const auto add_content = [&](std::string content, bool cut, const std::string& name) {
+    if (content.empty()) {
+      missing += "  " + name + "\n";
+      return;
+    }
+    included += "  " + name + (cut ? cut_note : "") + "\n";
+    entries.push_back({name, redact(std::move(content), rules)});
+  };
+  const auto add = [&](const std::wstring& path, const std::string& name) {
+    bool cut = false;
+    auto content = read_file_tail(path, file_limit, &cut);
+    add_content(std::move(content), cut, name);
+  };
+  // Both bridge logs under the writer's lock, so a rotation between the reads
+  // cannot copy the same records into both. The bridge drops records while it
+  // is held; without it within a moment, the logs are read anyway.
+  {
+    const auto log = data + L"\\bridge.log";
+    wchar_t mutex_name[80]{};
+    std::swprintf(mutex_name, 80, L"Local\\TaxiCam.Log.%016llx", static_cast<unsigned long long>(log_detail::path_key(log)));
+    const HANDLE mutex = CreateMutexW(nullptr, FALSE, mutex_name);
+    const DWORD wait = mutex ? WaitForSingleObject(mutex, 250) : WAIT_FAILED;
+    const bool locked = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    bool cut = false, older_cut = false;
+    auto current = read_file_tail(log, file_limit, &cut);
+    auto older = read_file_tail(log + L".1", file_limit, &older_cut);
+    if (locked)
+      ReleaseMutex(mutex);
+    if (mutex)
+      CloseHandle(mutex);
+    add_content(std::move(current), cut, "logs/bridge.log");
+    add_content(std::move(older), older_cut, "logs/bridge.log.1");
+  }
+  add(data + L"\\launcher.log", "logs/launcher.log");
+  add(install + L"\\setup-diagnostics.log", "logs/setup-diagnostics.log");
+  add(install + L"\\installation.json", "settings/installation.json");
+  for (const auto* name : {L"settings.ini", L"hotkeys.ini", L"buttons.ini"})
+    add(data + L"\\" + name, "settings/" + report_utf8(name));
+  std::vector<std::pair<std::wstring, std::string>> saved_profiles;
+  profile_files(data + L"\\profiles", "settings/profiles", 0, saved_profiles);
+  for (const auto& [path, name] : saved_profiles)
+    add(path, name);
+  if (!details.user_config.empty())
+    add(details.user_config, "msfs/UserCfg.opt");
+  // Only records of a fault that happened: Record::state 2 at offset 16. They
+  // hold registers and engine bytes, no text, so they are copied unchanged.
+  FILETIME now{};
+  GetSystemTimeAsFileTime(&now);
+  const std::uint64_t age_limit = std::uint64_t{BugReportCrashDays} * 24 * 3600 * 10000000;
+  unsigned crashes = 0;
+  for (const auto& file : files(data, L"renderer-fault-*.bin")) {
+    if (crashes >= BugReportCrashRecords)
+      break;
+    // A write time after now (the clock was set back) counts as new.
+    if (file_time(file.written) < file_time(now) && file_time(now) - file_time(file.written) > age_limit)
+      continue;
+    auto record = read_file_tail(file.path, 64 << 10);
+    std::uint32_t magic{}, state{};
+    if (record.size() < 20)
+      continue;
+    std::memcpy(&magic, record.data(), 4);
+    std::memcpy(&state, record.data() + 16, 4);
+    if (magic != 0x54434352 || state != 2)
+      continue;
+    included += "  crash/" + report_utf8(file.name) + "\n";
+    entries.push_back({"crash/" + report_utf8(file.name), std::move(record)});
+    ++crashes;
+  }
+  auto text = info + "\n\nFiles in this report:\n" + included + (missing.empty() ? "" : "Not found:\n" + missing) +
+              "\nThe Windows profile folder, user name and computer name are replaced with %USERPROFILE%, <user> and <computer>.\n";
+  entries.insert(entries.begin(), {"report-info.txt", redact(std::move(text), rules)});
+
+  SYSTEMTIME local{};
+  GetLocalTime(&local);
+  char name[64];
+  std::snprintf(name, sizeof(name), "taxi-cam-report-%04u%02u%02u-%02u%02u%02u.zip", local.wYear, local.wMonth, local.wDay, local.wHour,
+                local.wMinute, local.wSecond);
+  const auto archive =
+      zip_archive(entries, zip_dos_time(local.wHour, local.wMinute, local.wSecond), zip_dos_date(local.wYear, local.wMonth, local.wDay));
+  if (archive.empty()) {
+    result.error = "report too large";
+    return result;
+  }
+  const auto folder = data + L"\\reports";
+  CreateDirectoryW(folder.c_str(), nullptr);
+  const auto path = folder + L"\\" + std::wstring(name, name + std::strlen(name));
+  const auto partial = path + L".partial";
+  const HANDLE file = CreateFileW(partial.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    result.error = "could not create the file (error " + std::to_string(GetLastError()) + ")";
+    return result;
+  }
+  DWORD written = 0;
+  const bool ok = WriteFile(file, archive.data(), static_cast<DWORD>(archive.size()), &written, nullptr) && written == archive.size();
+  CloseHandle(file);
+  if (!ok || !MoveFileExW(partial.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    result.error = "could not write the file (error " + std::to_string(GetLastError()) + ")";
+    DeleteFileW(partial.c_str());
+    return result;
+  }
+  result.path = path;
+  result.name = name;
+  // Never the report just written, even when the clock went back.
+  const auto saved = files(folder, L"taxi-cam-report-*.zip");
+  for (std::size_t i = BugReportKeep; i < saved.size(); ++i)
+    if (_wcsicmp(saved[i].path.c_str(), path.c_str()))
+      DeleteFileW(saved[i].path.c_str());
+  return result;
+}
+
+// What the bug report button shares: the form link and the saved file's text.
+inline std::string bug_report_info(const BugReportForm& form, const std::string& snapshot) {
+  return "Taxi Cam bug report\nTaxi Cam: " + std::string(TAXI_CAM_VERSION) + "-build." + std::to_string(TAXI_CAM_BUILD_NUMBER) +
+         "\nSimulator: " + form.simulator + "\nAircraft: " + form.aircraft + "\n" + form.environment + "\n\n" + snapshot;
 }
 }  // namespace taxi_camera::standalone

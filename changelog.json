@@ -32,6 +32,10 @@
         {
           "title": "Cockpit L:vars",
           "text": "Setup → Taxi cameras and Door camera let a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press), Latched (on while set) or Equals (on at a number you type, such as 16 for INI_ECAM_ACTIVE_PAGE, the iniBuilds A380's VIDEO page). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads them."
+        },
+        {
+          "title": "Easier bug reports",
+          "text": "The bug icon now fills in your MSFS version, aircraft, Windows, graphics card and MSFS graphics options on the GitHub form, and saves a report file with your logs and settings, your Windows user and computer names removed. Drag it from File Explorer into the form's Logs box."
         }
       ],
       "fixes": [
@@ -40,6 +44,7 @@
         "Dragging a camera in the live view now turns it the way you drag, like the simulator's mouse look: drag right to look right, down to look down. It used to turn the other way.",
         "Taxi Cam no longer makes the simulator wait for camera work it has not finished on another graphics queue, the cause found in logs of freezes of several seconds on the PMDG 777, except on frames where it is also capturing a camera picture. On the other frames, the camera picture is skipped for that frame instead.",
         "The cameras no longer switch off and on again and again when the simulator keeps stalling. After three stalls within five minutes while the cameras are on, they stay off and Taxi Cam says so; turn them off and on again to retry. bridge.log now records the simulator's graphics memory use, to help find what causes the stalls.",
+        "The cameras pause while the simulator shows an outside view, where the cockpit displays cannot be seen, and resume when you return to the cockpit.",
         "Settings no longer has First camera only. With it on, the cameras never started and the display only showed the waiting page; a saved setting is ignored.",
         "When the simulator starts Taxi Cam, Taxi Cam now closes a few seconds after the simulator does, so Steam no longer shows the simulator as still running; unsaved Settings changes are discarded. The frames-stalled warning no longer appears while the cameras are off, for example while a flight loads or when the simulator quits."
       ]
