@@ -450,6 +450,20 @@ void autosave_setup_tests() {
   require(!live_view.window && !current.manual_mask && current.door_on == setup.door_on_before,
           "Closing the window after positioning turns the previews off");
   live_view = {};
+  // The window already open (from a Taxi cameras card) took the user's own
+  // cameras; positioning later, with the setup's saves having seen only the
+  // previews, keeps those.
+  current.manual_mask = 1;
+  current.door_on = 0;
+  open_live_view();
+  require(live_view.window && live_view.camera_taken && live_view.manual_before == 1 && (current.manual_mask & 3) == 3 && current.door_on,
+          "The window opened first takes the user's cameras and shows the previews");
+  setup.manual_before = current.manual_mask;
+  setup.door_on_before = current.door_on;
+  start_positioning();
+  DestroyWindow(live_view.window);
+  require(current.manual_mask == 1 && !current.door_on, "Closing it gives back the user's cameras, not the previews");
+  live_view = {};
 
   // A built-in profile: picks save at once, and the door camera's None stays.
   current = {};
