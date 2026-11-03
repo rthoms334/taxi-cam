@@ -1156,8 +1156,8 @@ DWORD run_impl() {
   std::uint64_t camera_off_window{};
   bool camera_off_settled = false;
   win::MainViewPause main_view_pause;
-  // Pauses that stopped requested cameras, not every non-cockpit view (flight
-  // loading shows the world map with nothing requested).
+  // Pauses that stopped requested cameras, not every exterior view (a drone
+  // view with the cameras off pauses nothing).
   bool last_outside_pause = false;
   std::uint64_t outside_pauses{};
   WindowPauseLatch window_pause;
