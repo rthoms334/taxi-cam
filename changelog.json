@@ -6,47 +6,48 @@
       "features": [
         {
           "title": "Door camera",
-          "text": "Every aircraft, the PMDG 777 included, gets a door camera: a view into the cabin on a cockpit display of its own, the lower display by default. Ctrl + Shift + V, a controller button or a cockpit L:var turns it on and off. Both A380s, the iniBuilds A340-300 and, once set up in Setup, the Fenix A320 are ready to go: their VIDEO buttons show the cabin. The Fenix A319 and A321 are not checked yet.",
+          "text": "See into the cabin from the flight deck, as a live feed or a snapshot: your choice. Every aircraft now has a door camera, the PMDG 777 included, on a cockpit display of its own (the lower one by default). Ctrl + Shift + V, a controller button or a cockpit switch with an L:var toggles it. Both A380s and the iniBuilds A340-300 show it on their VIDEO button, and the Fenix A320 after a quick Setup.",
           "image": "docs/whats-new/1.3.0/door-camera.jpg"
         },
         {
-          "title": "Set up the door camera",
-          "text": "Setup → Door camera chooses the display it fills and whether it takes one picture each time it turns on (Snapshot) or keeps rendering (Live). Adjust live view aims it; Display area places it anywhere on that display, at any shape, and the camera renders at that shape. On the A380s and A350s the lower display can be any cockpit panel, such as an MFD.",
+          "title": "Make the door camera yours",
+          "text": "Setup → Door camera puts it on the display you want, as a fresh picture each time it turns on (Snapshot) or a live feed (Live). Aim it in the live view, then place it anywhere on the display at any shape you like: the camera renders at that shape. On the A380s and A350s the lower display can be any cockpit panel, an MFD included.",
           "image": "docs/whats-new/1.3.0/door-camera-setup.png"
         },
         {
-          "title": "Film grain and black and white",
-          "text": "The cameras now look more like real cameras: every camera has film grain with darker edges, on by default. The two icons at the top right of a camera's picture in Setup turn its grain off or take its colour out, as on this iniBuilds A380 VIDEO page; hover over them to see which is which. Both are saved for each aircraft.",
+          "title": "A real camera look",
+          "text": "The cameras now look like real cameras, with film grain and darker edges on every one. Prefer a clean picture, or classic black and white? The two icons at the top right of each camera's picture in Setup switch grain and colour, as on this iniBuilds A380 VIDEO page, and your choice is saved for each aircraft.",
           "image": "docs/whats-new/1.3.0/camera-look.jpg"
         },
         {
           "title": "Guided setup",
-          "text": "Settings is simpler. Overview shows how the cameras are doing, with quick controls, and Setup takes you through three steps: Displays, Taxi cameras and Door camera, each with the controls that turn its cameras on. Place a display by selecting or dragging its picture. Exact values, texture routing and guide values are under Advanced. Display is now Options.",
+          "text": "Settings is simpler. Overview shows at a glance how the cameras are doing, with quick controls, and Setup walks you through three steps: Displays, Taxi cameras and Door camera, each with the controls that turn its cameras on. Select or drag a display's picture to place it. Exact values are still there under Advanced, and Display is now called Options.",
           "image": "docs/whats-new/1.3.0/guided-setup.png"
         },
         {
           "title": "Taxi Cam in your language",
-          "text": "Taxi Cam and Setup follow your Windows display language in German, Spanish, French and Simplified Chinese (thanks to JCH2333), or English. Choose another under Language in the tray menu or Settings → Menu. Aircraft names, simulator messages, these notes, logs and bug reports stay in English. The translations are new: if one reads wrong, please open an issue on GitHub with a better wording.",
+          "text": "The tray menu and Settings now speak German, Spanish, French and Simplified Chinese (thanks to JCH2333), following your Windows display language. Want a different one? Pick it under Language in the tray menu or Settings → Menu. Know a better wording? Suggest it on GitHub and help polish the translations.",
           "image": "docs/whats-new/1.3.0/language.png"
         },
         {
-          "title": "Cockpit L:vars",
-          "text": "Setup → Taxi cameras and Door camera let a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press), Latched (on while set) or Equals (on at a number you type, such as 16 for INI_ECAM_ACTIVE_PAGE, the iniBuilds A380's VIDEO page). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads them."
+          "title": "Use your cockpit switches",
+          "text": "Cockpit switches with an L:var can now run any camera action, for each aircraft. In Setup → Taxi cameras or Door camera, type the switch's L:var and pick Momentary (each press), Latched (on while set) or Equals (on at a value, such as 16 for INI_ECAM_ACTIVE_PAGE, the iniBuilds A380's VIDEO page). Ideal for aircraft whose TAXI buttons Taxi Cam doesn't know yet."
         },
         {
           "title": "Easier bug reports",
-          "text": "The bug icon now fills in your MSFS version, aircraft, Windows, graphics card and MSFS graphics options on the GitHub form, and saves a report file with your logs and settings, your Windows user and computer names removed. Drag it from File Explorer into the form's Logs box."
+          "text": "Found a problem? The bug icon now fills in the GitHub form for you with your MSFS version, aircraft, Windows, graphics card and MSFS graphics options. It also saves a report file with your logs and settings, your Windows user and computer names removed: just drag it from File Explorer into the form's Logs box."
         }
       ],
       "fixes": [
-        "Setup → Displays now lists every cockpit display on built-in aircraft too, not only panels the size of their PFDs.",
-        "When a built-in or set-up aircraft replaces its display textures during a flight, as the FlyByWire A380X does after loading, Setup → Displays keeps each display's picture and name. It used to show the old ones as unavailable and leave the new ones unnamed.",
-        "Dragging a camera in the live view now turns it the way you drag, like the simulator's mouse look: drag right to look right, down to look down. It used to turn the other way.",
-        "Taxi Cam no longer makes the simulator wait for camera work it has not finished on another graphics queue, the cause found in logs of freezes of several seconds on the PMDG 777, except on frames where it is also capturing a camera picture. On the other frames, the camera picture is skipped for that frame instead.",
-        "The cameras no longer switch off and on again and again when the simulator keeps stalling. After three stalls within five minutes while the cameras are on, they stay off and Taxi Cam says so; turn them off and on again to retry. bridge.log now records the simulator's graphics memory use, to help find what causes the stalls.",
-        "The cameras pause while the simulator shows an outside view, where the cockpit displays cannot be seen, and resume when you return to the cockpit.",
-        "Settings no longer has First camera only. With it on, the cameras never started and the display only showed the waiting page; a saved setting is ignored.",
-        "When the simulator starts Taxi Cam, Taxi Cam now closes a few seconds after the simulator does, so Steam no longer shows the simulator as still running; unsaved Settings changes are discarded. The frames-stalled warning no longer appears while the cameras are off, for example while a flight loads or when the simulator quits."
+        "Setup → Displays now lists every cockpit display on built-in aircraft, not just the ones the size of their PFDs.",
+        "On built-in and set-up aircraft, displays now keep their pictures and names when the aircraft swaps its display textures mid-flight, as the FlyByWire A380X does after loading.",
+        "Dragging in the live view now turns the camera the way you drag, just like the simulator's mouse look.",
+        "Taxi Cam no longer makes one of the simulator's graphics queues wait for unfinished work from another, except on frames where it captures a camera picture. This targets the multi-second freezes reported on the PMDG 777.",
+        "If the simulator keeps stalling, the cameras now switch off and stay off instead of flickering on and off, and Taxi Cam tells you. Turn them off and on again to retry.",
+        "The cameras now pause while you're in an outside view, where the cockpit displays can't be seen, and pick up again as soon as you're back in the cockpit.",
+        "The First camera only setting, which stopped the cameras from starting, is gone. If you had it on, your cameras now start as normal.",
+        "When the simulator starts Taxi Cam, Taxi Cam now closes shortly after the simulator does, so Steam no longer shows the simulator as still running. Unsaved Settings changes are discarded when it closes.",
+        "The frames-stalled warning no longer pops up while the cameras are off, such as while a flight loads or the simulator quits."
       ]
     },
     {
