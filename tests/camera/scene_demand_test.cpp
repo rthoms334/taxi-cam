@@ -332,6 +332,30 @@ void main_view_pause() {
   require(gap.observe(1600 + MainViewPause::kHoldMs + MainViewPause::kEnterMs, true, 3), "Outside after the gap did not pause again");
   // A clock that runs backwards never holds a pause.
   require(!gap.observe(100, false, 0), "A backwards clock held the pause");
+
+  // Which ticks pause rendering. Background warmup shares the render gates and
+  // has one attempt, so it is never paused, a live door camera included.
+  using taxi_camera::standalone::outside_view_pause;
+  using taxi_camera::standalone::OutsidePauseInput;
+  OutsidePauseInput taxi;
+  taxi.main_view_outside = taxi.cameras_requested = true;
+  require(outside_view_pause(taxi), "Requested cameras did not pause outside the cockpit");
+  auto in_cockpit = taxi;
+  in_cockpit.main_view_outside = false;
+  require(!outside_view_pause(in_cockpit), "The cockpit paused the cameras");
+  auto warmup_only = taxi;
+  warmup_only.cameras_requested = false;
+  warmup_only.background_warmup = true;
+  require(!outside_view_pause(warmup_only), "Background warmup paused outside the cockpit");
+  auto door_and_warmup = taxi;  // TAXI off, door camera live, warmup running.
+  door_and_warmup.background_warmup = true;
+  require(!outside_view_pause(door_and_warmup), "A live door camera let the pause stop background warmup");
+  for (auto exempt : {&OutsidePauseInput::demand_suspended, &OutsidePauseInput::test_scene, &OutsidePauseInput::calibration,
+                      &OutsidePauseInput::snapshot_pending}) {
+    auto in = taxi;
+    in.*exempt = true;
+    require(!outside_view_pause(in), "An exempt state paused the cameras");
+  }
 }
 }  // namespace
 int main() {

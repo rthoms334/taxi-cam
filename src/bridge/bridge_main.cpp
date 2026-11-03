@@ -1762,13 +1762,19 @@ DWORD run_impl() {
         connected && session_settings && session.ready && settings.enabled && aircraft_matches && !degraded ? settings.calibration_mask : 0;
     // Issue 97: the cockpit displays cannot be seen from outside the cockpit, so
     // the camera views stop rendering there. Demand, the pair, its mounts and the
-    // display output stay as they are; rendering resumes in the cockpit. The scene
-    // test, calibration and display snapshots keep rendering wherever the view is.
-    // Only requested cameras pause: background warmup keeps its single attempt.
+    // display output stay as they are; rendering resumes in the cockpit. Background
+    // warmup, the scene test, calibration and display snapshots keep rendering
+    // wherever the view is (outside_view_pause).
     const auto main_view = native_camera::get_camera_state();
-    const bool main_view_outside = main_view_pause.observe(now, main_view.valid, main_view.state);
-    const bool outside_pause =
-        main_view_outside && (mask != 0 || door_render) && !demand.suspend && !test_scene && !calibration && !snapshot_pending;
+    win::OutsidePauseInput pause_input;
+    pause_input.main_view_outside = main_view_pause.observe(now, main_view.valid, main_view.state);
+    pause_input.cameras_requested = mask != 0 || door_render;
+    pause_input.demand_suspended = demand.suspend;
+    pause_input.background_warmup = background_warmup;
+    pause_input.test_scene = test_scene;
+    pause_input.calibration = calibration != 0;
+    pause_input.snapshot_pending = snapshot_pending;
+    const bool outside_pause = win::outside_view_pause(pause_input);
     outside_pauses += outside_pause && !last_outside_pause;
     last_outside_pause = outside_pause;
     // Warmup and scene-only diagnostics need capture observation without PFD

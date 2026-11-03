@@ -50,4 +50,23 @@ class MainViewPause {
   bool paused_ = false;
   std::uint64_t outside_since_ms_ = 0, last_outside_ms_ = 0;
 };
+
+// Whether the bridge pauses camera rendering for the main view this tick. Only
+// requested cameras (TAXI, manual or the door camera) pause. Background warmup
+// shares the render gates and has a single attempt per session, so nothing
+// pauses while it runs, a live door camera included. The scene test,
+// calibration and display snapshots keep rendering in any view.
+struct OutsidePauseInput {
+  bool main_view_outside = false;
+  bool cameras_requested = false;
+  bool demand_suspended = false;
+  bool background_warmup = false;
+  bool test_scene = false;
+  bool calibration = false;
+  bool snapshot_pending = false;
+};
+inline bool outside_view_pause(const OutsidePauseInput& in) noexcept {
+  return in.main_view_outside && in.cameras_requested && !in.demand_suspended && !in.background_warmup && !in.test_scene &&
+         !in.calibration && !in.snapshot_pending;
+}
 }  // namespace taxi_camera::standalone
