@@ -7,6 +7,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 using taxi_camera::EffectiveCameraRate;
@@ -370,6 +372,29 @@ void auto_camera_policy() {
     paused_off.step(20, false, true, true);
     require(paused_off.step(20, false) == 0 && paused_off.policy.floor() == 54,
             "The first camera-off window after a pause set the reference");
+  }
+  // The bridge samples the pause every 250 ms tick; Auto judges a window once.
+  // A pause that starts and ends inside one window still pauses that window.
+  {
+    taxi_camera::WindowPauseLatch latch;
+    auto window_at = [](std::uint64_t ms) { return ms / 2000; };
+    std::vector<std::pair<std::uint64_t, bool>> judged;  // window, paused
+    std::uint64_t last = 0;
+    for (std::uint64_t ms = 0; ms <= 10000; ms += 250) {
+      const bool paused = (ms >= 750 && ms <= 1500) || ms == 6000;
+      const bool latched = latch.observe(window_at(ms), paused);
+      if (window_at(ms) != last) {
+        judged.emplace_back(last, latched);
+        last = window_at(ms);
+      }
+    }
+    // Windows: 0 has the 0.75-1.5 s pause; 1 has none; the 6 s tick completes
+    // window 2 and starts window 3, so both count it; 4 has none.
+    require(judged.size() == 5, "Latch fixture judged the wrong number of windows");
+    require(judged[0].second, "A pause inside one window was not reported when the window completed");
+    require(!judged[1].second && !judged[4].second, "A window without a pause was reported paused");
+    require(judged[2].second, "A pause on the tick that completed a window was not reported");
+    require(judged[3].second, "A pause on the tick that started a window was not carried into it");
   }
 }
 }  // namespace

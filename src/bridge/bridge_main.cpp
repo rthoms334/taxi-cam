@@ -1140,6 +1140,7 @@ DWORD run_impl() {
   // loading shows the world map with nothing requested).
   bool last_outside_pause = false;
   std::uint64_t outside_pauses{};
+  WindowPauseLatch window_pause;
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
   EffectiveCameraRate effective_rate;
@@ -1763,9 +1764,11 @@ DWORD run_impl() {
     // the camera views stop rendering there. Demand, the pair, its mounts and the
     // display output stay as they are; rendering resumes in the cockpit. The scene
     // test, calibration and display snapshots keep rendering wherever the view is.
+    // Only requested cameras pause: background warmup keeps its single attempt.
     const auto main_view = native_camera::get_camera_state();
     const bool main_view_outside = main_view_pause.observe(now, main_view.valid, main_view.state);
-    const bool outside_pause = main_view_outside && !demand.suspend && !test_scene && !calibration && !snapshot_pending;
+    const bool outside_pause =
+        main_view_outside && (mask != 0 || door_render) && !demand.suspend && !test_scene && !calibration && !snapshot_pending;
     outside_pauses += outside_pause && !last_outside_pause;
     last_outside_pause = outside_pause;
     // Warmup and scene-only diagnostics need capture observation without PFD
@@ -1792,6 +1795,7 @@ DWORD run_impl() {
     const unsigned desired_feeds = std::max(1u, static_cast<unsigned>(std::popcount(wanted_feeds ? wanted_feeds : taxi_bits)));
     const unsigned pfd_refresh_hz = rate_profile ? rate_profile->pfd_refresh_hz : 0;
     const double update_hz = update_meter.update(now, native_camera::scene_update_count());
+    const bool window_paused = window_pause.observe(update_meter.windows(), outside_pause);
     if (!demand.suspend) {
       camera_off_settled = false;
     } else if (std::isfinite(update_hz) && update_meter.windows() != camera_off_window) {
@@ -1809,7 +1813,7 @@ DWORD run_impl() {
       auto_input.window = update_meter.windows();
       auto_input.fps = update_hz;
       auto_input.cameras_active = !demand.suspend;
-      auto_input.paused = outside_pause;
+      auto_input.paused = window_paused;
       auto_input.next_helps = auto_cameras_per_frame(auto_policy.level(), desired_feeds) < desired_feeds;
       auto_policy.update(auto_input);
     }

@@ -3,10 +3,11 @@
 
 namespace taxi_camera::standalone {
 // Pauses camera rendering while the simulator's main view is not the cockpit.
-// The cockpit displays cannot be seen from outside, yet each camera view still
-// cost a render on every frame there (issue 97: switching the PMDG 777 to the
-// outside view with the cameras on gave 12 s of 80-100 ms frames while the
-// simulator loaded about 3 GB for the view).
+// The cockpit displays cannot be seen from outside, yet the camera views kept
+// rendering there at their scheduled rate (issue 97: switching the PMDG 777 to
+// the outside view with the cameras on gave about 12 s of 80-100 ms frames while
+// the simulator's graphics memory rose from 9.2 to 12.2 GB; the cameras' share
+// of that is not measured).
 //
 // Input is the public CAMERA STATE SimVar, where 2 is Cockpit:
 // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simvars/camera-variables/
