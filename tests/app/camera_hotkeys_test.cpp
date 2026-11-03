@@ -83,8 +83,8 @@ void registration_checks() {
             "A fabricated hotkey message cannot activate preview bindings");
     require(registration.configure(fixture, DefaultCameraHotkeys, false) && FakeRegistration::adds == 5,
             "Normal startup registers all five independent actions");
-    require(registration.action(CameraHotkeyFirstId + 4, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'V')) == 4,
-            "The door camera dispatches from Ctrl + Shift + V");
+    require(registration.action(CameraHotkeyFirstId + 4, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'E')) == 4,
+            "The door camera dispatches from Ctrl + Shift + E");
     require(registration.action(CameraHotkeyFirstId + 3, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'D')) == 3,
             "SD action dispatches from the matching chord");
     require(registration.action(CameraHotkeyFirstId + 2, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'B')) == 2,
@@ -172,8 +172,8 @@ void persistence_checks() {
   require(WritePrivateProfileStringW(L"shortcuts", L"door", nullptr, path.c_str()), "Write pre-door fixture");
   expected = custom;
   expected[4] = DefaultCameraHotkeys[4];
-  require(load_camera_hotkeys(loaded, settings_override) && loaded == expected && loaded[4].key == 'V',
-          "Older shortcut files gain Ctrl + Shift + V for the door camera");
+  require(load_camera_hotkeys(loaded, settings_override) && loaded == expected && loaded[4].key == 'E',
+          "Older shortcut files gain Ctrl + Shift + E for the door camera");
   require(save_camera_hotkeys(custom, settings_override), "Restore saved shortcut fixture after door migration");
 }
 void manual_intent_checks() {
