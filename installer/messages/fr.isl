@@ -1,6 +1,3 @@
-; Textes du programme d'installation de Taxi Cam. L'anglais est la source ; chaque langue de [Languages]
-; de taxi-cam.iss a un fichier avec les mêmes clés. %1 est fourni par le programme d'installation.
-
 [CustomMessages]
 StartupOptionInvalid=L'option /STARTUP doit valoir automatic ou manual.
 InstallFailed=Échec de l'installation. Fermez MSFS et Taxi Cam, puis vérifiez les chemins sélectionnés.

@@ -1,6 +1,3 @@
-; Taxi Cam Setup wording. English is the source; each language in [Languages]
-; of taxi-cam.iss has a file with the same keys. %1 is filled in by Setup.
-
 [CustomMessages]
 StartupOptionInvalid=The /STARTUP option must be automatic or manual.
 InstallFailed=Installation failed. Close MSFS and the companion and verify the selected paths.
