@@ -19,13 +19,11 @@ $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
 function New-ExitJob([string]$Name, [int]$Code, [int[]]$Ok = @(0)) {
     New-TaxiJob -Name $Name -File $cmd -Arguments @('/d', '/c', "echo $Name& exit $Code") -Failure "$Name failed." -Ok $Ok
 }
-# Passing jobs: exit codes recorded, accepted non-zero codes pass, output kept per job.
 $jobs = @((New-ExitJob 'first' 0), (New-ExitJob 'skipped' 77 @(0, 77)), (New-ExitJob 'third' 0))
 $output = @(Invoke-TaxiJobs $jobs 2)
 Assert-That ($jobs[0].ExitCode -eq 0 -and $jobs[1].ExitCode -eq 77 -and $jobs[2].ExitCode -eq 0) 'Exit codes were not recorded.'
 Assert-That (($output -join ',') -match 'first' -and ($output -join ',') -match 'skipped' -and ($output -join ',') -match 'third') 'Job output was not printed.'
 Assert-That (-not ($output -match 'FAILED')) 'Accepted exit code was reported as a failure.'
-# A failure stops new jobs, lets running ones finish and throws every collected message.
 $jobs = @((New-ExitJob 'broken' 3), (New-ExitJob 'never' 0))
 $message = $null
 try { $output = @(Invoke-TaxiJobs $jobs 1) } catch { $message = $_.Exception.Message }
@@ -35,7 +33,6 @@ $jobs = @((New-ExitJob 'left' 4), (New-ExitJob 'right' 5))
 $message = $null
 try { $output = @(Invoke-TaxiJobs $jobs 2) } catch { $message = $_.Exception.Message }
 Assert-That ($message -match 'left failed\.' -and $message -match 'right failed\.') "Concurrent failures were not all reported: [$message]."
-# Jobs start in PowerShell's location, not the process directory that Set-Location leaves unchanged.
 $location = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
 Push-Location $location
 try {
@@ -44,7 +41,6 @@ try {
 } finally { Pop-Location }
 Assert-That ([Environment]::CurrentDirectory.TrimEnd('\') -ne $location) 'The process directory already matched the test location.'
 Assert-That (($output -join '').Trim() -eq $location) "Job started in [$($output -join '')], expected [$location]."
-# A missing executable is a job failure, not a crash of the pool.
 $message = $null
 try { Invoke-TaxiJobs @(New-TaxiJob -Name 'missing' -File (Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N') + '.exe')) -Failure 'missing failed.') 1 | Out-Null } catch { $message = $_.Exception.Message }
 Assert-That ($message -like 'missing failed.*') "Missing executable was reported as [$message]."

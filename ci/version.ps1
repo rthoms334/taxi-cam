@@ -6,9 +6,6 @@ function Get-TaxiReleaseBuildNumber(
     [string]$Ref = $env:GITHUB_REF,
     [string]$RunNumber = $env:GITHUB_RUN_NUMBER
 ) {
-    # Only main-branch workflow runs that can produce a publishable candidate
-    # receive a release build number. Pull requests, other refs and local
-    # builds stay at zero so they cannot look newer than a published tag.
     if ($GitHubActions -cne 'true') { return 0 }
     if ($EventName -like 'pull_request*') { return 0 }
     if ($Ref -cne 'refs/heads/main') { return 0 }
@@ -33,9 +30,6 @@ function ConvertTo-TaxiReleaseVersion([string]$Text) {
 
 function Get-TaxiVersion([string]$Repository, [int]$BuildNumber = 0) {
     if ($BuildNumber -lt 0) { throw 'Build number must not be negative.' }
-    # The release version is the newest entry in changelog.json, so every build
-    # carries exactly the version its What's new notes describe. Add a new top
-    # entry to release a new version.
     $changelog = Get-Content -Raw -LiteralPath (Join-Path $Repository 'changelog.json') | ConvertFrom-Json
     if (-not ($changelog.PSObject.Properties.Name -contains 'releases')) { throw 'changelog.json must contain a releases list.' }
     $releases = @($changelog.releases)

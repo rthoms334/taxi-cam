@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param([string]$Output = (Join-Path $PSScriptRoot '../src/app/taxi-cam.ico'))
 $ErrorActionPreference = 'Stop'
-# A full-width hold-short marking and TAXI label inside a teal rounded square.
-# Eight samples per axis keep the deterministic glyph clear at shell sizes.
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;

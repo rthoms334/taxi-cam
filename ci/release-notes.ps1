@@ -33,9 +33,6 @@ function Get-TaxiLastPublishedMainTag {
         [Parameter(Mandatory=$true)][string]$Repository,
         [string]$ExcludeTag
     )
-    # Last published point is the latest v*-build.N tag reachable on
-    # origin/main, or main when the remote-tracking ref is absent. GitHub
-    # release metadata and the exact built commit are not consulted.
     $tip = Get-TaxiPublishedMainTip $Repository
     $best = $null
     foreach ($tag in @(& git -C $Repository tag --list)) {
