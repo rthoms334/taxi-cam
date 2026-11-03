@@ -36,8 +36,8 @@ $releaseVersion | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'ver
 $receipt = Join-Path $out 'validation.json'
 if (Test-Path -LiteralPath $receipt) { Remove-Item -LiteralPath $receipt }
 if ($Validate) {
-    & (Join-Path $taskRoot 'ci/parallel_test.ps1')
     & (Join-Path $taskRoot 'tests/repository/comments_test.ps1')
+    & (Join-Path $taskRoot 'ci/parallel_test.ps1')
     & (Join-Path $taskRoot 'tests/installer/installer_script_test.ps1')
 }
 $common = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-fms-extensions','-static',

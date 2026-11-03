@@ -19,7 +19,7 @@ $cFamilyExtensions = @('.cpp', '.hpp', '.h', '.c', '.rc', '.S', '.hlsl')
 $powerShellExtensions = @('.ps1', '.psm1', '.psd1')
 $hashExtensions = @('.cfg', '.clang-format', '.gitignore', '.gitattributes', '.yml', '.yaml', '.py', '.toml', '.ini')
 $markupExtensions = @('.manifest', '.xml')
-$toolDirectives = @('^//\s*clang-format (off|on)$', '^//\s*NOLINT(NEXTLINE)?(\([^)]*\))?$', '^#requires\s', '^#!')
+$toolDirectives = @('^//\s*clang-format (off|on)$', '^//\s*NOLINT(NEXTLINE)?(\([^)]*\))?$', '^#requires\s')
 
 $singleline = [Text.RegularExpressions.RegexOptions]::Singleline
 $cToken = New-Object Text.RegularExpressions.Regex (
@@ -58,8 +58,14 @@ function Get-CComments([string]$Text, [int[]]$LineIndex = (New-LineIndex $Text),
 }
 function Get-PowerShellComments([string]$Text) {
     $errors = $null
+    $previous = $null
     foreach ($token in [Management.Automation.PSParser]::Tokenize($Text, [ref]$errors)) {
         if ($token.Type -eq 'Comment') { New-Comment $token.StartLine $token.Content }
+        if ($token.Type -eq 'String' -and $previous -and $previous.Type -eq 'CommandParameter' -and $previous.Content -eq '-TypeDefinition') {
+            $firstSourceLine = if ($Text[$token.Start] -eq '@') { $token.StartLine + 1 } else { $token.StartLine }
+            foreach ($comment in @(Get-CComments $token.Content)) { New-Comment ($firstSourceLine + $comment.Line - 1) $comment.Text }
+        }
+        if ($token.Type -ne 'NewLine' -and $token.Type -ne 'LineContinuation') { $previous = $token }
     }
 }
 function Get-LinePrefixComments([string]$Text, [string]$Prefix) {
@@ -93,6 +99,10 @@ function Get-InnoComments([string]$Text) {
 function Get-MarkupComments([string]$Text) {
     $lineIndex = New-LineIndex $Text
     foreach ($match in $markupComment.Matches($Text)) { New-Comment (Get-LineNumber $lineIndex $match.Index) $match.Value }
+}
+function Test-CommentRule([string]$Path) {
+    $extension = [IO.Path]::GetExtension($Path)
+    return ($cFamilyExtensions + $powerShellExtensions + $hashExtensions + $markupExtensions + $noCommentExtensions + @('.iss', '.isl')) -ccontains $extension
 }
 function Get-FileComments([string]$Path, [string]$Text) {
     $extension = [IO.Path]::GetExtension($Path)
@@ -134,16 +144,22 @@ $innoSample = "[Setup]`n; setup note`nAppName=x ; kept`n[Code]`nconst A = '{ not
 $innoFound = @(Get-InnoComments $innoSample)
 Assert-That ((Get-Texts $innoFound) -join '|' -ceq '; setup note|// code note|{ brace note }|(* star note *)') 'Inno Setup comments were wrong.'
 Assert-That ($innoFound[0].Line -eq 2 -and $innoFound[1].Line -eq 5 -and $innoFound[3].Line -eq 7) 'Inno Setup comment lines were wrong.'
-Assert-That ((Get-Texts (Get-ProjectComments 'a.ps1' "#!/usr/bin/env pwsh`n#requires -Version 5.1`n# note")) -join '|' -ceq '# note') 'Shebang or #requires was not allowed.'
+Assert-That ((Get-Texts (Get-ProjectComments 'a.ps1' "#!/usr/bin/env pwsh`n#requires -Version 5.1`n# note`n#! later")) -join '|' -ceq '# note|#! later') 'Only a first-line shebang and #requires may be allowed.'
+$typeSample = "`$a = 1`nAdd-Type -TypeDefinition @'`npublic static class A {`n    // embedded`n}`n'@`nAdd-Type -TypeDefinition 'class B { /* inline */ }'"
+$typeFound = @(Get-PowerShellComments $typeSample)
+Assert-That ((Get-Texts $typeFound) -join '|' -ceq '// embedded|/* inline */' -and $typeFound[0].Line -eq 4 -and $typeFound[1].Line -eq 7) "Add-Type source comments were [$((Get-Texts $typeFound) -join '|')] on lines [$(@($typeFound | ForEach-Object { $_.Line }) -join ',')]."
 Assert-That ((Get-Texts (Get-ProjectComments 'a.cpp' "// clang-format off`n// NOLINT(bugprone-x)`n// clang-format off: why`n// NOLINT because")) -join '|' -ceq '// clang-format off: why|// NOLINT because') 'Tool directives with explanations were allowed.'
 Assert-That ((Get-Texts (Get-ProjectComments 'a.manifest' "<a><!-- note --></a>")) -join '|' -ceq '<!-- note -->') 'Markup comments were missed.'
 Assert-That ((Get-Texts (Get-ProjectComments 'a.cfg' "# note`nkey = 1 # kept")) -join '|' -ceq '# note') 'Configuration comments were missed.'
 $thrown = $false
 try { [void](Get-FileComments 'tools/script.lua' '') } catch { $thrown = $true }
-Assert-That $thrown 'An unknown file type was not refused.'
+Assert-That ($thrown -and -not (Test-CommentRule 'tools/script.lua') -and (Test-CommentRule 'src/a.cpp')) 'An unknown file type was not refused.'
 
-$files = @(& git -C $repoRoot ls-files --cached --others --exclude-standard)
+$tracked = @(& git -C $repoRoot ls-files --cached)
 if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
+$untracked = @(& git -C $repoRoot ls-files --others --exclude-standard)
+if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
+$files = @($tracked) + @($untracked | Where-Object { Test-CommentRule $_ })
 $utf8 = New-Object Text.UTF8Encoding($false)
 $counts = @{}
 $found = New-Object Collections.Generic.List[string]
