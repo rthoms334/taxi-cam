@@ -171,6 +171,41 @@ void draw_bug_icon(HDC dc, const RECT& bounds, COLORREF color) {
   SelectObject(dc, old_pen);
   DeleteObject(pen);
 }
+// The Displays swap button: a round button on the slot group's card, like the
+// slots it sits between, with two opposed arrows (drawn, not a font glyph).
+void draw_swap_button(const DRAWITEMSTRUCT& item) {
+  const auto& r = item.rcItem;
+  HDC dc = item.hDC;
+  HBRUSH surround = CreateSolidBrush(Card);
+  FillRect(dc, &r, surround);
+  DeleteObject(surround);
+  const bool down = (item.itemState & ODS_SELECTED) != 0, focus = (item.itemState & ODS_FOCUS) != 0;
+  HBRUSH fill = CreateSolidBrush(down ? RGB(30, 64, 63) : Background);
+  HPEN outline = CreatePen(PS_SOLID, scale(1), down || focus ? Accent : Border);
+  auto old_brush = SelectObject(dc, fill);
+  auto old_pen = SelectObject(dc, outline);
+  Ellipse(dc, r.left, r.top, r.right, r.bottom);
+  const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, size = r.right - r.left;
+  const int arm = size * 3 / 10, offset = size / 9, head = size / 8;
+  HPEN arrow = CreatePen(PS_SOLID, scale(2), Accent);
+  SelectObject(dc, arrow);
+  const auto line = [&](int x1, int y1, int x2, int y2) {
+    MoveToEx(dc, x1, y1, nullptr);
+    LineTo(dc, x2, y2);
+  };
+  // To the right above, to the left below.
+  for (const int direction : {1, -1}) {
+    const int y = cy - direction * offset, tip = cx + direction * arm;
+    line(cx - direction * arm, y, tip, y);
+    line(tip, y, tip - direction * head, y - head);
+    line(tip, y, tip - direction * head, y + head);
+  }
+  SelectObject(dc, old_brush);
+  SelectObject(dc, old_pen);
+  DeleteObject(fill);
+  DeleteObject(outline);
+  DeleteObject(arrow);
+}
 void frame_field(HWND control);
 void edit(double value, int id, int x, int y, int w = 110) {
   wchar_t buffer[64];
@@ -1835,6 +1870,14 @@ struct AircraftSetup {
   // aircraft of its own). Its choices save as the profile's DisplayOverride.
   std::uint32_t built_in{};
 } setup;
+// The Displays slots side by side over 730 logical pixels, the pilot
+// displays held apart by the swap button's gap. Returns a slot's x and width.
+constexpr int SetupSlotGap = 10, SetupSwapGap = 48, SetupSwapSize = 36;
+std::pair<int, int> setup_slot_x(unsigned side) {
+  const int sides = std::max(1, static_cast<int>(setup.sides)), swap = sides >= 2 ? SetupSwapGap - SetupSlotGap : 0;
+  const int width = (730 - SetupSlotGap * (sides - 1) - swap) / sides;
+  return {262 + static_cast<int>(side) * (width + SetupSlotGap) + (side >= 1 ? swap : 0), width};
+}
 bool fresh_status(const win::Status& sample) {
   const auto now = GetTickCount64();
   return sample.heartbeat && now >= sample.heartbeat && now - sample.heartbeat <= 3000;
@@ -3119,10 +3162,11 @@ void draw_setup(HDC dc, const win::Status& sample) {
        : !setup.picked.empty() ? Accent
                                : Muted,
        DT_LEFT | DT_WORDBREAK);
-  const int sides = static_cast<int>(setup.sides), gap = 10, width = (730 - gap * (sides - 1)) / sides;
+  const int sides = static_cast<int>(setup.sides);
   for (int side = 0; side < sides; ++side) {
-    const int x = 262 + side * (width + gap), y = SetupSlotTop, inner = width - 20;
     const auto unsigned_side = static_cast<unsigned>(side);
+    const auto [x, width] = setup_slot_x(unsigned_side);
+    const int y = SetupSlotTop, inner = width - 20;
     setup.slot_areas[unsigned_side] = rectangle(x, y, width, SetupSlotHeight);
     // A picked panel marks every display as a drop target; the one a drag is
     // over lights up.
@@ -5548,14 +5592,17 @@ void build_controls() {
       }
       sync_setup(sample);
     }
-    const int slot_width = (730 - 10 * (static_cast<int>(setup.sides) - 1)) / static_cast<int>(setup.sides);
     for (unsigned side = 0; side < setup.sides; ++side) {
-      const int x = 262 + static_cast<int>(side) * (slot_width + 10) + 10, w = slot_width - 20, y = SetupSlotTop + SetupSlotHeight - 40;
+      const auto [slot_x, slot_width] = setup_slot_x(side);
+      const int x = slot_x + 10, w = slot_width - 20, y = SetupSlotTop + SetupSlotHeight - 40;
       button(switch_label(tr(L"Test in cockpit"), (setup.testing >> side) & 1).c_str(), SetupTestId + static_cast<int>(side), x, y, w, 30);
       button(tr(L"Place here"), SetupPlaceId + static_cast<int>(side), x, y, w, 30);
     }
-    // Between the pilot displays, over the gap and clear of their pictures.
-    if (HWND swap = button(L"↔", SetupSwapId, 262 + slot_width + 5 - 14, SetupSlotTop + SetupSlotPicture + 20, 28, 28)) {
+    // In the gap between the pilot displays, level with their pictures
+    // (painted round with a drawn icon: draw_swap_button).
+    const auto [left_x, left_width] = setup_slot_x(0);
+    if (HWND swap = button(tr(L"Swap the left and right PFDs"), SetupSwapId, left_x + left_width + (SetupSwapGap - SetupSwapSize) / 2,
+                           SetupSlotTop + 40 + SetupSlotPicture / 2 - SetupSwapSize / 2, SetupSwapSize, SetupSwapSize)) {
       TOOLINFOW tip{};
       tip.cbSize = sizeof(tip);
       tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
@@ -6704,6 +6751,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id >= StepPillId && id < StepPillId + static_cast<int>(SetupSteps)) {
         draw_step_pill(*item, static_cast<unsigned>(id - StepPillId), page == OverviewPage);
+        return TRUE;
+      }
+      if (id == SetupSwapId) {
+        draw_swap_button(*item);
         return TRUE;
       }
       if (draw_page_button(*item))
