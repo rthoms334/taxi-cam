@@ -359,8 +359,5 @@
     "tools/diagnostics/static_literals.hpp": 10,
     "tools/diagnostics/static_numeric.cpp": 2,
     "tools/diagnostics/static_numeric.hpp": 12,
-    "tools/diagnostics/taxi_buttons_live.cpp": 1,
-    "tools/performance/capture.ps1": 2,
-    "tools/performance/ipc-poll.cpp": 6,
-    "tools/performance/sampler.cpp": 15
+    "tools/diagnostics/taxi_buttons_live.cpp": 1
 }
