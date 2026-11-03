@@ -411,6 +411,74 @@ void autosave_setup_tests() {
   require(win::load_settings(loaded, L"", profiles::DiscoveredProfileId, key) &&
               std::string_view(loaded.discovered.textures[0]) == "$DU6" && std::string_view(loaded.discovered.textures[1]) == "$DU1",
           "The swap button exchanges the pilot displays and saves them");
+  // The adjustment window takes cameras already all on as they are: one
+  // turned off afterwards stays off.
+  {
+    win::Status sample;
+    {
+      const std::lock_guard lock(app_mutex);
+      sample = status;
+    }
+    live_view = {};
+    const auto* set_up = profiles::find(current.profile);
+    require(set_up != nullptr, "The set-up aircraft's profile is published");
+    live_keep_camera(current, sample, *set_up, 0);
+    require(live_view.camera_taken && (current.manual_mask & 3) == 3, "Cameras already on are taken as they are");
+    current.manual_mask &= ~2u;
+    live_keep_camera(current, sample, *set_up, 0);
+    require(!(current.manual_mask & 2), "A camera turned off while the window is open stays off");
+    live_view = {};
+  }
+
+  // A built-in profile: picks save at once, and the door camera's None stays.
+  current = {};
+  current.profile = profiles::A380.id;
+  current.auto_profile = 0;
+  current.enabled = 1;
+  current.mounts = profiles::A380.mounts;
+  std::strcpy(current.display_override.textures[2], "SCREEN_DU_SD");
+  current.door_side = win::DoorSideNone;
+  require(win::valid_settings(current) && win::save_settings(current), "Save the A380X with its lower display and no door display");
+  publish(current);
+  page = OverviewPage;
+  build_controls();
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+    status.heartbeat = GetTickCount64();
+    status.graphics_ready = 1;
+    status.panel_discovery = 1;
+    status.panel_state = static_cast<std::uint32_t>(win::PanelMapState::paired);
+    status.panel_clean = 1;
+    status.panel_shift = 0;
+    status.identity_sample_ms = status.heartbeat;
+    status.detected_profile = profiles::A380.id;
+    status.panel_count = 3;
+    std::strcpy(status.aircraft_path, "SimObjects/Airplanes/FlyByWire_A380_842/aircraft.cfg");
+    const char* names[]{"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", "SCREEN_DU_SD"};
+    for (int i = 0; i < 3; ++i) {
+      std::strcpy(status.panels[i].name, names[i]);
+      status.panels[i].id = 901 + static_cast<std::uint64_t>(i);
+      status.panels[i].width = 768;
+      status.panels[i].height = 1024;
+      status.panels[i].mips = 5;
+    }
+  }
+  command(StepPillId);
+  require(page == SetupPage && setup.built_in == profiles::A380.id && setup.names[2] == "SCREEN_DU_SD",
+          "Displays opens on the A380X with its lower display");
+  swap_pilot_displays();
+  require(win::load_settings(loaded, L"", profiles::A380.id) && std::string_view(loaded.display_override.textures[0]) == "SCREEN_DU_PFDR" &&
+              loaded.door_side == win::DoorSideNone,
+          "A built-in swap saves at once and keeps the door camera's None");
+  // A pick made during a cockpit test saves on leaving Displays.
+  setup.testing = 1;
+  swap_pilot_displays();
+  require(setup.unsaved, "A pick during a cockpit test waits to be saved");
+  command(100);
+  require(page == OverviewPage && win::load_settings(loaded, L"", profiles::A380.id) && !loaded.display_override.textures[0][0] &&
+              !setup.testing && !current.calibration_mask,
+          "Leaving Displays saves it and ends the test");
   {
     const std::lock_guard lock(app_mutex);
     status = {};

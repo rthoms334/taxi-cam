@@ -2474,8 +2474,14 @@ void live_keep_camera(const win::Settings& s, const win::Status& sample, const p
     // camera, 2026-11-03). Once: a camera turned off meanwhile stays off,
     // and afterwards only the display shown is kept on, as below.
     preview_cameras(next, profiles::side_mask(profile));
-    if (next.manual_mask == s.manual_mask && next.door_on == s.door_on)
+    if (next.manual_mask == s.manual_mask && next.door_on == s.door_on) {
+      // Already all on: taken as they are, so this pass is the only one.
+      live_view.camera_taken = true;
+      live_view.follow_before = s.follow_taxi;
+      live_view.manual_before = live_view.manual_set = s.manual_mask;
+      live_view.door_preview = false;
       return;
+    }
   } else {
     if (live_cameras_on(s, sample, profile) & (1u << side))
       return;
@@ -4500,6 +4506,7 @@ bool save_built_in_displays(bool built_in_only, bool stay = false) {
   auto s = setup.trial ? setup.before : draft();
   setup.trial = false;
   setup.testing = 0;
+  const unsigned sides_before = profiles::override_sides(*base, s.display_override);
   s.display_override = built_in_choices(*base, s.display_override);
   if (built_in_only) {
     for (auto& texture : s.display_override.textures)
@@ -4507,8 +4514,11 @@ bool save_built_in_displays(bool built_in_only, bool stay = false) {
     win::update_target_assignment(s.left_id, s.right_id, s.route_request, 0, 0);
   } else {
     route_picks(s, setup_items(sample));
-    // A newly placed lower display is where the door camera goes.
-    if (s.door_side == win::DoorSideNone && profiles::override_sides(*base, s.display_override) > base->sides)
+    // A newly placed lower display is where the door camera goes. None with
+    // the lower display already placed is the user's choice and stays (a
+    // drop or swap saves too).
+    if (s.door_side == win::DoorSideNone && profiles::override_sides(*base, s.display_override) > base->sides &&
+        sides_before <= base->sides)
       s.door_side = MaxDisplaySides - 1;
   }
   // Without its placed lower display the door camera has none.
@@ -4708,6 +4718,18 @@ bool leave_page(int next) {
       return false;
     }
     s = draft();
+  }
+  // A built-in profile's picks not saved yet (made during a cockpit test)
+  // save on the way out; where something blocks that, they stay this
+  // flight's routes, and leaving is never held up.
+  if (page == SetupPage && next != SetupPage && setup.built_in && setup.unsaved) {
+    win::Status sample;
+    {
+      const std::lock_guard lock(app_mutex);
+      sample = status;
+    }
+    if (save_setup_picks(sample, true))
+      s = draft();
   }
   if (page == SetupPage && next != SetupPage)
     end_setup_trial(s);
