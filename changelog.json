@@ -32,6 +32,10 @@
         {
           "title": "Cockpit L:vars",
           "text": "Setup → Taxi cameras and Door camera let a cockpit switch run any camera action, for each aircraft: type the switch's L:var and choose Momentary (each press), Latched (on while set) or Equals (on at a number you type, such as 16 for INI_ECAM_ACTIVE_PAGE, the iniBuilds A380's VIDEO page). Useful on aircraft whose TAXI buttons Taxi Cam does not know. Taxi Cam only reads them."
+        },
+        {
+          "title": "Easier bug reports",
+          "text": "The bug icon now fills in your MSFS version, aircraft, Windows, graphics card and MSFS graphics options on the GitHub form, and saves a report file with your logs and settings, your Windows user and computer names removed. Drag it from File Explorer into the form's Logs box."
         }
       ],
       "fixes": [

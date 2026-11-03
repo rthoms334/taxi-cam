@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <shlobj.h>
 #include <uxtheme.h>
 #include <algorithm>
 #include <atomic>
@@ -321,6 +322,23 @@ void donate() {
     MessageBoxW(window, tr(L"Could not open your browser. You can also find the PayPal donation link in the Taxi Cam README."),
                 tr(L"Donate to Taxi Cam"), MB_OK | MB_ICONWARNING);
 }
+// For GitHub's file picker: Ctrl+V into its File name box attaches the file.
+void copy_text(const std::wstring& text) {
+  if (!OpenClipboard(window))
+    return;
+  EmptyClipboard();
+  const auto bytes = (text.size() + 1) * sizeof(wchar_t);
+  if (const auto memory = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+    auto* target = static_cast<wchar_t*>(GlobalLock(memory));
+    if (target) {
+      std::memcpy(target, text.c_str(), bytes);
+      GlobalUnlock(memory);
+    }
+    if (!target || !SetClipboardData(CF_UNICODETEXT, memory))
+      GlobalFree(memory);
+  }
+  CloseClipboard();
+}
 void report_bug() {
   win::BugReportContext context;
   {
@@ -333,8 +351,31 @@ void report_bug() {
   context.now = GetTickCount64();
   context.ui_preview = preview_ui;
   context.unsaved_edits = dirty;
-  const auto url = win::bug_report_url(context);
+  const auto cursor = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+  const auto details = win::system_details(simulator_pid.load(), expected_simulator);
+  win::BugReportForm form{
+      details.simulator, win::bug_report_aircraft(context), win::bug_report_environment(details, win::bug_report_created(context.now)), {}};
+  const auto bundle =
+      win::write_report_bundle(win::settings_directory(), details, win::bug_report_info(form, win::bug_report_snapshot(context)));
+  form.logs = bundle.path.empty() ? "Taxi Cam could not save the report file (" + bundle.error +
+                                        "). Attach bridge.log from Diagnostics > Open log folder instead."
+                                  : "Report file: " + bundle.name +
+                                        "\nDrag it into this box from the File Explorer window Taxi Cam opened, or click the attach "
+                                        "bar below and paste (Ctrl+V) into File name: Taxi Cam copied its location.";
+  // Select the file first; the form then opens in front of File Explorer.
+  if (!bundle.path.empty()) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (auto* item = ILCreateFromPathW(bundle.path.c_str())) {
+      SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+      ILFree(item);
+    }
+    if (SUCCEEDED(com))
+      CoUninitialize();
+    copy_text(bundle.path);
+  }
+  const auto url = win::bug_report_url(context, form);
   const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+  SetCursor(cursor);
   if (result <= 32) {
     MessageBoxW(window,
                 tr(L"Could not open your browser. Open github.com/rthoms334/taxi-cam/issues and choose Bug report. "
@@ -342,7 +383,8 @@ void report_bug() {
                 tr(L"Taxi Cam bug report"), MB_OK | MB_ICONWARNING);
     return;
   }
-  notice = tr(L"Bug report opened. Review the details and attach logs before submitting on GitHub.");
+  notice = bundle.path.empty() ? tr(L"Bug report opened, but the report file could not be saved. Attach bridge.log from Open log folder.")
+                               : tr(L"Bug report opened. Drag the selected report file from File Explorer into the form's Logs box.");
   InvalidateRect(window, nullptr, FALSE);
 }
 void dirty_notice() {
