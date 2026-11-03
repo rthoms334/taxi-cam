@@ -55,7 +55,7 @@ void pieces() {
   covers(small, split, many, 6);
   require(split.count <= keep::Pieces::Capacity, "Within capacity");
   keep::set_marks(nullptr, 0);
-  require(keep::pieces(small).count == 1, "Cleared when GlassOut goes");
+  require(keep::pieces(small).count == 1, "An empty list writes the area whole");
 }
 }  // namespace
 

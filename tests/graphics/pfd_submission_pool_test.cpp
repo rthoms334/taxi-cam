@@ -1,4 +1,5 @@
 #include "../../src/graphics/pfd_submission_pool.hpp"
+#include "../../src/graphics/display_keep.hpp"
 #include "../../src/hooks/queue_submit_observer.hpp"
 
 #include <d3d12sdklayers.h>
@@ -739,6 +740,18 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     execute({}, setup, {});
     // Every panel pixel: the camera patch, the instrument's redraw colour, or
     // the panel pattern.
+    namespace keep = taxi_camera::standalone::display_keep;
+    // Panel marks inside the patch: its corner, inside the redraw, and one
+    // clipped by the patch's right edge.
+    const keep::Point marks[]{{8, 4}, {12, 7}, {8 + PatchWidth - 1, 9}};
+    bool marks_listed = false;
+    const auto marked = [&](UINT x, UINT y) {
+      if (marks_listed)
+        for (const auto& m : marks)
+          if (x >= m.x && x < m.x + keep::MarkWidth && y >= m.y && y < m.y + keep::MarkHeight)
+            return true;
+      return false;
+    };
     const auto expect = [&](bool camera, bool redraw, const char* message) {
       auto* list = record(1);
       transition(list, panel.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -761,7 +774,7 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
           const bool redrawn = redraw && x >= 10 && x < 14 && y >= 5 && y < 9;
           const auto own = panel_pixel(x, y);
           const std::array<std::uint8_t, 4> wanted =
-              patch && camera
+              patch && camera && !marked(x, y)
                   ? std::array<std::uint8_t, 4>{static_cast<std::uint8_t>(180 + x - 8), static_cast<std::uint8_t>(70 + y - 4), 219, 255}
               : redrawn ? std::array<std::uint8_t, 4>{51, 102, 153, 255}
                         : own;
@@ -855,6 +868,31 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     require(static_cast<bool>(ran), "Record a shadow copy that runs");
     execute({ran}, nullptr, {});
     require(restored.load() == 6 && dropped.load() == 5, "A completed shadow copy reported a drop");
+    // Panel marks. A camera copy made before the marks are listed covers
+    // them; a restore after they are listed still puts every pixel back.
+    auto plain = stamp;
+    plain.save = nullptr;
+    plain.completed = nullptr;
+    plain.completed_value = 0;
+    const auto unmarked = context->pool.record(plain);
+    require(static_cast<bool>(unmarked), "Record a camera copy before the marks");
+    execute({unmarked}, nullptr, {});
+    expect(true, true, "A camera copy before the marks left the wrong pixels");
+    keep::set_marks(marks, 3);
+    marks_listed = true;
+    restore.completed = nullptr;
+    restore.completed_value = 0;
+    const auto whole = context->pool.record(restore);
+    require(static_cast<bool>(whole), "Record a restore with marks listed");
+    execute({whole}, nullptr, {});
+    expect(false, true, "A restore with marks listed left camera pixels on the marks");
+    // With marks listed, a camera copy leaves each of them on the panel.
+    const auto around = context->pool.record(plain);
+    require(static_cast<bool>(around), "Record a camera copy around the marks");
+    execute({around}, nullptr, {});
+    expect(true, true, "A camera copy wrote a panel mark or missed a camera pixel");
+    keep::set_marks(nullptr, 0);
+    marks_listed = false;
   }
   success(device->GetDeviceRemovedReason(), "D3D12 device removed");
   if (diagnostics.p) {

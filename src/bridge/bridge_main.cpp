@@ -3,8 +3,6 @@
 #include <bit>
 #include <chrono>
 #include <cstring>
-#include <cwchar>
-#include <cwctype>
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/display_panels.hpp"
 #include "../camera/mount_config.hpp"
@@ -1060,38 +1058,29 @@ DWORD WINAPI watchdog_run(void*) noexcept {
     log_contention(status, graphics, output);
   }
 }
-// GlassOut compatibility: while GlassOut's capture DLL is loaded in this
-// process, camera writes leave GlassOut's two marker pixels at each gauge's
-// top-left alone (display_keep.hpp). Marks go at the routed displays' gauge
-// corners from the built-in profile, which stay put when the user moves the
-// camera area, and at the current area's corners (a set-up aircraft's gauge
-// is unknown; the texture's own corner too). Without GlassOut nothing
-// changes. GlassOut's L:GLASSOUT_HOOK_ACTIVE read 0 over SimConnect while it
-// ran (2026-11-03), so it is not used.
-class GlassOutMarks {
+// Panel marks: camera writes leave two pixels at each routed display's gauge
+// corner alone, where GlassOut marks and checks every panel it streams
+// (display_keep.hpp). Marks go at the gauge corners from the built-in
+// profile, which stay put when the user moves the camera area, and at the
+// current area's corners (a set-up aircraft's gauge is unknown; the
+// texture's own corner too). Always on: two pixels cannot be seen, and a
+// panel streamer started after the cameras still finds its marks.
+class DisplayMarks {
  public:
   void service(const win::Status& status) noexcept {
     const auto now = GetTickCount64();
     if (now < next_poll_)
       return;
     next_poll_ = now + 1000;
-    const bool active = loaded();
     std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points{};
-    const unsigned count = active ? corners(status.active_profile, points) : 0;
-    if (active == active_ && count == count_ && std::equal(points.begin(), points.begin() + count, points_.begin(), same))
+    const unsigned count = corners(status.active_profile, points);
+    if (count == count_ && std::equal(points.begin(), points.begin() + count, points_.begin(), same))
       return;
-    const bool changed = active != active_;
-    active_ = active;
     count_ = count;
     points_ = points;
     standalone::display_keep::set_marks(points.data(), count);
-    if (!active) {
-      if (changed)
-        log_status(status, "GlassOut not detected: camera writes cover the whole display area.");
-      return;
-    }
-    char detail[160];
-    std::snprintf(detail, sizeof(detail), "GlassOut detected: camera writes leave its marker pixels at %u display corners.", count);
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "Display marks: camera writes leave the panel-mark pixels at %u display corners.", count);
     log_status(status, detail);
   }
 
@@ -1128,24 +1117,12 @@ class GlassOutMarks {
     }
     return count;
   }
-  // GlassOut stages its DLL as ...\GlassOutEngine\instances\<id>\capture.dll.
-  static bool loaded() noexcept {
-    const HMODULE module = GetModuleHandleW(L"capture.dll");
-    wchar_t path[MAX_PATH];
-    const DWORD length = module ? GetModuleFileNameW(module, path, MAX_PATH) : 0;
-    if (!length || length >= MAX_PATH)
-      return false;
-    for (DWORD i = 0; i < length; ++i)
-      path[i] = static_cast<wchar_t>(towlower(path[i]));
-    return std::wcsstr(path, L"\\glassoutengine\\") != nullptr;
-  }
   std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points_{};
   std::uint64_t next_poll_ = 0;
   unsigned count_ = 0;
-  bool active_ = false;
 };
 DWORD run_impl() {
-  GlassOutMarks glassout_marks;
+  DisplayMarks display_marks;
   log_worker_thread.store(GetCurrentThreadId(), std::memory_order_release);
   lock_holder_priority::mark_worker_thread();
   win::Mailbox mailbox;
@@ -2819,7 +2796,7 @@ DWORD run_impl() {
       logged = true;
       next_log = now + 5000;
     }
-    glassout_marks.service(status);
+    display_marks.service(status);
     Sleep(25);
   }
 }

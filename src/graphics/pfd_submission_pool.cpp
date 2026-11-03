@@ -227,8 +227,16 @@ Pool::Recording Pool::record(const Copy& copy) noexcept {
       if (copy.shadow_source)
         enter[entering++] = transition(copy.source, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
       packet.list->ResourceBarrier(entering, enter);
-      // Camera copies and shadow restores both leave GlassOut's marks alone.
-      standalone::display_keep::copy_region(packet.list, &texture, copy.x, copy.y, &buffer, copy.width, copy.height);
+      // A camera copy leaves the panel marks alone. A shadow restore goes back
+      // whole: it holds the panel's own pixels, and the camera may have
+      // covered a mark before the marks were listed (bridge start, a moved
+      // area).
+      if (copy.shadow_source) {
+        const D3D12_BOX box{0, 0, 0, copy.width, copy.height, 1};
+        packet.list->CopyTextureRegion(&texture, copy.x, copy.y, 0, &buffer, &box);
+      } else {
+        standalone::display_keep::copy_region(packet.list, &texture, copy.x, copy.y, &buffer, copy.width, copy.height);
+      }
       D3D12_RESOURCE_BARRIER leave[2]{transition(copy.target, D3D12_RESOURCE_STATE_COPY_DEST, copy.state)};
       UINT leaving = 1;
       if (copy.shadow_source)
