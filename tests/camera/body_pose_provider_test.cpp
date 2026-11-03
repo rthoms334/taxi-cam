@@ -913,10 +913,54 @@ int offline_tests() {
   check(testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
   check(testing::accept_session_packet(load_event.data(), load_event.size()));
   check(!testing::on_ground_at(10000).valid);
+  // CAMERA STATE (definition and request 9): the main view, 2 = Cockpit.
+  std::array<unsigned char, 48> camera_state_packet{};
+  const std::array<DWORD, 10> camera_state_header{48, 0, 8, 9, 2883584, 9, 0, 0, 1, 1};
+  const auto refresh_camera_state = [&](double value) {
+    std::memcpy(camera_state_packet.data(), camera_state_header.data(), sizeof(camera_state_header));
+    std::memcpy(camera_state_packet.data() + 40, &value, sizeof(value));
+  };
+  check(!testing::camera_state_at(20000).valid);
+  for (double value : {2.0, 3.0, 31.0, 0.0}) {
+    refresh_camera_state(value);
+    check(testing::accept_camera_state_packet(camera_state_packet.data(), 48, 20000));
+    const auto sample = testing::camera_state_at(20000);
+    check(sample.valid && sample.state == static_cast<unsigned>(value) && sample.sample_ms == 20000);
+  }
+  check(testing::camera_state_at(20500).valid && !testing::camera_state_at(20501).valid && !testing::camera_state_at(19999).valid);
+  check(std::strcmp(testing::camera_state_at(20501).error, "camera_state_telemetry_stale") == 0);
+  refresh_camera_state(2);
+  for (DWORD bytes = 0; bytes < camera_state_packet.size(); ++bytes)
+    check(!testing::accept_camera_state_packet(camera_state_packet.data(), bytes, 20000));
+  check(!testing::accept_camera_state_packet(camera_state_packet.data(), 49, 20000));
+  check(!testing::accept_camera_state_packet(nullptr, 48, 20000));
+  check(!testing::accept_camera_state_packet(camera_state_packet.data(), 48, 0));
+  for (unsigned field : {0u, 2u, 3u, 5u, 6u, 9u}) {
+    refresh_camera_state(2);
+    const DWORD wrong = camera_state_header[field] + 1;
+    std::memcpy(camera_state_packet.data() + field * 4, &wrong, 4);
+    check(!testing::accept_camera_state_packet(camera_state_packet.data(), 48, 20000));
+  }
+  // The SIM ON GROUND layout is not CAMERA STATE, and the reverse.
+  refresh_ground(1);
+  check(!testing::accept_camera_state_packet(ground_packet.data(), 48, 20000));
+  refresh_camera_state(1);
+  check(!testing::accept_on_ground_packet(camera_state_packet.data(), 48, 20000));
+  for (double value : {-1.0, 2.5, 256.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+    refresh_camera_state(value);
+    check(testing::accept_camera_state_packet(camera_state_packet.data(), 48, 20000));
+    const auto sample = testing::camera_state_at(20000);
+    check(!sample.valid && std::strcmp(sample.error, "camera_state_values") == 0);
+  }
+  refresh_camera_state(3);
+  check(testing::accept_camera_state_packet(camera_state_packet.data(), 48, 20000) && testing::camera_state_at(20000).valid);
+  check(testing::accept_session_packet(load_event.data(), load_event.size()));
+  check(!testing::camera_state_at(20000).valid);
   session_readiness_regressions(check);
   shutdown_body_pose_provider();
   check(!get_ground_speed().valid && std::isnan(get_ground_speed().knots));
   check(!get_on_ground().valid && std::strcmp(get_on_ground().error, "not_initialized") == 0);
+  check(!get_camera_state().valid && std::strcmp(get_camera_state().error, "not_initialized") == 0);
   check(!get_taxi_buttons().valid && std::strcmp(get_taxi_buttons().error, "not_initialized") == 0);
   check(!get_lighting().valid && std::strcmp(get_lighting().error, "not_initialized") == 0);
   std::printf(
