@@ -5,7 +5,7 @@
       "date": "2026-11-03",
       "fixes": [
         "The cameras now pause only in outside camera views, such as chase, drone, fixed and showcase. Other views the simulator reports, like an unusual one after a flight loads, no longer pause them.",
-        "Moving or resizing a display's camera area during a flight no longer leaves PLEASE WAIT on the display: the cameras come back at the new shape."
+        "Resizing a display's camera area during a flight now waits for the cameras' new pictures instead of giving up on them, and Taxi Cam asks for the cameras again if they have to be set up afresh."
       ]
     },
     {
