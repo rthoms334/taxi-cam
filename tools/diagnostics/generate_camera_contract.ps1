@@ -44,9 +44,7 @@ $ranges = @($evidence.ranges) + @([pscustomobject]@{
     decoded_path = 'targeted-comparison-02/57402512.selected-decoded.json'
     store_instructions_path = 'targeted-comparison-02/57402512.store-normalized.json'
 })
-# These numbers name reviewed input observations, not runtime lookup gates.
-# Generated code contains only symbolic roles and relative operand offsets.
-$functionRoles = [ordered]@{
+$reviewedStoreRvaByFunctionRole = [ordered]@{
     initialize_descriptor = 17640240; activate_entry = 17641776; create_entry = 17646976
     erase_entry = 17646000; set_position = 66324928; set_up = 66859376
     set_target = 66859344; set_fov = 66859296; update_view = 66825216
@@ -108,7 +106,7 @@ if (Test-Path -LiteralPath $IdentityEvidence) {
     }
 }
 $roleNames = @{}
-foreach ($entry in $functionRoles.GetEnumerator()) { $roleNames[[long]$entry.Value] = $entry.Key }
+foreach ($entry in $reviewedStoreRvaByFunctionRole.GetEnumerator()) { $roleNames[[long]$entry.Value] = $entry.Key }
 foreach ($entry in $layout | Where-Object steam_rva -gt 0) {
     if (!$roleNames.ContainsKey([long]$entry.store_rva)) { $roleNames[[long]$entry.store_rva] = $entry.name }
 }
@@ -167,12 +165,12 @@ foreach ($range in $ranges) {
     }
     $code.Add([pscustomobject]@{ symbol = $id; range = $range; bytes = $bytes; decoded = $decoded.instructions; store = $normal; cross_build=$crossBuild; operands = [Collections.Generic.List[object]]::new(); minimum_seed = $(if ($name -eq 'aircraft_controller_method') { 7 } else { 8 }) })
 }
-# Bind every reference into another reviewed range to that range's symbol plus
-# an addend. An independently named alias must not weaken this relationship.
-function Target([long]$Rva, [long]$Extent = 1) {
-    $inside = @($code | Where-Object { $Rva -ge $_.range.steam_rva -and $Rva -lt $_.range.steam_rva + $_.range.bytes })
-    if ($inside.Count -gt 1) { throw 'Overlapping reviewed code ranges.' }
-    if ($inside.Count -eq 1) { return [pscustomobject]@{symbol = $inside[0].symbol; addend = $Rva - $inside[0].range.steam_rva} }
+function Resolve-ReviewedRangeBeforeNamedTarget([long]$Rva, [long]$Extent = 1) {
+    $enclosingReviewedRange = @($code | Where-Object { $Rva -ge $_.range.steam_rva -and $Rva -lt $_.range.steam_rva + $_.range.bytes })
+    if ($enclosingReviewedRange.Count -gt 1) { throw 'Overlapping reviewed code ranges.' }
+    if ($enclosingReviewedRange.Count -eq 1) {
+        return [pscustomobject]@{symbol = $enclosingReviewedRange[0].symbol; addend = $Rva - $enclosingReviewedRange[0].range.steam_rva}
+    }
     $named = @($layout | Where-Object { $_.steam_rva -gt 0 -and $_.steam_rva -eq $Rva })
     $name = if ($named.Count -eq 1) { $named[0].name } else { '' }
     if ($named.Count -eq 1) { $Extent = [Math]::Max($Extent, $(if ($name -eq 'activation_disable_mask') { 16 } else { 8 })) }
@@ -232,29 +230,27 @@ foreach ($item in $code) {
             if ($field -ne $entry.operand_offset -or $field -lt $offset + 2 -or ($item.bytes[$field - 2] -band 0xc7) -ne 0x84) { throw 'Image RVA field is not an indexed mod10/SIB displacement.' }
             $kind = 'image_rva'; $width = 4; $target = [long]$entry.steam_target_rva
         }
-        # Recheck the semantic comparison independently of the receipt's summary
-        # flags. Only reviewed address roles may differ from archived assembly.
-        $expectedText = $saved.text
-        $actualText = $text
+        $archivedTextWithoutAddresses = $saved.text
+        $currentTextWithoutAddresses = $text
         [long]$storeTarget = -1
         if ($rip.Success) {
-            $old = [regex]::Match($expectedText, '(?<disp>-?\d+)\(%rip\)')
+            $old = [regex]::Match($archivedTextWithoutAddresses, '(?<disp>-?\d+)\(%rip\)')
             if (!$old.Success) { throw 'Store instruction has a different addressing mode.' }
             $storeTarget = [long]$saved.rva + $size + [long]$old.Groups['disp'].Value
-            $expectedText = $expectedText.Replace($old.Value, '<address>(%rip)')
-            $actualText = $actualText.Replace($rip.Value, '<address>(%rip)')
+            $archivedTextWithoutAddresses = $archivedTextWithoutAddresses.Replace($old.Value, '<address>(%rip)')
+            $currentTextWithoutAddresses = $currentTextWithoutAddresses.Replace($rip.Value, '<address>(%rip)')
         } elseif ($branch.Success) {
-            $old = [regex]::Match($expectedText, '^(?<op>callq?|j[a-z]+|loop[a-z]*) (?<disp>-?\d+)$')
+            $old = [regex]::Match($archivedTextWithoutAddresses, '^(?<op>callq?|j[a-z]+|loop[a-z]*) (?<disp>-?\d+)$')
             if (!$old.Success) { throw 'Store instruction has a different control-flow operand.' }
             $storeTarget = [long]$saved.rva + $size + [long]$old.Groups['disp'].Value
-            $expectedText = $old.Groups['op'].Value + ' <address>'
-            $actualText = $branch.Groups['op'].Value + ' <address>'
+            $archivedTextWithoutAddresses = $old.Groups['op'].Value + ' <address>'
+            $currentTextWithoutAddresses = $branch.Groups['op'].Value + ' <address>'
         } elseif ($indexedHere.Count) {
             $storeTarget = [long]$entry.store_target_rva
-            $expectedText = $expectedText.Replace([string]$storeTarget, '<image-rva>')
-            $actualText = $actualText.Replace([string]$target, '<image-rva>')
+            $archivedTextWithoutAddresses = $archivedTextWithoutAddresses.Replace([string]$storeTarget, '<image-rva>')
+            $currentTextWithoutAddresses = $currentTextWithoutAddresses.Replace([string]$target, '<image-rva>')
         }
-        if ($expectedText -cne $actualText) { throw "Non-address instruction semantics changed in $($item.range.store_rva)+$offset" }
+        if ($archivedTextWithoutAddresses -cne $currentTextWithoutAddresses) { throw "Non-address instruction semantics changed in $($item.range.store_rva)+$offset" }
         if ($storeTarget -ge 0 -and $item.cross_build) {
             if ($observedTargets.ContainsKey($storeTarget) -and $observedTargets[$storeTarget] -ne $target) { throw 'Conflicting cross-function target correspondence.' }
             $observedTargets[$storeTarget] = $target
@@ -265,10 +261,9 @@ foreach ($item in $code) {
             }
         }
         if ($field -lt 0) { continue }
-        # Internal branches and RIP references retain their exact original
-        # displacement bytes and local instruction topology.
-        if ($kind -eq 'pc_relative' -and $target -ge $item.range.steam_rva -and $target -lt $item.range.steam_rva + $item.range.bytes) { continue }
-        $destination = Target $target
+        $keepsOriginalLocalDisplacement = $kind -eq 'pc_relative' -and $target -ge $item.range.steam_rva -and $target -lt $item.range.steam_rva + $item.range.bytes
+        if ($keepsOriginalLocalDisplacement) { continue }
+        $destination = Resolve-ReviewedRangeBeforeNamedTarget $target
         $item.operands.Add([pscustomobject]@{offset = $field; width = $width; pc_offset = $(if ($kind -eq 'image_rva') { 0 } else { $offset + $size }); kind = $kind; target_symbol = $destination.symbol; addend = $destination.addend})
     }
     if ($cursor -ne $item.bytes.Length) { throw 'Decoded instructions do not cover template.' }
@@ -314,20 +309,18 @@ if ($identity -and (Has-Property $identity 'pointer_relations')) {
         $pointers.Add([pscustomobject]@{owner_symbol=$ownerId;offset=$relation.offset;target_symbol=$targetId})
     }
 }
-# Preserve archived real RUNTIME_FUNCTION observations, including split unwind
-# spans and the manager window's negative offset into its enclosing function.
-$runtimeFunctions = [Collections.Generic.List[object]]::new()
-function Visit($Node) {
+$archivedRuntimeFunctions = [Collections.Generic.List[object]]::new()
+function Add-ArchivedRuntimeFunctions($Node) {
     if ($null -eq $Node -or $Node -is [string] -or $Node -is [ValueType]) { return }
-    if ($Node -is [array]) { foreach ($part in $Node) { Visit $part }; return }
+    if ($Node -is [array]) { foreach ($part in $Node) { Add-ArchivedRuntimeFunctions $part }; return }
     if ((Has-Property $Node 'function_begin_rva') -and (Has-Property $Node 'function_end_rva')) {
         if ($Node.function_begin_rva -gt 0 -and $Node.function_end_rva -gt $Node.function_begin_rva) {
-            $runtimeFunctions.Add([pscustomobject]@{begin = [long]$Node.function_begin_rva; end = [long]$Node.function_end_rva})
+            $archivedRuntimeFunctions.Add([pscustomobject]@{begin = [long]$Node.function_begin_rva; end = [long]$Node.function_end_rva})
         }
     }
-    foreach ($p in $Node.PSObject.Properties) { if ($p.Name -ne 'instructions') { Visit $p.Value } }
+    foreach ($p in $Node.PSObject.Properties) { if ($p.Name -ne 'instructions') { Add-ArchivedRuntimeFunctions $p.Value } }
 }
-foreach ($file in Get-ChildItem -LiteralPath $StoreArchive -Filter '*1.8.16.0*.json' -File) { Visit (Read-Json $file.FullName) }
+foreach ($file in Get-ChildItem -LiteralPath $StoreArchive -Filter '*1.8.16.0*.json' -File) { Add-ArchivedRuntimeFunctions (Read-Json $file.FullName) }
 $aaEvidence = Read-Input (Join-Path $MotionArchive 'aa-commands-02.txt')
 $bodyEvidence = Read-Input (Join-Path $MotionArchive 'body-node-user-methods-03.txt')
 if ($bodyEvidence -notmatch '(?m)^body_handle_code rva=55966368 bytes=60 .*relocation_checked=1 repeated_match=1\r?$') {
@@ -337,6 +330,8 @@ $aaBoundary = [regex]::Match($aaEvidence, '(?m)^function request=69960016 begin=
 if (!$aaBoundary.Success -or [long]$aaBoundary.Groups['end'].Value - [long]$aaBoundary.Groups['begin'].Value -ne 455) {
     throw 'AA runtime-function provenance is incomplete.'
 }
+$aaRuntimeFunctionFromTextReport = 69960016
+$reviewedLeafOrTailStoreRvas = @(66859344, 66859376, 66859296, 56030192, 55874752, 55914960, 55966368, 70721312, 67705600, 80718912)
 $boundaries = [Collections.Generic.List[object]]::new()
 foreach ($item in $code) {
     if (Has-Property $item.range 'boundary_bytes') {
@@ -347,15 +342,10 @@ foreach ($item in $code) {
         continue
     }
     [long]$begin = $item.range.store_rva; [long]$end = $begin + $item.range.bytes
-    $spans = @($runtimeFunctions | Where-Object { $_.begin -lt $end -and $_.end -gt $begin } | Sort-Object begin, end -Unique)
+    $spans = @($archivedRuntimeFunctions | Where-Object { $_.begin -lt $end -and $_.end -gt $begin } | Sort-Object begin, end -Unique)
     if (!$spans.Count) {
-        # Body accessor and AA evidence are captured in explicit text reports.
-        if ($begin -eq 69960016) { $spans = @([pscustomobject]@{begin = [long]$aaBoundary.Groups['begin'].Value; end = [long]$aaBoundary.Groups['end'].Value}) }
-        elseif ($begin -in @(66859344, 66859376, 66859296, 56030192, 55874752, 55914960, 55966368, 70721312, 67705600, 80718912)) {
-            # Reviewed complete leaves/tail bodies: no call, stack reference,
-            # or push/pop. Their existing member accesses and terminal control
-            # flow remain exact. A present runtime-function entry is checked by
-            # the caller; no metadata absence is invented by this annotation.
+        if ($begin -eq $aaRuntimeFunctionFromTextReport) { $spans = @([pscustomobject]@{begin = [long]$aaBoundary.Groups['begin'].Value; end = [long]$aaBoundary.Groups['end'].Value}) }
+        elseif ($begin -in $reviewedLeafOrTailStoreRvas) {
             foreach ($instruction in $item.decoded) {
                 if ($instruction.text -match '\b(call|push|pop|enter|leave)|%[er]sp\b|%[er]bp\b') { throw 'Reviewed leaf unexpectedly touches stack or calls.' }
             }
@@ -393,7 +383,7 @@ foreach ($b in $boundaries) { [void]$cpp.AppendLine(('{{{0},{1},{2},{3}}},' -f $
 [void]$cpp.AppendLine('}; return value; }')
 [void]$cpp.AppendLine('std::uint32_t symbol_index(std::string_view name) noexcept { const auto& symbols=model().symbols; for(std::size_t i=0;i<symbols.size();++i) if(symbols[i].name==name) return static_cast<std::uint32_t>(i); return std::numeric_limits<std::uint32_t>::max(); }')
 [void]$cpp.AppendLine('bool bind(const std::vector<std::uint32_t>& symbols, CameraFunctions& functions, CameraImageLayout& layout) noexcept { if(symbols.size()!=model().symbols.size()) return false; CameraFunctions next_functions{}; CameraImageLayout next_layout{};')
-foreach ($entry in $functionRoles.GetEnumerator()) {
+foreach ($entry in $reviewedStoreRvaByFunctionRole.GetEnumerator()) {
     $item = @($code | Where-Object { $_.range.store_rva -eq $entry.Value })
     if ($item.Count -ne 1) { throw 'Missing public camera function role.' }
     [void]$cpp.AppendLine(('if(!symbols[{0}]) return false; next_functions.{1}=symbols[{0}];' -f $item[0].symbol, $entry.Key))
@@ -411,12 +401,10 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 [void](Read-Input (Join-Path $repo 'src/camera/camera_contract_model.hpp'))
 . (Join-Path $repo 'ci/toolchain.ps1')
 $toolchain = Get-TaxiToolchain $repo
-# Use the canonical source filename for main-header sorting and root style even
-# when the caller writes an ignored review output with a different filename.
-# Format before touching the destination so a formatter failure leaves it intact.
+$canonicalGeneratedSource = Join-Path $repo 'src/camera/camera_contract_model.cpp'
 $formatted = @($cpp.ToString() | & (Join-Path $toolchain 'clang-format.exe') `
     ('--style=file:' + (Join-Path $repo '.clang-format')) `
-    ('--assume-filename=' + (Join-Path $repo 'src/camera/camera_contract_model.cpp')))
+    ('--assume-filename=' + $canonicalGeneratedSource))
 if ($LASTEXITCODE -ne 0) { throw 'Generated source formatting failed.' }
 [IO.File]::WriteAllText([IO.Path]::GetFullPath($Output),
     (($formatted -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))

@@ -11,8 +11,6 @@ constexpr std::uint32_t kReadable = 0x40000000;
 constexpr std::uint32_t kWritable = 0x80000000;
 constexpr std::uint32_t kExecutable = 0x20000000;
 constexpr std::uint32_t kDiscardable = 0x02000000;
-constexpr std::uint32_t kWordBytes = 8;
-constexpr std::uint32_t kMaximumEntries = 32;
 
 bool contains(const ImageSection& section, std::uint32_t rva, std::uint32_t size) {
   return rva >= section.rva && rva - section.rva <= section.size && size <= section.size - (rva - section.rva);
@@ -44,8 +42,6 @@ bool valid_sections(const Inventory& image) {
 }
 
 bool readable_window(ImageReader& reader, std::uint32_t rva, std::uint32_t size) {
-  // At most eight one-byte windows are needed for a source word. A query that
-  // makes no progress or exceeds the requested range is rejected immediately.
   for (std::uint32_t done = 0; done < size;) {
     const auto window = reader.query(rva + done, size - done);
     if (!window.readable || window.size == 0 || window.size > size - done) {
@@ -57,21 +53,30 @@ bool readable_window(ImageReader& reader, std::uint32_t rva, std::uint32_t size)
 }
 
 bool read_word(ImageReader& reader, std::uint32_t rva, PointerInventory& result, std::uint64_t& value) {
-  if (!readable_window(reader, rva, kWordBytes)) {
+  if (!readable_window(reader, rva, kPointerWordBytes)) {
     ++result.read_failures;
     return false;
   }
-  std::array<std::uint8_t, kWordBytes> bytes{};
-  result.read_bytes += kWordBytes;
+  std::array<std::uint8_t, kPointerWordBytes> bytes{};
+  result.read_bytes += kPointerWordBytes;
   if (!reader.read(rva, bytes.data(), bytes.size())) {
     ++result.read_failures;
     return false;
   }
   value = 0;
-  for (std::uint32_t index = 0; index < kWordBytes; ++index) {
+  for (std::uint32_t index = 0; index < kPointerWordBytes; ++index) {
     value |= std::uint64_t(bytes[index]) << (index * 8);
   }
   return true;
+}
+
+bool proven_readable_code(ImageReader& reader, const Inventory& image, std::uint32_t rva) {
+  for (const auto& section : image.sections) {
+    if (eligible_section(section, true) && contains(section, rva, 1) && readable_window(reader, rva, 1)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 PointerEntry classify(ImageReader& reader,
@@ -91,20 +96,11 @@ PointerEntry classify(ImageReader& reader,
     return entry;
   }
   entry.target_rva = static_cast<std::uint32_t>(value - base);
-  // image_data is the conservative fallback for any in-image address not
-  // proven to be in mapped readable, non-writable executable section storage.
-  // It does not imply that destination data was read or is safe to dereference.
-  entry.category = PointerCategory::image_data;
-  for (const auto& section : image.sections) {
-    if (eligible_section(section, true) && contains(section, entry.target_rva, 1) && readable_window(reader, entry.target_rva, 1)) {
-      entry.category = PointerCategory::image_code;
-      break;
-    }
-  }
+  entry.category = proven_readable_code(reader, image, entry.target_rva) ? PointerCategory::image_code : PointerCategory::image_data;
   return entry;
 }
 
-}  // namespace
+}
 
 const char* pointer_category_name(PointerCategory category) {
   switch (category) {
@@ -128,7 +124,7 @@ PointerInventory inspect_pointer_table(ImageReader& reader,
                                        bool include_previous) {
   PointerInventory result;
   result.table_rva = table_rva;
-  result.entry_limit = std::min(max_entries, kMaximumEntries);
+  result.entry_limit = std::min(max_entries, kMaximumPointerTableEntries);
   if (!image.valid_image || image.machine != 0x8664 || image.image_size == 0 ||
       loaded_image_base > std::numeric_limits<std::uint64_t>::max() - image.image_size || !valid_sections(image)) {
     result.error = "Invalid loaded-image metadata or image-base bounds.";
@@ -140,7 +136,7 @@ PointerInventory inspect_pointer_table(ImageReader& reader,
   }
   const ImageSection* table_section = nullptr;
   for (const auto& section : image.sections) {
-    if (eligible_section(section, false) && contains(section, table_rva, kWordBytes)) {
+    if (eligible_section(section, false) && contains(section, table_rva, kPointerWordBytes)) {
       table_section = &section;
       break;
     }
@@ -150,16 +146,17 @@ PointerInventory inspect_pointer_table(ImageReader& reader,
     return result;
   }
   result.valid_table = true;
-  if (include_previous && table_rva >= kWordBytes && contains(*table_section, table_rva - kWordBytes, kWordBytes)) {
+  if (include_previous && table_rva >= kPointerWordBytes && contains(*table_section, table_rva - kPointerWordBytes, kPointerWordBytes)) {
     std::uint64_t value = 0;
-    if (read_word(reader, table_rva - kWordBytes, result, value)) {
+    if (read_word(reader, table_rva - kPointerWordBytes, result, value)) {
       result.preceding_available = true;
-      result.preceding = classify(reader, image, loaded_image_base, -1, table_rva - kWordBytes, value);
+      result.preceding = classify(reader, image, loaded_image_base, kPrecedingWordIndex, table_rva - kPointerWordBytes, value);
     }
   }
   for (std::uint32_t index = 0; index < result.entry_limit; ++index) {
-    const auto offset = std::uint64_t(table_rva) + std::uint64_t(index) * kWordBytes;
-    if (offset > std::numeric_limits<std::uint32_t>::max() || !contains(*table_section, static_cast<std::uint32_t>(offset), kWordBytes)) {
+    const auto offset = std::uint64_t(table_rva) + std::uint64_t(index) * kPointerWordBytes;
+    if (offset > std::numeric_limits<std::uint32_t>::max() ||
+        !contains(*table_section, static_cast<std::uint32_t>(offset), kPointerWordBytes)) {
       result.error = "The next table word crosses the static-data section boundary.";
       return result;
     }
@@ -179,4 +176,4 @@ PointerInventory inspect_pointer_table(ImageReader& reader,
   return result;
 }
 
-}  // namespace taxi_camera::discovery
+}

@@ -1,16 +1,4 @@
-// Read-only research scan of a running FlightSimulator2024.exe: which objects
-// tie a cockpit display texture name (panel.cfg texture=, e.g. DUS) to the
-// native ID3D12Resource the Taxi Cam bridge tracks.
-//
-// usage: display-identity-scan <pid> <display-candidates.txt> <name> [name...] > report.txt
-//
-// display-candidates.txt is written by the bridge beside a PFD routing
-// snapshot. Opens the explicit PID with PROCESS_QUERY_INFORMATION |
-// PROCESS_VM_READ only, after checking the exact executable basename and the
-// same user. No write, no thread, no injection. Reads committed, readable,
-// non-guard regions in bounded chunks; a failed read is skipped. The report
-// holds process-local addresses: keep it local.
-// clang-format off: Win32 types must precede PSAPI declarations.
+// clang-format off
 #include <windows.h>
 #include <psapi.h>
 // clang-format on
@@ -30,6 +18,34 @@
 #include "../../src/camera/panel_registry_contract.hpp"
 
 namespace {
+namespace panel_layout = taxi_camera::native_camera::panel_registry_contract;
+
+constexpr std::uint64_t kPanelSize = panel_layout::PanelBytes;
+constexpr std::size_t kPanelTableSlots = panel_layout::PanelTableBytes / sizeof(std::uint64_t);
+constexpr std::size_t kPanelCountSlot = panel_layout::CountOffset / sizeof(std::uint64_t);
+constexpr std::uint32_t kPanelTableCapacity = kPanelCountSlot;
+constexpr std::size_t kPanelSectionNameOffset = 0x88;
+constexpr std::size_t kPanelSectionNameEnd = 0x188;
+constexpr std::size_t kPanelTextureNameOffset = 0x528;
+constexpr std::size_t kPanelTextureIsPointerOffset = 0x534;
+constexpr std::size_t kPanelIndexOffset = 0x598;
+constexpr std::size_t kPanelKindOffset = 0x680;
+constexpr std::size_t kReachableObjectSpan = 0x400;
+constexpr std::size_t kReachableObjectFallbackSpan = 0x100;
+constexpr int kDefaultPanelPointerDepth = 3;
+constexpr std::size_t kDefaultPanelObjects = 6000;
+constexpr std::size_t kDeepPanelObjects = 400000;
+constexpr std::uint64_t kFibonacciHashMultiplier = 0x9E3779B97F4A7C15ull;
+constexpr unsigned kBloomBitIndexShift = 38;
+constexpr std::size_t kBloomFilterWords = 1u << 20;
+constexpr std::size_t kQwordScanChunkWords = 1u << 21;
+constexpr std::uint64_t kStringScanChunkBytes = 16u << 20;
+constexpr std::size_t kStringScanOverlapBytes = 256;
+constexpr int kAbsoluteReferenceLookbackBytes = 0x40;
+constexpr int kInlineStringObjectLookbackBytes = 0x20;
+constexpr int kHolderObjectLookbackBytes = 0x400;
+constexpr std::uint64_t kIdentityProximityBytes = 0x800;
+
 struct Region {
   std::uint64_t base, size;
   DWORD type, protect;
@@ -57,6 +73,16 @@ bool same_user(HANDLE target) {
   return user(target, a) && user(GetCurrentProcess(), b) &&
          EqualSid(reinterpret_cast<TOKEN_USER*>(a.data())->User.Sid, reinterpret_cast<TOKEN_USER*>(b.data())->User.Sid);
 }
+bool is_same_user_simulator(HANDLE target) {
+  wchar_t image[1024];
+  DWORD length = 1024;
+  const wchar_t* basename = nullptr;
+  if (QueryFullProcessImageNameW(target, 0, image, &length)) {
+    basename = wcsrchr(image, L'\\');
+    basename = basename ? basename + 1 : image;
+  }
+  return basename && _wcsicmp(basename, L"FlightSimulator2024.exe") == 0 && same_user(target);
+}
 bool readable(DWORD protect) {
   if (protect & (PAGE_GUARD | PAGE_NOACCESS))
     return false;
@@ -64,7 +90,7 @@ bool readable(DWORD protect) {
   return p == PAGE_READONLY || p == PAGE_READWRITE || p == PAGE_WRITECOPY || p == PAGE_EXECUTE_READ || p == PAGE_EXECUTE_READWRITE ||
          p == PAGE_EXECUTE_WRITECOPY;
 }
-void enumerate() {
+void enumerate_committed_readable_regions() {
   std::uint64_t address = 0;
   MEMORY_BASIC_INFORMATION m{};
   while (VirtualQueryEx(process, reinterpret_cast<void*>(address), &m, sizeof(m)) == sizeof(m)) {
@@ -74,6 +100,17 @@ void enumerate() {
     address = base + m.RegionSize;
     if (address < base)
       break;
+  }
+}
+void locate_main_image() {
+  HMODULE modules[1];
+  DWORD needed = 0;
+  if (EnumProcessModulesEx(process, modules, sizeof(modules), &needed, LIST_MODULES_ALL)) {
+    MODULEINFO info{};
+    if (GetModuleInformation(process, modules[0], &info, sizeof(info))) {
+      image_base = reinterpret_cast<std::uint64_t>(info.lpBaseOfDll);
+      image_size = info.SizeOfImage;
+    }
   }
 }
 const Region* region_of(std::uint64_t address) {
@@ -98,8 +135,7 @@ std::string where(std::uint64_t address) {
     return "?";
   return r->type == MEM_IMAGE ? "img" : r->type == MEM_MAPPED ? "map" : "heap";
 }
-// Printable ASCII or UTF-16 at address, or empty.
-std::string text_at(std::uint64_t address) {
+std::string printable_ascii_or_utf16_at(std::uint64_t address) {
   if (!region_of(address))
     return {};
   unsigned char buffer[96]{};
@@ -124,22 +160,24 @@ std::string text_at(std::uint64_t address) {
   return wide.size() >= 3 ? "L\"" + wide + "\"" : std::string{};
 }
 
-// Scan every region for aligned qwords in targets.
+std::uint64_t bloom_bit_index(std::uint64_t value) {
+  return (value * kFibonacciHashMultiplier) >> kBloomBitIndexShift;
+}
 struct Hit {
   std::uint64_t address, value;
 };
-std::vector<Hit> scan(const std::set<std::uint64_t>& targets, std::size_t cap = 200000) {
+std::vector<Hit> find_aligned_qwords_holding(const std::set<std::uint64_t>& targets, std::size_t cap = 200000) {
   std::vector<Hit> hits;
   if (targets.empty())
     return hits;
   const std::uint64_t low = *targets.begin(), high = *targets.rbegin();
   std::vector<std::uint64_t> sorted(targets.begin(), targets.end());
-  std::vector<std::uint64_t> filter(1u << 20);  // 64 Mbit
+  std::vector<std::uint64_t> bloom_filter(kBloomFilterWords);
   for (auto t : sorted) {
-    const auto h = (t * 0x9E3779B97F4A7C15ull) >> 38;
-    filter[h >> 6] |= 1ull << (h & 63);
+    const auto h = bloom_bit_index(t);
+    bloom_filter[h >> 6] |= 1ull << (h & 63);
   }
-  std::vector<std::uint64_t> chunk(1u << 21);  // 16 MiB
+  std::vector<std::uint64_t> chunk(kQwordScanChunkWords);
   for (const auto& r : regions) {
     for (std::uint64_t offset = 0; offset < r.size; offset += chunk.size() * 8) {
       const auto bytes = std::min<std::uint64_t>(chunk.size() * 8, r.size - offset);
@@ -150,8 +188,8 @@ std::vector<Hit> scan(const std::set<std::uint64_t>& targets, std::size_t cap = 
         const auto v = chunk[i];
         if (v < low || v > high)
           continue;
-        const auto h = (v * 0x9E3779B97F4A7C15ull) >> 38;
-        if (!(filter[h >> 6] & (1ull << (h & 63))))
+        const auto h = bloom_bit_index(v);
+        if (!(bloom_filter[h >> 6] & (1ull << (h & 63))))
           continue;
         if (std::binary_search(sorted.begin(), sorted.end(), v)) {
           hits.push_back({r.base + offset + i * 8, v});
@@ -163,16 +201,15 @@ std::vector<Hit> scan(const std::set<std::uint64_t>& targets, std::size_t cap = 
   }
   return hits;
 }
-// Find byte pattern occurrences (strings).
-std::vector<std::uint64_t> find_bytes(const std::string& needle, std::size_t cap = 4000) {
+std::vector<std::uint64_t> find_byte_string(const std::string& needle, std::size_t cap = 4000) {
   std::vector<std::uint64_t> found;
-  std::vector<char> chunk((16u << 20) + 256);
+  std::vector<char> chunk(kStringScanChunkBytes + kStringScanOverlapBytes);
   for (const auto& r : regions) {
-    for (std::uint64_t offset = 0; offset < r.size; offset += 16u << 20) {
+    for (std::uint64_t offset = 0; offset < r.size; offset += kStringScanChunkBytes) {
       const auto bytes = std::min<std::uint64_t>(chunk.size(), r.size - offset);
       if (!read(r.base + offset, chunk.data(), bytes))
         continue;
-      const auto limit = std::min<std::uint64_t>(bytes, 16u << 20);
+      const auto limit = std::min<std::uint64_t>(bytes, kStringScanChunkBytes);
       for (auto it = chunk.begin(); (it = std::search(it, chunk.begin() + bytes, needle.begin(), needle.end())) != chunk.begin() + bytes;
            ++it) {
         const auto at = static_cast<std::uint64_t>(it - chunk.begin());
@@ -199,7 +236,7 @@ void dump(std::uint64_t center, int before, int after, const char* indent) {
     std::string note;
     if (region_of(v)) {
       note = where(v);
-      const auto s = text_at(v);
+      const auto s = printable_ascii_or_utf16_at(v);
       if (!s.empty())
         note += " -> \"" + s + "\"";
     }
@@ -218,9 +255,7 @@ void dump(std::uint64_t center, int before, int after, const char* indent) {
 bool read_target(std::uint64_t address, void* out, std::size_t size) {
   return read(address, out, size);
 }
-// The main image read through this process handle: committed, readable
-// MEM_IMAGE pages only, for the bridge's own panel-table resolution.
-class TargetImage final : public taxi_camera::discovery::ImageReader {
+class CommittedMainImagePages final : public taxi_camera::discovery::ImageReader {
  public:
   taxi_camera::discovery::ReadWindow query(std::uint32_t rva, std::uint32_t maximum) override {
     MEMORY_BASIC_INFORMATION m{};
@@ -234,21 +269,46 @@ class TargetImage final : public taxi_camera::discovery::ImageReader {
     return rva < image_size && size <= image_size - rva && read_target(image_base + rva, out, size);
   }
 };
-// The panel.cfg reader keeps up to 64 VCockpit panel pointers in a static
-// table, count (u32) at +0x200, found in any build from the table's release
-// function (panel_registry_contract.hpp), as the bridge does. Each 0x690-byte
-// panel holds its section name inline at +0x88, its texture= name at +0x528
-// (inline, or a pointer when the u32 at +0x534 is set), its index at +0x598
-// and kind at +0x680.
-constexpr std::uint64_t kPanelSize = taxi_camera::native_camera::panel_registry_contract::PanelBytes;
-int panel_depth = 3;
-std::size_t panel_objects = 6000;
+int panel_pointer_depth = kDefaultPanelPointerDepth;
+std::size_t panel_objects = kDefaultPanelObjects;
+int print_natives_reachable_by_heap_pointers(std::uint64_t panel,
+                                             const std::map<std::uint64_t, std::string>& natives,
+                                             std::size_t& visited_objects) {
+  struct Node {
+    std::uint64_t address;
+    std::string path;
+    int depth;
+  };
+  std::vector<Node> queue{{panel, "panel", 0}};
+  std::set<std::uint64_t> visited{panel};
+  int found = 0;
+  for (std::size_t q = 0; q < queue.size() && q < panel_objects; ++q) {
+    const auto node = queue[q];
+    const std::size_t span = node.depth ? kReachableObjectSpan : kPanelSize;
+    std::vector<std::uint64_t> words(span / 8);
+    if (!read(node.address, words.data(), span) && !read(node.address, words.data(), kReachableObjectFallbackSpan))
+      continue;
+    for (std::size_t w = 0; w < words.size(); ++w) {
+      const auto v = words[w];
+      char step[48];
+      std::snprintf(step, sizeof(step), "+%#zx", w * 8);
+      if (const auto it = natives.find(v); it != natives.end()) {
+        if (found++ < 12)
+          std::printf("  FOUND %s%s = native %s\n", node.path.c_str(), step, it->second.c_str());
+      } else if (node.depth < panel_pointer_depth && (v & 7) == 0 && where(v) == "heap" && visited.insert(v).second) {
+        queue.push_back({v, node.path + step + "->", node.depth + 1});
+      }
+    }
+  }
+  visited_objects = queue.size();
+  return found;
+}
 void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
   if (!image_base || !image_size) {
     std::printf("\n=== panels: skipped (main image unreadable)\n");
     return;
   }
-  TargetImage reader;
+  CommittedMainImagePages reader;
   const auto image = taxi_camera::discovery::inspect_image(reader);
   const auto table = image.valid_image ? taxi_camera::native_camera::resolve_panel_table(reader, image, image_base)
                                        : taxi_camera::native_camera::PanelTableResolution{0, "image: " + image.error};
@@ -256,15 +316,15 @@ void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
     std::printf("\n=== panels: skipped (panel table unresolved: %s)\n", table.error.c_str());
     return;
   }
-  std::uint64_t registry[65]{};
+  std::uint64_t registry[kPanelTableSlots]{};
   if (!read(image_base + table.table, registry, sizeof(registry))) {
     std::printf("\n=== panels: registry unreadable\n");
     return;
   }
-  const auto count = static_cast<std::uint32_t>(registry[64]);
+  const auto count = static_cast<std::uint32_t>(registry[kPanelCountSlot]);
   std::printf("\n=== panels (registry exe+%#llx count=%u timestamp=%u)\n", static_cast<unsigned long long>(table.table), count,
               image.timestamp);
-  for (std::uint32_t i = 0; i < count && i < 64; ++i) {
+  for (std::uint32_t i = 0; i < count && i < kPanelTableCapacity; ++i) {
     const auto panel = registry[i];
     std::vector<unsigned char> bytes(kPanelSize);
     if (!panel || !read(panel, bytes.data(), bytes.size())) {
@@ -272,98 +332,32 @@ void walk_panels(const std::map<std::uint64_t, std::string>& natives) {
       continue;
     }
     std::string section;
-    for (std::size_t k = 0x88; k < 0x188 && bytes[k] >= 32 && bytes[k] <= 126; ++k)
+    for (std::size_t k = kPanelSectionNameOffset; k < kPanelSectionNameEnd && bytes[k] >= 32 && bytes[k] <= 126; ++k)
       section += char(bytes[k]);
-    std::uint32_t heap = 0;
-    std::memcpy(&heap, bytes.data() + 0x534, 4);
+    std::uint32_t texture_is_pointer = 0;
+    std::memcpy(&texture_is_pointer, bytes.data() + kPanelTextureIsPointerOffset, 4);
     std::uint64_t texture_word = 0;
-    std::memcpy(&texture_word, bytes.data() + 0x528, 8);
-    std::string texture = heap ? text_at(texture_word) : std::string();
-    if (!heap)
-      for (std::size_t k = 0x528; k < 0x534 && bytes[k] >= 32 && bytes[k] <= 126; ++k)
+    std::memcpy(&texture_word, bytes.data() + kPanelTextureNameOffset, 8);
+    std::string texture = texture_is_pointer ? printable_ascii_or_utf16_at(texture_word) : std::string();
+    if (!texture_is_pointer)
+      for (std::size_t k = kPanelTextureNameOffset; k < kPanelTextureIsPointerOffset && bytes[k] >= 32 && bytes[k] <= 126; ++k)
         texture += char(bytes[k]);
     std::uint32_t index = 0, kind = 0;
-    std::memcpy(&index, bytes.data() + 0x598, 4);
-    std::memcpy(&kind, bytes.data() + 0x680, 4);
+    std::memcpy(&index, bytes.data() + kPanelIndexOffset, 4);
+    std::memcpy(&kind, bytes.data() + kPanelKindOffset, 4);
     std::printf("panel[%u] %llx texture='%s' section='%s' index=%u kind=%u\n", i, static_cast<unsigned long long>(panel), texture.c_str(),
                 section.c_str(), index, kind);
-    // Breadth-first search of heap pointers out of the panel, depth 3, for
-    // any bridge-tracked native texture address.
-    struct Node {
-      std::uint64_t address;
-      std::string path;
-      int depth;
-    };
-    std::vector<Node> queue{{panel, "panel", 0}};
-    std::set<std::uint64_t> visited{panel};
-    int found = 0;
-    for (std::size_t q = 0; q < queue.size() && q < panel_objects; ++q) {
-      const auto node = queue[q];
-      const std::size_t span = node.depth ? 0x400 : kPanelSize;
-      std::vector<std::uint64_t> words(span / 8);
-      if (!read(node.address, words.data(), span) && !read(node.address, words.data(), 0x100))
-        continue;
-      for (std::size_t w = 0; w < words.size(); ++w) {
-        const auto v = words[w];
-        char step[48];
-        std::snprintf(step, sizeof(step), "+%#zx", w * 8);
-        if (const auto it = natives.find(v); it != natives.end()) {
-          if (found++ < 12)
-            std::printf("  FOUND %s%s = native %s\n", node.path.c_str(), step, it->second.c_str());
-        } else if (node.depth < panel_depth && (v & 7) == 0 && where(v) == "heap" && visited.insert(v).second) {
-          queue.push_back({v, node.path + step + "->", node.depth + 1});
-        }
-      }
-    }
-    if (!found)
-      std::printf("  no tracked native within 3 pointer levels (%zu objects)\n", queue.size());
-    if (i < 3 && panel_depth == 3)
+    std::size_t visited_objects = 0;
+    if (!print_natives_reachable_by_heap_pointers(panel, natives, visited_objects))
+      std::printf("  no tracked native within 3 pointer levels (%zu objects)\n", visited_objects);
+    if (i < 3 && panel_pointer_depth == kDefaultPanelPointerDepth)
       dump(panel, 0, static_cast<int>(kPanelSize), "    ");
   }
 }
-}  // namespace
 
-int main(int argc, char** argv) {
-  if (argc < 4) {
-    std::fprintf(stderr, "usage: display-identity-scan <pid> <display-candidates.txt> <name> [name...]\n");
-    return 2;
-  }
-  const DWORD pid = static_cast<DWORD>(std::strtoul(argv[1], nullptr, 10));
-  process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-  if (!process) {
-    std::fprintf(stderr, "OpenProcess failed %lu\n", GetLastError());
-    return 1;
-  }
-  wchar_t image[1024];
-  DWORD length = 1024;
-  const wchar_t* basename = nullptr;
-  if (QueryFullProcessImageNameW(process, 0, image, &length)) {
-    basename = wcsrchr(image, L'\\');
-    basename = basename ? basename + 1 : image;
-  }
-  if (!basename || _wcsicmp(basename, L"FlightSimulator2024.exe") != 0 || !same_user(process)) {
-    std::printf("error=wrong_process\n");
-    return 1;
-  }
-  HMODULE modules[1];
-  DWORD needed = 0;
-  if (EnumProcessModulesEx(process, modules, sizeof(modules), &needed, LIST_MODULES_ALL)) {
-    MODULEINFO info{};
-    if (GetModuleInformation(process, modules[0], &info, sizeof(info))) {
-      image_base = reinterpret_cast<std::uint64_t>(info.lpBaseOfDll);
-      image_size = info.SizeOfImage;
-    }
-  }
-  enumerate();
-  std::uint64_t total = 0;
-  for (const auto& r : regions)
-    total += r.size;
-  std::printf("pid=%lu image_size=%#llx regions=%zu readable=%.1f GiB\n", pid, static_cast<unsigned long long>(image_size), regions.size(),
-              total / 1073741824.0);
-
-  // Candidates.
-  std::map<std::uint64_t, std::string> natives;  // native -> label
-  if (std::FILE* file = std::fopen(argv[2], "rb")) {
+std::map<std::uint64_t, std::string> read_native_candidates(const char* path) {
+  std::map<std::uint64_t, std::string> label_by_native;
+  if (std::FILE* file = std::fopen(path, "rb")) {
     char line[512];
     while (std::fgets(line, sizeof(line), file)) {
       unsigned long long id = 0, native = 0;
@@ -371,71 +365,58 @@ int main(int argc, char** argv) {
       if (std::sscanf(line, "id=%llu native=0x%llx size=%ux%u mips=%u format=%u", &id, &native, &w, &h, &mips, &format) == 6) {
         char label[96];
         std::snprintf(label, sizeof(label), "#%llu %ux%u m%u f%u", id, w, h, mips, format);
-        natives[native] = label;
+        label_by_native[native] = label;
       } else {
         std::printf("candidates: %s", line);
       }
     }
     std::fclose(file);
   }
-  std::printf("natives=%zu\n", natives.size());
-  for (int a = 3; a + 1 < argc; ++a)
-    if (std::strcmp(argv[a], "--depth") == 0) {
-      panel_depth = std::atoi(argv[a + 1]);
-      panel_objects = 400000;
-    }
-  // --refs <exe RVA>: list every aligned qword holding image_base + RVA (for
-  // example an engine vtable). --refs-abs <address>...: holders of those
-  // values (or of any value up to 0x40 below them, reported with the delta).
-  for (int a = 3; a + 1 < argc; ++a)
-    if (std::strcmp(argv[a], "--refs") == 0 || std::strcmp(argv[a], "--refs-abs") == 0) {
-      const bool absolute = argv[a][6] == '-';
-      std::set<std::uint64_t> values;
-      std::map<std::uint64_t, std::string> labels;
-      for (int b = a + 1; b < argc && argv[b][0] != '-'; ++b) {
-        const auto v = std::strtoull(argv[b], nullptr, 16 * absolute);
-        for (int d = 0; d <= (absolute ? 0x40 : 0); d += 8) {
-          const auto target = absolute ? v + d : image_base + v;
-          values.insert(target);
-          char label[64];
-          std::snprintf(label, sizeof(label), absolute ? "%llx-%#x" : "exe+%llx", static_cast<unsigned long long>(v), d);
-          labels[target] = label;
-        }
-      }
-      const auto hits = scan(values, 100000);
-      std::printf("refs: %zu\n", hits.size());
-      for (const auto& hit : hits)
-        std::printf("ref %llx %s -> %s\n", static_cast<unsigned long long>(hit.address), where(hit.address).c_str(),
-                    labels[hit.value].c_str());
-      CloseHandle(process);
-      return 0;
-    }
-  walk_panels(natives);
-  bool full = true;
-  for (int a = 3; a < argc; ++a)
-    full &= std::strcmp(argv[a], "--panels-only") != 0;
-  if (!full) {
-    CloseHandle(process);
-    return 0;
-  }
+  return label_by_native;
+}
 
-  // Level 0: holders of each native.
-  std::set<std::uint64_t> targets;
-  for (const auto& [native, label] : natives)
-    targets.insert(native);
-  const auto holders = scan(targets);
-  std::map<std::uint64_t, std::vector<std::uint64_t>> by_native;
+void print_holders_of_image_rvas_or_absolute_values(int argc, char** argv, int option) {
+  const bool absolute = std::strcmp(argv[option], "--refs-abs") == 0;
+  std::set<std::uint64_t> values;
+  std::map<std::uint64_t, std::string> labels;
+  for (int b = option + 1; b < argc && argv[b][0] != '-'; ++b) {
+    const auto v = std::strtoull(argv[b], nullptr, 16 * absolute);
+    for (int d = 0; d <= (absolute ? kAbsoluteReferenceLookbackBytes : 0); d += 8) {
+      const auto target = absolute ? v + d : image_base + v;
+      values.insert(target);
+      char label[64];
+      std::snprintf(label, sizeof(label), absolute ? "%llx-%#x" : "exe+%llx", static_cast<unsigned long long>(v), d);
+      labels[target] = label;
+    }
+  }
+  const auto hits = find_aligned_qwords_holding(values, 100000);
+  std::printf("refs: %zu\n", hits.size());
+  for (const auto& hit : hits)
+    std::printf("ref %llx %s -> %s\n", static_cast<unsigned long long>(hit.address), where(hit.address).c_str(), labels[hit.value].c_str());
+}
+
+std::map<std::uint64_t, std::vector<std::uint64_t>> print_native_holders(const std::vector<Hit>& holders,
+                                                                         std::map<std::uint64_t, std::string>& natives) {
+  std::map<std::uint64_t, std::vector<std::uint64_t>> holders_by_native;
   for (const auto& hit : holders)
-    by_native[hit.value].push_back(hit.address);
+    holders_by_native[hit.value].push_back(hit.address);
   std::printf("\n=== native holders (%zu)\n", holders.size());
-  for (const auto& [native, list] : by_native) {
+  for (const auto& [native, list] : holders_by_native) {
     std::printf("%s native=%llx holders=%zu\n", natives[native].c_str(), static_cast<unsigned long long>(native), list.size());
     for (std::size_t i = 0; i < list.size() && i < 40; ++i)
       std::printf("  %llx %s\n", static_cast<unsigned long long>(list[i]), where(list[i]).c_str());
   }
+  return holders_by_native;
+}
 
-  // Name strings.
-  std::map<std::uint64_t, std::string> name_sites;  // address -> name
+bool begins_string(std::uint64_t at, bool is_wide) {
+  unsigned char before[2]{};
+  read(at - 2, before, 2);
+  return is_wide ? !(before[0] >= 32 && before[0] <= 126 && before[1] == 0) : !(before[1] >= 32 && before[1] <= 126);
+}
+
+std::map<std::uint64_t, std::string> find_name_sites(int argc, char** argv) {
+  std::map<std::uint64_t, std::string> name_by_address;
   for (int a = 3; a < argc; ++a) {
     if (argv[a][0] == '-')
       continue;
@@ -449,79 +430,56 @@ int main(int argc, char** argv) {
     }
     wide.append(2, '\0');
     for (const auto& needle : {ascii, wide}) {
-      for (auto at : find_bytes(needle)) {
-        // Require a string start: previous byte(s) not printable.
-        unsigned char before[2]{};
-        read(at - 2, before, 2);
+      for (auto at : find_byte_string(needle)) {
         const bool is_wide = needle.size() > ascii.size();
-        const bool start = is_wide ? !(before[0] >= 32 && before[0] <= 126 && before[1] == 0) : !(before[1] >= 32 && before[1] <= 126);
-        if (start)
-          name_sites[at] = (is_wide ? "L:" : "") + name;
+        if (begins_string(at, is_wide))
+          name_by_address[at] = (is_wide ? "L:" : "") + name;
       }
     }
   }
-  std::printf("\n=== name strings (%zu)\n", name_sites.size());
-  std::map<std::string, int> per_name;
-  for (const auto& [at, name] : name_sites)
-    if (per_name[name]++ < 25)
-      std::printf("  %s at %llx %s\n", name.c_str(), static_cast<unsigned long long>(at), where(at).c_str());
+  return name_by_address;
+}
 
-  // Level 1: pointers to name strings (and to inline-string objects starting
-  // up to 0x20 before them), and pointers into holder objects (base up to
-  // 0x400 before the holder).
-  std::map<std::uint64_t, std::pair<std::uint64_t, int>> back;  // target -> (origin, delta)
+using Origin = std::pair<std::uint64_t, int>;
+
+std::map<std::uint64_t, Origin> name_and_holder_object_origins(const std::map<std::uint64_t, std::string>& name_sites,
+                                                               const std::vector<Hit>& holders) {
+  std::map<std::uint64_t, Origin> origin_by_target;
   for (const auto& [at, name] : name_sites)
-    for (int d = 0; d <= 0x20; d += 8)
-      back.emplace((at & ~7ull) - d + (at & 7ull ? 0 : 0), std::make_pair(at, -d));
+    for (int d = 0; d <= kInlineStringObjectLookbackBytes; d += 8)
+      origin_by_target.emplace((at & ~7ull) - d, std::make_pair(at, -d));
   for (const auto& [at, name] : name_sites)
-    back.emplace(at, std::make_pair(at, 0));
-  std::set<std::uint64_t> holder_set;
+    origin_by_target.emplace(at, std::make_pair(at, 0));
+  std::set<std::uint64_t> heap_holders;
   for (const auto& hit : holders)
     if (where(hit.address) == "heap")
-      holder_set.insert(hit.address);
-  for (auto h : holder_set)
-    for (int d = 0; d <= 0x400; d += 8)
-      back.emplace(h - d, std::make_pair(h, -d));
-  std::set<std::uint64_t> level1;
-  for (const auto& [t, origin] : back)
-    level1.insert(t);
-  const auto refs = scan(level1, 400000);
-  std::printf("\n=== level-1 references (%zu)\n", refs.size());
+      heap_holders.insert(hit.address);
+  for (auto h : heap_holders)
+    for (int d = 0; d <= kHolderObjectLookbackBytes; d += 8)
+      origin_by_target.emplace(h - d, std::make_pair(h, -d));
+  return origin_by_target;
+}
 
-  // Classify.
-  std::vector<std::pair<std::uint64_t, std::string>> name_refs, chain_refs;  // address, description
-  for (const auto& hit : refs) {
-    const auto [origin, delta] = back[hit.value];
-    char text[160];
-    if (name_sites.count(origin)) {
-      std::snprintf(text, sizeof(text), "-> name %s%+d", name_sites[origin].c_str(), delta);
-      name_refs.push_back({hit.address, text});
-    } else {
-      std::snprintf(text, sizeof(text), "-> holder %llx base%+d", static_cast<unsigned long long>(origin), delta);
-      chain_refs.push_back({hit.address, text});
-    }
-  }
-  std::printf("name refs=%zu chain refs=%zu\n", name_refs.size(), chain_refs.size());
+using Reference = std::pair<std::uint64_t, std::string>;
 
-  // Proximity: name references within 0x800 bytes of a native holder or a
-  // chain reference are candidate identity objects.
-  std::vector<std::pair<std::uint64_t, std::string>> anchors;
+void print_name_references_near_texture_chain(const std::vector<Reference>& name_refs,
+                                              const std::vector<Reference>& chain_refs,
+                                              const std::vector<Hit>& holders,
+                                              std::map<std::uint64_t, std::string>& natives) {
+  std::vector<Reference> anchors;
   for (const auto& hit : holders)
     anchors.push_back({hit.address, "native " + natives[hit.value]});
   for (const auto& c : chain_refs)
     anchors.push_back(c);
   std::sort(anchors.begin(), anchors.end());
-  // Inline (small-string) names live inside their object: treat each name
-  // site as a reference too.
-  for (const auto& [at, name] : name_sites)
-    name_refs.push_back({at, "inline name " + name});
   std::printf("\n=== name reference next to texture chain (within 0x800, closest 4 each)\n");
   int shown = 0;
   std::set<std::uint64_t> dumped;
   for (const auto& [address, text] : name_refs) {
-    std::vector<std::pair<long long, const std::pair<std::uint64_t, std::string>*>> nearby;
-    auto it = std::lower_bound(anchors.begin(), anchors.end(), std::make_pair(address > 0x800 ? address - 0x800 : 0, std::string{}));
-    for (; it != anchors.end() && it->first <= address + 0x800; ++it)
+    std::vector<std::pair<long long, const Reference*>> nearby;
+    auto it = std::lower_bound(anchors.begin(), anchors.end(),
+                               std::make_pair(address > kIdentityProximityBytes ? address - kIdentityProximityBytes : 0, std::string{}));
+    for (; it != anchors.end() && it->first <= address + kIdentityProximityBytes; ++it)
       nearby.push_back({static_cast<long long>(it->first) - static_cast<long long>(address), &*it});
     if (nearby.empty())
       continue;
@@ -537,10 +495,12 @@ int main(int argc, char** argv) {
       dump(low, 0x40, static_cast<int>(high - low) + 0x48, "      ");
     }
   }
+}
 
-  // Context of the first heap holders per native and the closest chain refs.
+void print_first_heap_holders(const std::map<std::uint64_t, std::vector<std::uint64_t>>& holders_by_native,
+                              std::map<std::uint64_t, std::string>& natives) {
   std::printf("\n=== holder context\n");
-  for (const auto& [native, list] : by_native) {
+  for (const auto& [native, list] : holders_by_native) {
     int n = 0;
     for (auto h : list) {
       if (where(h) != "heap" || n++ >= 4)
@@ -549,21 +509,107 @@ int main(int argc, char** argv) {
       dump(h, 0x80, 0x80, "    ");
     }
   }
-  std::printf("\n=== chain refs (first 60, smallest base delta first)\n");
+}
+
+void print_references_with_context(const char* heading, const std::vector<Reference>& references) {
+  std::printf("%s", heading);
+  for (std::size_t i = 0; i < references.size() && i < 60; ++i) {
+    std::printf("%llx %s %s\n", static_cast<unsigned long long>(references[i].first), where(references[i].first).c_str(),
+                references[i].second.c_str());
+    if (i < 12)
+      dump(references[i].first, 0x40, 0x48, "    ");
+  }
+}
+}
+
+int main(int argc, char** argv) {
+  if (argc < 4) {
+    std::fprintf(stderr,
+                 "usage: display-identity-scan <pid> <display-candidates.txt> <name> [name...] [--panels-only] [--depth <n>]\n"
+                 "       [--refs <exe RVA>... | --refs-abs <hex address>...]\n");
+    return 2;
+  }
+  const DWORD pid = static_cast<DWORD>(std::strtoul(argv[1], nullptr, 10));
+  process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+  if (!process) {
+    std::fprintf(stderr, "OpenProcess failed %lu\n", GetLastError());
+    return 1;
+  }
+  if (!is_same_user_simulator(process)) {
+    std::printf("error=wrong_process\n");
+    return 1;
+  }
+  locate_main_image();
+  enumerate_committed_readable_regions();
+  std::uint64_t total = 0;
+  for (const auto& r : regions)
+    total += r.size;
+  std::printf("pid=%lu image_size=%#llx regions=%zu readable=%.1f GiB\n", pid, static_cast<unsigned long long>(image_size), regions.size(),
+              total / 1073741824.0);
+
+  auto natives = read_native_candidates(argv[2]);
+  std::printf("natives=%zu\n", natives.size());
+  for (int a = 3; a + 1 < argc; ++a)
+    if (std::strcmp(argv[a], "--depth") == 0) {
+      panel_pointer_depth = std::atoi(argv[a + 1]);
+      panel_objects = kDeepPanelObjects;
+    }
+  for (int a = 3; a + 1 < argc; ++a)
+    if (std::strcmp(argv[a], "--refs") == 0 || std::strcmp(argv[a], "--refs-abs") == 0) {
+      print_holders_of_image_rvas_or_absolute_values(argc, argv, a);
+      CloseHandle(process);
+      return 0;
+    }
+  walk_panels(natives);
+  bool full = true;
+  for (int a = 3; a < argc; ++a)
+    full &= std::strcmp(argv[a], "--panels-only") != 0;
+  if (!full) {
+    CloseHandle(process);
+    return 0;
+  }
+
+  std::set<std::uint64_t> native_addresses;
+  for (const auto& [native, label] : natives)
+    native_addresses.insert(native);
+  const auto holders = find_aligned_qwords_holding(native_addresses);
+  const auto holders_by_native = print_native_holders(holders, natives);
+
+  auto name_sites = find_name_sites(argc, argv);
+  std::printf("\n=== name strings (%zu)\n", name_sites.size());
+  std::map<std::string, int> per_name;
+  for (const auto& [at, name] : name_sites)
+    if (per_name[name]++ < 25)
+      std::printf("  %s at %llx %s\n", name.c_str(), static_cast<unsigned long long>(at), where(at).c_str());
+
+  auto origin_by_target = name_and_holder_object_origins(name_sites, holders);
+  std::set<std::uint64_t> level1;
+  for (const auto& [t, origin] : origin_by_target)
+    level1.insert(t);
+  const auto refs = find_aligned_qwords_holding(level1, 400000);
+  std::printf("\n=== level-1 references (%zu)\n", refs.size());
+
+  std::vector<Reference> name_refs, chain_refs;
+  for (const auto& hit : refs) {
+    const auto [origin, delta] = origin_by_target[hit.value];
+    char text[160];
+    if (name_sites.count(origin)) {
+      std::snprintf(text, sizeof(text), "-> name %s%+d", name_sites[origin].c_str(), delta);
+      name_refs.push_back({hit.address, text});
+    } else {
+      std::snprintf(text, sizeof(text), "-> holder %llx base%+d", static_cast<unsigned long long>(origin), delta);
+      chain_refs.push_back({hit.address, text});
+    }
+  }
+  std::printf("name refs=%zu chain refs=%zu\n", name_refs.size(), chain_refs.size());
+
+  for (const auto& [at, name] : name_sites)
+    name_refs.push_back({at, "inline name " + name});
+  print_name_references_near_texture_chain(name_refs, chain_refs, holders, natives);
+  print_first_heap_holders(holders_by_native, natives);
   std::stable_sort(chain_refs.begin(), chain_refs.end(), [](const auto& a, const auto& b) { return a.second.size() < b.second.size(); });
-  for (std::size_t i = 0; i < chain_refs.size() && i < 60; ++i) {
-    std::printf("%llx %s %s\n", static_cast<unsigned long long>(chain_refs[i].first), where(chain_refs[i].first).c_str(),
-                chain_refs[i].second.c_str());
-    if (i < 12)
-      dump(chain_refs[i].first, 0x40, 0x48, "    ");
-  }
-  std::printf("\n=== name refs (first 60)\n");
-  for (std::size_t i = 0; i < name_refs.size() && i < 60; ++i) {
-    std::printf("%llx %s %s\n", static_cast<unsigned long long>(name_refs[i].first), where(name_refs[i].first).c_str(),
-                name_refs[i].second.c_str());
-    if (i < 12)
-      dump(name_refs[i].first, 0x40, 0x48, "    ");
-  }
+  print_references_with_context("\n=== chain refs (first 60, smallest base delta first)\n", chain_refs);
+  print_references_with_context("\n=== name refs (first 60)\n", name_refs);
   CloseHandle(process);
   return 0;
 }

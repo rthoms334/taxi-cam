@@ -11,18 +11,7 @@ namespace taxi_camera::discovery {
 namespace {
 
 constexpr std::uint32_t kMaximumImageSize = 0x80000000;
-
-bool readable_image_page(DWORD protection) {
-  if ((protection & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
-    return false;
-  }
-  // Packaged executables can map headers/read-only sections as copy-on-write.
-  // Reading does not trigger a write; the parser separately excludes writable
-  // PE sections. PAGE_EXECUTE alone grants no documented read permission.
-  const auto base_protection = protection & 0xff;
-  return base_protection == PAGE_READONLY || base_protection == PAGE_READWRITE || base_protection == PAGE_WRITECOPY ||
-         base_protection == PAGE_EXECUTE_READ || base_protection == PAGE_EXECUTE_READWRITE || base_protection == PAGE_EXECUTE_WRITECOPY;
-}
+constexpr DWORD kBaseProtectionMask = 0xff;
 
 class MainImageReader final : public ImageReader {
  public:
@@ -71,13 +60,8 @@ class MainImageReader final : public ImageReader {
       if (!window.readable || window.size == 0 || window.size > size - completed) {
         return false;
       }
-      SIZE_T copied = 0;
-      // VirtualQuery is a snapshot. ReadProcessMemory checks the selected process
-      // mapping again and fails safely if protection changes before this read.
       read_attempted_ = true;
-      if (!ReadProcessMemory(process_, reinterpret_cast<const void*>(base_ + offset), output + completed, window.size, &copied) ||
-          copied != window.size) {
-        last_read_error_ = GetLastError();
+      if (!read_process_memory_rechecking_protection(process_, base_ + offset, output + completed, window.size, last_read_error_)) {
         return false;
       }
       completed += window.size;
@@ -120,9 +104,7 @@ std::wstring basename(const std::wstring& path) {
   return separator == std::wstring::npos ? path : path.substr(separator + 1);
 }
 
-bool file_identity(const std::wstring& path, FILE_ID_INFO& identity, MainModuleInventory& result) {
-  // This opens attributes only, not file contents. The mapped executable can
-  // have Xbox/package path aliases even when both names refer to the same file.
+bool file_identity_from_attributes(const std::wstring& path, FILE_ID_INFO& identity, MainModuleInventory& result) {
   const auto handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
@@ -144,7 +126,8 @@ bool same_executable_file(const std::wstring& process_path, const std::wstring& 
   }
   FILE_ID_INFO process_file{};
   FILE_ID_INFO module_file{};
-  if (!file_identity(process_path, process_file, result) || !file_identity(module_path, module_file, result)) {
+  if (!file_identity_from_attributes(process_path, process_file, result) ||
+      !file_identity_from_attributes(module_path, module_file, result)) {
     return false;
   }
   if (process_file.VolumeSerialNumber != module_file.VolumeSerialNumber ||
@@ -201,7 +184,25 @@ void inspect_verified(MainModuleInventory& result, HANDLE process, HMODULE modul
   }
 }
 
-}  // namespace
+}
+
+bool readable_image_page(DWORD protection) {
+  if ((protection & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+    return false;
+  }
+  const auto base_protection = protection & kBaseProtectionMask;
+  return base_protection == PAGE_READONLY || base_protection == PAGE_READWRITE || base_protection == PAGE_WRITECOPY ||
+         base_protection == PAGE_EXECUTE_READ || base_protection == PAGE_EXECUTE_READWRITE || base_protection == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool read_process_memory_rechecking_protection(HANDLE process, std::uintptr_t address, void* destination, std::size_t size, DWORD& error) {
+  SIZE_T copied = 0;
+  if (!ReadProcessMemory(process, reinterpret_cast<const void*>(address), destination, size, &copied) || copied != size) {
+    error = GetLastError();
+    return false;
+  }
+  return true;
+}
 
 MainModuleInventory inspect_main_module(HMODULE explicitly_selected_main, Limits limits) {
   MainModuleInventory result;
@@ -216,7 +217,7 @@ MainModuleInventory inspect_main_module(HMODULE explicitly_selected_main, Limits
   const auto length = GetModuleFileNameW(explicitly_selected_main, path.data(), static_cast<DWORD>(path.size()));
   if (length != 0 && length < path.size()) {
     const std::wstring full_path(path.data(), length);
-    result.module_name = basename(full_path);
+    result.module_basename = basename(full_path);
   }
   inspect_verified(result, GetCurrentProcess(), explicitly_selected_main, limits);
   return result;
@@ -243,8 +244,8 @@ MainModuleInventory inspect_simulator_main_module(std::uint32_t explicitly_selec
     return result;
   }
   const std::wstring executable_path(process_path.data(), path_size);
-  result.module_name = basename(executable_path);
-  if (CompareStringOrdinal(result.module_name.c_str(), -1, L"FlightSimulator2024.exe", -1, TRUE) != CSTR_EQUAL) {
+  result.module_basename = basename(executable_path);
+  if (CompareStringOrdinal(result.module_basename.c_str(), -1, L"FlightSimulator2024.exe", -1, TRUE) != CSTR_EQUAL) {
     fail(result, "The selected PID is not FlightSimulator2024.exe.");
     return result;
   }
@@ -258,25 +259,24 @@ MainModuleInventory inspect_simulator_main_module(std::uint32_t explicitly_selec
     fail(result, "The selected simulator process belongs to a different user.");
     return result;
   }
-  // Request just the first module handle, then prove that its filename is the
-  // selected process image. A mismatch is rejected, never searched around.
-  HMODULE main_module = nullptr;
+  HMODULE first_enumerated_module = nullptr;
   DWORD module_bytes = 0;
-  if (!K32EnumProcessModulesEx(process.value, &main_module, sizeof(main_module), &module_bytes, LIST_MODULES_64BIT) ||
-      module_bytes < sizeof(main_module) || main_module == nullptr) {
+  if (!K32EnumProcessModulesEx(process.value, &first_enumerated_module, sizeof(first_enumerated_module), &module_bytes,
+                               LIST_MODULES_64BIT) ||
+      module_bytes < sizeof(first_enumerated_module) || first_enumerated_module == nullptr) {
     fail(result, "Reading the selected process main-module handle failed.", GetLastError());
     return result;
   }
   std::array<wchar_t, 32768> module_path{};
   const auto module_name_size =
-      K32GetModuleFileNameExW(process.value, main_module, module_path.data(), static_cast<DWORD>(module_path.size()));
+      K32GetModuleFileNameExW(process.value, first_enumerated_module, module_path.data(), static_cast<DWORD>(module_path.size()));
   if (module_name_size == 0 || module_name_size >= module_path.size()) {
     fail(result, "Reading the enumerated main-module filename failed.", GetLastError());
     return result;
   }
   const std::wstring enumerated_path(module_path.data(), module_name_size);
-  result.candidate_module_name = basename(enumerated_path);
-  if (CompareStringOrdinal(result.candidate_module_name.c_str(), -1, L"FlightSimulator2024.exe", -1, TRUE) != CSTR_EQUAL) {
+  result.candidate_module_basename = basename(enumerated_path);
+  if (CompareStringOrdinal(result.candidate_module_basename.c_str(), -1, L"FlightSimulator2024.exe", -1, TRUE) != CSTR_EQUAL) {
     fail(result, "The first enumerated module is not FlightSimulator2024.exe.");
     return result;
   }
@@ -284,8 +284,8 @@ MainModuleInventory inspect_simulator_main_module(std::uint32_t explicitly_selec
     return result;
   }
   result.main_module_verified = true;
-  inspect_verified(result, process.value, main_module, limits);
+  inspect_verified(result, process.value, first_enumerated_module, limits);
   return result;
 }
 
-}  // namespace taxi_camera::discovery
+}

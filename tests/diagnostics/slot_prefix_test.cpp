@@ -9,6 +9,7 @@
 
 namespace {
 using namespace taxi_camera::discovery;
+static_assert(kMaximumSlotTargetReadBytes == 512 && kMaximumSlotProofReadBytes == 64);
 constexpr std::uint64_t kBase = 0x140000000;
 constexpr std::uint32_t kSlot = 0x3100;
 constexpr std::uint32_t kEntry = 0x2000;
@@ -176,7 +177,7 @@ struct Fixture {
     }
     require(result.read_bytes == target_bytes && result.proof_bytes == proof_bytes, "Attempted read-byte accounting is inaccurate");
     for (const auto& entry : result.entries)
-      require(entry.decoded_bytes <= entry.bytes_read && entry.bytes_read <= 64 && entry.instructions.size() <= 64,
+      require(entry.decoded_bytes <= entry.attempted_bytes && entry.attempted_bytes <= 64 && entry.instructions.size() <= 64,
               "Decoded metadata exceeds its bounded read");
     return result;
   }

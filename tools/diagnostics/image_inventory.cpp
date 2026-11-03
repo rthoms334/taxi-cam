@@ -23,6 +23,10 @@ struct Section {
   bool inspectable() const { return (flags & kReadable) != 0 && (flags & (kWritable | kDiscardable)) == 0; }
 };
 
+bool data_before_code(const Section& a, const Section& b) {
+  return (a.flags & kExecutable) < (b.flags & kExecutable);
+}
+
 bool within(std::uint32_t start, std::uint64_t size, std::uint32_t end) {
   return start <= end && size <= static_cast<std::uint64_t>(end - start);
 }
@@ -86,10 +90,7 @@ class Parser {
     }
     result_.valid_image = true;
     exports();
-    // Embedded symbol/literal data precedes code to make the byte budget useful
-    // in large executables. No virtual addresses or file bytes are returned.
-    std::stable_sort(sections_.begin(), sections_.end(),
-                     [](const Section& a, const Section& b) { return (a.flags & kExecutable) < (b.flags & kExecutable); });
+    std::stable_sort(sections_.begin(), sections_.end(), data_before_code);
     for (const auto& section : sections_) {
       if (section.inspectable()) {
         scan(section);
@@ -401,10 +402,10 @@ class Parser {
   std::uint32_t export_size_ = 0;
 };
 
-}  // namespace
+}
 
 Inventory inspect_image(ImageReader& reader, Limits limits) {
   return Parser(reader, limits).run();
 }
 
-}  // namespace taxi_camera::discovery
+}

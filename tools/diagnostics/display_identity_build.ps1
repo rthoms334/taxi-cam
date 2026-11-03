@@ -8,15 +8,19 @@ $standIn = Join-Path $output 'display-identity-fake'
 New-Item -ItemType Directory -Force -Path $standIn | Out-Null
 $flags = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-mno-avx','-mno-avx2','-D_WIN32_WINNT=0x0A00','-DNOMINMAX','-static')
 $scanner = Join-Path $output 'display-identity-scan.exe'
-# The panel table is resolved with the bridge's own contract code, never a fixed address.
-$contract = @('src/camera/camera_contract.cpp','src/camera/camera_contract_model.cpp','src/camera/relocatable_contract.cpp',
+$bridgePanelTableContract = @('src/camera/camera_contract.cpp','src/camera/camera_contract_model.cpp','src/camera/relocatable_contract.cpp',
     'src/camera/rtti_vtables.cpp','src/camera/code_contract.cpp','src/camera/activation_mask.cpp','tools/diagnostics/image_inventory.cpp') |
     ForEach-Object { Join-Path $repoRoot $_ }
-& $compiler @flags (Join-Path $PSScriptRoot 'display_identity_scan.cpp') @contract '-lpsapi' '-ladvapi32' '-o' $scanner
+& $compiler @flags (Join-Path $PSScriptRoot 'display_identity_scan.cpp') @bridgePanelTableContract '-lpsapi' '-ladvapi32' '-o' $scanner
 if ($LASTEXITCODE -ne 0) { throw 'Display identity scanner compile failed.' }
-# The stand-in must carry the simulator's basename to pass the scanner's process check.
-$fake = Join-Path $standIn 'FlightSimulator2024.exe'
-& $compiler @flags (Join-Path $repoRoot 'tests/diagnostics/display_identity_fake.cpp') '-o' $fake
+$imports = @(& (Join-Path (Get-TaxiToolchain $repoRoot) 'llvm-readobj.exe') '--coff-imports' $scanner |
+  Where-Object { $_ -match '^\s*Symbol: (\S+)' } | ForEach-Object { $Matches[1] })
+if ($LASTEXITCODE -ne 0 -or $imports -notcontains 'ReadProcessMemory') { throw 'The scanner import table could not be read.' }
+$processChanges = @($imports | Where-Object { $_ -in @('WriteProcessMemory', 'VirtualProtectEx', 'VirtualAllocEx', 'CreateRemoteThread',
+  'CreateRemoteThreadEx', 'SetThreadContext', 'DebugActiveProcess', 'AdjustTokenPrivileges', 'LookupPrivilegeValueW') })
+if ($processChanges.Count -ne 0) { throw "The scanner imports process-changing APIs: $($processChanges -join ', ')" }
+$standInWithSimulatorBasename = Join-Path $standIn 'FlightSimulator2024.exe'
+& $compiler @flags (Join-Path $repoRoot 'tests/diagnostics/display_identity_fake.cpp') '-o' $standInWithSimulatorBasename
 if ($LASTEXITCODE -ne 0) { throw 'Display identity stand-in compile failed.' }
 
 $wrong = & $scanner "$PID" (Join-Path $standIn 'none.txt') 'DUS'
@@ -24,7 +28,7 @@ if ($LASTEXITCODE -ne 1 -or ($wrong -join "`n") -notmatch 'error=wrong_process')
 
 $candidates = Join-Path $standIn 'display-candidates.txt'
 Remove-Item -LiteralPath $candidates, "$candidates.done" -ErrorAction SilentlyContinue
-$info = New-Object System.Diagnostics.ProcessStartInfo $fake, "`"$candidates`""
+$info = New-Object System.Diagnostics.ProcessStartInfo $standInWithSimulatorBasename, "`"$candidates`""
 $info.UseShellExecute = $false
 $info.RedirectStandardOutput = $true
 $info.CreateNoWindow = $true

@@ -8,9 +8,6 @@ namespace {
 constexpr std::uint32_t kReadable = 0x40000000;
 constexpr std::uint32_t kWritable = 0x80000000;
 constexpr std::uint32_t kExcluded = kWritable | 0x20000000 | 0x02000000;
-constexpr std::uint32_t kMaximumRequests = 8;
-constexpr std::uint32_t kMaximumBytes = 128;
-
 
 bool valid_sections(const Inventory& image) {
   if (image.sections.empty() || image.sections.size() > 96) {
@@ -48,9 +45,7 @@ StaticLiteral read_literal(ImageReader& reader, const Inventory& image, std::uin
   }
 
   std::string text;
-  for (std::uint32_t offset = 0; offset < kMaximumBytes; ++offset) {
-    // Validate the entire next read before either querying or reading it. The
-    // containing section was checked against image_size without overflowing.
+  for (std::uint32_t offset = 0; offset < kMaximumLiteralBytesIncludingNul; ++offset) {
     const auto next = std::uint64_t(rva) + offset;
     if (next >= std::uint64_t(storage->rva) + storage->size || next >= image.image_size) {
       record.error = "The literal reaches its static-data section boundary before NUL.";
@@ -85,7 +80,7 @@ StaticLiteral read_literal(ImageReader& reader, const Inventory& image, std::uin
   return record;
 }
 
-}  // namespace
+}
 
 StaticLiteralInventory inspect_static_literals(ImageReader& reader, const Inventory& image, const std::vector<std::uint32_t>& rvas) {
   StaticLiteralInventory result;
@@ -93,7 +88,7 @@ StaticLiteralInventory inspect_static_literals(ImageReader& reader, const Invent
     result.error = "Invalid loaded-image or section metadata.";
     return result;
   }
-  if (rvas.empty() || rvas.size() > kMaximumRequests) {
+  if (rvas.empty() || rvas.size() > kMaximumLiteralRequests) {
     result.error = "Request one to eight explicit literal RVAs.";
     return result;
   }
@@ -109,4 +104,4 @@ StaticLiteralInventory inspect_static_literals(ImageReader& reader, const Invent
   return result;
 }
 
-}  // namespace taxi_camera::discovery
+}

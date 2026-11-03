@@ -9,7 +9,6 @@
 namespace taxi_camera::discovery {
 namespace {
 
-constexpr std::uint32_t kMaximumBytes = 256;
 constexpr std::uint32_t kReadable = 0x40000000;
 constexpr std::uint32_t kExcluded = 0x80000000 | 0x20000000 | 0x02000000;
 static_assert(sizeof(float) == 4 && sizeof(double) == 8 && std::numeric_limits<float>::is_iec559 && std::numeric_limits<double>::is_iec559);
@@ -64,7 +63,7 @@ StaticNumericRecord inspect_request(ImageReader& reader,
   record.kind = request.kind;
   record.count = request.count;
   if ((request.kind != StaticNumericKind::float32 && request.kind != StaticNumericKind::float64) || request.count == 0 ||
-      request.count > 3) {
+      request.count > kMaximumScalarsPerNumericRequest) {
     record.error = "Request one to three float32 or float64 scalars.";
     return record;
   }
@@ -74,13 +73,13 @@ StaticNumericRecord inspect_request(ImageReader& reader,
     record.error = "The complete numeric range is not in one readable, non-writable, non-executable, non-discardable image section.";
     return record;
   }
-  if (size > kMaximumBytes - result.read_bytes) {
+  if (size > kMaximumNumericReadBytes - result.read_bytes) {
     record.error = "The static numeric read allowance is exhausted.";
     return record;
   }
   result.read_bytes += size;
   record.bytes = size;
-  std::array<std::uint8_t, 24> buffer{};
+  std::array<std::uint8_t, kMaximumScalarsPerNumericRequest * sizeof(double)> buffer{};
   std::uint32_t offset = 0;
   while (offset < size) {
     const auto rva = request.rva + offset;
@@ -115,7 +114,7 @@ StaticNumericRecord inspect_request(ImageReader& reader,
   return record;
 }
 
-}  // namespace
+}
 
 StaticNumericInventory inspect_static_numeric(ImageReader& reader,
                                               const Inventory& image,
@@ -125,7 +124,7 @@ StaticNumericInventory inspect_static_numeric(ImageReader& reader,
     result.error = "Invalid loaded-image or section metadata.";
     return result;
   }
-  if (requests.empty() || requests.size() > 8) {
+  if (requests.empty() || requests.size() > kMaximumNumericRequests) {
     result.error = "Request one to eight explicit numeric ranges.";
     return result;
   }
@@ -141,4 +140,4 @@ StaticNumericInventory inspect_static_numeric(ImageReader& reader,
   return result;
 }
 
-}  // namespace taxi_camera::discovery
+}

@@ -8,12 +8,9 @@
 namespace taxi_camera::discovery {
 namespace {
 
-constexpr std::uint64_t kCodeLimit = 128ull * 1024 * 1024;
-constexpr std::uint64_t kDecodeLimit = 8ull * 1024 * 1024;
-constexpr std::uint32_t kFunctionLimit = 64 * 1024;
 constexpr std::uint32_t kExceptionLimit = 8 * 1024 * 1024;
 constexpr std::uint32_t kChunk = 32 * 1024;
-constexpr std::size_t kReferenceLimit = 32;
+constexpr std::uint32_t kCallRel32Bytes = 5;
 
 std::uint32_t u32(const std::uint8_t* data) {
   return data[0] | (static_cast<std::uint32_t>(data[1]) << 8) | (static_cast<std::uint32_t>(data[2]) << 16) |
@@ -34,13 +31,23 @@ bool executable_range(const Inventory& image, std::uint32_t rva, std::uint32_t b
   });
 }
 
+bool candidate_opcode(const std::uint8_t* instruction, std::uint32_t candidate_size) {
+  return candidate_size == kCallRel32Bytes ? instruction[0] == 0xe8
+                                           : (instruction[0] & 0xf8) == 0x48 && instruction[1] == 0x8d && (instruction[2] & 0xc7) == 0x05;
+}
+
+std::int64_t candidate_destination(const std::uint8_t* instruction, std::uint32_t candidate_size, std::uint32_t rva) {
+  const auto displacement_offset = candidate_size == kCallRel32Bytes ? 1 : 3;
+  return static_cast<std::int64_t>(rva) + candidate_size + static_cast<std::int32_t>(u32(instruction + displacement_offset));
+}
+
 struct RuntimeFunction {
   std::uint32_t begin;
   std::uint32_t end;
 };
 
 bool validate_literals(ImageReader& reader, const Inventory& image, const std::vector<LiteralTarget>& targets, std::string& error) {
-  if (!image.valid_image || targets.empty() || targets.size() > 8) {
+  if (!image.valid_image || targets.empty() || targets.size() > kMaximumExplicitTargets) {
     error = "A validated image and between one and eight explicit literal targets are required.";
     return false;
   }
@@ -104,7 +111,7 @@ bool validate_boundary(ImageReader& reader,
                        std::uint32_t candidate_size,
                        ReferenceInventory& result,
                        CodeReference& reference) {
-  if (function.end - function.begin > kFunctionLimit) {
+  if (function.end - function.begin > kMaximumCandidateFunctionBytes) {
     return false;
   }
   std::vector<std::uint8_t> bytes(function.end - function.begin);
@@ -117,12 +124,12 @@ bool validate_boundary(ImageReader& reader,
   std::vector<InstructionMetadata> preceding;
   std::size_t following = 0;
   while (offset < bytes.size()) {
-    if (result.decoded_bytes >= kDecodeLimit) {
+    if (result.decoded_bytes >= kMaximumDecodedCodeBytes) {
       result.decode_limit_reached = true;
       return false;
     }
     std::string text;
-    const auto available = std::min<std::size_t>(bytes.size() - offset, kDecodeLimit - result.decoded_bytes);
+    const auto available = std::min<std::size_t>(bytes.size() - offset, kMaximumDecodedCodeBytes - result.decoded_bytes);
     const auto size = decoder.decode(bytes.data() + offset, available, function.begin + offset, text);
     if (size == 0 || size > 15 || size > available) {
       if (available < bytes.size() - offset) {
@@ -140,16 +147,9 @@ bool validate_boundary(ImageReader& reader,
       if (size != candidate_size) {
         return false;
       }
-      // Recheck bytes from the bounded function read, rather than trusting that
-      // the earlier scan read still describes this instruction.
-      const auto* instruction = bytes.data() + offset;
-      const bool matches_opcode = candidate_size == 5
-                                      ? instruction[0] == 0xe8
-                                      : (instruction[0] & 0xf8) == 0x48 && instruction[1] == 0x8d && (instruction[2] & 0xc7) == 0x05;
-      const auto displacement_offset = candidate_size == 5 ? 1 : 3;
-      const auto destination =
-          static_cast<std::int64_t>(rva) + candidate_size + static_cast<std::int32_t>(u32(instruction + displacement_offset));
-      if (!matches_opcode || destination != reference.target_rva) {
+      const auto* function_read_instruction = bytes.data() + offset;
+      if (!candidate_opcode(function_read_instruction, candidate_size) ||
+          candidate_destination(function_read_instruction, candidate_size, rva) != reference.target_rva) {
         return false;
       }
       found = true;
@@ -197,12 +197,12 @@ ReferenceInventory scan_references(ImageReader& reader,
     }
     std::uint32_t offset = section.rva;
     while (offset < section.rva + section.size) {
-      if (result.code_bytes >= kCodeLimit) {
+      if (result.code_bytes >= kMaximumScannedCodeBytes) {
         result.code_limit_reached = true;
         return result;
       }
       const auto count = std::min<std::uint32_t>(
-          {kChunk, section.rva + section.size - offset, static_cast<std::uint32_t>(kCodeLimit - result.code_bytes)});
+          {kChunk, section.rva + section.size - offset, static_cast<std::uint32_t>(kMaximumScannedCodeBytes - result.code_bytes)});
       const auto overlap = std::min<std::uint32_t>(candidate_size - 1, section.rva + section.size - offset - count);
       result.code_bytes += count;
       if (!reader.read(offset, buffer.data(), count + overlap)) {
@@ -211,20 +211,16 @@ ReferenceInventory scan_references(ImageReader& reader,
         continue;
       }
       for (std::uint32_t i = 0; i < count && i + candidate_size <= count + overlap; ++i) {
-        const bool matches_opcode =
-            candidate_size == 5 ? buffer[i] == 0xe8 : (buffer[i] & 0xf8) == 0x48 && buffer[i + 1] == 0x8d && (buffer[i + 2] & 0xc7) == 0x05;
-        if (!matches_opcode) {
+        if (!candidate_opcode(buffer.data() + i, candidate_size)) {
           continue;
         }
         const auto instruction_rva = offset + i;
-        const auto displacement_offset = candidate_size == 5 ? 1 : 3;
-        const auto destination = static_cast<std::int64_t>(instruction_rva) + candidate_size +
-                                 static_cast<std::int32_t>(u32(buffer.data() + i + displacement_offset));
+        const auto destination = candidate_destination(buffer.data() + i, candidate_size, instruction_rva);
         for (const auto& target : targets) {
           if (destination != target.rva) {
             continue;
           }
-          if (result.candidate_count >= 1024 || result.references.size() >= kReferenceLimit) {
+          if (result.candidate_count >= kMaximumReferenceCandidates || result.references.size() >= kMaximumCodeReferences) {
             result.reference_limit_reached = true;
             return result;
           }
@@ -257,7 +253,7 @@ ReferenceInventory scan_references(ImageReader& reader,
   return result;
 }
 
-}  // namespace
+}
 
 ReferenceInventory find_literal_references(ImageReader& reader,
                                            const Inventory& image,
@@ -281,7 +277,7 @@ ReferenceInventory find_direct_call_references(ImageReader& reader,
                                                const std::vector<LiteralTarget>& required_literals,
                                                const std::vector<CodeTarget>& targets) {
   ReferenceInventory result;
-  if (targets.empty() || targets.size() > 8) {
+  if (targets.empty() || targets.size() > kMaximumExplicitTargets) {
     result.error = "Between one and eight explicit direct-call target RVAs are required.";
     return result;
   }
@@ -311,12 +307,12 @@ FunctionInventory inspect_function_contexts(ImageReader& reader,
                                             const std::vector<std::uint32_t>& instruction_rvas,
                                             std::uint32_t prefix_limit) {
   FunctionInventory result;
-  if (prefix_limit == 0 || prefix_limit > 16384) {
+  if (prefix_limit == 0 || prefix_limit > kMaximumFunctionPrefixBytes) {
     result.error = "The function prefix limit must be between 1 and 16384 bytes.";
     result.partial = true;
     return result;
   }
-  if (instruction_rvas.empty() || instruction_rvas.size() > 8) {
+  if (instruction_rvas.empty() || instruction_rvas.size() > kMaximumExplicitTargets) {
     result.error = "Between one and eight explicit instruction RVAs are required.";
     result.partial = true;
     return result;
@@ -343,7 +339,7 @@ FunctionInventory inspect_function_contexts(ImageReader& reader,
     } else {
       context.function_begin_rva = function->begin;
       context.function_end_rva = function->end;
-      const auto remaining = static_cast<std::uint32_t>(32768 - result.code_bytes);
+      const auto remaining = static_cast<std::uint32_t>(kFunctionContextBudgetBytes - result.code_bytes);
       const auto count = std::min<std::uint32_t>({prefix_limit, function->end - function->begin, remaining});
       context.truncated = count < function->end - function->begin;
       if (count == 0) {
@@ -354,8 +350,6 @@ FunctionInventory inspect_function_contexts(ImageReader& reader,
         result.functions.push_back(std::move(context));
         continue;
       }
-      // Charge each attempted prefix to the aggregate budget, including failed
-      // reads. No additional executable range or catch-up read is inspected.
       std::vector<std::uint8_t> bytes(count);
       result.code_bytes += count;
       if (!reader.read(function->begin, bytes.data(), bytes.size())) {
@@ -404,4 +398,4 @@ FunctionInventory inspect_function_contexts(ImageReader& reader,
   return result;
 }
 
-}  // namespace taxi_camera::discovery
+}
