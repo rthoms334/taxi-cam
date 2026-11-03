@@ -6,12 +6,12 @@
       "features": [
         {
           "title": "Door camera",
-          "text": "See into the cabin from the flight deck, as a live feed or a snapshot: your choice. Every aircraft now has a door camera, the PMDG 777 included, on a cockpit display of its own (the lower one by default). Ctrl + Shift + V, a controller button or a cockpit switch turns it on. On both A380s and the iniBuilds A340-300 the VIDEO button shows the cabin, and the Fenix A320 joins after a quick Setup.",
+          "text": "See into the cabin from the flight deck, as a live feed or a snapshot: your choice. Every aircraft now has a door camera, the PMDG 777 included, on a cockpit display of its own (the lower one by default). Ctrl + Shift + V, a controller button or a cockpit switch with an L:var toggles it. Both A380s and the iniBuilds A340-300 show it on their VIDEO button, and the Fenix A320 after a quick Setup.",
           "image": "docs/whats-new/1.3.0/door-camera.jpg"
         },
         {
           "title": "Make the door camera yours",
-          "text": "Setup → Door camera puts it on the display you want, as a fresh picture each time it turns on (Snapshot) or a live feed (Live). Aim it in the live view, then place it anywhere on the display at any shape you like: the camera renders to fit, with nothing stretched. On the A380s and A350s the lower display can be any cockpit panel, an MFD included.",
+          "text": "Setup → Door camera puts it on the display you want, as a fresh picture each time it turns on (Snapshot) or a live feed (Live). Aim it in the live view, then place it anywhere on the display at any shape you like: the camera renders at that shape. On the A380s and A350s the lower display can be any cockpit panel, an MFD included.",
           "image": "docs/whats-new/1.3.0/door-camera-setup.png"
         },
         {
