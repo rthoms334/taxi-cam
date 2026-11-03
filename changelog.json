@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.3.2",
+      "date": "2026-11-03",
+      "fixes": [
+        "Moving or resizing a display's camera area during a flight no longer leaves PLEASE WAIT on the display: the cameras come back at the new shape."
+      ]
+    },
+    {
       "version": "1.3.1",
       "date": "2026-11-03",
       "fixes": [

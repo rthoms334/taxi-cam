@@ -340,6 +340,37 @@ void run() {
   transition.rebase({resized[0].dimensions, resized[1].dimensions});
   require(transition.inspect(owner, original, resized) == Transition::Decision::ready, "A rebased pair awaiting output was refused");
   require(transition.inspect(owner, original, ready_views()) == Transition::Decision::refused, "Old dimensions passed after a rebase");
+  // The output routine replaces the output: between the old one going and the
+  // new one appearing the views have none (2026-11-03, PMDG 777 display-area
+  // moves). That is the resize's own wait, not a changed identity.
+  auto replacing = resized;
+  for (auto& view : replacing)
+    if (view.complete) {
+      view.resource_present = false;
+      view.resource_address = 0;
+      view.output_dimensions = {};
+    }
+  transition.begin(2, original, dimensions);
+  transition.rebase({resized[0].dimensions, resized[1].dimensions});
+  require(transition.inspect(owner, original, replacing) == Transition::Decision::ready,
+          "A rebased pair whose output is being replaced was refused");
+  auto moved = replacing;
+  moved[1].camera_address = 0;
+  transition.begin(2, original, dimensions);
+  transition.rebase({resized[0].dimensions, resized[1].dimensions});
+  require(transition.inspect(owner, original, moved) == Transition::Decision::refused, "A view without its camera passed while resizing");
+  transition.begin(2, original, dimensions);
+  transition.rebase({resized[0].dimensions, resized[1].dimensions});
+  transition.resized();
+  require(transition.inspect(owner, original, replacing) == Transition::Decision::refused, "A resized pair passed without any output");
+  auto shared = resized;
+  shared[1].resource_address = shared[0].resource_address;
+  transition.begin(2, original, dimensions);
+  transition.rebase({resized[0].dimensions, resized[1].dimensions});
+  require(transition.inspect(owner, original, shared) == Transition::Decision::refused,
+          "Two views sharing one output passed while resizing");
+  transition.begin(2, original, dimensions);
+  require(transition.inspect(owner, original, replacing) == Transition::Decision::refused, "A pair without output passed unrebased");
   transition.begin(2, original, dimensions);
   transition.rebase({resized[0].dimensions, resized[1].dimensions});
   transition.resized();

@@ -1724,6 +1724,12 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   const std::lock_guard lock(runtime.mutex);
   if (token == runtime.profile_transition_token) {
     runtime.profile_transition = transition;
+    // Once the bridge has resumed the kept pair it no longer waits on this
+    // transition, so a refusal now would leave the cameras closed for the
+    // rest of the simulator session. The observer takes the full reset
+    // instead, which the bridge follows as a transition of its own.
+    if (resume_requested && transition.failed())
+      runtime.kept_resize_refused = true;
     if (validated)
       runtime.aircraft_profile = runtime.requested_profile;
     if (pose_ready && runtime.retained_restart_requested && start_revision == runtime.requested_start_revision &&

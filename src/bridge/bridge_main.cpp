@@ -1464,11 +1464,27 @@ DWORD run_impl() {
       log_status(status, detail);
     }
     const bool reapply = layout_changed || (choices_changed && (settings.profile != applied_profile || reshaped));
+    // The camera manager retired the cameras this loop already requested (a
+    // kept pair it could not resize or revalidate): follow its transition and
+    // request them again, or they stay off until the next aircraft change.
+    bool manager_transition = false;
+    if (connected && settings.enabled && !changing_profile && applied_profile) {
+      const auto manager = native_camera::scene_snapshot();
+      manager_transition =
+          camera_manager_transition(transition_token, manager, session.ready && !session.loading && session_epoch == applied_session_epoch);
+      if (manager_transition) {
+        char detail[512];
+        std::snprintf(detail, sizeof(detail), "Camera manager transition: token=%llu applied_token=%llu failed=%u message=%.300s",
+                      static_cast<unsigned long long>(manager.profile_transition_token), static_cast<unsigned long long>(transition_token),
+                      manager.profile_transition_failed, manager.message.c_str());
+        log_status(status, detail);
+      }
+    }
     if (connected && settings.enabled &&
         (changing_profile || connection.started || connection.generation != applied_connection || settings.profile != applied_profile ||
-         settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch || reapply)) {
+         settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch || reapply || manager_transition)) {
       if (!changing_profile || settings.profile != pending_profile || settings.profile_request != pending_profile_request ||
-          session_epoch != pending_session_epoch || connection.generation != pending_connection || layout_changed) {
+          session_epoch != pending_session_epoch || connection.generation != pending_connection || layout_changed || manager_transition) {
         const bool full_reset =
             pending_full_reset ||
             (applied_profile && (settings.profile != applied_profile || layout_changed || session_epoch != applied_session_epoch));
