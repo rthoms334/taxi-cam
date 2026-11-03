@@ -780,6 +780,85 @@ void display_session_reset_checks() {
   r.ready = old_ready;
   r.close_forward_verified = old_verified;
 }
+// The planner runs on the application's submit thread while other recording
+// threads take the registry for short hook calls. An Execute planned without
+// it carries no camera copy, so it waits within the submit budget: a holder
+// that lets go in time is waited for, one that does not is given up on.
+void submission_registry_wait_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_verified = r.close_forward_verified;
+  const auto old_key = r.key;
+  const auto* old_profile = r.profile;
+  auto item = std::make_shared<win::List>();
+  item->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x7a0000);
+  item->id = 795;
+  item->observation_epoch = r.observation_epoch.load();
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x8a0000);
+  target->id = 895;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  item->submission_proof.reset(1, true);
+  item->submission_proof.observe_legacy({reinterpret_cast<std::uint64_t>(target->native), target->id}, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_COMMON, 0);
+  item->submission_proof.close(1, true);
+  item->closed_recording = 1;
+  r.lists[item->native] = item;
+  target->display_shape = target->display_shape || win::display_shaped(target->desc);  // As admission decides it.
+  r.resources[target->native] = target;
+  r.profile = &taxi_camera::profiles::A380;
+  r.ready = r.close_forward_verified = true;
+  r.key = 0;  // No runtime device/patch exists. Tokens above must never reach COM.
+  ID3D12CommandList* batch[]{item->native};
+  const auto busy = static_cast<unsigned>(win::DisplaySubmissionOutcome::registry_busy);
+  const auto plan_while_held = [&](std::uint64_t hold_us) {
+    std::atomic<bool> held{false};
+    std::thread owner([&] {
+      const std::lock_guard guard(r.mutex);
+      held.store(true, std::memory_order_release);
+      const auto until = taxi_camera::bounded_lock_now_us() + hold_us;
+      while (taxi_camera::bounded_lock_now_us() < until)
+        SwitchToThread();
+    });
+    while (!held.load(std::memory_order_acquire))
+      SwitchToThread();
+    const auto started = taxi_camera::bounded_lock_now_us();
+    taxi_camera::SceneCaptureManager::DisplaySubmissionPlan plan;
+    win::plan_display_submission(nullptr, nullptr, 1, batch, plan);
+    const auto waited = taxi_camera::bounded_lock_now_us() - started;
+    owner.join();
+    return waited;
+  };
+  // A short hold, as a recording thread's hook call: the planner reads the
+  // batch (crediting the display's activity) instead of reporting busy.
+  auto busy_before = r.queue_outcomes[busy].load();
+  auto activity_before = target->submission_activity.load();
+  plan_while_held(taxi_camera::wait_budget::submit_us / 10);
+  require(r.queue_outcomes[busy] == busy_before && target->submission_activity == activity_before + 1,
+          "A registry hold shorter than the submit budget left the Execute unplanned");
+  // A hold past the budget: the submit thread gives up in bounded time.
+  busy_before = r.queue_outcomes[busy].load();
+  activity_before = target->submission_activity.load();
+  const auto waited = plan_while_held(taxi_camera::wait_budget::submit_us * 50);
+  require(r.queue_outcomes[busy] == busy_before + 1 && target->submission_activity == activity_before,
+          "A registry hold past the submit budget was not reported busy");
+  require(waited >= taxi_camera::wait_budget::submit_us / 2 && waited < taxi_camera::wait_budget::submit_us * 40,
+          "The planner's registry wait did not respect the submit budget");
+  r.lists.erase(item->native);
+  r.resources.erase(target->native);
+  r.key = old_key;
+  r.profile = old_profile;
+  r.close_forward_verified = old_verified;
+  r.ready = old_ready;
+}
 void inventory_checks() {
   namespace win = taxi_camera::standalone;
   auto& r = win::registry();
@@ -1130,6 +1209,7 @@ int main() {
     deferred_settlement_checks();
     known_list_and_idle_checks();
     display_session_reset_checks();
+    submission_registry_wait_checks();
     inventory_checks();
     auto& r = win::registry();
     auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x1000);

@@ -2984,8 +2984,12 @@ void drain_deferred_settlements(Registry& r) noexcept {
   }
 }
 // Called before manager/runtime submission serialization. The patch snapshot
-// is nonblocking, and the registry is only try-locked: missing metadata must
-// never make ExecuteCommandLists wait for discovery or composition.
+// is nonblocking: missing metadata must never make ExecuteCommandLists wait
+// for discovery or composition. The registry waits up to the submit budget,
+// like the ordering that follows: its holders are other recording threads'
+// short hook calls, and an Execute planned without it sends the instrument's
+// writes out with no camera copy (the shadow holds Close stamps), so the
+// aircraft's own picture shows until a later Execute covers it.
 void plan_display_submission(void*,
                              ID3D12CommandQueue* queue,
                              UINT count,
@@ -3012,7 +3016,7 @@ void plan_display_submission(void*,
   const auto generation = r.queue_patch_generation.load(std::memory_order_acquire);
   runtime::QueuePatchSnapshot patches;
   runtime::try_snapshot_queue_patches(r.key, generation, patches);
-  const std::unique_lock lock(r.mutex, std::try_to_lock);
+  const BoundedLock lock(r.mutex, wait_budget::submit_us, nullptr, hook_timing::registry_lock);
   const HoldTimer hold(registry_lock_holds(), __LINE__, lock.owns_lock());
   if (!lock.owns_lock()) {
     outcome(DisplaySubmissionOutcome::registry_busy);
