@@ -139,7 +139,7 @@ To remove the mod, close both applications and uninstall **Taxi Cam** from Windo
 
 ## Reporting a problem
 
-Click the app's **bug icon** or choose **Report a bug** in the tray menu. Describe what happened and follow the form's prompts for logs and screenshots. **Diagnostics → Open log folder** takes you to the files you may need.
+Click the app's **bug icon** or choose **Report a bug** in the tray menu. Taxi Cam opens the GitHub form with your Taxi Cam, MSFS, aircraft, Windows and graphics details filled in, and saves a report file with your logs and settings. File Explorer opens with the file selected: describe what happened, then drag the file into the form's **Logs** box. Your Windows user and computer names are removed from the file, but check the form before you submit, because GitHub issues are public. You need a GitHub account to submit.
 
 You can also [open a bug report on GitHub](https://github.com/rthoms334/taxi-cam/issues/new?template=bug_report.yml).
 
