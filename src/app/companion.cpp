@@ -1955,6 +1955,10 @@ void sync_setup(const win::Status& sample) {
   setup.synced = true;
   setup.key = key;
   setup.built_in = built_in;
+  // Saves and the cameras to give back belong to the aircraft they were made
+  // for: another one starts without them.
+  setup.stored = setup.unsaved = setup.leave_warned = false;
+  setup.manual_before = setup.door_on_before = 0;
   setup.names = {};
   // Each display starts on the texture it uses in this flight: the one the
   // user placed, else the bridge's.
@@ -1992,7 +1996,9 @@ std::wstring setup_aircraft_name() {
 bool names_unpaired(const win::Status& sample) {
   if (sample.panel_shift >= 0 || static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::paired)
     return false;
-  const auto s = draft();
+  // The saved profile: a setup's trial runs the picks themselves, which are
+  // not names saved for this aircraft.
+  const auto s = setup.trial ? setup.before : draft();
   if (const auto* built_in = setup.built_in ? profiles::find(setup.built_in) : nullptr)
     return built_in->panel_textures[0] && built_in->panel_textures[0][0];
   return s.profile == profiles::DiscoveredProfileId && setup.key[0] && profiles::same_variant(setup.key.data(), s.discovered.key);
@@ -2063,12 +2069,10 @@ void route_picks(win::Settings& s, const std::vector<win::PanelTexture>& items) 
   win::update_target_assignment(s.left_id, s.right_id, s.route_request, left, right == left ? 0 : right);
 }
 // Setup previews on the placed displays: a taxi camera on each, but the door
-// camera on its own display (the lower one unless chosen), as in flight,
-// rather than a taxi camera there until Door is picked in the live view.
+// camera on its own display, as in flight, rather than a taxi camera there
+// until Door is picked in the live view. A door camera set to no display (the
+// user's choice in Setup → Door camera) leaves that display a taxi camera.
 void preview_cameras(win::Settings& s, unsigned placed) {
-  constexpr unsigned lower = MaxDisplaySides - 1;
-  if (s.door_side == win::DoorSideNone && (placed & (1u << lower)))
-    s.door_side = lower;
   const unsigned door = s.door_side < MaxDisplaySides && (placed & (1u << s.door_side)) ? 1u << s.door_side : 0u;
   s.manual_mask = placed & ~door;
   s.door_on = door ? 1u : 0u;
@@ -2127,9 +2131,15 @@ void apply_setup_trial() {
     names[side] = setup.names[side].empty() ? fallback : setup.names[side].c_str();
   profiles::DiscoveredLayout layout;
   if (!fallback || win::learn_layout(sample, names, sides, layout, false) != win::LayoutLearning::learned) {
-    // Without a test asked for, the cameras wait for a placed display.
-    if (!setup.testing)
+    // Without a test asked for, the cameras wait for a placed display, and a
+    // test just turned off takes its bars down (the map may be pairing again).
+    if (!setup.testing) {
+      if (setup.trial && s.calibration_mask) {
+        s.calibration_mask = 0;
+        publish(s);
+      }
       return;
+    }
     setup.testing = 0;
     notice = fallback ? tr(L"The cockpit test needs the panel list. Wait for the pictures, then try again.") : tr(L"Pick a panel first.");
     InvalidateRect(window, nullptr, FALSE);
@@ -2191,6 +2201,7 @@ void route_placed_displays() {
     publish(s);
 }
 bool store_aircraft_setup(const win::Status& sample, bool quiet);
+bool save_setup_picks(const win::Status& sample, bool quiet);
 void apply_setup_picks();
 void refresh_setup_picking();
 // One panel per side: placing another side's panel swaps the two.
@@ -2242,27 +2253,26 @@ void swap_pilot_displays() {
   refresh_setup_picking();
   RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
-// The picks changed (a drop or a swap). An aircraft being set up saves each
-// change that completes its displays, so its cameras run there and stay
-// whichever step comes next. Until then (or while a test runs) its picks run
-// as the trial. A built-in profile's running test follows the new picks;
-// otherwise they are this flight's routes at once.
+// The picks changed (a drop or a swap): they save at once, like every other
+// change, so an aircraft's cameras run there and stay whichever step comes
+// next. Picks that cannot save yet stay unsaved and save once they can
+// (retry_unsaved_setup, leaving Displays), a cockpit test's after it ends.
+// Meanwhile an aircraft being set up runs them as the trial, and a built-in
+// profile's are this flight's routes.
 void apply_setup_picks() {
-  if (!setup.built_in && !setup.testing) {
-    win::Status sample;
-    {
-      const std::lock_guard lock(app_mutex);
-      sample = status;
-    }
-    setup.unsaved = true;
-    setup.leave_warned = false;
-    if (!setup_blocker(sample).empty() || !store_aircraft_setup(sample, true))
-      apply_setup_trial();
-  } else if (setup.testing) {
-    apply_setup_trial();
-  } else {
-    route_placed_displays();
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
   }
+  setup.unsaved = true;
+  setup.leave_warned = false;
+  if (!setup.testing && save_setup_picks(sample, true))
+    return;
+  if (!setup.built_in || setup.testing)
+    apply_setup_trial();
+  else
+    route_placed_displays();
 }
 // The displays' Test in cockpit, or Place here while a panel is picked.
 void refresh_setup_picking() {
@@ -2458,12 +2468,13 @@ void live_keep_camera(const win::Settings& s, const win::Status& sample, const p
   if (side >= MaxDisplaySides || !fresh_status(sample) || !sample.graphics_ready || s.calibration_mask || s.scene_test)
     return;
   auto next = s;
-  if (s.profile == profiles::DiscoveredProfileId) {
+  if (s.profile == profiles::DiscoveredProfileId && !live_view.camera_taken) {
     // A set-up aircraft previews every display it was set up on, the door
     // camera on its own display, as its setup does (one PFD only showed a
-    // camera, 2026-11-03).
+    // camera, 2026-11-03). Once: a camera turned off meanwhile stays off,
+    // and afterwards only the display shown is kept on, as below.
     preview_cameras(next, profiles::side_mask(profile));
-    if (next.manual_mask == s.manual_mask && next.door_on == s.door_on && next.door_side == s.door_side)
+    if (next.manual_mask == s.manual_mask && next.door_on == s.door_on)
       return;
   } else {
     if (live_cameras_on(s, sample, profile) & (1u << side))
@@ -2525,14 +2536,8 @@ void live_keep_door(const win::Settings& loaded) {
   auto s = loaded;
   if (live_view.door_taken && !door_hold_current(s))
     s = release_door_hold(s);
-  // No door display is never the user's choice: an aircraft with a lower
-  // display shows the door camera there (a set-up FSLabs A321 saved before its
-  // lower display was placed kept none, 2026-11-03). Saving keeps it.
-  if (s.door_side == win::DoorSideNone)
-    if (const auto* profile = profiles::find(s.profile); profile && (profiles::side_mask(*profile) & (1u << (MaxDisplaySides - 1))))
-      s.door_side = MaxDisplaySides - 1;
   if (!win::door_camera_set_up(s) || (s.door_on && s.door_live)) {
-    if ((s.door_live != loaded.door_live || s.door_side != loaded.door_side) && win::valid_settings(s))
+    if (s.door_live != loaded.door_live && win::valid_settings(s))
       publish(s);
     return;
   }
@@ -3785,8 +3790,11 @@ void paint_live_view(HWND hwnd, HDC dc) {
   else if (!fresh_status(sample) || !sample.graphics_ready)
     caption = tr(L"Choose Connect with a flight loaded to see the cameras.");
   // The door camera without a display: the picture stays on a taxi camera's.
+  // With a lower display placed, none is the user's choice in Door camera.
   else if (live_door(*profile) && !win::door_camera_set_up(s))
-    caption = tr(L"Place the lower display in Setup > Displays to show the door camera there.");
+    caption = profiles::side_mask(*profile) & (1u << (MaxDisplaySides - 1))
+                  ? tr(L"Choose the display it fills. The lower display is the usual place.")
+                  : tr(L"Place the lower display in Setup > Displays to show the door camera there.");
   else if (!live_view.id)
     caption = tr(L"Waiting for a display to be found for this aircraft.");
   else {
@@ -4478,10 +4486,12 @@ void open_aircraft_setup() {
 // A built-in profile's display choices: saved with the profile and applied
 // at once. Saved picks go on to Taxi cameras; the profile's own displays stay
 // on Displays to show them.
-void save_built_in_displays(bool built_in_only) {
+// stay: a drop's save, which keeps Displays open and the bridge tracking every
+// panel for its gallery. False when nothing was saved.
+bool save_built_in_displays(bool built_in_only, bool stay = false) {
   const auto* base = profiles::base_profile(setup.built_in);
   if (!base)
-    return;
+    return false;
   win::Status sample;
   {
     const std::lock_guard lock(app_mutex);
@@ -4503,26 +4513,29 @@ void save_built_in_displays(bool built_in_only) {
   }
   // Without its placed lower display the door camera has none.
   win::fit_door_camera(s);
-  s.panel_setup = 0;
+  s.panel_setup = stay ? 1 : 0;
   if (!win::valid_settings(s) || !win::save_settings(s)) {
     notice = tr(L"Could not save these displays. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
-    return;
+    return false;
   }
   publish(s);
   dirty = false;
+  setup.unsaved = false;
   if (built_in_only) {
     setup.key = {};  // The picks start again from the profile's own.
     setup.synced = false;
     s.panel_setup = 1;
     publish(s);
-  } else {
+  } else if (!stay) {
     page = CamerasPage;
   }
-  build_controls();
+  if (!stay)
+    build_controls();
   notice =
       built_in_only ? tr(L"The profile's own displays are back.") : tr(L"Saved. These displays are used for this aircraft from now on.");
   InvalidateRect(window, nullptr, FALSE);
+  return true;
 }
 // Learns the layout from the picks and the bridge's panel map, saves it for
 // this variant and selects it with the cameras on every placed display.
@@ -4570,10 +4583,11 @@ bool store_aircraft_setup(const win::Status& sample, bool quiet) {
   }
   next.enabled = s.enabled;
   const bool same = earlier.profile == profiles::DiscoveredProfileId && profiles::same_variant(layout.key, earlier.discovered.key);
-  // A placed lower display is where the door camera goes, as on a built-in
-  // profile. Saved first without one, the variant kept no door display
-  // (FSLabs A321, 2026-11-03: lower display placed after the pilots' PFDs).
-  if (next.door_side == win::DoorSideNone && layout.sides == MaxDisplaySides)
+  // A newly placed lower display is where the door camera goes, as on a
+  // built-in profile: saved first without one, the variant kept no door
+  // display (FSLabs A321, 2026-11-03). A door camera set to none with the
+  // lower display already placed is the user's choice and stays.
+  if (next.door_side == win::DoorSideNone && layout.sides == MaxDisplaySides && (!same || earlier.discovered.sides < MaxDisplaySides))
     next.door_side = MaxDisplaySides - 1;
   if (!win::prepare_profile_selection(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
     notice = tr(L"Could not save this aircraft. Check access to your local settings folder.");
@@ -4628,16 +4642,23 @@ void start_positioning() {
 }
 // A drop saved late, on Displays: once nothing blocks it (the map pairs again
 // after a save restarts the cameras). Picks not complete stay the trial.
+// Saves the picks where nothing blocks them: a built-in profile's display
+// choices, or the aircraft being set up. Quiet: a drop's or a retry's save,
+// which stays on Displays. False when nothing was saved.
+bool save_setup_picks(const win::Status& sample, bool quiet) {
+  if (!setup_blocker(sample).empty())
+    return false;
+  return setup.built_in ? save_built_in_displays(false, true) : store_aircraft_setup(sample, quiet);
+}
 void retry_unsaved_setup() {
-  if (!setup.unsaved || page != SetupPage || setup.built_in || setup.testing || setup.dragging)
+  if (!setup.unsaved || page != SetupPage || setup.testing || setup.dragging)
     return;
   win::Status sample;
   {
     const std::lock_guard lock(app_mutex);
     sample = status;
   }
-  if (setup_blocker(sample).empty())
-    store_aircraft_setup(sample, true);
+  save_setup_picks(sample, true);
 }
 void save_aircraft_setup() {
   win::Status sample;
