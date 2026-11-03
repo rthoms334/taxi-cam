@@ -26,7 +26,7 @@
         },
         {
           "title": "Taxi Cam in your language",
-          "text": "Taxi Cam now speaks German, Spanish, French and Simplified Chinese (thanks to JCH2333), following your Windows display language. Want a different one? Pick it under Language in the tray menu or Settings → Menu. Know a better wording? Suggest it on GitHub and help polish the translations.",
+          "text": "The tray menu and Settings now speak German, Spanish, French and Simplified Chinese (thanks to JCH2333), following your Windows display language. Want a different one? Pick it under Language in the tray menu or Settings → Menu. Know a better wording? Suggest it on GitHub and help polish the translations.",
           "image": "docs/whats-new/1.3.0/language.png"
         },
         {
@@ -36,12 +36,12 @@
       ],
       "fixes": [
         "Setup → Displays now lists every cockpit display on built-in aircraft, not just the ones the size of their PFDs.",
-        "Displays keep their pictures and names when an aircraft swaps its display textures mid-flight, as the FlyByWire A380X does after loading.",
+        "On built-in and set-up aircraft, displays now keep their pictures and names when the aircraft swaps its display textures mid-flight, as the FlyByWire A380X does after loading.",
         "Dragging in the live view now turns the camera the way you drag, just like the simulator's mouse look.",
-        "Fixed freezes of several seconds that some PMDG 777 pilots saw with the cameras on.",
-        "If the simulator keeps stalling, the cameras now switch off and stay off instead of flickering on and off, and Taxi Cam tells you. Turn them back on whenever you're ready.",
+        "Taxi Cam no longer holds up the simulator for unfinished camera work, except while it captures a camera picture. This targets the multi-second freezes reported on the PMDG 777.",
+        "If the simulator keeps stalling, the cameras now switch off and stay off instead of flickering on and off, and Taxi Cam tells you. Turn them off and on again to retry.",
         "The First camera only setting, which stopped the cameras from starting, is gone. If you had it on, your cameras now start as normal.",
-        "When the simulator starts Taxi Cam, Taxi Cam now closes shortly after the simulator does, so Steam no longer shows the simulator as still running.",
+        "When the simulator starts Taxi Cam, Taxi Cam now closes shortly after the simulator does, so Steam no longer shows the simulator as still running. Unsaved Settings changes are discarded when it closes.",
         "The frames-stalled warning no longer pops up while the cameras are off, such as while a flight loads or the simulator quits."
       ]
     },
