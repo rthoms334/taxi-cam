@@ -12,6 +12,18 @@ inline const char* camera_transition_message(const native_camera::ProbeSnapshot&
   return "Closing and validating retained camera views for the aircraft profile.";
 }
 
+// The camera manager began a transition of its own after the bridge applied
+// one (its token moved on) while the flight stayed loaded: it retired a kept
+// pair it could not resize or revalidate, or latched a session reset. The
+// bridge has already requested its cameras, so it waits for that transition
+// like its own and requests them again. A flight change (loading, or a new
+// session epoch) keeps its own transition path.
+inline bool camera_manager_transition(std::uint64_t applied_token,
+                                      const native_camera::ProbeSnapshot& scene,
+                                      bool session_unchanged) noexcept {
+  return applied_token && session_unchanged && scene.profile_transition_token != applied_token;
+}
+
 // A retained stop reason can outlive successful recovery. Only temporary
 // failures on a stopped pair (or pending cleanup) override normal capture status.
 inline const char* camera_stop_message(const native_camera::ProbeSnapshot& scene) noexcept {

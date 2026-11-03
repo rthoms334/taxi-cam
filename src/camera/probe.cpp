@@ -71,7 +71,11 @@ struct Runtime {
   // updates spent awaiting the new output, completed resizes and refusals.
   unsigned kept_resize_waits = 0;
   std::uint64_t kept_resizes = 0, kept_resize_failures = 0;
+  // A refused kept pair falls back to the full reset only for the transition
+  // it was refused in (its token); a newer transition starts without it.
+  // Observer thread only.
   bool kept_resize_refused = false;
+  std::uint64_t kept_resize_token = 0;
   std::atomic<std::uint64_t> scene_session_epoch{0};
   bool retained_restart_requested = false;
   profiles::CameraPanes allocation_panes = profiles::A380.camera_panes;
@@ -1701,6 +1705,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
     if (panes == KeptPanes::failed) {
       ++runtime.kept_resize_failures;
       runtime.kept_resize_refused = true;
+      runtime.kept_resize_token = token;
       transition.refuse();
       validated = false;
     } else if (panes == KeptPanes::pending || runtime.resized_dimensions != before) {
@@ -1724,6 +1729,14 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   const std::lock_guard lock(runtime.mutex);
   if (token == runtime.profile_transition_token) {
     runtime.profile_transition = transition;
+    // Once the bridge has resumed the kept pair it no longer waits on this
+    // transition, so a refusal now would leave the cameras closed for the
+    // rest of the simulator session. The observer takes the full reset
+    // instead, which the bridge follows as a transition of its own.
+    if (resume_requested && transition.failed()) {
+      runtime.kept_resize_refused = true;
+      runtime.kept_resize_token = token;
+    }
     if (validated)
       runtime.aircraft_profile = runtime.requested_profile;
     if (pose_ready && runtime.retained_restart_requested && start_revision == runtime.requested_start_revision &&
@@ -2311,6 +2324,9 @@ void observer(void* manager) noexcept {
       const std::lock_guard lock(runtime.mutex);
       if (!ec::any_owned(before.owned_ids) && !before.creation_pending)
         runtime.aircraft_profile = runtime.requested_profile;
+      // A refusal recorded for an earlier transition never decides a newer one.
+      if (runtime.kept_resize_refused && runtime.kept_resize_token != runtime.profile_transition_token)
+        runtime.kept_resize_refused = false;
       if ((runtime.flight_change_hold || runtime.kept_resize_refused) && runtime.profile_transition.failed()) {
         // The kept pair could not be revalidated or resized: the full reset
         // retires it and creates a new one.

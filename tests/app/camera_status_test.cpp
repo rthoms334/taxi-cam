@@ -57,5 +57,17 @@ int main() {
   scene.pair.owned_ids = {1001, 1002};
   require(std::strstr(camera_transition_message(scene), "retained camera views"),
           "Existing-camera transition lost its retained lifecycle status");
+  // The camera manager started a transition of its own after the bridge
+  // applied one, such as the full reset it takes for a kept pair it could not
+  // resize: its new token sends the bridge back to the transition so the
+  // cameras are requested again. (2026-11-03, PMDG 777: after that reset the
+  // cameras stayed off until the next display-area change.)
+  native_camera::ProbeSnapshot manager;
+  manager.profile_transition_token = 14;
+  require(!camera_manager_transition(14, manager, true), "The bridge's own applied transition was taken for a new one");
+  require(!camera_manager_transition(0, manager, true), "No applied transition yet (or a stopped connection) was taken for one");
+  manager.profile_transition_token = 16;
+  require(camera_manager_transition(14, manager, true), "The camera manager's own reset after a resume was not followed");
+  require(!camera_manager_transition(14, manager, false), "A flight change left its own transition path");
   std::printf("Camera status: PASS %u checks\n", checks);
 }
