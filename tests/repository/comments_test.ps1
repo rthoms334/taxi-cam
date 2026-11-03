@@ -172,7 +172,8 @@ if ($LowerBaseline) {
         $count = [Math]::Min($baseline[$file], $(if ($counts.ContainsKey($file)) { $counts[$file] } else { 0 }))
         if ($count -gt 0) { $lowered[$file] = $count }
     }
-    [IO.File]::WriteAllText($baselinePath, ($lowered | ConvertTo-Json) + "`n", $utf8)
+    $entries = @($lowered.Keys | ForEach-Object { '    "' + $_ + '": ' + $lowered[$_] })
+    [IO.File]::WriteAllText($baselinePath, "{`n" + ($entries -join ",`n") + "`n}`n", $utf8)
     Write-Output "Comment baseline lowered: $($lowered.Count) files keep $(@($lowered.Values | Measure-Object -Sum).Sum) existing comments."
     return
 }
