@@ -135,7 +135,7 @@ struct Candidate {
 };
 // Protocol 26: one textured VCockpit panel and the texture paired with it.
 struct PanelTexture {
-  char name[32]{};     // panel-mark key, "VCockpitNN/gauge" (mark_identity.hpp)
+  char name[32]{};     // panel-mark key, "@gauge" or "@gauge#rank/count" (mark_identity.hpp)
   std::uint64_t id{};  // tracked texture, 0 when the bridge does not track it
   std::uint32_t index{}, width{}, height{}, mips{};
 };

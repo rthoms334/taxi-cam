@@ -1,14 +1,25 @@
 #pragma once
 // Display identity by panel marks (claudedocs/panel-mark-identification.md).
-// Every cockpit panel page paints a block per gauge naming its panel section
-// and gauge (panel_marks.hpp); the bridge reads each panel texture once and
-// keeps here what it found. A display is named by a key: "VCockpit02/EFIS"
-// (section and gauge) or "VCockpit01" (any gauge of that section). Section
-// names repeat across MSFS 2024 attachments, so catalog keys name a gauge.
+// Every cockpit panel page paints a block per gauge naming its panel and
+// gauge (panel_marks.hpp); the bridge reads each panel texture once and keeps
+// here what it found.
+//
+// A display is named by a key built from its gauge, the one stable name: the
+// panel names a page reports ("VCockpit02") are MSFS's running numbers over
+// every attachment's panels in load order, and change between loads (the
+// Fenix A320's FAP EFB loaded first once and moved every cockpit panel up by
+// one, 2026-11-04). "@PFD_Captain" is the texture carrying that gauge; where
+// several textures carry the same gauge (the A350's two EFIS panels),
+// "@EFIS#1/2" is the second of the two, in panel number order, which a shift
+// of the whole list keeps. Such a key only resolves while exactly that many
+// textures carry the gauge.
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <utility>
 #include <vector>
 #include "panel_marks.hpp"
@@ -17,25 +28,53 @@ namespace taxi_camera::mark_identity {
 inline constexpr std::size_t KeySize = 32;
 using Key = std::array<char, KeySize>;
 
-// "section/gauge", cut to fit; a section alone without a gauge.
-inline Key make_key(const char* section, const char* gauge) noexcept {
+// "@gauge", or "@gauge#rank/count" for one of count textures carrying the
+// gauge; the gauge name is cut to fit.
+inline Key make_key(const char* gauge, unsigned rank = 0, unsigned count = 1) noexcept {
   Key key{};
+  char suffix[16]{};
+  if (count > 1)
+    std::snprintf(suffix, sizeof(suffix), "#%u/%u", rank, count);
+  const std::size_t room = key.size() - 2 - std::strlen(suffix);
   std::size_t at = 0;
-  const auto put = [&](const char* text) {
-    for (; text && *text && at + 1 < key.size(); ++text)
-      key[at++] = *text;
-  };
-  put(section);
-  if (gauge && *gauge && at + 1 < key.size()) {
-    key[at++] = '/';
-    put(gauge);
-  }
+  key[at++] = '@';
+  for (std::size_t i = 0; gauge && gauge[i] && i < room; ++i)
+    key[at++] = gauge[i];
+  for (std::size_t i = 0; suffix[i]; ++i)
+    key[at++] = suffix[i];
   return key;
 }
-// A display key as the marks write it; anything else (a panel.cfg texture=
-// name saved by an older Taxi Cam) has to be converted first.
+// A display key; anything else (a panel.cfg texture= name, or a
+// "VCockpitNN/gauge" key from a test build) has to be converted first.
 inline bool is_key(const char* name) noexcept {
-  return name && std::strncmp(name, "VCockpit", 8) == 0 && name[8] >= '0' && name[8] <= '9';
+  return name && name[0] == '@' && name[1];
+}
+struct ParsedKey {
+  std::string gauge;
+  unsigned rank = 0, count = 1;
+};
+inline bool parse_key(const char* key, ParsedKey& out) {
+  if (!is_key(key))
+    return false;
+  out = {};
+  std::string text(key + 1);
+  if (const auto hash = text.rfind('#'); hash != std::string::npos) {
+    unsigned rank = 0, count = 0;
+    char extra = 0;
+    if (std::sscanf(text.c_str() + hash, "#%u/%u%c", &rank, &count, &extra) == 2 && count > 1 && rank < count) {
+      out.rank = rank;
+      out.count = count;
+      text.resize(hash);
+    }
+  }
+  out.gauge = text;
+  return !out.gauge.empty();
+}
+// The number in a panel name ("VCockpit02" is 2), for ordering.
+inline unsigned panel_number(const char* section) noexcept {
+  while (section && *section && (*section < '0' || *section > '9'))
+    ++section;
+  return section ? static_cast<unsigned>(std::strtoul(section, nullptr, 10)) : 0;
 }
 
 struct Gauge {
@@ -50,30 +89,23 @@ struct Gauge {
     return panel_marks::texture_rect(m, texture_width, texture_height, out);
   }
 };
-inline bool matches(const char* key, const Gauge& gauge) noexcept {
-  if (!key || !*key)
-    return false;
-  const char* slash = std::strchr(key, '/');
-  const std::size_t section = slash ? static_cast<std::size_t>(slash - key) : std::strlen(key);
-  if (std::strlen(gauge.section.data()) != section || std::strncmp(key, gauge.section.data(), section) != 0)
-    return false;
-  // A key cut short to fit matches the gauge it was made from.
-  return !slash || make_key(gauge.section.data(), gauge.name.data()) == make_key(key, nullptr);
-}
-
 struct Texture {
   std::uint64_t id{};
   bool copied{};  // Marks inherited from the texture the simulator copied into this one.
   std::vector<Gauge> gauges;
-  // The texture's own key: its first gauge.
-  Key key() const noexcept {
-    if (gauges.empty())
-      return {};
-    const auto first = std::min_element(gauges.begin(), gauges.end(), [](const Gauge& a, const Gauge& b) { return a.index < b.index; });
-    return make_key(first->section.data(), first->name.data());
+  // Its identifying gauge: the first one read.
+  const Gauge* first() const noexcept {
+    return gauges.empty()
+               ? nullptr
+               : &*std::min_element(gauges.begin(), gauges.end(), [](const Gauge& a, const Gauge& b) { return a.index < b.index; });
   }
-  bool has(const char* key) const noexcept {
-    return std::any_of(gauges.begin(), gauges.end(), [&](const Gauge& gauge) { return matches(key, gauge); });
+  // The gauge of that name; a name cut short to fit a key (prefix) matches
+  // the gauge it was cut from.
+  const Gauge* gauge(const std::string& name, bool prefix = false) const noexcept {
+    for (const auto& g : gauges)
+      if (prefix ? std::strncmp(g.name.data(), name.c_str(), name.size()) == 0 : name == g.name.data())
+        return &g;
+    return nullptr;
   }
 };
 
@@ -141,28 +173,64 @@ class Store {
     }
     return taken;
   }
-  // The live texture showing the display named by key: of several (a source
-  // and its copies), the end of the copy chain, then the newest. Keys name a
-  // gauge whose block can be read: a gauge under a later gauge's block never
-  // is (legacy_display_names.hpp picks the same one).
-  std::uint64_t resolve(const char* key, const std::pair<std::uint64_t, std::uint64_t>* feeds, std::size_t count) const noexcept {
-    std::uint64_t best = 0;
-    bool best_end = false;
+  // The textures carrying a gauge, one per panel (a recreated panel's newest
+  // texture; copies follow their source), in panel number order.
+  std::vector<const Texture*> owners(const std::string& gauge, bool prefix = false) const {
+    std::vector<const Texture*> out;
     for (const auto& texture : textures_) {
-      if (!texture.has(key))
+      const auto* g = texture.copied ? nullptr : texture.gauge(gauge, prefix);
+      if (!g)
         continue;
-      bool end = true;
-      for (std::size_t i = 0; i < count && end; ++i)
-        if (feeds[i].first == texture.id) {
-          const auto* to = find(feeds[i].second);
-          end = !(to && to->has(key));
-        }
-      if (!best || (end && !best_end) || (end == best_end && texture.id > best)) {
-        best = texture.id;
-        best_end = end;
-      }
+      const auto panel = panel_number(g->section.data());
+      auto same_panel = std::find_if(out.begin(), out.end(),
+                                     [&](const Texture* t) { return panel_number(t->gauge(gauge, prefix)->section.data()) == panel; });
+      if (same_panel == out.end())
+        out.push_back(&texture);
+      else if (texture.id > (*same_panel)->id)
+        *same_panel = &texture;
     }
-    return best;
+    std::sort(out.begin(), out.end(), [&](const Texture* a, const Texture* b) {
+      return panel_number(a->gauge(gauge, prefix)->section.data()) < panel_number(b->gauge(gauge, prefix)->section.data());
+    });
+    return out;
+  }
+  // A texture's key: its identifying gauge, ranked among the textures that
+  // carry it. A copy has its source's.
+  Key key_of(const Texture& texture) const {
+    const auto* first = texture.first();
+    if (!first)
+      return {};
+    const std::string gauge = first->name.data();
+    const auto list = owners(gauge);
+    const auto panel = panel_number(first->section.data());
+    for (std::size_t i = 0; i < list.size(); ++i)
+      if (panel_number(list[i]->gauge(gauge)->section.data()) == panel)
+        return make_key(gauge.c_str(), static_cast<unsigned>(i), static_cast<unsigned>(list.size()));
+    return make_key(gauge.c_str());
+  }
+  // The live texture showing the display named by key: the gauge's texture
+  // (or the ranked one of exactly that many), then along the simulator's
+  // copies to the texture it shows.
+  std::uint64_t resolve(const char* key, const std::pair<std::uint64_t, std::uint64_t>* feeds, std::size_t count) const {
+    ParsedKey parsed;
+    if (!parse_key(key, parsed))
+      return 0;
+    // A key as long as a key can be was cut to fit: its gauge name is a prefix.
+    const auto list = owners(parsed.gauge, std::strlen(key) == KeySize - 1);
+    if (list.size() != parsed.count)
+      return 0;
+    std::uint64_t id = list[parsed.rank]->id;
+    for (std::size_t step = 0; step < count; ++step) {
+      bool moved = false;
+      for (std::size_t i = 0; i < count && !moved; ++i)
+        if (feeds[i].first == id && find(feeds[i].second)) {
+          id = feeds[i].second;
+          moved = true;
+        }
+      if (!moved)
+        break;
+    }
+    return id;
   }
 
  private:

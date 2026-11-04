@@ -414,7 +414,7 @@ void autosave_setup_tests() {
   current.auto_profile = 0;
   current.enabled = 1;
   current.mounts = profiles::A380.mounts;
-  std::strcpy(current.display_override.textures[2], "VCockpit04/sd");
+  std::strcpy(current.display_override.textures[2], "@sdv2");
   current.door_side = win::DoorSideNone;
   require(win::valid_settings(current) && win::save_settings(current), "Save the A380X with its lower display and no door display");
   publish(current);
@@ -431,7 +431,7 @@ void autosave_setup_tests() {
     status.detected_profile = profiles::A380.id;
     status.panel_count = 3;
     std::strcpy(status.aircraft_path, "SimObjects/Airplanes/FlyByWire_A380_842/aircraft.cfg");
-    const char* names[]{"VCockpit05/pfd", "VCockpit06/pfd", "VCockpit04/sd"};
+    const char* names[]{"@pfd#0/2", "@pfd#1/2", "@sdv2"};
     for (int i = 0; i < 3; ++i) {
       std::strcpy(status.panels[i].name, names[i]);
       status.panels[i].id = 901 + static_cast<std::uint64_t>(i);
@@ -441,10 +441,10 @@ void autosave_setup_tests() {
     }
   }
   command(StepPillId);
-  require(page == SetupPage && setup.built_in == profiles::A380.id && setup.names[2] == "VCockpit04/sd",
+  require(page == SetupPage && setup.built_in == profiles::A380.id && setup.names[2] == "@sdv2",
           "Displays opens on the A380X with its lower display");
   swap_pilot_displays();
-  require(win::load_settings(loaded, L"", profiles::A380.id) && std::string_view(loaded.display_override.textures[0]) == "VCockpit06/pfd" &&
+  require(win::load_settings(loaded, L"", profiles::A380.id) && std::string_view(loaded.display_override.textures[0]) == "@pfd#1/2" &&
               loaded.door_side == win::DoorSideNone,
           "A built-in swap saves at once and keeps the door camera's None");
   // A pick made during a cockpit test saves on leaving Displays.

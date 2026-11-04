@@ -133,7 +133,7 @@ struct AircraftProfile {
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
   // Each side's display by its panel-mark key (src/shared/mark_identity.hpp):
-  // "VCockpitNN/gauge" from the aircraft's panel.cfg. Empty leaves the side to
+  // "@gauge" or "@gauge#rank/count" (twins). Empty leaves the side to
   // the user's choice. A panel.cfg texture= name (an older catalog entry) is
   // converted by the companion from the aircraft's panel.cfg on first use.
   std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
@@ -240,10 +240,10 @@ inline constexpr AircraftProfile A380 = [] {
                     5};
   // Part_Interior_Cockpit panel.cfg: SCREEN_DU_PFDL, SCREEN_DU_PFDR, SCREEN_DU_SD (whose
   // sd gauge block lies under sdv2's, so its marks name it sdv2).
-  p.panel_textures = {"VCockpit05/pfd", "VCockpit06/pfd", ""};
+  p.panel_textures = {"@pfd#0/2", "@pfd#1/2", ""};
   // The system display below the EWD (panel.cfg VCockpit04, 768 x 1024 like
   // the PFDs), read from the installed package on 2026-11-02.
-  p.door_lower_texture = "VCockpit04/sdv2";
+  p.door_lower_texture = "@sdv2";
   // Door: Robert's live A380X door camera (2026-11-02) on the system display
   // above its bottom strip. The ECAM control panel's VIDEO key selects page 15
   // of A32NX_ECAM_SD_CURRENT_PAGE_INDEX (read live; -1 when it is deselected).
@@ -294,8 +294,8 @@ inline constexpr AircraftProfile A359 = [] {
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
   // Function_Interior_A350 panel.cfg: $EFIS_LEFT, $EFIS_RIGHT, $SD (live marks 2026-11-04).
-  p.panel_textures = {"VCockpit02/EFIS", "VCockpit03/EFIS", ""};
-  p.door_lower_texture = "VCockpit04/CTR";
+  p.panel_textures = {"@EFIS#0/2", "@EFIS#1/2", ""};
+  p.door_lower_texture = "@CTR";
   p.door_lower_area = A350DoorArea;
   return p;
 }();
@@ -320,8 +320,8 @@ inline constexpr AircraftProfile A35K = [] {
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
   // Function_Interior_A350 panel.cfg: $EFIS_LEFT, $EFIS_RIGHT, $SD (live marks 2026-11-04).
-  p.panel_textures = {"VCockpit02/EFIS", "VCockpit03/EFIS", ""};
-  p.door_lower_texture = "VCockpit04/CTR";
+  p.panel_textures = {"@EFIS#0/2", "@EFIS#1/2", ""};
+  p.door_lower_texture = "@CTR";
   p.door_lower_area = A350DoorArea;
   return p;
 }();
@@ -492,7 +492,7 @@ inline constexpr auto make_pmdg_777 =
       // are black. L/R stay 0.
       p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
       // Function_Interior panel.cfg: DUS and EICASCDU (live marks 2026-11-04).
-      p.panel_textures = {"VCockpit01/DU_LeftInboard", "VCockpit01/DU_RightInboard", "VCockpit02/DU_Lower"};
+      p.panel_textures = {"@DU_LeftInboard", "@DU_RightInboard", "@DU_Lower"};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 = make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
@@ -574,7 +574,7 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.display_layout = DisplayLayout::shared_texture;
   p.display_texture = A346Texture;
   // panel.cfg [VCockpit01] texture=$GAUGES_UNIFIED, its gauges NanoVGInstruments.
-  p.panel_textures = {"VCockpit01/NanoVGInstruments", "VCockpit01/NanoVGInstruments", "VCockpit01/NanoVGInstruments"};
+  p.panel_textures = {"@NanoVGInstruments", "@NanoVGInstruments", "@NanoVGInstruments"};
   return p;
 }();
 // iniBuilds A340-300 (streamed fs24-inibuilds-aircraft-a340; encrypted, so no

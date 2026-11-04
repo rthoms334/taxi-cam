@@ -308,7 +308,7 @@ void service_mark_identity(MarkIdentityState& state,
       if (record == records.end())
         continue;
       win::PanelTexture panel{};
-      std::strncpy(panel.name, texture.key().data(), sizeof(panel.name) - 1);
+      std::strncpy(panel.name, state.store.key_of(texture).data(), sizeof(panel.name) - 1);
       panel.id = texture.id;
       panel.index = texture.gauges.front().index;
       panel.width = record->width;
@@ -770,6 +770,7 @@ DWORD run_impl() {
       std::uint64_t id{}, next_ms{};
       unsigned tries{};
       bool read{};
+      std::uint64_t seen_ms{};  // When the scan first listed the texture.
     };
     std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{};
     std::vector<Entry> entries;
@@ -1042,7 +1043,7 @@ DWORD run_impl() {
         });
         for (const auto& record : records)
           if ((record.draws || record.activity) && !mark_entry(record.id)) {
-            mark_scan.entries.push_back({record.id, now});
+            mark_scan.entries.push_back({record.id, now, 0, false, now});
             mark_scan.last_new_ms = now;
           }
       }
@@ -1071,7 +1072,11 @@ DWORD run_impl() {
       bool missing = false;
       for (unsigned side = 0; profile && side < profile->sides && side < MaxDisplaySides; ++side)
         missing = missing || (profile->panel_textures[side][0] && !panel_identity.named[side]);
-      if (unread && (mark_scan.reshows < MarkReshows || (missing && now - mark_scan.last_reshow_ms >= MarkReshowGapMs))) {
+      // Later, only for a texture that appeared since the last time: one that
+      // never carries marks must not bring them back every minute.
+      const bool fresh = std::any_of(mark_scan.entries.begin(), mark_scan.entries.end(),
+                                     [&](const MarkScan::Entry& entry) { return !entry.read && entry.seen_ms > mark_scan.last_reshow_ms; });
+      if (unread && (mark_scan.reshows < MarkReshows || (missing && fresh && now - mark_scan.last_reshow_ms >= MarkReshowGapMs))) {
         ++mark_scan.reshows;
         mark_scan.last_reshow_ms = now;
         mark_scan.shown_again = true;

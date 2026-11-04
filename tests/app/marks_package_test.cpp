@@ -73,10 +73,10 @@ int main() {
       "[VPainting01]\r\ntexture=$RegistrationNumber\r\n";
   auto sections = legacy_names::parse_panel_cfg(cfg);
   require(sections.size() == 2 && sections[0].section == "VCockpit01" && sections[0].gauge == "DU_LeftOutboard", "sections parsed");
-  require(std::string(legacy_names::key_for(sections, "DUS").data()) == "VCockpit01/DU_LeftOutboard", "DUS converts");
+  require(std::string(legacy_names::key_for(sections, "DUS").data()) == "@DU_LeftOutboard", "DUS converts");
   require(legacy_names::key_for(sections, "$RegistrationNumber")[0] == 0, "VPainting sections are not displays");
   // An attachment naming the same texture another way: no guess.
-  sections.push_back({"VCockpit17", "DUS", "Other"});
+  sections.push_back({"VCockpit17", "DUS", "Other", {"Other"}});
   require(legacy_names::key_for(sections, "DUS")[0] == 0, "ambiguous texture refused");
   // Fenix A320 PFD (Part_Interior_Cockpit panel.cfg): three full-panel gauges,
   // only the last one's block is read. FSLabs starts at htmlgauge01. A gauge
@@ -90,10 +90,22 @@ int main() {
       "htmlgauge01=WasmInstrument/WasmInstrument.html?wasm_module=fsl-a32x.wasm&wasm_gauge=LCDScreen_1,\t\t   0,    0, 768,768\r\n"
       "[VCockpit09]\r\nsize_mm=100,100\r\npixel_size=100,100\r\ntexture=$TINY\r\nhtmlgauge00=Tiny/Tiny.html, 0,0,10,10\r\n";
   const auto more_sections = legacy_names::parse_panel_cfg(more);
-  require(std::string(legacy_names::key_for(more_sections, "$A320_PFD_Captain").data()) == "VCockpit01/PFD_Captain",
+  require(std::string(legacy_names::key_for(more_sections, "$A320_PFD_Captain").data()) == "@PFD_Captain",
           "a gauge under a later block is skipped");
-  require(std::string(legacy_names::key_for(more_sections, "$DU1").data()) == "VCockpit03/LCDScreen_1", "gauges from htmlgauge01");
-  require(std::string(legacy_names::key_for(more_sections, "$TINY").data()) == "VCockpit09", "no gauge fits: the section alone");
+  require(std::string(legacy_names::key_for(more_sections, "$DU1").data()) == "@LCDScreen_1", "gauges from htmlgauge01");
+  require(legacy_names::key_for(more_sections, "$TINY")[0] == 0, "no gauge fits: nothing to name it by");
+  // Keys saved by a test build that named panels by number convert too.
+  require(std::string(legacy_names::key_for(more_sections, "VCockpit01/PFD_Captain").data()) == "@PFD_Captain", "test-build key converts");
+  // The A350's two EFIS panels: the same gauge, ranked in panel order.
+  constexpr std::string_view a350 =
+      "[VCockpit02]\r\nsize_mm=1644,1024\r\npixel_size=1644,1024\r\ntexture=$EFIS_LEFT\r\n"
+      "htmlgauge00=WasmInstrument/WasmInstrument.html?wasm_module=efis.wasm&wasm_gauge=EFIS, 0,0,1644,1024,L\r\n"
+      "[VCockpit03]\r\nsize_mm=1644,1024\r\npixel_size=1644,1024\r\ntexture=$EFIS_RIGHT\r\n"
+      "htmlgauge00=WasmInstrument/WasmInstrument.html?wasm_module=efis.wasm&wasm_gauge=EFIS, 0,0,1644,1024,R\r\n";
+  const auto twins = legacy_names::parse_panel_cfg(a350);
+  require(std::string(legacy_names::key_for(twins, "$EFIS_LEFT").data()) == "@EFIS#0/2" &&
+              std::string(legacy_names::key_for(twins, "$EFIS_RIGHT").data()) == "@EFIS#1/2",
+          "twins ranked in panel order");
   require(legacy_names::airplane_folder("SimObjects\\Airplanes\\FNX_32X\\presets\\fnx\\FNX_320_CFM_SL\\config\\aircraft.CFG") ==
               std::filesystem::path("SimObjects") / "Airplanes" / "FNX_32X",
           "airplane folder from the sim path");

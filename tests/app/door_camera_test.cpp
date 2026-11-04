@@ -24,8 +24,8 @@ profiles::DiscoveredLayout fenix_layout() {
   l.sides = 2;
   l.shapes[0] = l.shapes[1] = {768, 768, 5};
   // Panel-mark keys read on the live A320 (2026-11-04).
-  std::strcpy(l.textures[0], "VCockpit01/PFD_Captain");
-  std::strcpy(l.textures[1], "VCockpit05/PFD_FO");
+  std::strcpy(l.textures[0], "@PFD_Captain");
+  std::strcpy(l.textures[1], "@PFD_FO");
   return l;
 }
 }  // namespace
@@ -95,13 +95,13 @@ int main() {
   require(!profiles::door_template("SimObjects/Airplanes/FNX_32X_copy/presets/x/y") && !profiles::door_template(""),
           "Other aircraft do not");
   auto layout = fenix_layout();
-  require(profiles::add_door_display(layout, *door) && layout.sides == 3 && std::strcmp(layout.textures[2], "VCockpit04/ECAM_Lower") == 0 &&
+  require(profiles::add_door_display(layout, *door) && layout.sides == 3 && std::strcmp(layout.textures[2], "@ECAM_Lower") == 0 &&
               layout.shapes[2].width == 768 && layout.shapes[2].mips == 5,
           "The lower ECAM is added");
   require(profiles::valid_layout(layout), "and the layout stays valid");
   auto chosen = fenix_layout();
   chosen.sides = 3;
-  std::strcpy(chosen.textures[2], "VCockpit03/ECAM_Upper");
+  std::strcpy(chosen.textures[2], "@ECAM_Upper");
   chosen.shapes[2] = {768, 768, 5};
   const auto before = chosen;
   require(profiles::add_door_display(chosen, *door) && profiles::same_layout(chosen, before), "A lower display already chosen is kept");

@@ -20,7 +20,8 @@
 
 namespace taxi_camera::standalone::legacy_names {
 struct Section {
-  std::string section, texture, gauge;
+  std::string section, texture, gauge;  // gauge: the first visible one, which names the texture.
+  std::vector<std::string> visible;     // Every gauge whose block can be read.
 };
 // The gauge name a mark carries for an htmlgauge URL: wasm_gauge for a WASM
 // gauge, else the page's file name (taxi-cam-marks.js gaugeName).
@@ -112,15 +113,18 @@ inline std::vector<Section> parse_panel_cfg(std::string_view text) {
     for (const auto& g : gauges)
       blocks.push_back(block_for(current.section, g.name, std::round(g.x * rx), std::round(g.y * ry), std::round(g.width * rx),
                                  std::round(g.height * ry)));
-    for (std::size_t i = 0; i < gauges.size() && current.gauge.empty(); ++i) {
+    for (std::size_t i = 0; i < gauges.size(); ++i) {
       const auto& a = blocks[i];
       bool covered = !a.width;
       for (std::size_t j = i + 1; j < gauges.size() && !covered; ++j) {
         const auto& b = blocks[j];
         covered = b.width && a.left < b.left + b.width && b.left < a.left + a.width && a.top < b.top + b.height && b.top < a.top + a.height;
       }
-      if (!covered)
+      if (covered)
+        continue;
+      if (current.gauge.empty())
         current.gauge = gauges[i].name;
+      current.visible.push_back(gauges[i].name);
     }
     out.push_back(current);
   };
@@ -170,15 +174,40 @@ inline std::vector<Section> parse_panel_cfg(std::string_view text) {
   flush();
   return out;
 }
-// The key for a texture= name among an aircraft's sections; empty when no
-// section names it or two name it differently.
-inline mark_identity::Key key_for(const std::vector<Section>& sections, std::string_view texture) {
+// A section's key (mark_identity.hpp): its first visible gauge, ranked
+// among the sections where that gauge is visible, in the order read.
+inline mark_identity::Key section_key(const std::vector<Section>& sections, std::size_t index) {
+  const auto& s = sections[index];
+  if (s.gauge.empty())
+    return {};
+  std::size_t rank = 0, count = 0;
+  for (std::size_t i = 0; i < sections.size(); ++i)
+    if (std::find(sections[i].visible.begin(), sections[i].visible.end(), s.gauge) != sections[i].visible.end()) {
+      if (i == index)
+        rank = count;
+      ++count;
+    }
+  return mark_identity::make_key(s.gauge.c_str(), static_cast<unsigned>(rank), static_cast<unsigned>(std::max<std::size_t>(count, 1)));
+}
+// The key for a saved name among an aircraft's sections: a panel.cfg
+// texture= name, or a "VCockpitNN/gauge" key from a test build. Empty when
+// nothing names it, two name it differently, or its panel has no gauge a
+// mark can be read from.
+inline mark_identity::Key key_for(const std::vector<Section>& sections, std::string_view name) {
   mark_identity::Key found{};
-  for (const auto& s : sections) {
-    if (s.texture != texture)
+  std::string section, gauge;
+  if (const auto slash = name.find('/'); name.rfind("VCockpit", 0) == 0 && slash != std::string_view::npos) {
+    section = std::string(name.substr(0, slash));
+    gauge = std::string(name.substr(slash + 1));
+  }
+  for (std::size_t i = 0; i < sections.size(); ++i) {
+    const auto& s = sections[i];
+    const bool named =
+        gauge.empty() ? s.texture == name : s.section == section && std::find(s.visible.begin(), s.visible.end(), gauge) != s.visible.end();
+    if (!named)
       continue;
-    const auto key = mark_identity::make_key(s.section.c_str(), s.gauge.c_str());
-    if (found[0] && found != key)
+    const auto key = section_key(sections, i);
+    if (!key[0] || (found[0] && found != key))
       return {};
     found = key;
   }
@@ -243,8 +272,13 @@ inline std::vector<Section> aircraft_sections(const std::filesystem::path& commu
         std::ifstream in(file->path(), std::ios::binary);
         std::ostringstream text;
         text << in.rdbuf();
-        const auto sections = parse_panel_cfg(text.str());
-        out.insert(out.end(), sections.begin(), sections.end());
+        // Variant panel files repeat sections (FSLabs: panel, Panel.FSL and
+        // Panel.FSLACF): the same section once.
+        for (const auto& section : parse_panel_cfg(text.str()))
+          if (std::none_of(out.begin(), out.end(), [&](const Section& o) {
+                return o.section == section.section && o.texture == section.texture && o.visible == section.visible;
+              }))
+            out.push_back(section);
       }
       error.clear();
     }

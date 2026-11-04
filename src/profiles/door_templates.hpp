@@ -28,7 +28,7 @@ struct DoorTemplate {
 // live A320 door camera (2026-11-02), behind the cockpit door looking aft and
 // down; the A319 and A321 start from it too (not checked live).
 inline constexpr std::array<DoorTemplate, 1> DoorTemplates{{{"SimObjects/Airplanes/FNX_32X",
-                                                             "VCockpit04/ECAM_Lower",
+                                                             "@ECAM_Lower",
                                                              {768, 768, 5},
                                                              {0, 0, 768, 666},
                                                              {-0.4, 2.84, 9.4, -52.93, 166.49, 1.55},

@@ -370,7 +370,7 @@ void display_choices(const std::wstring& root) {
   require(chosen && profiles::find(profiles::A380.id) == chosen && profiles::base_profile(profiles::A380.id) == &profiles::A380 &&
               profiles::override_current(&profiles::A380, choices),
           "find() returns the profile with the user's choices");
-  require(std::strcmp(chosen->panel_textures[0], "SCREEN_DU_NDL") == 0 && std::strcmp(chosen->panel_textures[1], "VCockpit06/pfd") == 0 &&
+  require(std::strcmp(chosen->panel_textures[0], "SCREEN_DU_NDL") == 0 && std::strcmp(chosen->panel_textures[1], "@pfd#1/2") == 0 &&
               chosen->display_regions[1].bottom == 900 && chosen->display_regions[0].bottom == profiles::A380.display_regions[0].bottom,
           "Only the chosen sides change");
   require(profiles::publish_override(&profiles::A380, choices) == chosen, "The same choices keep their profile");
