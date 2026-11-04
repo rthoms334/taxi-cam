@@ -41,7 +41,7 @@ namespace taxi_camera::standalone {
 // (door_side, door_live, door_on); Status gains lvar_generation/lvars (what the
 // bridge reads from them) and door_state.
 // Protocol 28: Settings film_grain and black_and_white (the cameras' looks).
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 28;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 29;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 // Settings::door_side of an aircraft without a door camera display.
 inline constexpr std::uint32_t DoorSideNone = MaxDisplaySides;
@@ -135,16 +135,13 @@ struct Candidate {
 };
 // Protocol 26: one textured VCockpit panel and the texture paired with it.
 struct PanelTexture {
-  char name[32]{};     // panel.cfg texture= name
+  char name[32]{};     // panel-mark key, "VCockpitNN/gauge" (mark_identity.hpp)
   std::uint64_t id{};  // tracked texture, 0 when the bridge does not track it
   std::uint32_t index{}, width{}, height{}, mips{};
 };
 enum class PanelMapState : std::uint32_t {
-  waiting,            // no settled panel table in this flight yet
-  unavailable,        // the panel table could not be read
-  unresolved,         // the panel table was not found in this simulator build
-  incomplete,         // fewer cockpit-load textures than textured panels
-  paired,
+  waiting,  // no panel marks read in this flight yet
+  marked,   // panels lists the textures whose marks were read
 };
 inline constexpr std::size_t MaxPanelTextures = 32, MaxCandidates = 32;
 struct Status {
@@ -185,15 +182,10 @@ struct Status {
   std::uint32_t auto_level{};
   float auto_floor{};
   // Protocol 26: 1 while no profile matches the aircraft and the bridge tracks
-  // every panel texture. panel_state is a PanelMapState; panels lists up to
-  // MaxPanelTextures of panel_count textured panels, highest index first.
-  // panel_shift is the pairing window shift that put the selected profile's
-  // names on its display shape, or -1 when they did not resolve and the panels
-  // are paired with the last cockpit-load textures as created. panel_clean is
-  // 1 when this is the simulator process's first cockpit table or the same
-  // aircraft again: pairings after a switch to another aircraft can be off.
-  std::uint32_t panel_discovery{}, panel_state{}, panel_count{}, panel_clean{};
-  std::int32_t panel_shift{-1};
+  // every panel texture. Protocol 29: panel_state is a PanelMapState; panels
+  // lists up to MaxPanelTextures of panel_count textures whose panel marks
+  // were read, each by its key.
+  std::uint32_t panel_discovery{}, panel_state{}, panel_count{};
   PanelTexture panels[MaxPanelTextures]{};
   // Protocol 27: the bound L:vars as read, in Settings::lvar_bindings order.
   // A new generation (new names, a reconnected worker, a flight change) starts

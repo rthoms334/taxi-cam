@@ -3,8 +3,8 @@
 #include <cstddef>
 #include <utility>
 #include <vector>
+#include "../graphics/pfd_observation.hpp"
 #include "../graphics/pfd_submission_proof.hpp"
-#include "../graphics/pfd_target_detector.hpp"
 #include "../graphics/render_target_sequence.hpp"
 #include "../graphics/render_target_shapes.hpp"
 #include "../graphics/scene_runtime.hpp"
@@ -139,7 +139,6 @@ struct GraphicsStatus {
       shadow_baselines{};
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
-  const char* target_detection = "warming_up";
   bool observing{};
   std::uint64_t observation_epoch{}, observation_invalidations{};
   // Opt-in hot-path diagnostics: misses equal actual registry acquisitions.
@@ -243,8 +242,6 @@ const RenderTargetShapes& render_target_shape_inventory() noexcept;
 // Render-target creations (256 px and larger) in creation order with the
 // bridge's resource ID where it tracks the texture, for display identity.
 const RenderTargetSequence& render_target_creation_sequence() noexcept;
-// The same, restricted to multi-mip R8G8B8A8_UNORM creations (panel textures).
-const RenderTargetSequence& panel_texture_creation_sequence() noexcept;
 // Control-thread only. Turns off late-attach barrier/copy/OM extras after the
 // profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled
 // list keeps association a little longer so stamps/calibration can light.
@@ -280,10 +277,6 @@ void set_named_targets(const std::array<std::uint64_t, MaxDisplaySides>& ids) no
 // already exist join through the live scan. Never routed or stamped.
 void set_panel_discovery(bool on) noexcept;
 bool panel_discovery() noexcept;
-// Fills the ID of creation entries recorded before the bridge tracked them
-// (id 0) from the live texture at the recorded address with the same shape.
-// Returns how many were filled.
-std::size_t resolve_creation_ids(RenderTargetSequence::Entry* entries, std::size_t count) noexcept;
 // Display texture snapshot for PFD routing. Control thread only. Replaces any
 // earlier request, then copies the tracked display texture's base mip into a
 // private READBACK buffer at the next proven submission boundary, the same

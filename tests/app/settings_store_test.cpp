@@ -317,7 +317,7 @@ void door_camera_persists() {
   select_fixture(L"door-camera");
   auto saved = customized(profiles::A380);
   // Two displays: without the system display the A380X places by default.
-  require(std::strcmp(saved.display_override.textures[2], "SCREEN_DU_SD") == 0 && saved.door_side == 2,
+  require(std::strcmp(saved.display_override.textures[2], "VCockpit04/sd") == 0 && saved.door_side == 2,
           "A fresh A380X starts its door camera on its system display");
   saved.display_override = {};
   saved.door_side = 1;
@@ -359,7 +359,7 @@ void door_camera_persists() {
           "A fresh A340-600 profile starts its door camera on the lower ECAM");
   patch(path, L"door_camera", L"display", nullptr);
   require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.door_side == 2 &&
-              std::strcmp(loaded.display_override.textures[2], "SCREEN_DU_SD") == 0 && loaded.display_override.areas[2].bottom == 664 &&
+              std::strcmp(loaded.display_override.textures[2], "VCockpit04/sd") == 0 && loaded.display_override.areas[2].bottom == 664 &&
               loaded.display_override.areas[2].right == 768 && valid_settings(loaded),
           "The A380X places its system display above its bottom strip as the lower display for the door camera");
   require(std::strcmp(loaded.lvar_bindings[CameraDoor].name, "A32NX_ECAM_SD_CURRENT_PAGE_INDEX") == 0 &&
@@ -390,7 +390,7 @@ void door_camera_persists() {
               std::strcmp(profiles::IniA380.door_lvar, "INI_ECAM_ACTIVE_PAGE") == 0,
           "The two A380s ship their own door cameras");
   require(load_settings(loaded, L"missing-installation", profiles::A359.id) && loaded.door_side == 2 &&
-              std::strcmp(loaded.display_override.textures[2], "$SD") == 0 && loaded.display_override.areas[2].top == 268 &&
+              std::strcmp(loaded.display_override.textures[2], "VCockpit04/CTR") == 0 && loaded.display_override.areas[2].top == 268 &&
               loaded.display_override.areas[2].bottom == 925 && loaded.display_override.areas[2].right == 806 && valid_settings(loaded),
           "The A350 places its centre display, the system page only, for the door camera");
   require(load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.door_side == 2 &&

@@ -7,7 +7,8 @@
 #include "../../src/app/settings_store.hpp"
 #include "../../src/camera/aircraft_identity.hpp"
 #include "../../src/camera/view_resize.hpp"
-#include "../../src/graphics/pfd_target_detector.hpp"
+#include "../../src/graphics/pfd_observation.hpp"
+#include "../../src/profiles/catalog.hpp"
 using namespace taxi_camera;
 namespace {
 // The vertical-FOV interpretation matches the live -900 horizon/gear fit.
@@ -702,26 +703,10 @@ int main() {
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);
     assert(profile->composition.nose_height == 255 && profile->composition.tail_top == 259);
   }
-  static PfdTargetDetector detector;
-  detector.configure(profiles::A359);
-  std::array<PfdTargetObservation, 4> observations{
-      {{10, 0, 1644, 1024, 1, 28}, {20, 0, 1644, 1024, 1, 28}, {30, 0, 1644, 1024, 1, 28}, {40, 0, 768, 1024, 5, 28}}};
-  detector.observe(observations.data(), observations.size(), 0);
-  for (unsigned i = 1; i <= 3; ++i) {
-    observations[0].draws += 100;
-    observations[1].draws += 100;
-    observations[2].draws += 20;
-    observations[3].draws += 1000;
-    detector.observe(observations.data(), observations.size(), i * 1000);
-  }
-  assert(detector.snapshot().valid && detector.snapshot().targets[0] == 20 && detector.snapshot().targets[1] == 10);
-  detector.configure(profiles::A380);
-  assert(!detector.snapshot().valid);
-  assert(!detector.observe(observations.data(), observations.size(), 4000).valid);
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 0, 28));
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 1, 0));
   guide_settings_tests();
   std::puts(
       "PASS aircraft profiles: isolated settings, variant identity, pane dimensions, mirrored display regions, "
-      "mount geometry, guide position/colour roundtrip/bounds/defaults/isolation and detector reset");
+      "mount geometry, guide position/colour roundtrip/bounds/defaults/isolation");
 }

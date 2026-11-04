@@ -333,7 +333,6 @@ struct Registry {
   std::unordered_map<SIZE_T, View> rtvs;
   std::unordered_map<SIZE_T, DXGI_FORMAT> dsvs;
   TaxiButtonRoutes routes;
-  PfdTargetDetector detector;
   // A dropped resource can make a truncated allocation group look complete.
   // Keep this false for the device lifetime once observation loses coverage.
   std::atomic<bool> pfd_inventory_complete{true};
@@ -961,43 +960,6 @@ bool same_device(ID3D12Device* device) noexcept {
 constexpr std::uint64_t LiveBackfillAdmitMs = 3000;
 constexpr std::uint64_t LiveBackfillAssociateMs = 10000;
 static_assert(LiveBackfillAdmitMs < LiveBackfillAssociateMs);
-std::array<std::uint64_t, 2> dominant_activity_pair(const profiles::AircraftProfile& profile,
-                                                    const std::vector<PfdTargetObservation>& inventory) noexcept {
-  if (inventory.size() != 2 || !inventory[0].id || !inventory[1].id || inventory[0].id == inventory[1].id)
-    return {};
-  // With opaque pre-existing views, A350's first two surfaces can be unrelated
-  // five-mip outputs or an incomplete powered EFIS group. Let the detector
-  // establish its full submission-only group and activity windows first.
-  if ((profile.id == profiles::A359.id || profile.id == profiles::A35K.id) && !inventory[0].draws && !inventory[1].draws)
-    return {};
-  const auto high = std::max(inventory[0].id, inventory[1].id);
-  const auto low = std::min(inventory[0].id, inventory[1].id);
-  return profile.higher_id_left ? std::array<std::uint64_t, 2>{high, low} : std::array<std::uint64_t, 2>{low, high};
-}
-// Control-thread only. Same last / third-last mapping as the allocation-group
-// detector. Preserve the complete-group automatic selection used by the
-// aircraft profile, including late discovery. A partial list is incomplete.
-std::array<std::uint64_t, 2> allocation_group_pair(const profiles::AircraftProfile& profile,
-                                                   const std::vector<PfdTargetObservation>& inventory) noexcept {
-  if (profile.pfd_detection != profiles::PfdDetectionPolicy::ini_a380_allocation_group)
-    return {};
-  std::array<std::uint64_t, 8> ids{};
-  std::size_t n = 0;
-  for (const auto& item : inventory) {
-    if (!item.id || item.format != 27)
-      continue;
-    if (n == ids.size())
-      return {};
-    ids[n++] = item.id;
-  }
-  if (n != ids.size())
-    return {};
-  std::sort(ids.begin(), ids.end());
-  for (std::size_t i = 1; i < ids.size(); ++i)
-    if (ids[i] == ids[i - 1])
-      return {};
-  return {ids[7], ids[5]};
-}
 // A texture of the profile's display shape, or the one routed to a placed
 // lower display that is another panel (lower_any_panel): only that texture,
 // so readiness and backfill still count the profile's displays alone.
@@ -1252,20 +1214,11 @@ RenderTargetSequence& render_target_sequence() noexcept {
   static RenderTargetSequence sequence;
   return sequence;
 }
-// Panel-texture candidates only (multi-mip R8G8B8A8_UNORM): rare, so a cockpit
-// load's burst cannot scroll out behind the loader's many small targets.
-RenderTargetSequence& panel_texture_sequence() noexcept {
-  static RenderTargetSequence sequence;
-  return sequence;
-}
 void record_creation(const D3D12_RESOURCE_DESC& desc, std::uint64_t id, ID3D12Resource* native) noexcept {
   const auto now = GetTickCount64();
   const auto address = reinterpret_cast<std::uint64_t>(native);
   render_target_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
                                   static_cast<std::uint32_t>(desc.Format), id, now, address);
-  if (panel_texture_desc(desc))
-    panel_texture_sequence().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
-                                    static_cast<std::uint32_t>(desc.Format), id, now, address);
 }
 bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial, bool created, bool* settled) {
   auto& r = registry();
@@ -4901,7 +4854,6 @@ GraphicsStatus graphics_status() noexcept {
                         r.copy_attempts,
                         r.copy_rejected,
                         r.copy_error};
-  result.target_detection = r.detector.snapshot().status;
   for (unsigned i = 0; i < result.selected_exit_scopes.size(); ++i)
     result.selected_exit_scopes[i] = r.selected_exit_scopes[i].load(std::memory_order_relaxed);
   result.calibration_clears = r.calibration_clears.load(std::memory_order_relaxed);
@@ -5021,9 +4973,6 @@ std::vector<DisplayResourceRecord> display_resource_records() {
 }
 const RenderTargetSequence& render_target_creation_sequence() noexcept {
   return render_target_sequence();
-}
-const RenderTargetSequence& panel_texture_creation_sequence() noexcept {
-  return panel_texture_sequence();
 }
 const RenderTargetShapes& render_target_shape_inventory() noexcept {
   return render_target_shapes();
@@ -5382,28 +5331,6 @@ void set_panel_discovery(bool on) noexcept {
 bool panel_discovery() noexcept {
   return panel_discovery_on.load(std::memory_order_relaxed);
 }
-std::size_t resolve_creation_ids(RenderTargetSequence::Entry* entries, std::size_t count) noexcept {
-  std::size_t resolved = 0;
-  auto& r = registry();
-  const WorkerRegistryLock lock(r);
-  for (std::size_t i = 0; i < count; ++i) {
-    auto& entry = entries[i];
-    if (entry.id || !entry.native)
-      continue;
-    // The address is only a map key here. A later texture at a reused address
-    // must also have the recorded shape.
-    const auto found = r.resources.find(reinterpret_cast<ID3D12Resource*>(entry.native));
-    if (found == r.resources.end() || !found->second->alive)
-      continue;
-    const auto& desc = found->second->desc;
-    if (desc.Width == entry.width && desc.Height == entry.height && desc.MipLevels == entry.mips &&
-        static_cast<std::uint32_t>(desc.Format) == entry.format) {
-      entry.id = found->second->id;
-      ++resolved;
-    }
-  }
-  return resolved;
-}
 bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower) noexcept {
   auto& r = registry();
   const WorkerRegistryLock lock(r);
@@ -5500,7 +5427,6 @@ void reset_display_session() noexcept {
   for (auto& shadow : r.shadows)
     forget_shadow(shadow);
   r.routes.reset();
-  r.detector.reset();
   for (const auto& [native, item] : r.resources) {
     (void)native;
     item->draws.store(0, std::memory_order_relaxed);
@@ -5533,7 +5459,6 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
     // reload of the same adapter. Ordinary texture replacement uses forget().
     r.routes.reset();
     r.profile = profile;
-    r.detector.configure(*profile);
     // Retry discovery from fresh activity and fresh late-bind evidence. Keep
     // creation-proven native identities/descriptors: discarding those would
     // turn an otherwise valid resident bridge into another blind late attach.
@@ -5635,9 +5560,10 @@ void discover_pfds(std::uint64_t now) noexcept {
       } else
         ++i;
     }
-    // Panel-name identity first: only live textures of this profile's display
-    // shape, and only when every named side resolves. Naming is automatic
-    // selection too, so Auto detect off (now == 0) leaves it out.
+    // Displays are named by their panel marks only (bridge_main.cpp
+    // service_mark_identity): live textures of this profile's display shape,
+    // and only when every named side resolves. Naming is automatic selection,
+    // so Auto detect off (now == 0) leaves it out.
     if (now) {
       std::array<std::uint64_t, MaxDisplaySides> named{};
       bool usable = false, complete = true;
@@ -5660,46 +5586,6 @@ void discover_pfds(std::uint64_t now) noexcept {
       }
       if (usable && complete)
         r.routes.adopt_named(named, r.profile->sides);
-    }
-    const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
-    const bool single_display = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
-    // A set-up aircraft is routed by name only: its displays share one shape
-    // with other panels, so activity cannot tell them apart.
-    const bool named_only = r.profile->pfd_detection == profiles::PfdDetectionPolicy::named;
-    const bool separate_lower = profiles::separate_lower_texture(*r.profile);
-    const bool missing =
-        single_display ? !r.routes.targets[0] || (separate_lower && !r.routes.targets[2]) : (!r.routes.targets[0] || !r.routes.targets[1]);
-    if (now && !named_only && (ranked_group || missing)) {
-      // Take the full inventory after retirement cleanup, under the same
-      // registry lock used for detector configuration and target assignment.
-      // The detector sorts by incarnation itself. Avoid the unrelated UI
-      // draw-count sort while holding the registry lock.
-      auto inventory = pfd_inventory_locked(r);
-      const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now, r.pfd_inventory_complete.load());
-      if (detection.valid) {
-        if (single_display) {
-          r.routes.adopt_single(detection.targets[0], separate_lower);
-          if (separate_lower)
-            r.routes.adopt_lower(detection.targets[1]);
-        } else if (!r.routes.adopt_detected(detection.targets) && detection.replaced)
-          // A recreated texture took over its role after the group evidence had
-          // already dropped both detected targets; explicit sides still refuse.
-          r.routes.replace_detected(detection.targets);
-      } else if (ranked_group && detection.invalidates_targets)
-        r.routes.forget_detected();
-      if (!ranked_group && !single_display && !r.routes.targets[0] && !r.routes.targets[1]) {
-        if (const auto pair = dominant_activity_pair(*r.profile, inventory); pair[0])
-          r.routes.adopt_detected(pair);
-      } else if (ranked_group && (!r.routes.targets[0] || !r.routes.targets[1])) {
-        // After incomplete→complete the detector reports ini_group_changed
-        // (invalidates). Still adopt a filled idle eight so ready/calibration
-        // are not stuck behind all-eight draw increments or a stale automatic
-        // singleton. A live explicit selection remains the user's anchor.
-        if (const auto pair = allocation_group_pair(*r.profile, inventory); pair[0]) {
-          if (!r.routes.adopt_detected(pair) && (!r.routes.targets[0] || !r.routes.targets[1]))
-            r.routes.replace_detected(pair);
-        }
-      }
     }
     refresh_selected(r);
   });

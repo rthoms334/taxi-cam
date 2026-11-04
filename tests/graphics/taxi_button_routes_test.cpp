@@ -2,8 +2,9 @@
 #include <cstdio>
 #include <limits>
 
-#include "../../src/graphics/pfd_target_detector.hpp"
+#include "../../src/graphics/pfd_observation.hpp"
 #include "../../src/graphics/taxi_button_routes.hpp"
+#include "../../src/profiles/catalog.hpp"
 
 int main() {
   taxi_camera::TaxiButtonIntent intent;
@@ -129,22 +130,10 @@ int main() {
   // Existing live A350 textures stay eligible across the deliberate A35K ->
   // A359 profile change. Clearing only public IDs used to leave assigned_ set,
   // permanently refusing even a newly confirmed pair in the new profile.
-  static taxi_camera::PfdTargetDetector profile_detector;
   taxi_camera::TaxiButtonRoutes profile_routes;
   std::array<taxi_camera::PfdTargetObservation, 2> live{{{280, 10000, 1644, 1024, 1, 27}, {279, 9000, 1644, 1024, 1, 27}}};
-  std::uint64_t now = 10000;
-  const auto confirm = [&](const taxi_camera::profiles::AircraftProfile& profile) {
-    profile_detector.configure(profile);
-    assert(!profile_detector.observe(live.data(), live.size(), now).valid);
-    for (unsigned window = 1; window <= 3; ++window) {
-      live[0].draws += 100;
-      live[1].draws += 90;
-      now += 1000;
-      const auto& observed = profile_detector.observe(live.data(), live.size(), now);
-      assert(observed.valid == (window == 3));
-    }
-    return profile_detector.snapshot().targets;
-  };
+  // The pair a profile's displays resolve to (by their panel marks).
+  const auto confirm = [&](const taxi_camera::profiles::AircraftProfile&) { return std::array<std::uint64_t, 2>{live[0].id, live[1].id}; };
   const auto old_pair = confirm(taxi_camera::profiles::A35K);
   assert(profile_routes.adopt_detected(old_pair));
   assert((old_pair == std::array<std::uint64_t, 2>{280, 279}));

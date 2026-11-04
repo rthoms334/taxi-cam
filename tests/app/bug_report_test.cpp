@@ -374,15 +374,14 @@ int main() {
   assert(snapshot.find("captures=123456; compositions=789; stamps=234; hook_failures=3") != std::string::npos);
   assert(snapshot.find("Stage ms (manager/pool/lifecycle/entries/view1/view2/handoff/pose/activation/publish)") != std::string::npos);
   assert(snapshot.find("truncated") == std::string::npos);
-  assert(snapshot.find("Panels: discovery=0; state=0; clean=0; shift=-1; paired=0; tracked=0") != std::string::npos);
+  assert(snapshot.find("Panels: discovery=0; state=0; marked=0; tracked=0") != std::string::npos);
   context.status.panel_discovery = 1;
-  context.status.panel_state = static_cast<std::uint32_t>(PanelMapState::paired);
-  context.status.panel_clean = 1;
+  context.status.panel_state = static_cast<std::uint32_t>(PanelMapState::marked);
   context.status.panel_count = 3;
   context.status.panels[0].id = 41;
   context.status.panels[2].id = 43;
   snapshot = bug_report_snapshot(context);
-  assert(snapshot.find("Panels: discovery=1; state=4; clean=1; shift=-1; paired=3; tracked=2") != std::string::npos);
+  assert(snapshot.find("Panels: discovery=1; state=1; marked=3; tracked=2") != std::string::npos);
   --context.status.heartbeat;
   assert(bug_report_snapshot(context).find("stale; last known values below; age_ms=3001") != std::string::npos);
   context.status.heartbeat = context.now + 1;
@@ -420,7 +419,6 @@ int main() {
   context.settings.left_id = context.settings.right_id = UINT64_MAX;
   context.status.graphics_ready = context.status.scene_ready = context.status.candidate_count = UINT32_MAX;
   context.status.panel_count = context.status.panel_state = UINT32_MAX;
-  context.status.panel_shift = INT32_MIN;
   for (auto& panel : context.status.panels)
     panel.id = UINT64_MAX;
   context.settings.profile = UINT32_MAX;

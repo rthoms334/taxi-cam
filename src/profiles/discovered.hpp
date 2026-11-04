@@ -14,7 +14,7 @@ namespace taxi_camera::profiles {
 // switch. Each camera fills whichever panel texture its side is routed to,
 // at that texture's size. Travels in the companion's Settings and is saved
 // per variant.
-inline constexpr std::size_t MaxPanelName = 32, MaxPanelAnchors = 8;
+inline constexpr std::size_t MaxPanelName = 32;
 struct DiscoveredLayout {
   char key[MaxVariantKey]{};
   std::uint32_t sides{};
@@ -24,11 +24,6 @@ struct DiscoveredLayout {
   };
   Shape shapes[MaxDisplaySides]{};
   DisplayInsets padding{};
-  struct Anchor {
-    char name[MaxPanelName]{};
-    std::uint32_t width{}, height{};
-  };
-  Anchor anchors[MaxPanelAnchors]{};
 };
 // Compared bytewise: no padding, so equal layouts have equal bytes.
 static_assert(std::has_unique_object_representations_v<DiscoveredLayout>);
@@ -77,22 +72,6 @@ inline bool valid_layout(const DiscoveredLayout& l) noexcept {
         content.right <= content.left || content.bottom <= content.top)
       return false;
   }
-  bool ended = false;
-  for (const auto& anchor : l.anchors) {
-    if (!terminated_name(anchor.name, true))
-      return false;
-    if (!anchor.name[0]) {
-      ended = true;
-      if (anchor.width || anchor.height)
-        return false;
-      continue;
-    }
-    if (ended || !anchor.width || anchor.width > MaxPanelEdge || !anchor.height || anchor.height > MaxPanelEdge)
-      return false;
-    for (unsigned side = 0; side < l.sides; ++side)
-      if (std::strcmp(anchor.name, l.textures[side]) == 0)
-        return false;
-  }
   return true;
 }
 // One published profile and the storage its pointers refer to.
@@ -136,14 +115,10 @@ inline void build_discovered(DiscoveredProfile& out) noexcept {
   p.camera_padding = l.padding;
   p.pfd_detection = PfdDetectionPolicy::named;
   p.sides = l.sides;
-  for (std::size_t i = 0; i < MaxPanelAnchors; ++i)
-    p.panel_shapes[i] = l.anchors[i].name[0] ? AircraftProfile::PanelShape{l.anchors[i].name, l.anchors[i].width, l.anchors[i].height}
-                                             : AircraftProfile::PanelShape{};
   // The cameras take side 0's panel shape, from the A380 panes made for its
   // camera area; every other side shows that picture at its shape.
   shape_cameras(p, A380.camera_panes, display_content_rect(A380, 0), 1, {1, 1, 1});
 }
-static_assert(MaxPanelAnchors == std::tuple_size_v<decltype(AircraftProfile::panel_shapes)>);
 namespace discovered_detail {
 inline std::mutex publish_mutex;
 inline const DiscoveredProfile* published{};

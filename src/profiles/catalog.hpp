@@ -128,8 +128,10 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
-  // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
-  // routing by name. Empty keeps automatic detection for that side.
+  // Each side's display by its panel-mark key (src/shared/mark_identity.hpp):
+  // "VCockpitNN/gauge" from the aircraft's panel.cfg. Empty leaves the side to
+  // the user's choice. A panel.cfg texture= name (an older catalog entry) is
+  // converted by the companion from the aircraft's panel.cfg on first use.
   std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
   // A pilot pair's lower display (a panel of the pair's shape), placed for the
   // door camera while the aircraft's settings have no door camera yet; the
@@ -150,14 +152,6 @@ struct AircraftProfile {
   // mip count differs from the detected display targets'. Kept narrow: every
   // profile's shape admits display candidates on every aircraft.
   unsigned panel_mips = 0;
-  // Texture shapes of other panels, read from logged cockpit loads. Name
-  // pairing must land every listed panel on its shape, so extra textures from
-  // an aircraft switch cannot slide the names onto look-alike displays.
-  struct PanelShape {
-    const char* name;
-    unsigned width, height;
-  };
-  std::array<PanelShape, 8> panel_shapes{};
   // Aircraft set up by the user (discovered.hpp): any panel texture is a
   // display, and each side's area is the whole texture routed to it, whatever
   // its size. side_shapes (width, height, mips) are the panels the user picked;
@@ -241,10 +235,11 @@ inline constexpr AircraftProfile A380 = [] {
                     768,
                     1024,
                     5};
-  p.panel_textures = {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", ""};
+  // Part_Interior_Cockpit panel.cfg: SCREEN_DU_PFDL, SCREEN_DU_PFDR, SCREEN_DU_SD.
+  p.panel_textures = {"VCockpit05/pfd", "VCockpit06/pfd", ""};
   // The system display below the EWD (panel.cfg VCockpit04, 768 x 1024 like
   // the PFDs), read from the installed package on 2026-11-02.
-  p.door_lower_texture = "SCREEN_DU_SD";
+  p.door_lower_texture = "VCockpit04/sd";
   // Door: Robert's live A380X door camera (2026-11-02) on the system display
   // above its bottom strip. The ECAM control panel's VIDEO key selects page 15
   // of A32NX_ECAM_SD_CURRENT_PAGE_INDEX (read live; -1 when it is deselected).
@@ -252,11 +247,6 @@ inline constexpr AircraftProfile A380 = [] {
   p.mounts[DoorFeed] = A380XDoorMount;
   p.door_lvar = "A32NX_ECAM_SD_CURRENT_PAGE_INDEX";
   p.door_lvar_trigger = standalone::lvar_equals_trigger(15);
-  p.panel_shapes = {{{"SCREEN_DU_MFD", 1646, 1024},
-                     {"SCREEN_DU_EWD", 768, 1024},
-                     {"SCREEN_DU_SD", 768, 1024},
-                     {"SCREEN_DU_NDL", 768, 1024},
-                     {"SCREEN_DU_NDR", 768, 1024}}};
   return p;
 }();
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
@@ -299,10 +289,10 @@ inline constexpr AircraftProfile A359 = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
-  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
-  p.door_lower_texture = "$SD";
+  // Function_Interior_A350 panel.cfg: $EFIS_LEFT, $EFIS_RIGHT, $SD (live marks 2026-11-04).
+  p.panel_textures = {"VCockpit02/EFIS", "VCockpit03/EFIS", ""};
+  p.door_lower_texture = "VCockpit04/CTR";
   p.door_lower_area = A350DoorArea;
-  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 inline constexpr AircraftProfile A35K = [] {
@@ -325,10 +315,10 @@ inline constexpr AircraftProfile A35K = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
-  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
-  p.door_lower_texture = "$SD";
+  // Function_Interior_A350 panel.cfg: $EFIS_LEFT, $EFIS_RIGHT, $SD (live marks 2026-11-04).
+  p.panel_textures = {"VCockpit02/EFIS", "VCockpit03/EFIS", ""};
+  p.door_lower_texture = "VCockpit04/CTR";
   p.door_lower_area = A350DoorArea;
-  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 inline constexpr std::array<double, 6> IniA380DoorMount{-0.6, 8, 20, -64.54, 158.19, 1.2};
@@ -370,7 +360,6 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
   p.door_lvar_trigger = standalone::lvar_equals_trigger(16);
   p.black_and_white = 1u << DoorFeed;
-  p.panel_shapes = {{{"$INI_FAP", 2048, 1536}, {"$ND_CPT", 768, 1024}, {"$ND_FO", 768, 1024}, {"$EWD", 768, 1024}, {"$SD", 768, 1024}}};
   p.formats = {28, 29, 87, 91, 27, 90};
   p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
   // 31.3 both-PFD stamps/s at camera_rate 15 on installed 0.9.11 (no FG):
@@ -499,7 +488,8 @@ inline constexpr auto make_pmdg_777 =
       // picture. Bottom inset stays 0; leftover working-image rows under the squares
       // are black. L/R stay 0.
       p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
-      p.panel_textures = {Pmdg777Texture, Pmdg777Texture, Pmdg777LowerTexture};
+      // Function_Interior panel.cfg: DUS and EICASCDU (live marks 2026-11-04).
+      p.panel_textures = {"VCockpit01/DU_LeftInboard", "VCockpit01/DU_RightInboard", "VCockpit02/DU_Lower"};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 = make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
@@ -580,7 +570,8 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
   p.pfd_detection = PfdDetectionPolicy::single_display;
   p.display_texture = A346Texture;
-  p.panel_textures = {A346Texture, A346Texture, A346Texture};
+  // panel.cfg [VCockpit01] texture=$GAUGES_UNIFIED, its gauges NanoVGInstruments.
+  p.panel_textures = {"VCockpit01/NanoVGInstruments", "VCockpit01/NanoVGInstruments", "VCockpit01/NanoVGInstruments"};
   return p;
 }();
 // iniBuilds A340-300 (streamed fs24-inibuilds-aircraft-a340; encrypted, so no

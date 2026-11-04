@@ -37,6 +37,8 @@
 #include "changelog_fetch.hpp"
 #include "whats_new_image.hpp"
 #include "localization.hpp"
+#include "legacy_display_names.hpp"
+#include "marks_package.hpp"
 
 namespace {
 using namespace taxi_camera;
@@ -1991,18 +1993,6 @@ std::wstring setup_aircraft_name() {
   const auto* profile = profiles::find(draft().profile);
   return profile ? std::wstring(profile->name) : std::wstring(tr(L"this aircraft"));
 }
-// The aircraft loaded is the selected profile's, with names of its own,
-// and the bridge could not pair them in this flight (panel_shift).
-bool names_unpaired(const win::Status& sample) {
-  if (sample.panel_shift >= 0 || static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::paired)
-    return false;
-  // The saved profile: a setup's trial runs the picks themselves, which are
-  // not names saved for this aircraft.
-  const auto s = setup.trial ? setup.before : draft();
-  if (const auto* built_in = setup.built_in ? profiles::find(setup.built_in) : nullptr)
-    return built_in->panel_textures[0] && built_in->panel_textures[0][0];
-  return s.profile == profiles::DiscoveredProfileId && setup.key[0] && profiles::same_variant(setup.key.data(), s.discovered.key);
-}
 // What stops the setup now; empty when the picks can be saved.
 std::wstring setup_blocker(const win::Status& sample) {
   // Pictures and the panel list need the bridge connection.
@@ -2012,29 +2002,9 @@ std::wstring setup_blocker(const win::Status& sample) {
     return tr(L"Waiting for the simulator to report which aircraft is loaded.");
   if (!sample.panel_discovery)
     return tr(L"Waiting for the bridge to track this cockpit's panels.");
-  switch (static_cast<win::PanelMapState>(sample.panel_state)) {
-    case win::PanelMapState::waiting:
-      return tr(L"Reading this cockpit's panels. This takes a few seconds after the flight has loaded.");
-    case win::PanelMapState::unavailable:
-    case win::PanelMapState::unresolved:
-      return tr(L"Taxi Cam cannot read this cockpit's panel list in this simulator version, so this aircraft cannot be set up yet.");
-    case win::PanelMapState::incomplete:
-      return tr(L"This cockpit's panel list is not complete. Wait a few seconds after the cockpit has loaded.");
-    case win::PanelMapState::paired:
-      break;
-  }
-  // The saved names of the aircraft loaded did not pair this flight
-  // (panel_shift): the names under the pictures can be off, so none are
-  // saved. What is placed is still used, by picture, for this flight.
-  if (names_unpaired(sample))
-    return tr(
-        L"This flight's panel names don't match their pictures, so displays can't be saved now. What you place is used until "
-        L"Taxi Cam closes.");
-  // A built-in profile's names are its own, so no clean load is needed.
-  if (!sample.panel_clean && !setup.built_in)
-    return tr(
-        L"Another aircraft was loaded before this one in this simulator session, so panel names can be one texture off. "
-        L"Restart the simulator, load this aircraft first, then set it up.");
+  // Panels are named by the marks their pages paint when they load.
+  if (static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::marked)
+    return tr(L"Reading this cockpit's panels. This takes a few seconds after the flight has loaded.");
   return {};
 }
 // A built-in profile's choices from the picks: a pick that is the profile's
@@ -2130,7 +2100,7 @@ void apply_setup_trial() {
   for (unsigned side = 0; side < sides; ++side)
     names[side] = setup.names[side].empty() ? fallback : setup.names[side].c_str();
   profiles::DiscoveredLayout layout;
-  if (!fallback || win::learn_layout(sample, names, sides, layout, false) != win::LayoutLearning::learned) {
+  if (!fallback || win::learn_layout(sample, names, sides, layout) != win::LayoutLearning::learned) {
     // Without a test asked for, the cameras wait for a placed display, and a
     // test just turned off takes its bars down (the map may be pairing again).
     if (!setup.testing) {
@@ -3348,6 +3318,105 @@ bool apply(bool save = true) {
   return true;
 }
 // Runs on the UI thread, including when hidden to the tray.
+// Display choices saved before panel marks name displays by panel.cfg
+// texture= (legacy_display_names.hpp); a catalog profile can too. Converted
+// once per aircraft from its own panel.cfg files and saved, so the bridge
+// finds them by their marks.
+void convert_legacy_displays() {
+  static std::string tried;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  if (!fresh_status(sample) || !sample.identity_sample_ms)
+    return;
+  const auto s = draft();
+  const auto* base = profiles::base_profile(s.profile);
+  const bool set_up = s.profile == profiles::DiscoveredProfileId;
+  const auto legacy = [](const char* name) { return name && name[0] && !mark_identity::is_key(name); };
+  bool any = false;
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
+    any = any || legacy(s.display_override.textures[side]) ||
+          (set_up && side < s.discovered.sides && legacy(s.discovered.textures[side])) ||
+          (!set_up && base && side < base->sides && legacy(base->panel_textures[side]) && !s.display_override.textures[side][0]);
+  if (!any)
+    return;
+  const std::string path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
+  const auto attempt = path + "|" + std::to_string(s.profile);
+  if (attempt == tried)
+    return;
+  tried = attempt;
+  const auto sections = win::legacy_names::aircraft_sections(win::marks_package::community_folder(), path);
+  auto next = s;
+  bool changed = false, missing = false;
+  const auto put = [&](char (&name)[profiles::MaxPanelName], const char* from) {
+    const auto key = win::legacy_names::key_for(sections, from);
+    if (!key[0]) {
+      missing = true;
+      return;
+    }
+    std::fill(std::begin(name), std::end(name), '\0');
+    std::strncpy(name, key.data(), profiles::MaxPanelName - 1);
+    changed = true;
+  };
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+    if (legacy(next.display_override.textures[side]))
+      put(next.display_override.textures[side], s.display_override.textures[side]);
+    else if (!set_up && base && side < base->sides && legacy(base->panel_textures[side]) && !s.display_override.textures[side][0])
+      put(next.display_override.textures[side], base->panel_textures[side]);
+    if (set_up && side < next.discovered.sides && legacy(next.discovered.textures[side]))
+      put(next.discovered.textures[side], s.discovered.textures[side]);
+  }
+  if (!changed || !win::valid_settings(next) || !win::save_settings(next)) {
+    notice = tr(L"Taxi Cam could not convert this aircraft's saved displays. Choose them again in Displays.");
+    build_controls();
+    return;
+  }
+  publish(next);
+  notice = missing ? tr(L"Some of this aircraft's saved displays could not be converted. Check them in Displays.")
+                   : tr(L"This aircraft's saved displays now use the new display names.");
+  build_controls();
+}
+// The panel marks package (marks_package.hpp), checked once at start off the
+// window thread; a new or updated package takes effect at the next
+// simulator start.
+std::atomic<int> marks_package_outcome{-1};
+DWORD WINAPI marks_package_worker(void*) {
+  try {
+    marks_package_outcome.store(
+        static_cast<int>(win::marks_package::ensure(win::marks_package::simulator_folder(), win::marks_package::community_folder(),
+                                                    win::marks_package::helper_text())),
+        std::memory_order_release);
+  } catch (...) {
+    marks_package_outcome.store(static_cast<int>(win::marks_package::Outcome::failed), std::memory_order_release);
+  }
+  return 0;
+}
+void service_marks_package_notice() {
+  static bool shown = false;
+  const auto outcome = marks_package_outcome.load(std::memory_order_acquire);
+  if (shown || outcome < 0)
+    return;
+  shown = true;
+  using win::marks_package::Outcome;
+  switch (static_cast<Outcome>(outcome)) {
+    case Outcome::written:
+      notice = tr(L"Taxi Cam updated its display package in Community. Restart the simulator once so your displays can be found.");
+      break;
+    case Outcome::removed:
+    case Outcome::page_changed:
+      notice = tr(
+          L"This simulator version changed the cockpit page Taxi Cam's display package extends. Update Taxi Cam to find displays again.");
+      break;
+    case Outcome::no_community:
+      notice = tr(L"Taxi Cam could not find the simulator's Community folder for its display package.");
+      break;
+    default:
+      return;
+  }
+  build_controls();
+}
 void sync_aircraft_session() {
   auto s = draft();
   win::Status sample;
@@ -6904,6 +6973,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       refresh_connection_button();
       sync_aircraft_session();
       auto_profile();
+      convert_legacy_displays();
+      service_marks_package_notice();
       service_lvar_bindings();
       show_notifications();
       update_gallery_buttons();
@@ -7511,6 +7582,9 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
                               CW_USEDEFAULT, scale(1070), scale(810), nullptr, nullptr, instance, nullptr);
   if (!main)
     return 1;
+  if (!preview_ui)
+    if (const HANDLE package = CreateThread(nullptr, 0, marks_package_worker, nullptr, 0, nullptr))
+      CloseHandle(package);
   worker = CreateThread(nullptr, 0, connection_worker, nullptr, 0, nullptr);
   if (!worker) {
     DestroyWindow(main);

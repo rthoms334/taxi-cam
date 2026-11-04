@@ -272,59 +272,37 @@ long; this design is the answer.
    came about 0.4 s apart when the Displays page asked for them; 17 panels
    took about 17 s that way, which the scan replaces.
 
-## What it replaces
+## What it replaced (done, 2026-11-04)
 
-| Today | With marks |
+The owner chose marks as the only identity path, with no fallback, and the
+activity detector removed too.
+
+| Removed | Now |
 |---|---|
-| `propose`, `resolve_names`, shift ≤ 8, `PanelOrder::section` | Deleted. The mark carries the name. |
-| `resolve_by_shape`, `drop_copy_destinations`, `trim_trailing_ui` | Deleted. |
-| `ProcessTables`, `aircraft_signature`, clean-load learning, layout anchors, catalog `panel_shapes` | Deleted. Nothing is learned or persisted about textures. |
-| `RenderTargetSequence` creation-burst ring (pairing input) | Kept only if other diagnostics need it. |
-| Panel table decode (`read_panels`, `panel_registry_contract`, `resolve_panel_table`) | Gone if E1 shows the page has `texture=`. Otherwise kept as a name lookup by section (or replaced by reading `panel.cfg` from `sConfigFile`'s folder). |
-| Profile display rects (777 DUS sub-rects) and guided setup's default areas | Default to the gauge rectangle from the mark. |
-| Guided setup "pick by picture" | Stays as the UI for choosing *which* display is left, right or lower. Pictures now carry trustworthy names, and picks are saved as panel + gauge names. |
-| `follow_copies` | Kept for continuity between requests. |
-| FBW A380X twin PFD swap | Fixed: each page names itself. |
+| Panel table read (`read_panels`, `panel_registry_contract`, `resolve_panel_table`, `display_panels.*`) and the display-identity research scanner | Deleted. Nothing is read from simulator memory to name displays. |
+| Order pairing (`propose`, `resolve_names`, shift, `resolve_by_shape`, `drop_copy_destinations`, `trim_trailing_ui`, creation bursts, `ProcessTables`, clean-load learning) | Deleted. `MarkIdentityState` / `service_mark_identity` in `bridge_main.cpp` with `src/shared/mark_identity.hpp`. |
+| Layout anchors, catalog `panel_shapes`, `panel_clean`, `panel_shift`, `PanelMapState` unavailable/unresolved/incomplete | Deleted (protocol 29: `waiting`, `marked`). |
+| Activity / allocation-group detector (`pfd_target_detector.hpp`, `dominant_activity_pair`, `allocation_group_pair`) | Deleted. `discover_pfds` adopts named sides only; explicit choices still win. `PfdDetectionPolicy` remains as a layout flag (single display, set-up). |
+| `follow_copies` / `follow_recreated` | Copies inherit the source's marks (`Store::inherit`); the end of a copy chain wins. Recreated textures are read again (marks re-shown). |
+| Keys | Catalog and saved choices name displays by key, `VCockpitNN/gauge`. Built-in keys from panel.cfg + live marks: A350 `VCockpit02/EFIS`, `VCockpit03/EFIS`, door `VCockpit04/CTR`; FBW A380X `VCockpit05/pfd`, `VCockpit06/pfd`, door `VCockpit04/sd`; 777 `VCockpit01/DU_LeftInboard`, `VCockpit01/DU_RightInboard`, `VCockpit02/DU_Lower`; Aerosoft A346 `VCockpit01/NanoVGInstruments`; Fenix door template `VCockpit04/ECAM_Lower`. The iniBuilds A380 keeps `$PFD_CPT`/`$PFD_FO` (not installed here) and is converted at runtime. |
+| Old saved `texture=` names | `legacy_display_names.hpp`: the companion converts them once from the aircraft's panel.cfg files (Community, then Official) and saves; unreadable files ask the user to choose again. |
 
-**Fallback while marks are unavailable** (package missing, overridden, stale
-or off): the current pairing stays for one or two releases. The bridge logs
-`marks=unavailable reason=…` and the bug report carries it. Deleting the old
-pairing is a separate PR, once E1–E7 pass.
+## Install and update (done, 2026-11-04)
 
-## Install and update
-
-- **Make the page from the user's own stock file, never ship one.** The
-  companion does it at start (C++, not PowerShell: the installer AV history),
-  and so does the installer.
-  1. Find the stock file next to the running sim: `<exe dir>\Packages\
-     asobo-vcockpits-core\html_ui\Pages\VCockpit\Core\VCockpit.html`. That is
-     the same layout on Store; on Steam it is unverified.
-  2. Require exactly one `VCockpit.js` script line and insert ours after it.
-     Anything else means the page changed shape, so write nothing and report
-     "marks unavailable: stock page changed".
-  3. Write `Community\taxi-cam-panel-marks\` with `manifest.json`,
-     `layout.json` (sizes, FILETIME dates), the page, the helper, and
-     `taxi-cam-marks.stock.txt` (stock SHA-256 and path).
-  4. Community is found through `UserCfg.opt` `InstalledPackagesPath`, the
-     same roots `startup_xml.cpp` uses for `exe.xml`.
-- **Keep it in step.**
-  - At every companion start and when MSFS exits, compare the stock hash with
-    the recorded one. If it differs, rebuild. A rebuild while MSFS runs takes
-    effect at the next start.
-  - **The stale window** is the first sim start after an update that changed
-    `VCockpit.html`, if the companion starts after MSFS mounts packages
-    (unknown, E8). In that window our copy lacks whatever line Asobo added.
-  - How safe that is:
-    - The copy differs from stock by one line.
-    - The page is tiny and declarative.
-    - The helper is optional.
-    - The failure mode is the old page for one session, not a missing page.
-    - If an update changes the page's shape, step 2 refuses, and the rebuild
-      removes the override instead of keeping a stale one.
-- **Remove.** The uninstaller and an Options switch delete the package, but
-  only a folder holding our marker file.
-- **Steam.** Same steps with the Steam `UserCfg.opt` and exe folder. This is
-  unverified; the dev box is Store only.
+`src/app/marks_package.hpp`, the helper embedded in `taxi-cam.exe` (app.rc
+RCDATA 201):
+- Setup's `configure` writes the package (best effort, outcome in
+  `setup-diagnostics.log` as "Panel marks package: …"); `uninstall` removes it
+  (only a folder with our marker).
+- The companion checks it at every start on a worker thread: stock page or
+  helper changed (SHA-256 in `taxi-cam-marks.stock.txt`) rewrites it; a stock
+  page without exactly one `VCockpit.js` line removes the package. A write
+  while MSFS runs takes effect at the next start (notice shown).
+- Community from `UserCfg.opt` `InstalledPackagesPath` (Store, then Steam);
+  the simulator folder from the running process, the Store default, or Steam
+  libraries. Steam paths are unverified (the dev box is Store).
+- `tools/panel-marks/make-package.ps1` stays as a developer tool; the
+  companion rewrites its package on the next start (different marker text).
 
 ## Risks and unknowns (each has an experiment)
 
