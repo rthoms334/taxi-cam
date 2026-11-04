@@ -25,6 +25,13 @@ LRESULT CALLBACK host(HWND h, UINT m, WPARAM w, LPARAM l) {
 void command(int id) {
   procedure(window, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
 }
+// Every change saves by itself once edits pause (there is no Save button):
+// the pending autosave, made due now.
+void save_now() {
+  dirty = true;
+  autosave_due = 1;
+  autosave();
+}
 void marking_controls_tests() {
   for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
     current = {};
@@ -83,7 +90,7 @@ void marking_controls_tests() {
     DeleteObject(bitmap);
     DeleteDC(dc);
     require(matching, "Both A350 nose previews draw squares in the selected marking colour");
-    command(500);
+    save_now();
     win::Settings loaded;
     require(win::load_settings(loaded, L"", profile->id) && loaded.guide_color == current.guide_color &&
                 loaded.nose_dot == current.nose_dot && loaded.speed_color == before.speed_color && loaded.mounts == before.mounts,
@@ -230,17 +237,63 @@ void door_hold_save_tests() {
   live_view = {};
 }
 namespace {
-// Displays in a flight whose panel names do not pair (the Fenix display boot
-// of 2026-11-02 left each PFD's name on an ND): a display placed by its
-// picture routes that picture's texture at once, keeps it when the step is
-// left, reopened or passed with Next, and no name from the flight is saved.
-void session_display_tests() {
+// Autosave, the setup's target and a drop on an aircraft without a profile.
+void autosave_setup_tests() {
+  current = {};
+  current.profile = profiles::A359.id;
+  current.auto_profile = 0;
+  current.enabled = 1;
+  current.mounts = profiles::A359.mounts;
+  dirty = false;
+  autosave_due = 0;
+  page = 4;
+  build_controls();
+  SetDlgItemTextW(window, 203, L"2048");
+  dirty_notice();  // As the field's EN_CHANGE does.
+  require(dirty && autosave_due > GetTickCount64(), "An edit schedules its save for when typing pauses");
+  autosave();
+  win::Settings loaded;
+  require(dirty && (!win::load_settings(loaded, L"", profiles::A359.id) || loaded.calibration_budget != 2048),
+          "Nothing saves while the edit may still be typed");
+  autosave_due = 1;
+  autosave();
+  require(!dirty && win::load_settings(loaded, L"", profiles::A359.id) && loaded.calibration_budget == 2048,
+          "The edit saves by itself once due");
+  // A setup's trial is not the user's profile.
+  SetDlgItemTextW(window, 203, L"4096");
+  dirty_notice();
+  setup.trial = true;
+  autosave_due = 1;
+  autosave();
+  require(dirty && win::load_settings(loaded, L"", profiles::A359.id) && loaded.calibration_budget == 2048,
+          "The autosave leaves a setup trial unsaved");
+  require(apply() && win::load_settings(loaded, L"", profiles::A359.id) && loaded.calibration_budget == 2048,
+          "Applying during a setup trial does not save it either");
+  setup.trial = false;
+  dirty = false;
+  autosave_due = 0;
+
+  win::Settings selected;
+  selected.profile = profiles::A380.id;
+  win::Status sample{};
+  sample.heartbeat = GetTickCount64();
+  sample.identity_sample_ms = 1;
+  require(!setup_built_in(selected, sample), "An aircraft without a profile is set up as itself, not the selected built-in");
+  sample.detected_profile = profiles::DiscoveredProfileId;
+  require(!setup_built_in(selected, sample), "So is one the bridge still knows as set up earlier in the session");
+  sample.detected_profile = profiles::A380.id;
+  require(setup_built_in(selected, sample) == profiles::A380.id, "The built-in profile's own aircraft changes its displays");
+  sample = {};
+  require(setup_built_in(selected, sample) == profiles::A380.id, "Without a fresh report the selected profile is the one changed");
+  selected.profile = profiles::DiscoveredProfileId;
+  require(!setup_built_in(selected, sample), "A set-up aircraft is never a built-in one");
+
+  // A drop that completes an aircraft's displays saves its variant at once.
   current = {};
   current.profile = profiles::A380.id;
   current.auto_profile = 0;
+  current.enabled = 1;
   current.mounts = profiles::A380.mounts;
-  dirty = false;
-  advanced = false;
   page = OverviewPage;
   build_controls();
   {
@@ -249,52 +302,172 @@ void session_display_tests() {
     status.heartbeat = GetTickCount64();
     status.graphics_ready = 1;
     status.panel_discovery = 1;
-    status.panel_state = static_cast<std::uint32_t>(win::PanelMapState::paired);
-    status.panel_clean = 1;
-    status.panel_shift = -1;
-    status.panel_count = 2;
-    std::strcpy(status.aircraft_path, "SimObjects/Airplanes/FlyByWire_A380_842/aircraft.cfg");
-    // Each name on the other display's texture.
-    const char* names[]{"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"};
-    for (int i = 0; i < 2; ++i) {
+    status.panel_state = static_cast<std::uint32_t>(win::PanelMapState::marked);
+    status.identity_sample_ms = status.heartbeat;
+    status.panel_count = 3;
+    std::strcpy(status.aircraft_path, "SimObjects/Airplanes/Test Twin/aircraft.cfg");
+    const char* names[]{"$DU1", "$DU6", "$DU4"};
+    for (int i = 0; i < 3; ++i) {
       std::strcpy(status.panels[i].name, names[i]);
-      status.panels[i].id = 702 - i;
+      status.panels[i].id = 801 + static_cast<std::uint64_t>(i);
+      status.panels[i].width = status.panels[i].height = 768;
+      status.panels[i].mips = 5;
+    }
+  }
+  command(StepPillId);
+  require(page == SetupPage && !setup.built_in, "Displays sets up the aircraft loaded, not the selected built-in");
+  setup.picked = "$DU1";
+  setup.picked_texture = 801;
+  place_setup_panel(0);
+  const std::string_view key = "SimObjects/Airplanes/Test Twin";
+  require(setup.unsaved && setup.trial && current.profile == profiles::DiscoveredProfileId && (current.manual_mask & 1),
+          "One pilot display runs as the trial, its camera on, until the other is placed");
+  setup.picked = "$DU6";
+  setup.picked_texture = 802;
+  place_setup_panel(1);
+  require(!setup.unsaved && setup.stored && !setup.trial && current.profile == profiles::DiscoveredProfileId &&
+              win::load_settings(loaded, L"", profiles::DiscoveredProfileId, key) && loaded.discovered.sides == 2 &&
+              std::string_view(loaded.discovered.textures[0]) == "$DU1" && std::string_view(loaded.discovered.textures[1]) == "$DU6",
+          "The drop that completes the pilot displays saves the variant");
+  require((current.manual_mask & 3) == 3, "Both placed displays show their cameras at once");
+  setup.picked = "$DU4";
+  setup.picked_texture = 803;
+  place_setup_panel(2);
+  require(win::load_settings(loaded, L"", profiles::DiscoveredProfileId, key) && loaded.discovered.sides == 3 && loaded.door_side == 2,
+          "A newly placed lower display saves, and the door camera goes there");
+  swap_pilot_displays();
+  require(win::load_settings(loaded, L"", profiles::DiscoveredProfileId, key) &&
+              std::string_view(loaded.discovered.textures[0]) == "$DU6" && std::string_view(loaded.discovered.textures[1]) == "$DU1",
+          "The swap button exchanges the pilot displays and saves them");
+  // The adjustment window takes cameras already all on as they are: one
+  // turned off afterwards stays off.
+  {
+    win::Status sample;
+    {
+      const std::lock_guard lock(app_mutex);
+      sample = status;
+    }
+    live_view = {};
+    const auto* set_up = profiles::find(current.profile);
+    require(set_up != nullptr, "The set-up aircraft's profile is published");
+    live_keep_camera(current, sample, *set_up, 0);
+    require(live_view.camera_taken && (current.manual_mask & 3) == 3, "Cameras already on are taken as they are");
+    current.manual_mask &= ~2u;
+    live_keep_camera(current, sample, *set_up, 0);
+    require(!(current.manual_mask & 2), "A camera turned off while the window is open stays off");
+    live_view = {};
+  }
+  // Positioning after the setup's saves: closing the window gives back the
+  // cameras from before the setup (none here), though the window's first
+  // pass found the previews already on.
+  current.manual_mask = 3;
+  current.door_on = 1;
+  {
+    // The displays routed, so the window's first pass runs at once.
+    const std::lock_guard lock(app_mutex);
+    status.heartbeat = GetTickCount64();
+    status.left_id = 802;
+    status.right_id = 801;
+    status.lower_id = 803;
+  }
+  start_positioning();
+  require(page == CamerasPage && live_view.window && live_view.camera_taken && live_view.manual_before == setup.manual_before &&
+              live_view.door_preview,
+          "Positioning hands the window the cameras from before the setup");
+  DestroyWindow(live_view.window);
+  require(!live_view.window && !current.manual_mask && current.door_on == setup.door_on_before,
+          "Closing the window after positioning turns the previews off");
+  live_view = {};
+  // A window already open when the setup saves (from a Taxi cameras card, or
+  // on the door feed) gives its cameras back first, so the setup records the
+  // user's; positioning then opens a window of its own.
+  for (const unsigned feed : {0u, static_cast<unsigned>(profiles::DoorFeed)}) {
+    current.manual_mask = 1;
+    current.door_on = 0;
+    open_live_view(feed);
+    require(live_view.window != nullptr, "The adjustment window opens");
+    setup.stored = false;  // The setup's first save.
+    setup.picked = "$DU4";
+    setup.picked_texture = 803;
+    place_setup_panel(2);
+    require(!live_view.window && setup.manual_before == 1 && !setup.door_on_before,
+            "A setup save closes an open window and records the user's cameras");
+    start_positioning();
+    require(live_view.window && live_view.manual_before == 1, "Positioning opens a window of its own");
+    DestroyWindow(live_view.window);
+    require(current.manual_mask == 1 && !current.door_on, "Closing the positioning window gives back the user's cameras");
+    live_view = {};
+  }
+  // Opening Displays closes the window before a trial can copy its previews.
+  current.manual_mask = 1;
+  current.door_on = 0;
+  open_live_view();
+  require(live_view.window && (current.manual_mask & 3) == 3, "The window shows the previews");
+  open_aircraft_setup();
+  require(!live_view.window && current.manual_mask == 1 && !current.door_on,
+          "Opening Displays closes it and gives back the user's cameras");
+  live_view = {};
+
+  // A built-in profile: picks save at once, and the door camera's None stays.
+  current = {};
+  current.profile = profiles::A380.id;
+  current.auto_profile = 0;
+  current.enabled = 1;
+  current.mounts = profiles::A380.mounts;
+  std::strcpy(current.display_override.textures[2], "@sdv2");
+  current.door_side = win::DoorSideNone;
+  require(win::valid_settings(current) && win::save_settings(current), "Save the A380X with its lower display and no door display");
+  publish(current);
+  page = OverviewPage;
+  build_controls();
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+    status.heartbeat = GetTickCount64();
+    status.graphics_ready = 1;
+    status.panel_discovery = 1;
+    status.panel_state = static_cast<std::uint32_t>(win::PanelMapState::marked);
+    status.identity_sample_ms = status.heartbeat;
+    status.detected_profile = profiles::A380.id;
+    status.panel_count = 3;
+    std::strcpy(status.aircraft_path, "SimObjects/Airplanes/FlyByWire_A380_842/aircraft.cfg");
+    const char* names[]{"@pfd#0/2", "@pfd#1/2", "@sdv2"};
+    for (int i = 0; i < 3; ++i) {
+      std::strcpy(status.panels[i].name, names[i]);
+      status.panels[i].id = 901 + static_cast<std::uint64_t>(i);
       status.panels[i].width = 768;
       status.panels[i].height = 1024;
       status.panels[i].mips = 5;
     }
   }
   command(StepPillId);
-  require(page == SetupPage && setup.built_in == profiles::A380.id && setup.names[0] == "SCREEN_DU_PFDL" && setup.sides == 3,
-          "Displays opens on the profile's own displays, with a lower display");
-  require(setup_blocker(status).find(L"don't match their pictures") != std::wstring::npos,
-          "Names that did not pair in the flight are not offered for saving");
-  // The left PFD's picture is the texture named SCREEN_DU_PFDR here.
-  setup.picked = "SCREEN_DU_PFDR";
-  setup.picked_texture = 701;
-  place_setup_panel(0);
-  require(current.left_id == 701 && setup.textures[0] == 701, "The display placed by picture routes that picture at once");
+  require(page == SetupPage && setup.built_in == profiles::A380.id && setup.names[2] == "@sdv2",
+          "Displays opens on the A380X with its lower display");
+  swap_pilot_displays();
+  require(win::load_settings(loaded, L"", profiles::A380.id) && std::string_view(loaded.display_override.textures[0]) == "@pfd#1/2" &&
+              loaded.door_side == win::DoorSideNone,
+          "A built-in swap saves at once and keeps the door camera's None");
+  // A pick made during a cockpit test saves on leaving Displays.
+  setup.testing = 1;
+  swap_pilot_displays();
+  require(setup.unsaved, "A pick during a cockpit test waits to be saved");
   command(100);
-  require(page == OverviewPage && current.left_id == 701, "Leaving Displays keeps this flight's route");
-  command(StepPillId);
-  require(page == SetupPage && current.left_id == 701, "Opening Displays again keeps it");
-  command(NextId);
-  require(
-      page == CamerasPage && current.left_id == 701 && !current.display_override.textures[0][0] && !current.display_override.textures[1][0],
-      "Next goes on without saving the flight's names, and the route stays");
-  // A cockpit test ends without taking the route back.
-  command(StepPillId);
-  setup.picked = "SCREEN_DU_PFDL";
-  setup.picked_texture = 702;
-  place_setup_panel(1);
-  setup.testing = 2;
-  apply_setup_trial();
-  command(100);
-  require(current.left_id == 701 && current.right_id == 702 && !current.calibration_mask, "Ending a cockpit test keeps both routes");
+  require(page == OverviewPage && win::load_settings(loaded, L"", profiles::A380.id) && !loaded.display_override.textures[0][0] &&
+              !setup.testing && !current.calibration_mask,
+          "Leaving Displays saves it and ends the test");
   {
     const std::lock_guard lock(app_mutex);
     status = {};
   }
+  setup.trial = false;
+  setup.testing = 0;
+  page = OverviewPage;
+  const auto variant = win::settings_override + L"\\profiles\\discovered\\Airplanes\\Test Twin";
+  DeleteFileW((variant + L"\\variant.ini").c_str());
+  DeleteFileW((variant + L"\\layout.ini").c_str());
+  RemoveDirectoryW(variant.c_str());
+  RemoveDirectoryW((win::settings_override + L"\\profiles\\discovered\\Airplanes").c_str());
+  RemoveDirectoryW((win::settings_override + L"\\profiles\\discovered").c_str());
 }
 }  // namespace
 int main() {
@@ -450,7 +623,7 @@ int main() {
     page = 4;
     build_controls();
     SetDlgItemTextW(window, 203, L"1024");
-    command(500);
+    save_now();
     require(current.scene_test == 1 && current.calibration_budget == 1024, "Save applies the calibration budget without stopping scenes");
     win::Settings loaded;
     require(win::load_settings(loaded, L"", 2) && loaded.calibration_budget == 1024 && !loaded.scene_test &&
@@ -505,7 +678,7 @@ int main() {
     stale_color_selection_tests();
     setup_step_tests();
     door_hold_save_tests();
-    session_display_tests();
+    autosave_setup_tests();
     DestroyWindow(window);
     for (const auto* profile : profiles::Catalog) {
       win::Settings saved;

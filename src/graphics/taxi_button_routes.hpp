@@ -50,9 +50,12 @@ class TaxiButtonIntent {
 
 // Session-only resource identities. The caller serializes access and forgets
 // destroyed resources; no simulator state or resource lifetime is owned here.
-// Pair detection routes the captain and first-officer sides; a single-display
+// A pilot pair routes the captain and first-officer sides; a shared-texture
 // profile routes one texture to every side, except that a separate lower
 // texture (PMDG 777 lower DU) keeps its own side-2 identity.
+// Which display texture each side draws on. Displays are named by their
+// panel marks (bridge_main.cpp service_mark_identity); the user can choose
+// any texture instead, and a choice always wins over a name.
 class TaxiButtonRoutes {
  public:
   using Pair = std::array<std::uint64_t, 2>;
@@ -62,55 +65,35 @@ class TaxiButtonRoutes {
   // Explicit device/profile session change only. Resource destruction uses forget().
   void reset() noexcept { *this = {}; }
 
-  // The caller first validates supplied nonzero resource IDs. Zero requests
-  // automatic detection for that side; both zero starts a fresh explicit request.
-  // Side 2 is not part of the pair: a lower display the user placed (named) stays.
+  // The caller first validates supplied nonzero resource IDs. Zero leaves
+  // that side to its name. Side 2 is not part of the pair: a lower display
+  // the user placed (named) stays.
   bool select_explicit(const Pair& selection) noexcept {
     if (selection[0] && selection[0] == selection[1])
       return false;
     targets = {selection[0], selection[1], targets[2]};
-    detected_targets_ = {0, 0, detected_targets_[2]};
-    assigned_ = selection[0] != 0 || selection[1] != 0;
     return true;
   }
   // Single-display profiles: an explicit texture serves every side, because all
-  // display rectangles live on it. Zero requests automatic detection again.
+  // display rectangles live on it. Zero leaves them to their names.
   // separate_lower leaves side 2 on its own texture, which it cannot share.
   bool select_single(std::uint64_t id, bool separate_lower = false) noexcept {
     if (separate_lower) {
       if (id && id == targets[2])
         return false;
       targets[0] = targets[1] = id;
-      detected_targets_[0] = detected_targets_[1] = 0;
-      assigned_ = id != 0;
       return true;
     }
     targets = {id, id, id};
-    detected_targets_ = {};
     lower_explicit_ = false;
-    assigned_ = id != 0;
     return true;
   }
-  // Separate lower texture: explicit choice; zero returns it to automatic.
+  // Separate lower texture: explicit choice; zero leaves it to its name.
   bool select_lower(std::uint64_t id) noexcept {
     if (id && (id == targets[0] || id == targets[1]))
       return false;
     targets[2] = id;
-    detected_targets_[2] = 0;
     lower_explicit_ = id != 0;
-    return true;
-  }
-  // Separate lower texture: automatic guess. An existing choice is kept until
-  // its texture is destroyed or the user selects another.
-  bool adopt_lower(std::uint64_t id) noexcept {
-    if (!id || id == targets[0] || id == targets[1])
-      return false;
-    if (targets[2] == id)
-      return true;
-    if (targets[2])
-      return false;
-    targets[2] = detected_targets_[2] = id;
-    lower_explicit_ = false;
     return true;
   }
   bool lower_explicit() const noexcept { return lower_explicit_; }
@@ -118,94 +101,16 @@ class TaxiButtonRoutes {
     if (side >= 2 || id == 0 || targets[1 - side] == id)
       return false;
     targets[side] = id;
-    detected_targets_[side] = 0;
-    assigned_ = true;
     return true;
   }
 
-  // Detector ordering is only an initial-session hint. Once a side is known,
-  // retain every surviving identity through replacement. With both lost,
-  // semantic labels or an explicit assignment are required to recover sides.
-  // A lower display found by name (side 2) is not the pair's and stays.
-  bool adopt_detected(const Pair& detected, bool exact_names = false) noexcept {
-    if (!detected[0] || !detected[1] || detected[0] == detected[1] || detected[0] == targets[2] || detected[1] == targets[2])
-      return false;
-    if (exact_names || (!assigned_ && !targets[0] && !targets[1])) {
-      targets = {detected[0], detected[1], targets[2]};
-      detected_targets_ = exact_names ? Sides{0, 0, detected_targets_[2]} : Sides{detected[0], detected[1], detected_targets_[2]};
-      assigned_ = true;
-      return true;
-    }
-    if (targets[0] && targets[1])
-      return (targets[0] == detected[0] && targets[1] == detected[1]) || (targets[0] == detected[1] && targets[1] == detected[0]);
-    if (!targets[0] && !targets[1])
-      return false;
-    const unsigned survivor = targets[0] ? 0u : 1u;
-    if (targets[survivor] != detected[0] && targets[survivor] != detected[1])
-      return false;
-    targets[1 - survivor] = detected[0] == targets[survivor] ? detected[1] : detected[0];
-    detected_targets_[1 - survivor] = targets[1 - survivor];
-    assigned_ = true;
-    return true;
-  }
-
-  // Single-display profiles confirm one texture. Every display rectangle lives
-  // on it, so every side receives that id. Pair adoption still rejects a
-  // repeated id and is not used here.
-  // Both-zero after forget() can leave assigned_ set (same sticky ownership as
-  // dual-PFD both-lost). Unlike pair adoption, a lone navigation texture may
-  // be re-bound automatically: there is no left/right ambiguity to resolve.
-  bool adopt_single(std::uint64_t id, bool separate_lower = false) noexcept {
-    if (!id)
-      return false;
-    if (separate_lower) {
-      if (targets[0] == id && targets[1] == id)
-        return true;
-      if (targets[0] || targets[1] || (targets[2] == id && lower_explicit_))
-        return false;
-      // An automatic lower guess (the next-highest texture) can be the display
-      // a later detection confirms, after a transient texture shifted the
-      // order. Only an explicit lower choice keeps the texture.
-      if (targets[2] == id)
-        targets[2] = detected_targets_[2] = 0;
-      targets[0] = targets[1] = detected_targets_[0] = detected_targets_[1] = id;
-      assigned_ = true;
-      return true;
-    }
-    if (targets[0] == id && targets[1] == id && targets[2] == id)
-      return true;
-    if (targets[0] || targets[1] || targets[2])
-      return false;
-    targets = {id, id, id};
-    detected_targets_ = {id, id, id};
-    assigned_ = true;
-    return true;
-  }
-
-  // A complete allocation group may replace stale automatic ranks, but never
-  // a surviving explicit/semantic side. Keep the replacement marked detected
-  // so a later group change can withdraw or replace it in the same way.
-  bool replace_detected(const Pair& detected) noexcept {
-    if (!detected[0] || !detected[1] || detected[0] == detected[1])
-      return false;
-    for (unsigned side = 0; side < targets.size(); ++side)
-      if (targets[side] && targets[side] != detected_targets_[side])
-        return false;
-    targets = detected_targets_ = Sides{detected[0], detected[1], 0};
-    assigned_ = true;
-    return true;
-  }
-
-  // Panel-name identity (the simulator's VCockpit texture= names): a side the
-  // user did not choose takes the texture named for it, replacing an automatic
-  // guess. Detection changes never withdraw a named side; destruction does.
+  // A side the user did not choose takes the texture its name resolves to.
   // Single-display profiles may name one texture for several sides.
   bool adopt_named(const Sides& named, unsigned sides) noexcept {
-    // A side the user chose: neither detected nor named. Single-display
-    // choices also set side 2 this way; the 777 lower DU has its own flag.
+    // A side the user chose: not its name's texture. Single-display choices
+    // also set side 2 this way; the 777 lower DU has its own flag.
     const auto chosen = [&](unsigned side) {
-      return (side == 2 && lower_explicit_) ||
-             (targets[side] && targets[side] != detected_targets_[side] && targets[side] != named_targets_[side]);
+      return (side == 2 && lower_explicit_) || (targets[side] && targets[side] != named_targets_[side]);
     };
     std::array<bool, MaxDisplaySides> user{};
     for (unsigned side = 0; side < targets.size(); ++side)
@@ -216,17 +121,14 @@ class TaxiButtonRoutes {
       if (!id || targets[side] == id || user[side])
         continue;
       // A texture the user put on another side (the right PFD's texture moved
-      // to the left) never serves this side as well. Automatic sides do not
-      // block: a swapped detected pair takes its names in this one pass.
+      // to the left) never serves this side as well. Named sides do not
+      // block: swapped names move both sides in this one pass.
       bool held = false;
       for (unsigned other = 0; other < targets.size(); ++other)
         held = held || (other != side && user[other] && targets[other] == id && named[other] != id);
       if (held)
         continue;
       targets[side] = named_targets_[side] = id;
-      detected_targets_[side] = 0;
-      // A lower display alone leaves the pair to detection.
-      assigned_ = assigned_ || side < 2;
       changed = true;
     }
     return changed;
@@ -234,25 +136,13 @@ class TaxiButtonRoutes {
   bool named(unsigned side) const noexcept { return side < targets.size() && targets[side] && targets[side] == named_targets_[side]; }
 
   void forget(std::uint64_t id) noexcept {
-    assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0;
     for (unsigned side = 0; side < targets.size(); ++side)
       if (targets[side] == id) {
         targets[side] = 0;
-        detected_targets_[side] = 0;
         named_targets_[side] = 0;
         if (side == 2)
           lower_explicit_ = false;
       }
-  }
-
-  // An allocation-rank policy must be withdrawn when its complete-group
-  // evidence changes. Explicit sides and semantic-name assignments survive;
-  // the existing both-lost guard still requires an explicit session retry.
-  void forget_detected() noexcept {
-    const auto previous = detected_targets_;
-    for (auto id : previous)
-      if (id)
-        forget(id);
   }
 
   unsigned active_mask(bool valid, unsigned buttons) const noexcept { return valid ? buttons & assigned_mask() : 0; }
@@ -271,9 +161,7 @@ class TaxiButtonRoutes {
   }
 
  private:
-  bool assigned_ = false;
   bool lower_explicit_ = false;
-  Sides detected_targets_{};
   Sides named_targets_{};
 };
 

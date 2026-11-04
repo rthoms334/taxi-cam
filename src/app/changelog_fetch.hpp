@@ -7,6 +7,7 @@
 #include <thread>
 #include "../shared/version.hpp"
 #include "changelog.hpp"
+#include "json_value.hpp"
 
 namespace taxi_camera::standalone {
 inline constexpr wchar_t ChangelogHost[] = L"raw.githubusercontent.com";
@@ -98,12 +99,15 @@ class ChangelogFetcher {
     std::wstring request_path = ChangelogRoot;
     for (const char c : path)
       request_path += static_cast<wchar_t>(c);
+    return get(ChangelogHost, request_path, WINHTTP_NO_ADDITIONAL_HEADERS, limit, body);
+  }
+  bool get(const wchar_t* host, const std::wstring& request_path, const wchar_t* headers, std::size_t limit, std::string& body) {
     HINTERNET session = WinHttpOpen(L"Taxi Cam/" TAXI_CAM_VERSION_WIDE, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                     WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session)
       return false;
     WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
-    HINTERNET connection = WinHttpConnect(session, ChangelogHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET connection = WinHttpConnect(session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", request_path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                                         WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
                                    : nullptr;
@@ -122,7 +126,7 @@ class ChangelogFetcher {
         DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
         DWORD status{}, size = sizeof(status);
-        ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        ok = WinHttpSendRequest(request, headers, headers ? static_cast<DWORD>(-1L) : 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
              WinHttpReceiveResponse(request, nullptr) &&
              WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status,
                                  &size, WINHTTP_NO_HEADER_INDEX) &&

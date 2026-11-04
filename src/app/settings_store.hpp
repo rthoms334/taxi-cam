@@ -173,10 +173,6 @@ inline std::wstring discovered_layout_text(const profiles::DiscoveredLayout& l) 
     std::swprintf(line, 160, L"shape%u=%u,%u,%u\r\n", side, shape.width, shape.height, shape.mips);
     text += L"texture" + std::to_wstring(side) + L"=" + ascii(l.textures[side]) + L"\r\n" + line;
   }
-  for (unsigned i = 0; i < profiles::MaxPanelAnchors && l.anchors[i].name[0]; ++i) {
-    std::swprintf(line, 160, L"anchor%u_size=%u,%u\r\n", i, l.anchors[i].width, l.anchors[i].height);
-    text += L"anchor" + std::to_wstring(i) + L"=" + ascii(l.anchors[i].name) + L"\r\n" + line;
-  }
   return text;
 }
 inline bool read_discovered_layout(const std::wstring& path, std::string_view key, profiles::DiscoveredLayout& out) {
@@ -224,16 +220,7 @@ inline bool read_discovered_layout(const std::wstring& path, std::string_view ke
     ok = name(L"texture" + std::to_wstring(side), l.textures[side]) && numbers(L"shape" + std::to_wstring(side), 3, shape);
     l.shapes[side] = {shape[0], shape[1], shape[2]};
   }
-  for (unsigned i = 0; ok && i < profiles::MaxPanelAnchors; ++i) {
-    if (!name(L"anchor" + std::to_wstring(i), l.anchors[i].name))
-      return false;
-    if (!l.anchors[i].name[0])
-      break;
-    std::uint32_t size[2]{};
-    ok = numbers(L"anchor" + std::to_wstring(i) + L"_size", 2, size);
-    l.anchors[i].width = size[0];
-    l.anchors[i].height = size[1];
-  }
+  // anchorN lines from layouts saved before panel marks are ignored.
   if (!ok || !profiles::valid_layout(l))
     return false;
   out = l;

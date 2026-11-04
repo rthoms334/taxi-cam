@@ -92,8 +92,8 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
     std::uint32_t tracked = 0;
     for (std::uint32_t i = 0; i < sample.panel_count && i < MaxPanelTextures; ++i)
       tracked += sample.panels[i].id != 0;
-    out << "Panels: discovery=" << sample.panel_discovery << "; state=" << sample.panel_state << "; clean=" << sample.panel_clean
-        << "; shift=" << sample.panel_shift << "; paired=" << sample.panel_count << "; tracked=" << tracked << '\n';
+    out << "Panels: discovery=" << sample.panel_discovery << "; state=" << sample.panel_state << "; marked=" << sample.panel_count
+        << "; tracked=" << tracked << '\n';
     out << "Probe CPU ms=" << sample.probe_cpu_ms << "; max=" << sample.probe_max_ms << '\n';
     out << "Stage ms (manager/pool/lifecycle/entries/view1/view2/handoff/pose/activation/publish):";
     for (const double value : sample.stage_ms)

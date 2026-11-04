@@ -50,6 +50,16 @@ try {
     [IO.File]::WriteAllText($xml, '<SimBase.Document Type="Launch"><Launch.Addon><Name>Keep Me</Name><Path>C:\Other.exe</Path></Launch.Addon></SimBase.Document>')
     $simExe = Join-Path $sim 'FlightSimulator2024.exe'
     $appExe = Join-Path $app 'taxi-cam.exe'
+    # The simulator's Community folder (UserCfg.opt) and stock cockpit page,
+    # for the panel marks package.
+    $community = Join-Path $fixture 'packages/Community'
+    $userCfg = Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/UserCfg.opt'
+    New-Item -ItemType Directory -Force -Path $community,(Split-Path -Parent $userCfg) | Out-Null
+    [IO.File]::WriteAllText($userCfg, "InstalledPackagesPath `"$(Join-Path $fixture 'packages')`"`r`n")
+    $stockPage = Join-Path $sim 'Packages/asobo-vcockpits-core/html_ui/Pages/VCockpit/Core/VCockpit.html'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stockPage) | Out-Null
+    [IO.File]::WriteAllText($stockPage, "<html>`r`n<head>`r`n    <script type=`"text/javascript`" src=`"VCockpit.js`"></script>`r`n</head>`r`n</html>`r`n")
+    $marksMarker = Join-Path $community 'taxi-cam-panel-marks/taxi-cam-marks.stock.txt'
 
     # Pre-installation checks never depend on, or touch, real running programs.
     $result = Invoke-Setup check $app @('--simulator', $sim) "FlightSimulator2024|$simExe"
@@ -77,7 +87,9 @@ try {
 
     # Configure after Setup copied the files: startup entry, record and legacy add-on.
     $result = Invoke-Setup configure $app @('--simulator', $sim, '--startup', 'automatic', '--exe-xml', $xml)
-    Assert-That ($result.Code -eq 0 -and -not $result.Warning) "Configure failed: $($result.Error)"
+    Assert-That ($result.Code -eq 0 -and -not $result.Warning) "Configure failed: $($result.Error) $($result.Warning)"
+    Assert-That ((Test-Path -LiteralPath $marksMarker) -and
+        (Get-Content -Raw -LiteralPath (Join-Path $app 'setup-diagnostics.log')) -like '*Panel marks package: written*') 'Configure did not write the panel marks package.'
     $record = Get-Record $app
     Assert-That ($record.startupStatus -eq 'configured' -and $record.startupUpdated -and $record.exeXml -eq $xml -and $record.simulator -eq $simExe) 'Installation record is incorrect.'
     Assert-That ($record.exeXmlInstalledHash -eq (Get-Hash $xml)) 'Record does not own the committed startup bytes.'
@@ -209,6 +221,7 @@ try {
     [xml]$document = Get-Content -Raw -LiteralPath $xml
     Assert-That ($document.SelectNodes('//Launch.Addon[Name="Keep Me"]').Count -eq 1) 'Uninstall changed an unrelated entry.'
     Assert-Known $true 'Keep-settings uninstall removed'
+    Assert-That (-not (Test-Path -LiteralPath (Split-Path -Parent $marksMarker))) 'Uninstall kept the panel marks package.'
     $result = Invoke-Setup uninstall $app @('--remove-settings')
     Assert-That ($result.Code -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg'))) "Settings removal failed: $($result.Error)"
     Assert-Known $false 'Settings removal kept'

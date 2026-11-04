@@ -195,10 +195,13 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   auto inventory = win::pfd_inventory();
   require(inventory.size() == count, "Complete pre-hook display inventory recovered through barriers");
   std::sort(inventory.begin(), inventory.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
-  const auto ids = win::target_ids();
   const std::array<std::uint64_t, taxi_camera::MaxDisplaySides> expected =
       fbw_count ? std::array{inventory[1].id, inventory[0].id, std::uint64_t{0}} : std::array{inventory[7].id, inventory[5].id, std::uint64_t{0}};
-  require(ids == expected, "Existing automatic side mapping works without manual assignment");
+  // Displays are routed by the names their panel marks give them.
+  win::set_named_targets(expected);
+  win::discover_pfds(start + 5000);
+  const auto ids = win::target_ids();
+  require(ids == expected, "Named side mapping works without manual assignment");
   for (unsigned i = 0; i < count; ++i) {
     selected[i] = inventory[i].id == ids[0] || inventory[i].id == ids[1];
     require(inventory[i].draws == 0, "Opaque pre-hook RTVs remain unassociated; split submission proves attachment");
@@ -548,6 +551,58 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   restored(false, !common, "After a dropped first save the display came back without the camera");
   runtime::service();
   win::service_display_patches();
+  // A camera period whose first copy runs on another queue: an Execute there
+  // that leaves the display alone carries the camera over the instrument's
+  // last frame, and its save is on that queue. The instrument's writes on the
+  // application queue must still get the shadow back under them (it is taken
+  // again there), and the stop must restore it there, not wait for the other
+  // queue. A copy is carried only over a state a display list's exit left: a
+  // COMMON display, or the separate placement's last list (the consumer's
+  // copy round trip), leaves none.
+  if (!common && mixed_exit) {
+    Recording idle_list;
+    idle_list.create(device.get());
+    idle_list.close();
+    idle_list.reset();
+    idle_list.close();
+    record_frame(false, false);  // The instrument's frame the camera covers first.
+    execute();
+    win::set_target_mask(3);
+    win::service_display_patches();
+    runtime::service();
+    const auto before_other = win::graphics_status();
+    ID3D12CommandList* idle_batch[]{idle_list.list.get()};
+    other_queue->ExecuteCommandLists(1, idle_batch);
+    require(drain_copy_queue(other_queue.get(), device.get()), "Second queue camera copy completed");
+    require(win::graphics_status().shadow_saves >= before_other.shadow_saves + 2, "The camera's first copies saved on the second queue");
+    runtime::service();
+    record_frame(false, false);
+    execute();
+    pixels(false, false);
+    runtime::service();
+    record_frame(false, false, &under, under_colour);
+    execute();
+    runtime::service();
+    const auto rebound = win::graphics_status();
+    if (rebound.shadow_entry_restores < before_other.shadow_entry_restores + 2)
+      std::fprintf(stderr, "Other-queue shadow: saves=%llu->%llu entry_restores=%llu->%llu lost_writes=%llu->%llu\n",
+                   static_cast<unsigned long long>(before_other.shadow_saves), static_cast<unsigned long long>(rebound.shadow_saves),
+                   static_cast<unsigned long long>(before_other.shadow_entry_restores),
+                   static_cast<unsigned long long>(rebound.shadow_entry_restores),
+                   static_cast<unsigned long long>(before_other.shadow_lost_writes),
+                   static_cast<unsigned long long>(rebound.shadow_lost_writes));
+    require(rebound.shadow_entry_restores >= before_other.shadow_entry_restores + 2,
+            "A shadow saved on another queue went back under the application queue's writes");
+    win::set_target_mask(0);
+    win::service_display_patches();
+    record_frame(false, false, &after, after_colour);
+    execute();
+    require(win::graphics_status().shadow_restores >= rebound.shadow_restores + 2,
+            "The camera's stop restored the shadow on the application queue");
+    restored(true, true, "After a first copy on another queue the display came back without the camera");
+    runtime::service();
+    win::service_display_patches();
+  }
   handoff.stop_scene();
   runtime::reset_feed(key);
   UINT64 errors = 0;

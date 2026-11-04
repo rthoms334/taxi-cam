@@ -1,0 +1,6 @@
+{"sName":"VCockpit01","sConfigFile":"","vLogicalSize":{"x":2048,"y":2048},"vDisplaySize":{"x":2048,"y":2048},"daAttributes":[],"daInstruments":[
+{"iGUId":0,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=pmdg_777_msfs.wasm&wasm_gauge=DU_LeftOutboard","vPosAndSize":{"x":30,"y":33,"z":958,"w":971}},
+{"iGUId":1,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=pmdg_777_msfs.wasm&wasm_gauge=DU_LeftInboard","vPosAndSize":{"x":1058,"y":33,"z":958,"w":971}},
+{"iGUId":2,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=pmdg_777_msfs.wasm&wasm_gauge=DU_RightInboard","vPosAndSize":{"x":30,"y":1058,"z":958,"w":971}},
+{"iGUId":3,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=pmdg_777_msfs.wasm&wasm_gauge=DU_RightOutboard","vPosAndSize":{"x":1058,"y":1058,"z":958,"w":971}},
+{"iGUId":4,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=pmdg_777_msfs.wasm&wasm_gauge=Core","vPosAndSize":{"x":2044,"y":2044,"z":4,"w":4}}]}

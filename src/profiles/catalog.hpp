@@ -64,7 +64,11 @@ static_assert(sizeof(Composition) == 36 * sizeof(float));
 enum class TaxiControl { push_event, lvar_off, manual_only, pmdg_dsp_cam };
 // named routes only by panel name (aircraft set up by the user): a side whose
 // name does not resolve waits instead of guessing among same-sized displays.
-enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group, single_display, named };
+// How an aircraft's display sides sit on its textures. pair: each pilot side
+// has a texture of its own (A380s, A350s). shared_texture: every side is a
+// region of one texture (PMDG 777, A340s; the 777's lower DU may be separate).
+// fitted: a set-up aircraft, each side the whole texture the user picked.
+enum class DisplayLayout { pair, shared_texture, fitted };
 inline constexpr Composition A350Etacs = [] {
   Composition c;
   // A350-900 image-space guide defaults; live adjustments remain per profile.
@@ -104,7 +108,7 @@ struct AircraftProfile {
   std::array<std::string_view, 3> package_markers{"flybywire-aircraft-a380-842", "flybywire_a380_842"};
   // Target pixels: the outer display region is black around this camera inset.
   DisplayInsets camera_padding{16, 12, 16, 0};
-  PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
+  DisplayLayout display_layout = DisplayLayout::pair;
   // Daytime EV of Taxi Cam's fallback exposure (DisplayExposureController),
   // used only while the camera images cannot take the main view's lighting.
   float exposure = -8.f;
@@ -128,8 +132,10 @@ struct AircraftProfile {
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340s or the lower DU on the PMDG 777.
   unsigned sides = 2;
-  // panel.cfg [VCockpitNN] texture= name of each side's display texture, for
-  // routing by name. Empty keeps automatic detection for that side.
+  // Each side's display by its panel-mark key (src/shared/mark_identity.hpp):
+  // "@gauge" or "@gauge#rank/count" (twins). Empty leaves the side to
+  // the user's choice. A panel.cfg texture= name (an older catalog entry) is
+  // converted by the companion from the aircraft's panel.cfg on first use.
   std::array<const char*, MaxDisplaySides> panel_textures{"", "", ""};
   // A pilot pair's lower display (a panel of the pair's shape), placed for the
   // door camera while the aircraft's settings have no door camera yet; the
@@ -146,18 +152,10 @@ struct AircraftProfile {
   // Cameras that start in black and white (a bit per camera view) until the
   // aircraft's settings save their look.
   std::uint32_t black_and_white = 0;
-  // A second accepted mip count (0 = none), for named panel textures whose
-  // mip count differs from the detected display targets'. Kept narrow: every
+  // A second accepted mip count (0 = none), for panel textures whose mip
+  // count differs from the profile's display shape. Kept narrow: every
   // profile's shape admits display candidates on every aircraft.
   unsigned panel_mips = 0;
-  // Texture shapes of other panels, read from logged cockpit loads. Name
-  // pairing must land every listed panel on its shape, so extra textures from
-  // an aircraft switch cannot slide the names onto look-alike displays.
-  struct PanelShape {
-    const char* name;
-    unsigned width, height;
-  };
-  std::array<PanelShape, 8> panel_shapes{};
   // Aircraft set up by the user (discovered.hpp): any panel texture is a
   // display, and each side's area is the whole texture routed to it, whatever
   // its size. side_shapes (width, height, mips) are the panels the user picked;
@@ -183,18 +181,17 @@ inline constexpr unsigned taxi_feeds(const AircraftProfile& p) noexcept {
 
 // Side 2 lives on its own texture rather than the shared display texture.
 inline constexpr bool separate_lower_texture(const AircraftProfile& p) noexcept {
-  return p.sides > 2 && p.pfd_detection == PfdDetectionPolicy::single_display && p.lower_display_texture[0] != '\0';
+  return p.sides > 2 && p.display_layout == DisplayLayout::shared_texture && p.lower_display_texture[0] != '\0';
 }
 // A catalog profile with a pilot pair of displays can take a third: the lower
 // display the user placed in Displays (apply_choices), any cockpit panel on
 // its own texture (lower_any_panel), found by its name only. Used for the door
 // camera.
-inline constexpr bool pair_detection(const AircraftProfile& p) noexcept {
-  return !p.fit_texture &&
-         (p.pfd_detection == PfdDetectionPolicy::dominant_activity || p.pfd_detection == PfdDetectionPolicy::ini_a380_allocation_group);
+inline constexpr bool pilot_pair(const AircraftProfile& p) noexcept {
+  return !p.fit_texture && p.display_layout == DisplayLayout::pair;
 }
 inline constexpr bool named_lower_side(const AircraftProfile& p) noexcept {
-  return p.sides > 2 && pair_detection(p);
+  return p.sides > 2 && pilot_pair(p);
 }
 // Side 2 has a texture of its own: the 777's lower DU, a pilot pair's placed
 // lower display, or a set-up aircraft's (each of its sides is a panel).
@@ -241,10 +238,12 @@ inline constexpr AircraftProfile A380 = [] {
                     768,
                     1024,
                     5};
-  p.panel_textures = {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR", ""};
+  // Part_Interior_Cockpit panel.cfg: SCREEN_DU_PFDL, SCREEN_DU_PFDR, SCREEN_DU_SD (whose
+  // sd gauge block lies under sdv2's, so its marks name it sdv2).
+  p.panel_textures = {"@pfd#0/2", "@pfd#1/2", ""};
   // The system display below the EWD (panel.cfg VCockpit04, 768 x 1024 like
   // the PFDs), read from the installed package on 2026-11-02.
-  p.door_lower_texture = "SCREEN_DU_SD";
+  p.door_lower_texture = "@sdv2";
   // Door: Robert's live A380X door camera (2026-11-02) on the system display
   // above its bottom strip. The ECAM control panel's VIDEO key selects page 15
   // of A32NX_ECAM_SD_CURRENT_PAGE_INDEX (read live; -1 when it is deselected).
@@ -252,11 +251,6 @@ inline constexpr AircraftProfile A380 = [] {
   p.mounts[DoorFeed] = A380XDoorMount;
   p.door_lvar = "A32NX_ECAM_SD_CURRENT_PAGE_INDEX";
   p.door_lvar_trigger = standalone::lvar_equals_trigger(15);
-  p.panel_shapes = {{{"SCREEN_DU_MFD", 1646, 1024},
-                     {"SCREEN_DU_EWD", 768, 1024},
-                     {"SCREEN_DU_SD", 768, 1024},
-                     {"SCREEN_DU_NDL", 768, 1024},
-                     {"SCREEN_DU_NDR", 768, 1024}}};
   return p;
 }();
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
@@ -299,10 +293,10 @@ inline constexpr AircraftProfile A359 = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
-  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
-  p.door_lower_texture = "$SD";
+  // Function_Interior_A350 panel.cfg: $EFIS_LEFT, $EFIS_RIGHT, $SD (live marks 2026-11-04).
+  p.panel_textures = {"@EFIS#0/2", "@EFIS#1/2", ""};
+  p.door_lower_texture = "@CTR";
   p.door_lower_area = A350DoorArea;
-  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 inline constexpr AircraftProfile A35K = [] {
@@ -325,10 +319,10 @@ inline constexpr AircraftProfile A35K = [] {
                     {28, 29, 87, 91, 27, 90},
                     {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
   p.pfd_refresh_hz = A350PfdRefreshHz;
-  p.panel_textures = {"$EFIS_LEFT", "$EFIS_RIGHT", ""};
-  p.door_lower_texture = "$SD";
+  // Function_Interior_A350 panel.cfg: $EFIS_LEFT, $EFIS_RIGHT, $SD (live marks 2026-11-04).
+  p.panel_textures = {"@EFIS#0/2", "@EFIS#1/2", ""};
+  p.door_lower_texture = "@CTR";
   p.door_lower_area = A350DoorArea;
-  p.panel_shapes = {{{"$INI_FAP", 2048, 2048}, {"$SD", 1644, 1024}}};
   return p;
 }();
 inline constexpr std::array<double, 6> IniA380DoorMount{-0.6, 8, 20, -64.54, 158.19, 1.2};
@@ -351,16 +345,16 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.composition.tail_upper = {0.34f, 0.52f};
   p.composition.tail_corner = {0.305f, 0.65f};
   p.composition.tail_inner = {0.355f, 0.65f};
-  // The aircraft draws its PFDs in one-mip typeless targets and then into the
-  // five-mip panel textures named in panel.cfg; routing by name stamps the
-  // named $PFD_CPT/$PFD_FO panel textures (2026-10-04 panel table: eight
-  // 768 x 1024 five-mip displays). The allocation-group fallback still pairs
-  // only the one-mip typeless group.
+  // The aircraft draws its PFDs in one-mip typeless targets and then into
+  // five-mip 768 x 1024 panel textures, which the cameras are drawn on. Its
+  // package is encrypted, so the keys come from Robert's choice in Displays
+  // (2026-11-04, routed and Ready live): the two PFD panels' first gauge is
+  // ini-crash-report, ranked by panel number, and the system display is the
+  // fourth of the six DU panels.
   p.mips = 1;
   p.panel_mips = 5;
-  p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
-  // Its system display, a five-mip 768 x 1024 panel like the PFDs (same table).
-  p.door_lower_texture = "$SD";
+  p.panel_textures = {"@ini-crash-report#0/2", "@ini-crash-report#1/2", ""};
+  p.door_lower_texture = "@DU#3/6";
   // Door: Robert's live iniBuilds A380 door camera (2026-11-02), in black and
   // white in the picture of the system display's VIDEO page, between its tabs
   // and its TAT/SAT strip. The ECAM control panel's VIDEO key selects page 16
@@ -370,9 +364,7 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
   p.door_lvar_trigger = standalone::lvar_equals_trigger(16);
   p.black_and_white = 1u << DoorFeed;
-  p.panel_shapes = {{{"$INI_FAP", 2048, 1536}, {"$ND_CPT", 768, 1024}, {"$ND_FO", 768, 1024}, {"$EWD", 768, 1024}, {"$SD", 768, 1024}}};
   p.formats = {28, 29, 87, 91, 27, 90};
-  p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
   // 31.3 both-PFD stamps/s at camera_rate 15 on installed 0.9.11 (no FG):
   // ~15.7 redraws per side. FBW A380 (profile 1) is not measured yet.
   p.pfd_refresh_hz = 16;
@@ -488,7 +480,7 @@ inline constexpr auto make_pmdg_777 =
                         Pmdg777Composition,
                         Pmdg777Formats,
                         {marker, "", ""}};
-      p.pfd_detection = PfdDetectionPolicy::single_display;
+      p.display_layout = DisplayLayout::shared_texture;
       p.display_texture = Pmdg777Texture;
       p.lower_display_texture = Pmdg777LowerTexture;
       p.sides = 3;
@@ -499,7 +491,8 @@ inline constexpr auto make_pmdg_777 =
       // picture. Bottom inset stays 0; leftover working-image rows under the squares
       // are black. L/R stay 0.
       p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
-      p.panel_textures = {Pmdg777Texture, Pmdg777Texture, Pmdg777LowerTexture};
+      // Function_Interior panel.cfg: DUS and EICASCDU (live marks 2026-11-04).
+      p.panel_textures = {"@DU_LeftInboard", "@DU_RightInboard", "@DU_Lower"};
       return p;
     };
 inline constexpr AircraftProfile Pmdg777 = make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
@@ -578,9 +571,10 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.composition = A346Composition;
   p.formats = {};
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
-  p.pfd_detection = PfdDetectionPolicy::single_display;
+  p.display_layout = DisplayLayout::shared_texture;
   p.display_texture = A346Texture;
-  p.panel_textures = {A346Texture, A346Texture, A346Texture};
+  // panel.cfg [VCockpit01] texture=$GAUGES_UNIFIED, its gauges NanoVGInstruments.
+  p.panel_textures = {"@NanoVGInstruments", "@NanoVGInstruments", "@NanoVGInstruments"};
   return p;
 }();
 // iniBuilds A340-300 (streamed fs24-inibuilds-aircraft-a340; encrypted, so no
@@ -591,6 +585,14 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
 // and (1,2) on the lower ECAM. Rows are therefore ND / PFD pairs:
 // CAPT ND, CAPT PFD / F/O ND, F/O PFD / E/WD, SD. CAPT PFD at (1,0) follows
 // that pattern and is not yet re-checked.
+// Since displays are found only by panel marks (2026-11-04) the cameras draw
+// on the cockpit panel texture, 2340 x 2340 with five mips: its
+// DisplayManager gauge holds the same grid at 0,0, and the FMGS pages sit to
+// its right. The one-mip 1560 x 2340 texture the grid is drawn on first
+// carries no marks and is not copied into the panel (the bridge saw no copy),
+// so name routing cannot reach it; Displays offered only the panel and
+// refused it for its shape.
+inline constexpr unsigned IniA343PanelSize = 2340, IniA343PanelMips = 5;
 inline constexpr unsigned IniA343DisplayWidth = 1560;
 inline constexpr unsigned IniA343DisplayHeight = 2340;
 inline constexpr unsigned IniA343Cell = 780;
@@ -613,9 +615,9 @@ inline constexpr AircraftProfile IniA343 = [] {
                     {"", "", ""},
                     {"", "", ""},
                     {{A359.mounts[0], A359.mounts[1], A359.mounts[2], IniA343DoorMount}},
-                    IniA343DisplayWidth,
-                    IniA343DisplayHeight,
-                    1,
+                    IniA343PanelSize,
+                    IniA343PanelSize,
+                    IniA343PanelMips,
                     TaxiControl::manual_only,
                     {"", "", ""},
                     {{ini_a343_cell(1, 0), ini_a343_cell(1, 1), ini_a343_cell(1, 2)}}};
@@ -623,10 +625,13 @@ inline constexpr AircraftProfile IniA343 = [] {
   p.composition = A346Composition;
   p.formats = {28, 29, 87, 91, 27, 90};
   p.package_markers = {"simobjects/airplanes/inibuilds-a340", "fs24-inibuilds-aircraft-a340", ""};
-  p.pfd_detection = PfdDetectionPolicy::single_display;
+  p.display_layout = DisplayLayout::shared_texture;
   p.door_lower_area = {IniA343Cell, 2 * IniA343Cell, IniA343DisplayWidth, 2210};
   p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
   p.door_lvar_trigger = standalone::lvar_equals_trigger(15);
+  // Its panel's marks (2026-11-04): VCockpit02 gauge 0 DisplayManager, the
+  // only gauge of that name.
+  p.panel_textures = {"@DisplayManager", "@DisplayManager", "@DisplayManager"};
   return p;
 }();
 inline constexpr std::array<const AircraftProfile*, 10> Catalog{&A380,         &A359,         &A35K,     &IniA380,      &Pmdg777,
@@ -770,15 +775,6 @@ inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, 
   // No scanned format list: admit the known size and leave a shared size ambiguous.
   return !listed;
 }
-// Automatic detection: the profile's own mip count only. panel_mips admits
-// named panel textures for routing by name, not for detection.
-inline constexpr bool matches_detection(const AircraftProfile& p,
-                                        unsigned width,
-                                        unsigned height,
-                                        unsigned mips,
-                                        unsigned format) noexcept {
-  return matches_display(p, width, height, mips, format) && (!p.mips || mips == p.mips);
-}
 // Name routing: a texture a named side may resolve to. On a set-up aircraft
 // that is one of the panel shapes the user picked, not any panel texture.
 inline constexpr bool named_display(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
@@ -793,22 +789,9 @@ inline constexpr bool named_display(const AircraftProfile& p, unsigned width, un
 }
 // A pilot pair's placed lower display (named_lower_side) is any cockpit panel
 // its name picks, such as the A380X's 1646 x 1024 MFD for the door camera. Its
-// pilot displays keep their own shape, and automatic detection only ever
-// considers that shape (matches_detection).
+// pilot displays keep their own shape.
 inline constexpr bool lower_any_panel(const AircraftProfile& p) noexcept {
   return named_lower_side(p);
-}
-// Name routing per side: the placed lower display any panel texture, every
-// other side named_display.
-inline constexpr bool side_display(const AircraftProfile& p,
-                                   unsigned side,
-                                   unsigned width,
-                                   unsigned height,
-                                   unsigned mips,
-                                   unsigned format) noexcept {
-  if (side == MaxDisplaySides - 1 && lower_any_panel(p))
-    return panel_texture_shape(width, height, mips, format);
-  return named_display(p, width, height, mips, format);
 }
 // A texture some side may be drawn on, once routed there: the display shape,
 // or any panel texture where the placed lower display can be one.

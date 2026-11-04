@@ -68,16 +68,22 @@ class RetainedProfileTransition {
       const auto& view = views[i];
       if (!view.complete || !view.ready || view.status == engine_camera::OwnedViewStatus::pending)
         return state_ = Decision::wait;
-      if (view.status != engine_camera::OwnedViewStatus::ready || view.mode != 2 || !view.resource_present || !view.resource_address ||
-          !view.view_address || !view.node_address || !view.camera_address || view.view_index < 0 || view.view_index >= 8 ||
-          view.dimensions != dimensions_[i] || (!resizing_ && view.output_dimensions != dimensions_[i][0]))
+      // While resizing, the engine's output routine is replacing the view's
+      // output: the old one may already be gone and the new one not yet made
+      // (2026-11-03, PMDG 777: every display-area move refused the kept pair
+      // here and its cameras never came back). resize_kept_panes awaits the
+      // new output, bounded; identity stays strict.
+      const bool output = view.resource_present && view.resource_address;
+      if (view.status != engine_camera::OwnedViewStatus::ready || view.mode != 2 || (!resizing_ && !output) || !view.view_address ||
+          !view.node_address || !view.camera_address || view.view_index < 0 || view.view_index >= 8 || view.dimensions != dimensions_[i] ||
+          (!resizing_ && view.output_dimensions != dimensions_[i][0]))
         return state_ = Decision::refused;
       open |= (view.flags[0] & 1u) == 0;
     }
     for (unsigned i = 0; i < feeds; ++i)
       for (unsigned j = i + 1; j < feeds; ++j)
         if (views[i].view_address == views[j].view_address || views[i].view_index == views[j].view_index ||
-            views[i].resource_address == views[j].resource_address)
+            (views[i].resource_address && views[i].resource_address == views[j].resource_address))
           return state_ = Decision::refused;
     return state_ = open ? Decision::close : Decision::ready;
   }

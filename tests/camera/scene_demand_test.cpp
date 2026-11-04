@@ -297,10 +297,15 @@ void prewarm_unqueued_failure_then_taxi() {
   require(retained_wait.observe(1500, true, false, {}, false) && retained_wait.phase() == win::ScenePrewarm::Phase::preparing,
           "The same background attempt was not kept for a later readiness sample");
 }
-// Issue 97: camera rendering pauses while CAMERA STATE says the main view is
-// outside the cockpit (2). Unknown readings never pause.
+// Issue 97: camera rendering pauses while CAMERA STATE says the main view is an
+// exterior camera. The cockpit (2) and every other reading never pause.
 void main_view_pause() {
   using taxi_camera::standalone::MainViewPause;
+  using taxi_camera::standalone::outside_camera_state;
+  for (unsigned state : {3u, 4u, 5u, 6u, 9u, 10u, 17u, 19u, 25u})
+    require(outside_camera_state(state), "A documented exterior camera was not outside");
+  for (unsigned state : {0u, 1u, 2u, 7u, 8u, 11u, 12u, 16u, 21u, 24u, 27u, 29u, 34u, 0xffffffffu})
+    require(!outside_camera_state(state), "A cockpit, loading or undocumented state was outside");
   MainViewPause cockpit;
   for (std::uint64_t t = 1000; t < 20000; t += 250)
     require(!cockpit.observe(t, true, MainViewPause::kCockpit), "The cockpit view paused the cameras");
@@ -315,11 +320,38 @@ void main_view_pause() {
   require(outside.observe(1750, true, 4), "Another outside camera ended the pause");
   require(!outside.observe(2000, true, MainViewPause::kCockpit) && !outside.paused(), "The cockpit did not end the pause at once");
 
-  // A transition state that passes within kEnterMs does not close the cameras.
+  // An outside view that passes within kEnterMs does not close the cameras.
   MainViewPause transition;
-  require(!transition.observe(1000, true, 27) && !transition.observe(1250, true, 27), "A passing transition paused");
-  require(!transition.observe(1400, true, MainViewPause::kCockpit), "The cockpit after a transition paused");
-  require(!transition.observe(1600, true, 27), "The transition timer survived the cockpit reading");
+  require(!transition.observe(1000, true, 3) && !transition.observe(1250, true, 3), "A passing outside view paused");
+  require(!transition.observe(1400, true, MainViewPause::kCockpit), "The cockpit after a passing view paused");
+  require(!transition.observe(1600, true, 3), "The outside timer survived the cockpit reading");
+
+  // MSFS 2024, PMDG 777 after a fresh flight load (2026-11-03): 7, 29 and 34
+  // while loading, then 7 for the whole time in the cockpit. None of them pauses.
+  MainViewPause fresh_load;
+  std::uint64_t t = 1000;
+  for (unsigned state : {7u, 29u, 34u})
+    for (int i = 0; i < 8; ++i, t += 250)
+      require(!fresh_load.observe(t, true, state), "A loading state paused the cameras");
+  for (; t < 60000; t += 250)
+    require(!fresh_load.observe(t, true, 7), "State 7 in the cockpit paused the cameras");
+  // Unknown states do not add up to kEnterMs between outside readings.
+  for (; t < 62000; t += 250)
+    require(!fresh_load.observe(t, true, t % 500 ? 7u : 3u), "Outside readings between unknown states paused");
+  // The cockpit view after outside (live: 7, 5, 2) still pauses and resumes.
+  for (; t < 63000; t += 250)
+    fresh_load.observe(t, true, 5);
+  require(fresh_load.paused(), "Fixed on Plane after state 7 did not pause");
+  require(!fresh_load.observe(t, true, MainViewPause::kCockpit), "The cockpit after state 7 kept the pause");
+
+  // An unknown state during a pause is no reading: a passing one between two
+  // exterior cameras keeps the pause, a lasting one ends it after kHoldMs.
+  MainViewPause unknown;
+  unknown.observe(1000, true, 3);
+  require(unknown.observe(1500, true, 3), "Unknown-state fixture did not pause");
+  require(unknown.observe(1750, true, 27) && unknown.observe(2000, true, 4), "A state between exterior cameras ended the pause");
+  require(unknown.observe(2000 + MainViewPause::kHoldMs, true, 7), "A short unknown state ended the pause");
+  require(!unknown.observe(2001 + MainViewPause::kHoldMs, true, 7), "A lasting unknown state kept the pause");
 
   // A telemetry gap while paused (frames stall while the outside view loads)
   // holds the pause for kHoldMs after the last outside reading, then ends it.

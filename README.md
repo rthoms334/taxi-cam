@@ -23,7 +23,7 @@ If you find Taxi Cam useful, please consider donating.
 
 ## Supported aircraft
 
-Taxi Cam works with **any aircraft** whose displays are cockpit panels. For an aircraft without a built-in profile, open **Setup**: in **Displays**, pick each camera's display from pictures of the cockpit panels (**Test in cockpit** shows which screen a pick is), then **Next** saves them and opens **Taxi cameras** with the live view to position the cameras. Each aircraft variant, such as the Fenix A320 and A321, is saved separately, and **Overview → Saved aircraft…** copies a setup to another variant or removes it. A set-up aircraft's cameras are turned on with the keyboard shortcuts or the camera switches under **Overview → Cockpit displays**, because Taxi Cam does not know its cockpit buttons. See [Aircraft without a profile](docs/aircraft-profiles.md#aircraft-without-a-profile).
+Taxi Cam works with **any aircraft** whose displays are cockpit panels. For an aircraft without a built-in profile, open **Setup**: in **Displays**, pick each camera's display from pictures of the cockpit panels (**Test in cockpit** shows which screen a pick is), each display saves as soon as it is placed and its camera shows there, then **Next** opens **Taxi cameras** with the live view to position the cameras. Each aircraft variant, such as the Fenix A320 and A321, is saved separately, and **Overview → Saved aircraft…** copies a setup to another variant or removes it. A set-up aircraft's cameras are turned on with the keyboard shortcuts or the camera switches under **Overview → Cockpit displays**, because Taxi Cam does not know its cockpit buttons. See [Aircraft without a profile](docs/aircraft-profiles.md#aircraft-without-a-profile).
 
 These aircraft have built-in profiles, with camera positions, reference guides and cockpit camera controls ready to use. **Setup → Displays** can still pick other panels or display areas for them.
 
@@ -69,7 +69,7 @@ Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles th
 
 Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved separately for each aircraft profile.
 
-**Setup** has three steps, **Displays**, **Taxi cameras** and **Door camera**, which the step pills on **Overview** also open. **Next** saves a step and goes on to the next (the last step's is **Save and finish**); **Back**, **Cancel** and the step pills move without saving. **Advanced** in the header shows each step's extra values and pages; it is not saved. **Overview**, **Options** and **Diagnostics** keep **Save changes**.
+**Setup** has three steps, **Displays**, **Taxi cameras** and **Door camera**, which the step pills on **Overview** also open. Every change saves by itself, a moment after you stop typing; there is no Save button. **Next** goes on to the next step (the last step's is **Finish**), and **Back**, **Cancel** and the step pills move between pages. **Advanced** in the header shows each step's extra values and pages; it is not saved.
 
 To use another language, choose **Language** in the tray menu or under **Menu** in Settings. **Follow Windows** returns to the Windows display language. Aircraft names, status messages from the simulator, logs and bug reports stay in English.
 
@@ -89,7 +89,7 @@ The icons at the top of a card's picture turn its camera on or off (left) and se
 
 Set your camera views first. Then, on **Setup → Taxi cameras** with **Advanced** on, select **Guide values…** to position the nose markers and tail brackets. **X** moves them sideways and **Y** moves them up or down. The nose markers mirror each other; the left and right tail brackets are set separately, each measured from its own edge. The PMDG 777 does not use these markers, so that aircraft does not need guide calibration.
 
-Choose **Apply live** to preview the positions, then **Next** to keep them. To restore the defaults, choose **Reset guides**, then **Next**. The guides may need realigning if you change the camera view.
+**Apply live** shows the positions and saves them. **Reset guides** restores the defaults. The guides may need realigning if you change the camera view.
 
 ### Camera frame rate and colours
 
@@ -101,9 +101,9 @@ On **Options**, choose the camera frame rate and the ground-speed text colour (w
 - **Smooth**: 30 fps per camera. Costs the most simulator time.
 - **Custom**: set your own target with the slider, 5–60 fps per camera.
 
-Each card shows its target and, once the simulator is running, what each camera gets right now. Below the cards, **Now** shows the frame rate each camera actually gets and why, when it is less than the target. The cameras keep the same frame rate while the aircraft is parked. Profiles saved by earlier versions start on Auto; a camera frame rate you had lowered starts on Performance, and one you had raised starts on Custom at that rate. Choose **Save changes** when finished.
+Each card shows its target and, once the simulator is running, what each camera gets right now. Below the cards, **Now** shows the frame rate each camera actually gets and why, when it is less than the target. The cameras keep the same frame rate while the aircraft is parked. Profiles saved by earlier versions start on Auto; a camera frame rate you had lowered starts on Performance, and one you had raised starts on Custom at that rate.
 
-**Marking colour**, on **Setup → Taxi cameras** with **Advanced** on and on **Guide values…**, changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Next** to retain the colour for the selected aircraft profile.
+**Marking colour**, on **Setup → Taxi cameras** with **Advanced** on and on **Guide values…**, changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. The colour is saved for the selected aircraft profile as you choose it.
 
 The camera views always use the main view's lighting: the simulator's own exposure, tone curve and bloom, so they look like the main view by day and at night. **Options → Daytime brightness** and **Night brightness** shift the camera images from −4 to +2 EV in 0.25 steps on top of that, per aircraft, for displays or lighting add-ons that look too bright or too dark; 0, the default, matches the main view. Dusk blends the two with the ambient light. Until the simulator's exposure is available, for example in the first moments after a flight loads, Taxi Cam exposes the camera images itself and brightens them automatically as the ambient light drops.
 
@@ -114,7 +114,7 @@ All aircraft start with the same green ground-speed colour. Exposure and night b
 If automatic detection stays at a waiting message or selects the wrong screens, open **Setup → Displays** with the aircraft loaded and connected:
 
 1. The slots at the top (**Left PFD**, **Right PFD**, and **Lower display** where the aircraft has one) show the panel each camera is drawn on: **Built in**, **Saved**, **Your choice** or **Not placed**. **Overview → Cockpit displays** shows the camera areas in small; selecting one opens **Displays**.
-2. Under **All cockpit displays**, find the screen in the pictures (double-click one to enlarge it), select it and choose **Place here** on its slot, or drag the picture onto the slot. **Test in cockpit** on a slot shows the calibration bars on its panel in the cockpit. **Next** saves new picks for this aircraft.
+2. Under **All cockpit displays**, find the screen in the pictures (double-click one to enlarge it), select it and choose **Place here** on its slot, or drag the picture onto the slot. **Test in cockpit** on a slot shows the calibration bars on its panel in the cockpit. Each pick saves for this aircraft as you place it (an aircraft you set up saves once both PFDs are placed), and the **↔** button between the PFDs swaps them.
 3. To choose the texture behind a display for this flight only, turn **Advanced** on and open **Texture routing…**. **Assigned displays** shows a picture of the texture behind each display and whether it was named, detected or chosen. Under **Display textures**, find the screen in the pictures (select one to enlarge it) and choose **Left** or **Right** on its card. Use **Swap left / right** if the two sides are reversed, or **Clear choices** to go back to automatic selection. **Auto select** off stops automatic selection altogether, so only the textures you choose are used.
 4. If the pictures are not conclusive, turn on the **Left** or **Right** calibration bars on **Diagnostics** to identify that screen with an animated pattern, then turn them off. On aircraft with working TAXI buttons, turning the last calibration bar off automatically restores button control. The iniBuilds A380 stays in manual control.
 
@@ -131,7 +131,7 @@ Please report unexpected behaviour using **Report a bug**.
 
 Use **Check for updates** in the tray menu, or download the latest installer from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and Taxi Cam before installing an update. Your saved settings are kept by default; setup offers an explicit reset if you want to start again.
 
-Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, open **Setup → Taxi cameras**, select **Reset shortcuts**, then **Next**.
+Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, open **Setup → Taxi cameras**, select **Reset shortcuts**.
 
 Click the version number at the bottom of the settings sidebar to open the Taxi Cam GitHub repository in your browser.
 

@@ -104,7 +104,11 @@ void profile_switch_case() {
   win::service_live_backfill(1000 + win::LiveBackfillAssociateMs, 8);
   expect("restarted association ends at its bounded deadline", r.live_backfill.load(), false);
   win::discover_pfds(1000);
-  expect("full late-discovered group retains automatic last and third-last selection",
+  expect("a late-discovered group is never guessed from creation order",
+         win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
+  win::set_named_targets({items[7]->id, items[5]->id, 0});
+  win::discover_pfds(1000);
+  expect("a late-discovered group takes the textures its marks name",
          win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{items[7]->id, items[5]->id}, true);
   clear_fixture(r);
 }
@@ -200,9 +204,6 @@ void distinct_associations_case() {
   }
   win::maybe_stop_live_backfill(partial);
   expect("partial two-resource ini group keeps attachment enabled", partial.live_backfill.load(), true);
-  const auto inventory = win::pfd_inventory_locked(partial);
-  const auto targets = win::allocation_group_pair(*partial.profile, inventory);
-  expect("partial ini group cannot adopt a PFD pair", targets[0] || targets[1], false);
   win::clear_views(partial);
   win::clear_views(r);
 }
@@ -301,72 +302,15 @@ void reconnect_discovery_case() {
   clear_fixture(r);
 }
 
-void a350_power_up_discovery_case() {
-  // Replay the observed cold/dark -> AC-powered six-texture inventory through
-  // the real control-thread discovery and routing handlers, without a GPU.
-  constexpr std::array<std::uint64_t, 8> times{89548890, 89550062, 89551171, 89552296, 89553421, 89554546, 89555671, 89556812};
-  constexpr std::array<std::uint64_t, 8> pfds{686562, 689737, 692531, 695198, 698373, 700532, 702691, 705866};
-  constexpr std::array<std::uint64_t, 8> other{483285, 485170, 487345, 489085, 490970, 492855, 494740, 496625};
-  constexpr std::array<std::uint64_t, 8> quiet{7870, 7896, 7924, 7952, 7978, 8006, 8036, 8064};
-  auto& r = win::registry();
-  for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
-    clear_fixture(r);
-    win::set_aircraft_profile(profile->id);
-    r.pfd_inventory_complete = true;
-    win::discover_pfds(times[0] - 2000);
-    expect("cold/dark empty A350 inventory waits for displays", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
-    std::array<std::shared_ptr<win::Resource>, 6> items{};
-    for (unsigned i = 0; i < items.size(); ++i) {
-      items[i] = display(i);
-      items[i]->id = 1084 + i;
-      items[i]->desc.Width = profile->width;
-      items[i]->desc.Height = profile->height;
-      items[i]->desc.MipLevels = i < 3 ? 5 : 1;
-      items[i]->desc.Format = i < 3 ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R8G8B8A8_TYPELESS;
-      if (i < 3) {
-        items[i]->draws = quiet[0];
-        seed_observed_display(r, items[i]);
-      }
-    }
-    win::discover_pfds(times[0] - 1000);
-    expect("cold/dark static A350 surfaces do not become PFD targets", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
-    for (unsigned i = 3; i < items.size(); ++i)
-      seed_observed_display(r, items[i]);
-    expect("powered A350 inventory retains all six eligible display textures", win::pfd_inventory().size(), 6);
-    for (unsigned sample = 0; sample < times.size(); ++sample) {
-      for (unsigned i = 0; i < items.size(); ++i)
-        items[i]->draws = i < 3 ? quiet[sample] : i == 3 ? other[sample] : pfds[sample];
-      win::discover_pfds(times[sample]);
-      using Sides = std::array<std::uint64_t, taxi_camera::MaxDisplaySides>;
-      const auto expected = sample < 3 ? Sides{} : Sides{1089, 1088};
-      expect(sample < 3 ? "powered A350 waits for three complete activity windows"
-                        : "powered A350 automatically adopts and retains the reported working PFD pair",
-             win::target_ids() == expected, true);
-    }
-    expect("automatic discovery publishes the correct native resource identities",
-           r.selected_resources[0] == items[5] && r.selected_resources[1] == items[4], true);
-    expect("explicit A350 side correction remains available after automatic discovery", win::assign_targets(1088, 1089), true);
-    win::discover_pfds(times.back() + 1000);
-    expect("automatic discovery preserves an explicit A350 side correction", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{1088, 1089},
-           true);
-  }
-  clear_fixture(r);
-}
-
-void a350_submission_power_up_case() {
-  // A35K live metadata: user confirmed47 is left.45 is the inferred paired
-  // candidate; its right-side cockpit identity still needs live confirmation.
-  // Replay sampled cumulative counters at detector-window intervals; log
-  // cadence itself was approximately five seconds, not the discovery cadence.
+void a350_named_discovery_case() {
+  // The powered A350's six display-shaped textures (2026 live inventory):
+  // draw activity alone never routes; the EFIS textures their panel marks
+  // name do, an explicit correction wins, and a full reset clears them.
   constexpr std::array<std::uint64_t, 6> ids{43, 44, 46, 75, 45, 47};
-  constexpr std::array<std::uint64_t, 4> auxiliary{1, 234, 423, 571};
-  constexpr std::array<std::uint64_t, 4> efis{1, 118, 224, 318};
-  constexpr std::array<std::uint64_t, 4> other{1, 67, 126, 186};
   auto& r = win::registry();
   for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
     clear_fixture(r);
     win::set_aircraft_profile(profile->id);
-    r.pfd_inventory_complete = true;
     std::array<std::shared_ptr<win::Resource>, 6> items{};
     for (unsigned i = 0; i < items.size(); ++i) {
       items[i] = display(i);
@@ -375,37 +319,29 @@ void a350_submission_power_up_case() {
       items[i]->desc.Height = profile->height;
       items[i]->desc.MipLevels = i < 3 ? 5 : 1;
       items[i]->desc.Format = i < 3 ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R8G8B8A8_TYPELESS;
-    }
-    seed_observed_display(r, items[0]);
-    seed_observed_display(r, items[1]);
-    win::discover_pfds(1000);
-    expect("partial cold A350 outputs cannot bypass automatic activity proof", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
-    for (unsigned i = 2; i < items.size(); ++i)
+      items[i]->draws = items[i]->submission_activity = 1000 * (i + 1);
       seed_observed_display(r, items[i]);
-    win::discover_pfds(2000);
-    expect("complete but unpowered A350 inventory remains unassigned", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
-    for (unsigned sample = 0; sample < auxiliary.size(); ++sample) {
-      for (unsigned i = 0; i < items.size(); ++i)
-        items[i]->submission_activity = i < 3 ? auxiliary[sample] : i == 3 ? other[sample] : efis[sample];
-      win::discover_pfds(3000 + sample * 1000);
-      expect("A350 completion-only discovery waits then adopts the EFIS activity pair",
-             win::target_ids() == (sample < 3 ? std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{} : std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{47, 45}), true);
     }
+    win::discover_pfds(1000);
+    expect("busy A350 displays are not routed without their names",
+           win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
+    win::set_named_targets({47, 45, 0});
+    win::discover_pfds(2000);
+    expect("the A350 EFIS textures named by their marks are routed",
+           win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{47, 45}, true);
+    expect("routing publishes the EFIS identities", r.selected_resources[0] == items[5] && r.selected_resources[1] == items[4], true);
     expect("all six candidates remain available for manual selection", win::pfd_inventory().size(), 6);
-    expect("automatic routing publishes the EFIS identities", r.selected_resources[0] == items[5] && r.selected_resources[1] == items[4],
-           true);
-    expect("manual auxiliary selection stays available", win::assign_targets(43, 0), true);
-    win::discover_pfds(7000);
-    expect("automatic discovery preserves an explicit selection", win::target_ids()[0], 43);
+    expect("explicit A350 side correction remains available", win::assign_targets(45, 47), true);
+    win::discover_pfds(3000);
+    expect("named routing preserves an explicit A350 side correction",
+           win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{45, 47}, true);
     win::reset_display_session();
     win::set_aircraft_profile(profile->id);
     expect("full reset removes old assignment", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
-    for (unsigned sample = 0; sample < auxiliary.size(); ++sample) {
-      for (unsigned i = 0; i < items.size(); ++i)
-        items[i]->submission_activity = i < 3 ? auxiliary[sample] : i == 3 ? other[sample] : efis[sample];
-      win::discover_pfds(8000 + sample * 1000);
-    }
-    expect("A350 automatic discovery recovers after full flight reset", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{47, 45}, true);
+    win::set_named_targets({47, 45, 0});
+    win::discover_pfds(4000);
+    expect("named routing recovers after a full flight reset",
+           win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{47, 45}, true);
   }
   clear_fixture(r);
 }
@@ -511,15 +447,15 @@ void ini_explicit_discovery_case() {
   auto& r = win::registry();
   clear_fixture(r);
   win::set_aircraft_profile(profiles::IniA380.id);
-  r.pfd_inventory_complete = true;
   for (unsigned i = 0; i < 8; ++i) {
     const auto item = display(i);
     item->id = 163 + i;
     seed_observed_display(r, item);
   }
   std::uint64_t now = 1000;
+  win::set_named_targets({170, 168, 0});
   win::discover_pfds(now);
-  expect("idle complete ini group still automatically selects last/third-last", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{170, 168},
+  expect("the ini group's named PFDs are routed", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{170, 168},
          true);
   for (const auto selection : {std::array<std::uint64_t, 2>{164, 0}, std::array<std::uint64_t, 2>{0, 166}}) {
     expect("accept explicit ini side outside the automatic pair", win::assign_targets(selection[0], selection[1]), true);
@@ -527,8 +463,8 @@ void ini_explicit_discovery_case() {
     for (unsigned pass = 0; pass < 4; ++pass) {
       now += 1000;
       win::discover_pfds(now);
-      expect("automatic polling preserves the explicit single-side calibration target",
-             win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{selection[0], selection[1]}, true);
+      expect("named routing preserves the explicit side",
+             win::target_ids()[selection[0] ? 0 : 1] == (selection[0] ? selection[0] : selection[1]), true);
     }
     const unsigned side = selection[0] ? 0 : 1;
     expect("published calibration identity remains the user's selected resource", r.selected_ids[side].load(), selection[side]);
@@ -545,17 +481,6 @@ void ini_explicit_discovery_case() {
   win::discover_pfds(now);
   expect("changed allocation ranks preserve a same-ID explicit anchor", win::target_ids()[0], 170);
 
-  // Preserve the former automatic-singleton recovery using genuinely detected
-  // provenance, rather than mislabelling an explicit user request as stale.
-  r.routes.reset();
-  expect("seed earlier automatic pair", r.routes.adopt_detected({164, 163}), true);
-  r.routes.forget(163);
-  now += 1000;
-  win::discover_pfds(now);
-  expect("stale automatic singleton recovers to the complete ranked group", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{171, 169},
-         true);
-  r.routes.forget_detected();
-  expect("recovered automatic pair retains detected provenance", win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, true);
   clear_fixture(r);
 }
 void recovered_output_encoding_case() {
@@ -820,8 +745,7 @@ int main() {
   recovered_output_encoding_case();
   rt_exit_case();
   reconnect_discovery_case();
-  a350_power_up_discovery_case();
-  a350_submission_power_up_case();
+  a350_named_discovery_case();
   incomplete_backfill_outlives_admit_budget();
   every_profile_set_keeps_attachment();
   ini_explicit_discovery_case();

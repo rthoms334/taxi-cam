@@ -1,0 +1,2 @@
+{"sName":"VCockpit06","vLogicalSize":{"x":300,"y":300},"vDisplaySize":{"x":300,"y":300},"daAttributes":[],"daInstruments":[
+{"iGUId":0,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=inibuilds-A350.wasm&wasm_gauge=ISIS","vPosAndSize":{"x":0,"y":0,"z":300,"w":300}}]}

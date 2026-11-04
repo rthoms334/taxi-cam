@@ -141,7 +141,7 @@ void print_missing(const std::wstring& root, const char* tag) {
 void catalogs(const std::wstring& root, std::wstring_view only = {}) {
   const auto wording = marked_wording(root);
   require(wording.size() > 300, "Companion wording is marked for translation");
-  require(wording.contains(L"Save changes") && wording.contains(L"Waiting for Microsoft Flight Simulator 2024"),
+  require(wording.contains(L"Finish") && wording.contains(L"Waiting for Microsoft Flight Simulator 2024"),
           "Source scan finds marked control and status wording");
   for (const auto& language : UiLanguages) {
     if (!only.empty() && only != language.tag)

@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     require(shown.size() == 1 && shown[0].version == ChangelogVersion{0, 9, 2}, "Hide notes newer than the installed version");
     require(releases_up_to(releases, {0, 9, 40}).size() == 2, "Show the installed version's own notes");
     using Kind = WhatsNewBlock::Kind;
-    const auto legacy = whats_new_blocks(releases, installed);
+    const auto legacy = whats_new_blocks(releases, {0, 9, 40});
     require(legacy.size() == 7 && legacy[0].kind == Kind::heading && legacy[0].text == L"Taxi Cam 0.9.40" &&
                 legacy[0].detail == L"24 September 2026" && legacy[1].kind == Kind::section && legacy[1].text == L"Changes" &&
                 legacy[2].kind == Kind::bullet && legacy[2].text == L"Café \"quoted\" \U0001F695" && legacy[3].text == L"Line\nbreak",
@@ -75,6 +75,17 @@ int main(int argc, char** argv) {
     const auto none = whats_new_blocks({}, installed);
     require(none.size() == 1 && none[0].kind == Kind::note && none[0].text == L"No notes are listed for Taxi Cam 0.9.39 yet.",
             "Explain an empty list");
+    // Notes on main for a version newer than the installed one: listed apart as the next update.
+    const auto ahead = whats_new_blocks(releases, installed);
+    require(ahead.size() == 7 && ahead[0].kind == Kind::heading && ahead[0].text == L"Taxi Cam 0.9.2" && ahead[1].text == L"Changes" &&
+                ahead[2].text == L"Older" && ahead[3].kind == Kind::section && ahead[3].text == L"Coming in the next update" &&
+                ahead[3].wording && ahead[4].kind == Kind::release && ahead[4].text == L"Taxi Cam 0.9.40" &&
+                ahead[4].detail == L"24 September 2026" && ahead[5].kind == Kind::bullet && ahead[6].text == L"Line\nbreak",
+            "Notes newer than the installed version follow its own under Coming in the next update");
+    const auto only_ahead = whats_new_blocks(releases, {0, 9, 1});
+    require(only_ahead.size() == 7 && only_ahead[0].kind == Kind::note && only_ahead[1].text == L"Coming in the next update" &&
+                only_ahead[2].text == L"Taxi Cam 0.9.40" && only_ahead[5].text == L"Taxi Cam 0.9.2",
+            "Without notes for the installed version, the coming ones still show, newest first");
 
     // Features with pictures and fixes (1.2.0 on).
     const std::string rich = wrap(

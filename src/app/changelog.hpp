@@ -11,7 +11,8 @@
 namespace taxi_camera::standalone {
 // "What's new" notes live in changelog.json at the repository root. The
 // companion fetches that file from main when What's new opens and shows the
-// entries at or below the installed version, newest first. A feature's picture
+// installed version's entry, then entries for newer versions under "Coming in
+// the next update", then earlier ones (whats_new_blocks). A feature's picture
 // is a file under docs/whats-new/ in the same repository, fetched the same way.
 inline constexpr std::size_t kChangelogMaxBytes = 64 * 1024, kChangelogMaxReleases = 64, kChangelogMaxChanges = 32, kChangelogMaxText = 400,
                              kChangelogMaxFeatures = 8, kChangelogMaxTitle = 80, kChangelogMaxImagePath = 120;
@@ -387,13 +388,21 @@ inline bool parse_changelog(std::string_view text,
   return finish(true);
 }
 
-// main can carry notes for merged builds that are not published yet.
+// main can carry notes for merged builds that are not published yet: those
+// newer than the installed version are listed apart, as the next update.
 inline std::vector<ChangelogRelease> releases_up_to(const std::vector<ChangelogRelease>& releases, const ChangelogVersion& installed) {
   std::vector<ChangelogRelease> shown;
   for (const auto& release : releases)
     if (release.version <= installed)
       shown.push_back(release);
   return shown;
+}
+inline std::vector<ChangelogRelease> releases_after(const std::vector<ChangelogRelease>& releases, const ChangelogVersion& installed) {
+  std::vector<ChangelogRelease> upcoming;
+  for (const auto& release : releases)
+    if (release.version > installed)
+      upcoming.push_back(release);
+  return upcoming;
 }
 
 inline std::wstring changelog_widen(const std::string& text) {
@@ -414,13 +423,15 @@ inline std::wstring changelog_date_text(const std::string& date) {
   const int month = (date[5] - '0') * 10 + (date[6] - '0'), day = (date[8] - '0') * 10 + (date[9] - '0');
   return std::to_wstring(day) + L" " + months[month - 1] + L" " + changelog_widen(date.substr(0, 4));
 }
-// What's new top to bottom: the newest release shown in full (its features
-// with their pictures, then fixes and other changes), then earlier releases
-// as compact lists.
+// What's new top to bottom: the installed release shown in full (its features
+// with their pictures, then fixes and other changes), then notes for versions
+// newer than the installed one under "Coming in the next update", then earlier
+// releases, both as compact lists. Titles are the version only: the section
+// says when notes are still to come.
 struct WhatsNewBlock {
   enum class Kind {
     heading,  // text: "Taxi Cam 1.2.0", detail: its date.
-    section,  // text: "New features", "Fixes", "Other changes" or "Earlier versions".
+    section,  // text: "New features", "Fixes", "Other changes", "Coming in the next update" or "Earlier versions".
     feature,  // text: title, detail: text, image: repository path or empty.
     bullet,   // text: one fix or change.
     release,  // An earlier release: text "Taxi Cam 1.1.3", detail: its date.
@@ -433,7 +444,7 @@ struct WhatsNewBlock {
   const wchar_t* wording{};
   std::wstring value{};
 };
-inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRelease>& shown, const ChangelogVersion& installed) {
+inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRelease>& releases, const ChangelogVersion& installed) {
   using Kind = WhatsNewBlock::Kind;
   std::vector<WhatsNewBlock> blocks;
   const auto chrome = [](Kind kind, const wchar_t* wording, std::wstring value = {}) {
@@ -442,41 +453,49 @@ inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRe
       text.replace(at, 3, value);
     return WhatsNewBlock{kind, text, {}, {}, wording, std::move(value)};
   };
-  if (shown.empty()) {
-    blocks.push_back(chrome(Kind::note, ui_text(L"No notes are listed for Taxi Cam {0} yet."), changelog_version_text(installed)));
-    return blocks;
-  }
-  for (std::size_t i = 0; i < shown.size(); ++i) {
-    const auto& release = shown[i];
-    const auto version = L"Taxi Cam " + changelog_version_text(release.version);
-    const auto date = release.date.empty() ? std::wstring{} : changelog_date_text(release.date);
-    if (i == 0) {
-      blocks.push_back({Kind::heading, version, date, {}});
-      if (!release.features.empty())
-        blocks.push_back(chrome(Kind::section, ui_text(L"New features")));
-      for (const auto& feature : release.features)
-        blocks.push_back({Kind::feature, changelog_widen(feature.title), changelog_widen(feature.text), feature.image});
-      if (!release.fixes.empty())
-        blocks.push_back(chrome(Kind::section, ui_text(L"Fixes")));
-      for (const auto& fix : release.fixes)
-        blocks.push_back({Kind::bullet, changelog_widen(fix), {}, {}});
-      if (!release.changes.empty())
-        blocks.push_back(
-            chrome(Kind::section, release.features.empty() && release.fixes.empty() ? ui_text(L"Changes") : ui_text(L"Other changes")));
-      for (const auto& change : release.changes)
-        blocks.push_back({Kind::bullet, changelog_widen(change), {}, {}});
-      continue;
-    }
-    if (i == 1)
-      blocks.push_back(chrome(Kind::section, ui_text(L"Earlier versions")));
-    blocks.push_back({Kind::release, version, date, {}});
+  const auto title = [&](Kind kind, const ChangelogRelease& release) {
+    WhatsNewBlock block{kind, L"Taxi Cam " + changelog_version_text(release.version), {}, {}};
+    block.detail = release.date.empty() ? std::wstring{} : changelog_date_text(release.date);
+    return block;
+  };
+  const auto compact = [&](const ChangelogRelease& release) {
+    blocks.push_back(title(Kind::release, release));
     for (const auto& feature : release.features)
       blocks.push_back({Kind::bullet, changelog_widen(feature.title) + L": " + changelog_widen(feature.text), {}, {}});
     for (const auto& fix : release.fixes)
       blocks.push_back(chrome(Kind::bullet, ui_text(L"Fixed: {0}"), changelog_widen(fix)));
     for (const auto& change : release.changes)
       blocks.push_back({Kind::bullet, changelog_widen(change), {}, {}});
+  };
+  const auto shown = releases_up_to(releases, installed), upcoming = releases_after(releases, installed);
+  if (shown.empty()) {
+    blocks.push_back(chrome(Kind::note, ui_text(L"No notes are listed for Taxi Cam {0} yet."), changelog_version_text(installed)));
+  } else {
+    const auto& release = shown.front();
+    blocks.push_back(title(Kind::heading, release));
+    if (!release.features.empty())
+      blocks.push_back(chrome(Kind::section, ui_text(L"New features")));
+    for (const auto& feature : release.features)
+      blocks.push_back({Kind::feature, changelog_widen(feature.title), changelog_widen(feature.text), feature.image});
+    if (!release.fixes.empty())
+      blocks.push_back(chrome(Kind::section, ui_text(L"Fixes")));
+    for (const auto& fix : release.fixes)
+      blocks.push_back({Kind::bullet, changelog_widen(fix), {}, {}});
+    if (!release.changes.empty())
+      blocks.push_back(
+          chrome(Kind::section, release.features.empty() && release.fixes.empty() ? ui_text(L"Changes") : ui_text(L"Other changes")));
+    for (const auto& change : release.changes)
+      blocks.push_back({Kind::bullet, changelog_widen(change), {}, {}});
   }
+  // Notes main already carries for later versions, newest first.
+  if (!upcoming.empty())
+    blocks.push_back(chrome(Kind::section, ui_text(L"Coming in the next update")));
+  for (const auto& next : upcoming)
+    compact(next);
+  if (shown.size() > 1)
+    blocks.push_back(chrome(Kind::section, ui_text(L"Earlier versions")));
+  for (std::size_t i = 1; i < shown.size(); ++i)
+    compact(shown[i]);
   return blocks;
 }
 
