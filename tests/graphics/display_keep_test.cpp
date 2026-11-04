@@ -54,29 +54,18 @@ void pieces() {
   split = keep::pieces(small);
   covers(small, split, many, 6);
   require(split.count <= keep::Pieces::Capacity, "Within capacity");
-  // Restores leave out only gauge marks: an area mark goes back whole.
-  const keep::Point mixed[]{{10, 5, true}, {30, 5, false}};
-  keep::set_marks(mixed, 2);
-  covers(small, keep::pieces(small, true), mixed, 1);
-  require(keep::pieces(small).count > keep::pieces(small, true).count, "An area mark is left out of camera writes only");
   keep::set_marks(nullptr, 0);
   require(keep::pieces(small).count == 1, "An empty list writes the area whole");
 }
-// A reader takes the published list without waiting, even while the worker
-// is writing the next one.
+// A reader takes the published list, even while the worker writes the next.
 void publication() {
   const keep::Point first[]{{1, 2}, {3, 4}}, second[]{{5, 6}};
   std::array<std::uint32_t, keep::MaxMarks> out{};
   keep::set_marks(first, 2);
   require(keep::read_marks(out) == 2 && out[0] == (1u << 16 | 2) && out[1] == (3u << 16 | 4), "The published list");
-  const keep::Point gauge[]{{0x7fff, 0xffff, true}};
-  keep::set_marks(gauge, 1);
-  require(keep::read_marks(out) == 1 && out[0] == (1u << 31 | 0x7fffu << 16 | 0xffff), "A gauge mark keeps its flag and position");
-  keep::set_marks(first, 2);
-  const auto stable = keep::version.load();
-  keep::version.store(stable + 1);  // The worker is writing the other buffer.
+  // The worker fills the other list before publishing it.
+  keep::lists[keep::published.load() ^ 1u].count.store(1);
   require(keep::read_marks(out) == 2 && out[0] == (1u << 16 | 2), "The published list while the next is written");
-  keep::version.store(stable);
   keep::set_marks(second, 1);
   require(keep::read_marks(out) == 1 && out[0] == (5u << 16 | 6), "The next list once published");
   keep::set_marks(nullptr, 0);

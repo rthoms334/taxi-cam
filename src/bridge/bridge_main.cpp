@@ -1084,7 +1084,7 @@ class DisplayMarks {
 
  private:
   static bool same(const standalone::display_keep::Point& a, const standalone::display_keep::Point& b) noexcept {
-    return a.x == b.x && a.y == b.y && a.gauge == b.gauge;
+    return a.x == b.x && a.y == b.y;
   }
   std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points_{};
   std::uint64_t next_poll_ = 0;

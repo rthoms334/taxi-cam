@@ -15,12 +15,11 @@ void require(bool condition, const char* message) {
 struct Marks {
   std::array<keep::Point, keep::MaxMarks> points{};
   unsigned count = 0;
-  // 1 gauge mark, 0 area mark, -1 not listed.
-  int at(unsigned x, unsigned y) const {
+  bool has(unsigned x, unsigned y) const {
     for (unsigned i = 0; i < count; ++i)
       if (points[i].x == x && points[i].y == y)
-        return points[i].gauge ? 1 : 0;
-    return -1;
+        return true;
+    return false;
   }
 };
 Marks marks(const profiles::AircraftProfile* current, const profiles::AircraftProfile* base) {
@@ -32,17 +31,15 @@ void built_in() {
   // The PMDG 777 left inboard DU: GlassOut marks its gauge at 1058,33.
   const auto& p = profiles::Pmdg777300ER;
   const auto plain = marks(&p, &p);
-  require(plain.at(1058, 33) == 1, "The 777 left inboard gauge corner is a gauge mark");
+  require(plain.has(1058, 33), "The 777 left inboard gauge corner is marked");
   const auto content = profiles::display_content_rect(p, 0);
-  require(plain.at(content.left, content.top) == 1, "Its camera area corner is a gauge mark too");
-  for (unsigned i = 0; i < plain.count; ++i)
-    require(plain.points[i].gauge, "Every mark of an unchanged built-in profile is a gauge mark");
+  require(plain.has(content.left, content.top), "Its camera area corner is marked too");
   // The user moved the left inboard area to start at row 0.
   auto moved = p;
   moved.display_regions[0] = {1058, 0, 2016, 1004};
   const auto custom = marks(&moved, &p);
-  require(custom.at(1058, 33) == 1, "The gauge corner stays a gauge mark after the area moves");
-  require(custom.at(1058, 0) == 0, "The moved area's corner is an area mark");
+  require(custom.has(1058, 33), "The gauge corner stays marked after the area moves");
+  require(custom.has(1058, 0), "The moved area's corner is marked");
   require(marks(nullptr, &p).count == 0, "No profile, no marks");
 }
 void set_up() {
@@ -51,8 +48,8 @@ void set_up() {
   p.fit_texture = true;
   p.areas[0] = {40, 25, 900, 700};
   const auto listed = marks(&p, nullptr);
-  require(listed.at(40, 25) == 1, "A set-up aircraft's area corner is a gauge mark");
-  require(listed.at(0, 0) == 1, "The texture's own corner is a gauge mark");
+  require(listed.has(40, 25), "A set-up aircraft's area corner is marked");
+  require(listed.has(0, 0), "The texture's own corner is marked");
   require(listed.count <= keep::MaxMarks, "Within the list's size");
 }
 }  // namespace
