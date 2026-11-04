@@ -8,6 +8,11 @@
           "title": "Every display recognised by name",
           "text": "As the flight loads, each cockpit display shows a tiny code for a moment: the small coloured square in its top-right corner. It carries the display's name, so Taxi Cam can tell which screen is which, then it's gone. After updating, some aircraft need their displays chosen once more: Taxi Cam asks, takes you to Displays and keeps your choice.",
           "image": "docs/whats-new/1.3.2/panel-marks.jpg"
+        },
+        {
+          "title": "All your aircraft in one list",
+          "text": "Saved aircraft on Overview now shows every aircraft in one place: the ones that come with Taxi Cam and the ones you set up yourself. Change any of them in Setup, and copy or remove the ones you set up.",
+          "image": "docs/whats-new/1.3.2/saved-aircraft.png"
         }
       ],
       "fixes": [
