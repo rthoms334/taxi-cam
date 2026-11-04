@@ -8,6 +8,11 @@
           "title": "Every display recognised by name",
           "text": "As the flight loads, each cockpit display shows a tiny code for a moment: the small coloured square in its top-right corner. It carries the display's name, so Taxi Cam can tell which screen is which, then it's gone. After updating, some aircraft need their displays chosen once more: Taxi Cam asks, takes you to Displays and keeps your choice.",
           "image": "docs/whats-new/1.3.2/panel-marks.jpg"
+        },
+        {
+          "title": "All your aircraft in one list",
+          "text": "Saved aircraft on Overview now shows every aircraft in one place: the ones that come with Taxi Cam and the ones you set up yourself. Change any of them in Setup, and copy or remove the ones you set up.",
+          "image": "docs/whats-new/1.3.2/saved-aircraft.png"
         }
       ],
       "fixes": [
@@ -16,8 +21,7 @@
         "The cameras now pause only in outside camera views, such as chase, drone, fixed and showcase. Other views the simulator reports, like an unusual one after a flight loads, no longer pause them.",
         "Resizing a display's camera area during a flight now waits for the cameras' new pictures instead of giving up on them, and Taxi Cam asks for the cameras again if they have to be set up afresh.",
         "The camera picture now stays steady on the cockpit displays: the aircraft's own display no longer flickers through it now and then.",
-        "The connection heading on Overview now fits while Taxi Cam waits for the cockpit displays, instead of being cut off.",
-        "Saved aircraft on Overview now lists every aircraft in one place: the ones that come with Taxi Cam and the ones you set up. Each can be changed in Setup, and the ones you set up can be copied or removed."
+        "The connection heading on Overview now fits while Taxi Cam waits for the cockpit displays, instead of being cut off."
       ]
     },
     {
