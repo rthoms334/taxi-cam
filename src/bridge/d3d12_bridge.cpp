@@ -409,7 +409,10 @@ struct Registry {
     // The queue of the first save. Copies on another queue are not ordered
     // with this shadow's, so they neither save nor restore it. retake_queue:
     // the instrument wrote the display on that other queue and missed the
-    // shadow; a camera copy there may take the shadow again (a baseline).
+    // shadow; a camera copy there may take the shadow again (a baseline),
+    // once every shadow copy on the old queue has completed. A copy dropped
+    // there never completes, so after kShadowConfirmMs (from retake_ms) the
+    // side goes to direct stamps instead.
     ID3D12CommandQueue *queue{}, *retake_queue{};
     // saved: a save into buffer was planned. confirmed: one has completed, so
     // buffer holds panel pixels. clean: in planned order, the area holds panel
@@ -420,7 +423,7 @@ struct Registry {
     // one that will not run; handled_drop is the last drop acted on. Both are
     // raised before the next plan on the submitting thread.
     std::uint64_t serial{}, first_save_serial{}, restore_serial{}, handled_drop{};
-    std::uint64_t started_ms{}, planned_ms{}, uncovered_ms{};
+    std::uint64_t started_ms{}, planned_ms{}, uncovered_ms{}, retake_ms{};
     // The display dirty_id may still hold this side's camera: a camera copy or
     // stamp was planned, and no restore has completed since. A camera that
     // starts on it is not clean: its first save is a baseline.
@@ -2448,6 +2451,7 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
         shadow.mode = shadow.saved ? Mode::restoring : Mode::off;
         shadow.started_ms = now;
         shadow.restore_serial = 0;
+        shadow.retake_queue = nullptr;
         if (shadow.mode == Mode::off)
           shadow.target.reset();
       } else if (shadow.mode == Mode::queue && shadow.saved && !shadow.confirmed && now - shadow.planned_ms > kShadowConfirmMs) {
@@ -2455,6 +2459,15 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
         r.shadow_fallbacks.fetch_add(1, std::memory_order_relaxed);
         shadow.mode = Mode::direct;
         shadow.saved = shadow.clean = false;
+      } else if (shadow.mode == Mode::queue && shadow.retake_queue && now - shadow.retake_ms > kShadowConfirmMs) {
+        // The instrument writes on another queue than the shadow's, and a
+        // shadow copy there has not completed (dropped, or never run): the
+        // shadow cannot be taken again where it is written. Direct stamps
+        // leave the buffer alone.
+        r.shadow_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        shadow.mode = Mode::direct;
+        shadow.saved = shadow.confirmed = shadow.clean = false;
+        shadow.queue = shadow.retake_queue = nullptr;
       }
       break;
     case Mode::restoring:
@@ -3226,8 +3239,10 @@ void plan_display_submission(void*,
       ++restore_count;
     } else if (shadow.saved) {
       r.shadow_lost_writes.fetch_add(1, std::memory_order_relaxed);
-      if (shadow.queue != queue)
+      if (shadow.queue != queue && shadow.retake_queue != queue) {
         shadow.retake_queue = queue;
+        shadow.retake_ms = now;
+      }
     }
   }
   if (!candidates && !snapshot_overlay && !restore_count && !copies) {

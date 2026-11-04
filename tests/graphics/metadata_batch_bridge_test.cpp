@@ -859,6 +859,70 @@ void submission_registry_wait_checks() {
   r.close_forward_verified = old_verified;
   r.ready = old_ready;
 }
+// A shadow saved on one queue while the instrument writes the display on
+// another is taken again there once every copy on the old queue completed. A
+// copy dropped there never completes: the side must not keep missing every
+// write for the rest of the camera period, so it goes to direct stamps after
+// the confirm window, and not before.
+void shadow_retake_fallback_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto* old_profile = r.profile;
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x8b0000);
+  target->id = 896;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  target->display_shape = win::display_shaped(target->desc);
+  r.resources[target->native] = target;
+  r.profile = &taxi_camera::profiles::A380;
+  r.ready = true;
+  r.routes.select_explicit({target->id, 0});
+  r.active_mask = 1;
+  r.calibration_mask = 0;
+  win::refresh_selected(r);
+  auto* const old_queue = reinterpret_cast<ID3D12CommandQueue*>(0x8c0000);
+  auto* const writer = reinterpret_cast<ID3D12CommandQueue*>(0x8d0000);
+  const auto completed = r.shadow_completed[0].load();
+  const auto prepare = [&](std::uint64_t retake_ms) {
+    auto& shadow = r.shadows[0];
+    shadow = {};
+    shadow.mode = win::Registry::ShadowMode::queue;
+    shadow.target = target;
+    shadow.area = win::shadow_area(r, 0, *target);
+    shadow.queue = old_queue;
+    shadow.retake_queue = writer;
+    shadow.retake_ms = retake_ms;
+    shadow.saved = shadow.confirmed = true;
+    shadow.first_save_serial = shadow.serial = completed + 2;  // A copy on the old queue is still outstanding.
+    shadow.handled_drop = r.shadow_dropped[0].load();
+  };
+  const auto fallbacks = r.shadow_fallbacks.load();
+  const std::uint64_t now = 100000;
+  prepare(now - 100);
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::queue && r.shadow_fallbacks == fallbacks,
+          "A retake still inside the confirm window gave up on the shadow");
+  prepare(now - win::kShadowConfirmMs - 1);
+  const auto mode = win::update_shadow(r, 0, now);
+  const auto& shadow = r.shadows[0];
+  require(mode == win::Registry::ShadowMode::direct && r.shadow_fallbacks == fallbacks + 1 && !shadow.saved && !shadow.queue &&
+              !shadow.retake_queue,
+          "A retake blocked past the confirm window kept the side on queue copies");
+  r.shadows[0] = {};
+  r.routes.reset();
+  r.active_mask = 0;
+  win::refresh_selected(r);
+  r.resources.erase(target->native);
+  r.profile = old_profile;
+  r.ready = old_ready;
+}
 void inventory_checks() {
   namespace win = taxi_camera::standalone;
   auto& r = win::registry();
@@ -1210,6 +1274,7 @@ int main() {
     known_list_and_idle_checks();
     display_session_reset_checks();
     submission_registry_wait_checks();
+    shadow_retake_fallback_checks();
     inventory_checks();
     auto& r = win::registry();
     auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x1000);
