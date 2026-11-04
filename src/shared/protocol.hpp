@@ -144,6 +144,13 @@ enum class PanelMapState : std::uint32_t {
   marked,   // panels lists the textures whose marks were read
 };
 inline constexpr std::size_t MaxPanelTextures = 32, MaxCandidates = 32;
+// A gauge a panel's marks name, its rectangle in that panel's texture pixels.
+struct PanelGauge {
+  char name[24]{};        // The gauge's name from its mark, cut to fit.
+  std::uint32_t panel{};  // Index into Status::panels.
+  std::uint16_t x{}, y{}, width{}, height{};
+};
+inline constexpr std::size_t MaxPanelGauges = 96;
 struct Status {
   std::uint64_t heartbeat{}, captures{}, composed{}, stamps{}, left_id{}, right_id{}, hook_failures{};
   std::uint32_t graphics_ready{}, scene_ready{}, taxi_mask{}, candidate_count{};
@@ -187,6 +194,10 @@ struct Status {
   // were read, each by its key.
   std::uint32_t panel_discovery{}, panel_state{}, panel_count{};
   PanelTexture panels[MaxPanelTextures]{};
+  // Protocol 29: every marked panel's gauges, gauge_count of them, so a
+  // display's area can be picked from the gauge it shows.
+  std::uint32_t gauge_count{};
+  PanelGauge gauges[MaxPanelGauges]{};
   // Protocol 27: the bound L:vars as read, in Settings::lvar_bindings order.
   // A new generation (new names, a reconnected worker, a flight change) starts
   // the counters again; 0 while nothing is read.

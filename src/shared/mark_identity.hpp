@@ -41,7 +41,14 @@ inline bool is_key(const char* name) noexcept {
 struct Gauge {
   std::array<char, 48> section{}, name{};
   std::uint8_t index{};
-  std::uint16_t x{}, y{}, width{}, height{};
+  // Gauge rectangle and panel size in page pixels.
+  std::uint16_t x{}, y{}, width{}, height{}, panel_width{}, panel_height{};
+  // The gauge rectangle in a texture of this size (texture_rect).
+  bool rect_in(unsigned texture_width, unsigned texture_height, panel_marks::Rect& out) const noexcept {
+    panel_marks::Mark m;
+    m.x = x, m.y = y, m.width = width, m.height = height, m.panel_width = panel_width, m.panel_height = panel_height;
+    return panel_marks::texture_rect(m, texture_width, texture_height, out);
+  }
 };
 inline bool matches(const char* key, const Gauge& gauge) noexcept {
   if (!key || !*key)
@@ -91,6 +98,7 @@ class Store {
       gauge.name = marks[i].gauge_name;
       gauge.index = marks[i].gauge;
       gauge.x = marks[i].x, gauge.y = marks[i].y, gauge.width = marks[i].width, gauge.height = marks[i].height;
+      gauge.panel_width = marks[i].panel_width, gauge.panel_height = marks[i].panel_height;
       texture.gauges.push_back(gauge);
     }
     if (texture.gauges.empty())
@@ -160,7 +168,7 @@ class Store {
  private:
   static bool same(const Gauge& a, const Gauge& b) noexcept {
     return a.section == b.section && a.name == b.name && a.index == b.index && a.x == b.x && a.y == b.y && a.width == b.width &&
-           a.height == b.height;
+           a.height == b.height && a.panel_width == b.panel_width && a.panel_height == b.panel_height;
   }
   std::vector<Texture> textures_;
 };

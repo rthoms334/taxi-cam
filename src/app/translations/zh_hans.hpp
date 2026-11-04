@@ -593,5 +593,12 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
      L"此模拟器版本更改了 Taxi Cam 显示屏包所扩展的驾驶舱页面。请更新 Taxi Cam 以重新找到显示屏。"},
     {L"Taxi Cam could not find the simulator's Community folder for its display package.",
      L"Taxi Cam 找不到模拟器的 Community 文件夹来放置其显示屏包。"},
+    {L"Display area: {0}", L"显示区域：{0}"},
+    {L"Click a gauge to use it, or drag the frame and its handles. The cameras are drawn inside this area.", L"点击一个仪表以使用它，或拖动边框及其控制点。摄像头画面绘制在此区域内。"},
+    {L"Whole panel", L"整个面板"},
+    {L"Done", L"完成"},
+    {L"Taxi Cam — Display area", L"Taxi Cam — 显示区域"},
+    {L"Place a panel on this display first.", L"请先在此显示屏上放置一个面板。"},
+    {L"Could not open the display area.", L"无法打开显示区域。"},
 };
 }  // namespace taxi_camera::standalone

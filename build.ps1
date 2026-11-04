@@ -142,6 +142,7 @@ if ($Validate) {
         @{Name='panel-marks'; Sources=@('tests/graphics/panel_marks_test.cpp')},
         @{Name='mark-identity'; Sources=@('tests/camera/mark_identity_test.cpp')},
         @{Name='marks-package'; Sources=@('tests/app/marks_package_test.cpp'); Libs=@('-lbcrypt')},
+        @{Name='area-edit'; Sources=@('tests/app/area_edit_test.cpp')},
         @{Name='notification-settings'; Sources=@('tests/app/notification_settings_test.cpp')},
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='startup-state'; Sources=@('tests/app/startup_state_test.cpp')},

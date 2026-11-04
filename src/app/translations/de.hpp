@@ -674,5 +674,12 @@ inline constexpr Translation GermanTranslations[]{
      L"damit Anzeigen wieder gefunden werden."},
     {L"Taxi Cam could not find the simulator's Community folder for its display package.",
      L"Taxi Cam hat den Community-Ordner des Simulators für sein Anzeigepaket nicht gefunden."},
+    {L"Display area: {0}", L"Anzeigebereich: {0}"},
+    {L"Click a gauge to use it, or drag the frame and its handles. The cameras are drawn inside this area.", L"Klicken Sie auf ein Instrument, um es zu verwenden, oder ziehen Sie den Rahmen und seine Griffe. Die Kameras werden in diesem Bereich gezeichnet."},
+    {L"Whole panel", L"Ganzes Panel"},
+    {L"Done", L"Fertig"},
+    {L"Taxi Cam — Display area", L"Taxi Cam — Anzeigebereich"},
+    {L"Place a panel on this display first.", L"Legen Sie zuerst ein Panel auf diese Anzeige."},
+    {L"Could not open the display area.", L"Der Anzeigebereich konnte nicht geöffnet werden."},
 };
 }  // namespace taxi_camera::standalone

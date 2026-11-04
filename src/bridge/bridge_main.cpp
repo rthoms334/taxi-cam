@@ -259,6 +259,7 @@ struct MarkIdentityState {
   const profiles::AircraftProfile* profile{};
   bool logged{};
   std::vector<win::PanelTexture> map;
+  std::vector<win::PanelGauge> gauges;
 };
 void service_mark_identity(MarkIdentityState& state,
                            const win::Status& status,
@@ -299,6 +300,7 @@ void service_mark_identity(MarkIdentityState& state,
       log_status(status, detail);
     }
     state.map.clear();
+    state.gauges.clear();
     for (const auto& texture : state.store.textures()) {
       if (state.map.size() >= win::MaxPanelTextures)
         break;
@@ -312,6 +314,20 @@ void service_mark_identity(MarkIdentityState& state,
       panel.width = record->width;
       panel.height = record->height;
       panel.mips = record->mips;
+      for (const auto& gauge : texture.gauges) {
+        panel_marks::Rect rect;
+        if (state.gauges.size() >= win::MaxPanelGauges || !gauge.rect_in(record->width, record->height, rect) || !rect.width ||
+            !rect.height)
+          continue;
+        win::PanelGauge out{};
+        std::strncpy(out.name, gauge.name.data(), sizeof(out.name) - 1);
+        out.panel = static_cast<std::uint32_t>(state.map.size());
+        out.x = static_cast<std::uint16_t>(rect.x);
+        out.y = static_cast<std::uint16_t>(rect.y);
+        out.width = static_cast<std::uint16_t>(rect.width);
+        out.height = static_cast<std::uint16_t>(rect.height);
+        state.gauges.push_back(out);
+      }
       state.map.push_back(panel);
     }
   } catch (...) {
@@ -322,6 +338,9 @@ void publish_panel_map(const MarkIdentityState& state, win::Status& status) noex
   status.panel_count = static_cast<std::uint32_t>(state.map.size());
   for (std::size_t i = 0; i < state.map.size() && i < win::MaxPanelTextures; ++i)
     status.panels[i] = state.map[i];
+  status.gauge_count = static_cast<std::uint32_t>(std::min(state.gauges.size(), win::MaxPanelGauges));
+  for (std::size_t i = 0; i < status.gauge_count; ++i)
+    status.gauges[i] = state.gauges[i];
 }
 // A display texture's key in this flight for the PFD routing cards, or empty.
 const char* panel_texture_name(const MarkIdentityState& state, std::uint64_t id) noexcept {
