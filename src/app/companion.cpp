@@ -3223,10 +3223,8 @@ LRESULT CALLBACK drag_ghost_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM 
     SelectObject(dc, old_pen);
     DeleteObject(fill);
     DeleteObject(pen);
-    draw_thumbnail(dc, rectangle(8, 8, DragGhostWidth - 16, DragGhostHeight - 44), setup.picked_texture, L"");
-    const auto name = widen(setup.picked.c_str());
-    text(dc, name.c_str(), 10, DragGhostHeight - 32, DragGhostWidth - 20, 24, small, Text,
-         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // The picture alone: panel names stay internal.
+    draw_thumbnail(dc, rectangle(8, 8, DragGhostWidth - 16, DragGhostHeight - 16), setup.picked_texture, L"");
     EndPaint(hwnd, &paint);
     return 0;
   }
@@ -3534,8 +3532,10 @@ void draw_setup(HDC dc, const win::Status& sample) {
     }
     if (id)
       hit_areas.push_back({box, id, name.empty() ? -1 : static_cast<int>(unsigned_side)});
-    text(dc, name.empty() ? tr(L"Nothing placed yet") : widen(name.c_str()).c_str(), x + 10, y + 46 + SetupSlotPicture, inner, 18, small,
-         name.empty() ? Muted : Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // The picture says which display it is; panel names stay internal.
+    if (name.empty())
+      text(dc, tr(L"Nothing placed yet"), x + 10, y + 46 + SetupSlotPicture, inner, 18, small, Muted,
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
   panel(dc, 244, SetupGalleryTop, 766, 676 - SetupGalleryTop);
   text(dc, tr(L"All cockpit displays"), 262, SetupGalleryTop + 8, 200, 30, heading);
@@ -3550,7 +3550,7 @@ void draw_setup(HDC dc, const win::Status& sample) {
   }
 }
 // A gallery card of Displays: the panel's picture, the displays it is
-// placed on, its name and size. The picked panel is outlined.
+// placed on, and its size. The picked panel is outlined.
 bool draw_page_button(const DRAWITEMSTRUCT& item) {
   const int id = static_cast<int>(item.CtlID);
   if (id < SetupCardButtonId || id >= SetupCardButtonId + static_cast<int>(GalleryColumns))
@@ -3588,16 +3588,14 @@ bool draw_page_button(const DRAWITEMSTRUCT& item) {
       chip(item.hDC, 12, chip_y, display_side_title(s, side), Accent);
       chip_y += 26;
     }
+  // The picture says which display it is: panel names (an iniBuilds gauge is
+  // "ini-crash-report") stay internal, so only its size is written.
   SetBkMode(item.hDC, TRANSPARENT);
-  SelectObject(item.hDC, normal);
-  SetTextColor(item.hDC, Text);
-  RECT name_box{r.left + scale(10), r.bottom - scale(48), r.right - scale(10), r.bottom - scale(26)};
-  DrawTextW(item.hDC, widen(panel_name(*found).c_str()).c_str(), -1, &name_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   wchar_t details[64];
-  std::swprintf(details, 64, L"%u × %u · m%u", found->width, found->height, found->mips);
+  std::swprintf(details, 64, L"%u × %u", found->width, found->height);
   SelectObject(item.hDC, small);
   SetTextColor(item.hDC, Muted);
-  RECT details_box{r.left + scale(10), r.bottom - scale(26), r.right - scale(10), r.bottom - scale(6)};
+  RECT details_box{r.left + scale(10), r.bottom - scale(48), r.right - scale(10), r.bottom - scale(6)};
   DrawTextW(item.hDC, details, -1, &details_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   return true;
 }
@@ -3671,8 +3669,35 @@ bool apply(bool save = true) {
 // texture= (legacy_display_names.hpp); a catalog profile can too. Converted
 // once per aircraft from its own panel.cfg files and saved, so the bridge
 // finds them by their marks.
+bool legacy_display_name(const char* name) {
+  return name && name[0] && !mark_identity::is_key(name);
+}
+// Whether the displays in use still name a panel.cfg texture=.
+bool legacy_displays(const win::Settings& s) {
+  const auto* base = profiles::base_profile(s.profile);
+  const bool set_up = s.profile == profiles::DiscoveredProfileId;
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
+    if (legacy_display_name(s.display_override.textures[side]) ||
+        (set_up && side < s.discovered.sides && legacy_display_name(s.discovered.textures[side])) ||
+        (!set_up && base && side < base->sides && legacy_display_name(base->panel_textures[side]) && !s.display_override.textures[side][0]))
+      return true;
+  return false;
+}
+std::string legacy_attempt(const win::Status& sample, std::uint32_t profile) {
+  return std::string(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path))) + "|" + std::to_string(profile);
+}
+// The aircraft and profile last converted.
+std::string legacy_tried;
+// The loaded aircraft's displays could not all be converted (an encrypted
+// Marketplace panel.cfg, the iniBuilds A380): until the user chooses them,
+// Overview says so.
+bool displays_to_choose(const win::Status& sample) {
+  if (!fresh_status(sample) || !sample.identity_sample_ms || legacy_tried.empty())
+    return false;
+  const auto s = draft();
+  return legacy_tried == legacy_attempt(sample, s.profile) && legacy_displays(s);
+}
 void convert_legacy_displays() {
-  static std::string tried;
   win::Status sample;
   {
     const std::lock_guard lock(app_mutex);
@@ -3683,19 +3708,14 @@ void convert_legacy_displays() {
   const auto s = draft();
   const auto* base = profiles::base_profile(s.profile);
   const bool set_up = s.profile == profiles::DiscoveredProfileId;
-  const auto legacy = [](const char* name) { return name && name[0] && !mark_identity::is_key(name); };
-  bool any = false;
-  for (unsigned side = 0; side < MaxDisplaySides; ++side)
-    any = any || legacy(s.display_override.textures[side]) ||
-          (set_up && side < s.discovered.sides && legacy(s.discovered.textures[side])) ||
-          (!set_up && base && side < base->sides && legacy(base->panel_textures[side]) && !s.display_override.textures[side][0]);
-  if (!any)
+  const auto legacy = legacy_display_name;
+  if (!legacy_displays(s))
     return;
   const std::string path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
-  const auto attempt = path + "|" + std::to_string(s.profile);
-  if (attempt == tried)
+  const auto attempt = legacy_attempt(sample, s.profile);
+  if (attempt == legacy_tried)
     return;
-  tried = attempt;
+  legacy_tried = attempt;
   const auto sections = win::legacy_names::aircraft_sections(win::marks_package::community_folder(), path);
   auto next = s;
   bool changed = false, missing = false;
@@ -6299,8 +6319,14 @@ void draw_page(HDC dc) {
     text(dc, line.c_str(), 262, 166, 410, 36, small, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
     panel(dc, 244, 222, 766, 84);
     text(dc, tr(L"Setup"), 262, 230, 120, 26, heading);
-    text(dc, unsupported ? tr(L"This aircraft is not set up yet. Start with Displays.") : tr(L"Open any step to change it."), 382, 230, 610,
-         26, small, unsupported ? Accent : Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // After an update whose display names could not be converted, the user
+    // chooses this aircraft's displays again.
+    const bool choose = !unsupported && displays_to_choose(sample);
+    text(dc,
+         unsupported ? tr(L"This aircraft is not set up yet. Start with Displays.")
+         : choose    ? tr(L"After this update, choose this aircraft's displays again in Displays.")
+                     : tr(L"Open any step to change it."),
+         382, 230, 610, 26, small, unsupported || choose ? Accent : Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const auto s = draft();
     const auto* profile = profiles::find(s.profile);
     panel(dc, 244, 320, 766, 96);
@@ -6308,9 +6334,10 @@ void draw_page(HDC dc) {
     if (profile)
       chip(dc, 470, 332,
            unsupported                                  ? tr(L"Not set up")
+           : choose                                     ? tr(L"Choose displays")
            : s.profile == profiles::DiscoveredProfileId ? tr(L"Set up")
                                                         : tr(L"Built in"),
-           unsupported ? RGB(236, 182, 92) : Accent);
+           unsupported || choose ? RGB(236, 182, 92) : Accent);
     panel(dc, 244, 430, 766, 246);
     text(dc, tr(L"Cockpit displays"), 262, 440, 180, 32, heading);
     text(dc, tr(L"Select one to change it in Displays."), 446, 440, 314, 32, small, Muted,
@@ -6933,7 +6960,8 @@ void poll_updates() {
     check_updates(false);
 }
 // A step pill: its number in a circle, then its name. The current step is
-// filled; on Overview, Displays stands out while the aircraft is not set up.
+// filled; on Overview, Displays stands out while the aircraft is not set up
+// or its displays are to be chosen again.
 void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
   win::Status sample;
   {
@@ -6941,7 +6969,7 @@ void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
     sample = status;
   }
   const bool current = setup_step(page) == static_cast<int>(step);
-  const bool attention = page == OverviewPage && step == 0 && unsupported_aircraft(sample);
+  const bool attention = page == OverviewPage && step == 0 && (unsupported_aircraft(sample) || displays_to_choose(sample));
   const bool down = (item.itemState & ODS_SELECTED) != 0;
   const auto& r = item.rcItem;
   HBRUSH surround = CreateSolidBrush(on_card ? Card : Background);

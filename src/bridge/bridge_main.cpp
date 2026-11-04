@@ -2097,7 +2097,7 @@ DWORD run_impl() {
         : !settings.auto_detect ? "Automatic display selection is off. Select the displays in PFD routing."
         : panel_identity.store.textures().empty()
             ? "Waiting for the cockpit displays' Taxi Cam marks. If this persists, check the taxi-cam-panel-marks package in Community."
-            : "This aircraft's displays were not found by name. Select them in PFD routing, or set the aircraft up again.";
+            : "Taxi Cam could not find this aircraft's displays. Choose them in Displays.";
     const auto stopped_camera = camera_stop_message(scene);
     char close_blocked_message[sizeof(status.message)];
     std::snprintf(close_blocked_message, sizeof(close_blocked_message),
