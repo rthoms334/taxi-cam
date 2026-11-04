@@ -104,6 +104,21 @@ int main() {
   alive = {1540, 1600};
   a380.retain(live);
   require(a380.resolve("@pfd#0/2", feeds, 2) == 0, "a copy alone has no owner to rank");
+  require(key_of(a380, 1540).empty() && key_of(a380, 1600) == "@pfd",
+          "a copy whose source is gone has no key, so it is never listed as its twin");
+
+  // A recorded copy into a texture with marks of its own is another display:
+  // routing stays. Of two copies, the newest is followed.
+  Store copies;
+  const panel_marks::Mark nd[] = {mark("VCockpit07", "nd", 0)};
+  copies.read(1522, pfdl, 1);
+  copies.read(1700, nd, 1);
+  std::vector<std::uint64_t> shown{1522, 1528, 1530, 1700};
+  const auto showing = [&](std::uint64_t id) { return std::find(shown.begin(), shown.end(), id) != shown.end(); };
+  const std::pair<std::uint64_t, std::uint64_t> into_nd[] = {{1522, 1700}};
+  require(copies.resolve("@pfd", into_nd, 1) == 1522, "no copy into a texture that carries other marks");
+  const std::pair<std::uint64_t, std::uint64_t> two[] = {{1522, 1528}, {1522, 1530}};
+  require(copies.inherit(two, 2, showing) == 2 && copies.resolve("@pfd", two, 2) == 1530, "the newest copy is followed");
 
   // A recreated display (777, Fenix): the newer texture of the same panel wins
   // and the old one does not count as a twin.

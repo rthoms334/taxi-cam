@@ -258,7 +258,7 @@ inline constexpr Translation FrenchTranslations[]{
     {L"Equals takes a whole number from 0 to 16777215, such as the page number the line under it reads.",
      L"Égal à attend un nombre entier de 0 à 16777215, comme le numéro de page que lit la ligne en dessous."},
     {L"NDs", L"ND"},
-    {L"Named", L"Nommé"},
+    {L"Found", L"Trouvé"},
     {L"Native bridge connected", L"Pont natif connecté"},
     {L"Native bridge loaded. Waiting for graphics and aircraft.", L"Pont natif chargé. En attente des graphismes et de l'avion."},
     {L"Native bridge startup is pending.", L"Démarrage du pont natif en attente."},
@@ -663,24 +663,37 @@ inline constexpr Translation FrenchTranslations[]{
     {L"After this update, choose this aircraft's displays again in Displays.",
      L"Après cette mise à jour, choisissez à nouveau les écrans de cet avion dans Écrans."},
     {L"Choose displays", L"Choisir les écrans"},
-    {L"Taxi Cam now finds cockpit displays a new way, and could not carry over this aircraft's saved displays.\n\n"
-     L"Choose them again in Displays: select each display's picture and place it in its slot.",
-     L"Taxi Cam trouve désormais les écrans du cockpit d'une nouvelle façon et n'a pas pu reprendre les écrans enregistrés de cet avion.\n\n"
-     L"Choisissez-les à nouveau dans Écrans : sélectionnez l'image de chaque écran et placez-la dans son emplacement."},
+    {L"Taxi Cam can't recognise your displays", L"Taxi Cam ne peut pas reconnaître vos écrans"},
+    {L"Restart the simulator once", L"Redémarrez le simulateur une fois"},
+    {L"Taxi Cam has just set up the package that lets it recognise your cockpit displays, but the simulator had already loaded its "
+     L"add-ons. Restart the simulator so Taxi Cam can find your displays.",
+     L"Taxi Cam vient d'installer le paquet qui lui permet de reconnaître les écrans du cockpit, mais le simulateur avait déjà chargé ses "
+     L"modules. Redémarrez le simulateur pour que Taxi Cam trouve vos écrans."},
+    {L"Update Taxi Cam", L"Mettre à jour Taxi Cam"},
+    {L"This simulator version changed the cockpit page Taxi Cam uses to recognise your displays, so it can't find them. Update Taxi Cam to "
+     L"find them again.",
+     L"Cette version du simulateur a modifié la page de cockpit que Taxi Cam utilise pour reconnaître vos écrans : il ne les trouve plus. "
+     L"Mettez à jour Taxi Cam pour les retrouver."},
+    {L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.",
+     L"Taxi Cam n'a pas trouvé le dossier Community du simulateur pour son paquet d'écrans. Relancez le programme d'installation de Taxi "
+     L"Cam."},
+    {L"Taxi Cam could not add its display package to the simulator's Community folder. Run the Taxi Cam installer again.",
+     L"Taxi Cam n'a pas pu ajouter son paquet d'écrans au dossier Community du simulateur. Relancez le programme d'installation de Taxi "
+     L"Cam."},
+    {L"OK", L"OK"},
+    {L"Taxi Cam now recognises cockpit displays a new way and could not carry over this aircraft's saved displays. Choose them once in "
+     L"Displays: Taxi Cam keeps your choice from then on.",
+     L"Taxi Cam reconnaît désormais les écrans du cockpit d'une nouvelle façon et n'a pas pu reprendre les écrans enregistrés de cet "
+     L"avion. Choisissez-les une fois dans Écrans : Taxi Cam conservera ensuite votre choix."},
+    {L"Later", L"Plus tard"},
     {L"Choose this aircraft's displays", L"Choisir les écrans de cet avion"},
     {L"Some of this aircraft's saved displays could not be converted. Check them in Displays.",
      L"Certains écrans enregistrés de cet avion n'ont pas pu être convertis. Vérifiez-les dans Écrans."},
     {L"This aircraft's saved displays now use the new display names.",
      L"Les écrans enregistrés de cet avion utilisent désormais les nouveaux noms d'écran."},
-    {L"Taxi Cam updated its display package in Community. Restart the simulator once so your displays can be found.",
-     L"Taxi Cam a mis à jour son paquet d'écrans dans Community. Redémarrez le simulateur une fois pour que vos écrans soient trouvés."},
-    {L"This simulator version changed the cockpit page Taxi Cam's display package extends. Update Taxi Cam to find displays again.",
-     L"Cette version du simulateur a modifié la page de cockpit que le paquet d'écrans de Taxi Cam complète. Mettez à jour Taxi Cam pour "
-     L"retrouver les écrans."},
-    {L"Taxi Cam could not find the simulator's Community folder for its display package.",
-     L"Taxi Cam n'a pas trouvé le dossier Community du simulateur pour son paquet d'écrans."},
     {L"Display area: {0}", L"Zone d'affichage : {0}"},
-    {L"Click a gauge to use it, or drag the frame and its handles. The cameras are drawn inside this area.", L"Cliquez sur un instrument pour l'utiliser, ou faites glisser le cadre et ses poignées. Les caméras sont dessinées dans cette zone."},
+    {L"Click a gauge to use it, or drag the frame and its handles. The cameras are drawn inside this area.",
+     L"Cliquez sur un instrument pour l'utiliser, ou faites glisser le cadre et ses poignées. Les caméras sont dessinées dans cette zone."},
     {L"Whole panel", L"Panneau entier"},
     {L"Done", L"Terminé"},
     {L"Taxi Cam — Display area", L"Taxi Cam — Zone d'affichage"},

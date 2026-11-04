@@ -311,6 +311,19 @@ void configure(const Options& options) {
             simulator, standalone::marks_package::community_folder(), standalone::marks_package::helper_text()));
       } catch (...) {
       }
+      // Without the package no cockpit display can be recognised, so the
+      // installer's last page says so.
+      const wchar_t* marks_warning =
+          marks == "current" || marks == "written" ? L""
+          : marks == "no_community"
+              ? L"Taxi Cam could not find the simulator's Community folder for its display package, so it can't recognise cockpit "
+                L"displays yet. Start MSFS once, close it, then run Setup again."
+          : marks == "page_changed" || marks == "removed"
+              ? L"This simulator version changed the cockpit page Taxi Cam uses to recognise your displays. Update Taxi Cam to find them."
+              : L"Taxi Cam could not add its display package to the simulator's Community folder, so it can't recognise cockpit displays "
+                L"yet. Close MSFS, then run Setup again.";
+      if (marks_warning[0])
+        warning += std::wstring(warning.empty() ? L"" : L" ") + marks_warning;
       write_utf8(join(destination, L"setup-diagnostics.log"),
                  L"Taxi Cam Setup " TAXI_CAM_VERSION_WIDE L" build " + std::to_wstring(TAXI_CAM_BUILD_NUMBER) + L"\r\nUTC: " +
                      utc_iso_timestamp() + L"\r\nDestination: " + destination + L"\r\nStartup requested: " + options.startup +

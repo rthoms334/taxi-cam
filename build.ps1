@@ -204,7 +204,8 @@ if ($Validate) {
     $setupLibs = @('-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lbcrypt')
     $startupXmlTest = Add-Compile (Join-Path $out 'startup-xml-test.exe') (@((Join-Path $taskRoot 'tests/setup/startup_xml_test.cpp'), (Join-Path $taskRoot 'src/setup/startup_xml.cpp'), (Join-Path $taskRoot 'src/setup/setup_common.cpp')) + $setupLibs) 'Startup XML test compilation failed.'
     $prerequisitesTest = Add-Compile (Join-Path $out 'prerequisites-test.exe') (@((Join-Path $taskRoot 'tests/setup/prerequisites_test.cpp'), (Join-Path $taskRoot 'src/setup/prerequisites.cpp'), (Join-Path $taskRoot 'src/setup/setup_common.cpp')) + $setupLibs) 'Prerequisite test compilation failed.'
-    $setupHost = Add-Compile (Join-Path $out 'setup-host-test.exe') (@('-municode', '-DTAXI_SETUP_TEST', (Join-Path $taskRoot 'tests/setup/setup_host.cpp')) + $setupSources + $setupLibs) 'Setup command test host compilation failed.'
+    # The companion's resources carry the panel marks helper that configure writes.
+    $setupHost = Add-Compile (Join-Path $out 'setup-host-test.exe') (@('-municode', '-DTAXI_SETUP_TEST', (Join-Path $taskRoot 'tests/setup/setup_host.cpp')) + $setupSources + @($resource | Where-Object { $_ }) + $setupLibs) 'Setup command test host compilation failed.'
     $updaterTest = Add-Compile (Join-Path $out 'updater-test.exe') @((Join-Path $taskRoot 'tests/app/updater_test.cpp'), (Join-Path $taskRoot 'src/app/updater.cpp'), '-lbcrypt', '-lshell32', '-lwinhttp') 'Updater test compilation failed.'
     $observerTest = Add-Compile (Join-Path $out 'pfd-state-observer-test.exe') @('-DTAXI_PFD_STATE_OBSERVER_VALIDATION', (Join-Path $taskRoot 'tests/hooks/pfd_state_observer_test.cpp'), (Join-Path $taskRoot 'src/hooks/pfd_state_observer.cpp')) 'PFD state observer test compilation failed.'
 }

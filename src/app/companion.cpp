@@ -11,6 +11,7 @@
 #include <atomic>
 #include <climits>
 #include <cwchar>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -3133,18 +3134,23 @@ COLORREF route_color(RouteSource source) {
          : source == RouteSource::none   ? RGB(236, 182, 92)
                                          : Muted;
 }
-int route_chip(HDC dc, int x, int y, RouteSource source) {
+// How a display was found, in words: the pilot needs that, not the panel's
+// internal name.
+const wchar_t* route_label(RouteSource source) {
   switch (source) {
     case RouteSource::named:
-      return chip(dc, x, y, tr(L"Named"), Accent);
+      return tr(L"Found");
     case RouteSource::chosen:
-      return chip(dc, x, y, tr(L"Your choice"), RGB(126, 176, 255));
+      return tr(L"Your choice");
     case RouteSource::detected:
-      return chip(dc, x, y, tr(L"Detected"), Muted);
+      return tr(L"Detected");
     case RouteSource::none:
-      return chip(dc, x, y, tr(L"Not found"), RGB(236, 182, 92));
+      break;
   }
-  return 0;
+  return tr(L"Not found");
+}
+int route_chip(HDC dc, int x, int y, RouteSource source) {
+  return chip(dc, x, y, route_label(source), route_color(source));
 }
 // Draws a texture's picture, or the part `crop` (texture pixels) of it,
 // fitted and centred in box. Returns the drawn rectangle; empty without one.
@@ -3312,12 +3318,11 @@ void draw_display_strip(HDC dc, const win::Status& sample) {
     const auto crop = profiles::display_rect(*profile, card.side);
     draw_thumbnail(dc, picture, id, tr(L"No display"), fits ? &crop : nullptr);
     hit_areas.push_back({rectangle(x, y, width, DisplayCardSwitches - 4), 0});
-    // The panel's name in a pill coloured by how it was found.
-    const auto* candidate = find_candidate(sample, id);
-    const auto name = candidate_name(candidate);
-    const auto label = !id ? std::wstring(tr(L"Not found")) : name.empty() ? L"#" + std::to_wstring(id) : name;
-    const int pill = std::min(chip_width(dc, label.c_str()), inner / 2);
-    chip(dc, x + 10 + inner - pill, row, label.c_str(), route_color(route_source(s, sample, card.side, id)), pill);
+    // How it was found, in a pill of that colour; the picture shows which.
+    const auto source = route_source(s, sample, card.side, id);
+    const auto* label = route_label(source);
+    const int pill = std::min(chip_width(dc, label), inner / 2);
+    chip(dc, x + 10 + inner - pill, row, label, route_color(source), pill);
     text(dc, display_side_title(s, card.side), x + 10, row, inner - pill - 8, 22, heading, Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
@@ -3715,6 +3720,16 @@ void convert_legacy_displays() {
   const auto legacy = legacy_display_name;
   if (!legacy_displays(s))
     return;
+  // Only from the panel.cfg of the aircraft these settings are for: a profile
+  // kept over a newly loaded aircraft (Auto aircraft waits for a second
+  // sample, finds no profile, or is off) is converted once its own aircraft
+  // is loaded.
+  const bool own =
+      set_up ? profiles::same_variant(std::string_view(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path))),
+                                      s.discovered.key)
+             : sample.detected_profile && profiles::base_profile(sample.detected_profile) == base;
+  if (!own)
+    return;
   const std::string path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
   const auto attempt = legacy_attempt(sample, s.profile);
   if (attempt == legacy_tried)
@@ -3768,6 +3783,11 @@ void check_marks_package(const std::wstring& simulator_exe) {
   }
   marks_package_outcome.store(static_cast<int>(outcome), std::memory_order_release);
 }
+void show_alert(std::wstring title, std::wstring body, std::wstring primary, std::wstring secondary, std::function<void()> act);
+// The package is loaded with the simulator's add-ons, before the simulator
+// starts Taxi Cam: a package written or changed now, or one that could not be
+// written, means no display can be recognised until the simulator starts
+// again, so the pilot is told in front of the simulator.
 void service_marks_package_notice() {
   static bool shown = false;
   const auto outcome = marks_package_outcome.load(std::memory_order_acquire);
@@ -3775,21 +3795,31 @@ void service_marks_package_notice() {
     return;
   shown = true;
   using win::marks_package::Outcome;
+  const wchar_t* title = tr(L"Taxi Cam can't recognise your displays");
   switch (static_cast<Outcome>(outcome)) {
+    case Outcome::current:
+      return;
     case Outcome::written:
-      notice = tr(L"Taxi Cam updated its display package in Community. Restart the simulator once so your displays can be found.");
+      title = tr(L"Restart the simulator once");
+      notice =
+          tr(L"Taxi Cam has just set up the package that lets it recognise your cockpit displays, but the simulator had already "
+             L"loaded its add-ons. Restart the simulator so Taxi Cam can find your displays.");
       break;
     case Outcome::removed:
     case Outcome::page_changed:
-      notice = tr(
-          L"This simulator version changed the cockpit page Taxi Cam's display package extends. Update Taxi Cam to find displays again.");
+      title = tr(L"Update Taxi Cam");
+      notice =
+          tr(L"This simulator version changed the cockpit page Taxi Cam uses to recognise your displays, so it can't find them. "
+             L"Update Taxi Cam to find them again.");
       break;
     case Outcome::no_community:
-      notice = tr(L"Taxi Cam could not find the simulator's Community folder for its display package.");
+      notice = tr(L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.");
       break;
     default:
-      return;
+      notice = tr(L"Taxi Cam could not add its display package to the simulator's Community folder. Run the Taxi Cam installer again.");
+      break;
   }
+  show_alert(title, notice, tr(L"OK"), L"", {});
   build_controls();
 }
 void sync_aircraft_session() {
@@ -6222,37 +6252,180 @@ void show() {
   SetForegroundWindow(window);
   offer_whats_new();
 }
-// After an update that could not convert this aircraft's displays, a pop-up
-// says so once, and OK opens Displays to choose them. Only while the window is
-// on screen: a start in the tray waits until it is opened, so the pop-up never
-// takes the focus from the simulator.
+// An alert in front of everything, the simulator included, for something the
+// pilot must do before Taxi Cam can work. The companion often runs only in
+// the tray, so a notice in its window would go unseen. The alert is shown
+// without taking the keyboard from the simulator, centred on the monitor of
+// the window in front (the simulator while flying). One at a time: a newer
+// alert replaces the one on screen.
+constexpr wchar_t AlertClass[] = L"380TaxiCamera.Alert";
+constexpr int AlertWidth = 460, AlertPadding = 24, AlertTitleHeight = 28, AlertButtonHeight = 34, AlertButtonWidth = 150;
+struct AlertView {
+  HWND window{};
+  std::wstring title, body, primary, secondary;
+  std::function<void()> act;  // The primary button's action, after the alert closes.
+  RECT primary_rect{}, secondary_rect{};
+  int body_height{};
+} alert_view;
+void close_alert() {
+  if (alert_view.window)
+    DestroyWindow(alert_view.window);
+  alert_view.window = nullptr;
+}
+void draw_alert_button(HDC dc, const RECT& r, const std::wstring& label, bool primary) {
+  HBRUSH brush = CreateSolidBrush(primary ? Accent : Card);
+  HPEN pen = CreatePen(PS_SOLID, scale(1), primary ? Accent : Border);
+  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
+  RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(9), scale(9));
+  SelectObject(dc, oldb);
+  SelectObject(dc, oldp);
+  DeleteObject(brush);
+  DeleteObject(pen);
+  SelectObject(dc, normal);
+  SetTextColor(dc, primary ? Background : Text);
+  SetBkMode(dc, TRANSPARENT);
+  auto bounds = r;
+  DrawTextW(dc, label.c_str(), -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+LRESULT CALLBACK alert_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+  auto& v = alert_view;
+  switch (message) {
+    case WM_MOUSEACTIVATE:
+      return MA_NOACTIVATE;  // A click works without taking the keyboard from the simulator.
+    case WM_SETCURSOR: {
+      POINT p{};
+      GetCursorPos(&p);
+      ScreenToClient(hwnd, &p);
+      const bool over = PtInRect(&v.primary_rect, p) || (!v.secondary.empty() && PtInRect(&v.secondary_rect, p));
+      SetCursor(LoadCursorW(nullptr, over ? IDC_HAND : IDC_ARROW));
+      return TRUE;
+    }
+    case WM_LBUTTONUP: {
+      const POINT p{static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))};
+      if (PtInRect(&v.primary_rect, p)) {
+        auto act = std::move(v.act);
+        close_alert();
+        if (act)
+          act();
+      } else if (!v.secondary.empty() && PtInRect(&v.secondary_rect, p)) {
+        close_alert();
+      }
+      return 0;
+    }
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC dc = BeginPaint(hwnd, &ps);
+      RECT client;
+      GetClientRect(hwnd, &client);
+      HBRUSH fill = CreateSolidBrush(Card);
+      FillRect(dc, &client, fill);
+      DeleteObject(fill);
+      // An amber frame: it needs the pilot, like the amber chips on Overview.
+      HBRUSH frame = CreateSolidBrush(RGB(236, 182, 92));
+      for (int i = 0; i < scale(2); ++i) {
+        RECT edge{client.left + i, client.top + i, client.right - i, client.bottom - i};
+        FrameRect(dc, &edge, frame);
+      }
+      DeleteObject(frame);
+      SetBkMode(dc, TRANSPARENT);
+      const int pad = scale(AlertPadding);
+      RECT title{pad, pad, client.right - pad, pad + scale(AlertTitleHeight)};
+      SelectObject(dc, heading);
+      SetTextColor(dc, Text);
+      DrawTextW(dc, v.title.c_str(), -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      RECT body{pad, title.bottom + scale(10), client.right - pad, title.bottom + scale(10) + v.body_height};
+      SelectObject(dc, normal);
+      SetTextColor(dc, Muted);
+      DrawTextW(dc, v.body.c_str(), -1, &body, DT_LEFT | DT_WORDBREAK);
+      draw_alert_button(dc, v.primary_rect, v.primary, true);
+      if (!v.secondary.empty())
+        draw_alert_button(dc, v.secondary_rect, v.secondary, false);
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+    case WM_DESTROY:
+      if (v.window == hwnd)
+        v.window = nullptr;
+      return 0;
+  }
+  return DefWindowProcW(hwnd, message, w, l);
+}
+// primary closes the alert, then runs act; secondary (empty for none) only
+// closes it.
+void show_alert(std::wstring title, std::wstring body, std::wstring primary, std::wstring secondary, std::function<void()> act) {
+  if (preview_ui)
+    return;
+  close_alert();
+  static bool registered = false;
+  if (!registered) {
+    WNDCLASSEXW type{};
+    type.cbSize = sizeof(type);
+    type.hInstance = instance;
+    type.lpfnWndProc = alert_procedure;
+    type.lpszClassName = AlertClass;
+    type.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    registered = RegisterClassExW(&type) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+  }
+  if (!registered)
+    return;
+  auto& v = alert_view;
+  v.title = std::move(title);
+  v.body = std::move(body);
+  v.primary = std::move(primary);
+  v.secondary = std::move(secondary);
+  v.act = std::move(act);
+  const int width = scale(AlertWidth), pad = scale(AlertPadding);
+  // The body's height at the alert's width.
+  HDC screen = GetDC(nullptr);
+  const auto old_font = SelectObject(screen, normal);
+  RECT measure{0, 0, width - 2 * pad, 0};
+  DrawTextW(screen, v.body.c_str(), -1, &measure, DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
+  SelectObject(screen, old_font);
+  ReleaseDC(nullptr, screen);
+  v.body_height = measure.bottom - measure.top;
+  const int buttons_top = pad + scale(AlertTitleHeight) + scale(10) + v.body_height + scale(20);
+  const int height = buttons_top + scale(AlertButtonHeight) + pad;
+  v.primary_rect = {width - pad - scale(AlertButtonWidth), buttons_top, width - pad, buttons_top + scale(AlertButtonHeight)};
+  v.secondary_rect = {v.primary_rect.left - scale(10) - scale(AlertButtonWidth), buttons_top, v.primary_rect.left - scale(10),
+                      buttons_top + scale(AlertButtonHeight)};
+  MONITORINFO monitor{};
+  monitor.cbSize = sizeof(monitor);
+  GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &monitor);
+  const auto& area = monitor.rcWork;
+  const int x = area.left + (area.right - area.left - width) / 2, y = area.top + (area.bottom - area.top - height) / 2;
+  v.window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, AlertClass, v.title.c_str(), WS_POPUP, x, y, width,
+                             height, nullptr, nullptr, instance, nullptr);
+  if (v.window)
+    ShowWindow(v.window, SW_SHOWNOACTIVATE);
+}
+// After an update that could not convert this aircraft's displays, an alert
+// says so once, in front of the simulator; Choose displays opens Displays.
 void prompt_choose_displays() {
-  static bool prompting{};
-  if (!choose_displays_prompt || prompting || preview_ui || !IsWindowVisible(window) || IsIconic(window))
+  if (!choose_displays_prompt || preview_ui)
     return;
   win::Status sample;
   {
     const std::lock_guard lock(app_mutex);
     sample = status;
   }
-  if (!displays_to_choose(sample)) {
-    choose_displays_prompt = false;
-    return;
-  }
+  if (!fresh_status(sample) || !sample.identity_sample_ms)
+    return;  // Not known yet: ask once the aircraft is.
   choose_displays_prompt = false;
-  prompting = true;
-  MessageBoxW(window,
-              tr(L"Taxi Cam now finds cockpit displays a new way, and could not carry over this aircraft's saved displays.\n\n"
-                 L"Choose them again in Displays: select each display's picture and place it in its slot."),
-              tr(L"Choose this aircraft's displays"), MB_OK | MB_ICONINFORMATION);
-  prompting = false;
-  // The pop-up pumps status messages: the aircraft may have changed meanwhile.
-  {
-    const std::lock_guard lock(app_mutex);
-    sample = status;
-  }
-  if (displays_to_choose(sample) && page != SetupPage)
-    open_step(0);
+  if (!displays_to_choose(sample))
+    return;
+  show_alert(tr(L"Choose this aircraft's displays"),
+             tr(L"Taxi Cam now recognises cockpit displays a new way and could not carry over this aircraft's saved displays. "
+                L"Choose them once in Displays: Taxi Cam keeps your choice from then on."),
+             tr(L"Choose displays"), tr(L"Later"), [] {
+               win::Status now;
+               {
+                 const std::lock_guard lock(app_mutex);
+                 now = status;
+               }
+               show();
+               if (displays_to_choose(now) && page != SetupPage)
+                 open_step(0);
+             });
 }
 // Tray and Menu: Language. Unfinished fields are kept as a page change keeps
 // them, then the controls are made again in the new language. Open windows

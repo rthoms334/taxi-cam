@@ -6,7 +6,7 @@
       "features": [
         {
           "title": "Every display recognised by name",
-          "text": "As the flight loads, each cockpit display shows a tiny code for a moment: the small coloured square in its top-right corner. It carries the display's name, so Taxi Cam knows exactly which screen is which on every load, then it's gone. After updating, some aircraft need their displays chosen once more: Taxi Cam asks, takes you to Displays and keeps your choice.",
+          "text": "As the flight loads, each cockpit display shows a tiny code for a moment: the small coloured square in its top-right corner. It carries the display's name, so Taxi Cam can tell which screen is which, then it's gone. After updating, some aircraft need their displays chosen once more: Taxi Cam asks, takes you to Displays and keeps your choice.",
           "image": "docs/whats-new/1.3.2/panel-marks.jpg"
         }
       ],

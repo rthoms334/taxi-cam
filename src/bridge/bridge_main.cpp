@@ -260,6 +260,10 @@ struct MarkIdentityState {
   bool logged{};
   std::vector<win::PanelTexture> map;
   std::vector<win::PanelGauge> gauges;
+  // No panel texture is waiting for its picture (mark scan). Until then a
+  // gauge read on one panel may have an unread twin, so its key could be
+  // saved unranked and later name the twin.
+  bool settled{};
 };
 void service_mark_identity(MarkIdentityState& state,
                            const win::Status& status,
@@ -338,7 +342,8 @@ void service_mark_identity(MarkIdentityState& state,
   }
 }
 void publish_panel_map(const MarkIdentityState& state, win::Status& status) noexcept {
-  status.panel_state = static_cast<std::uint32_t>(state.map.empty() ? win::PanelMapState::waiting : win::PanelMapState::marked);
+  status.panel_state =
+      static_cast<std::uint32_t>(state.map.empty() || !state.settled ? win::PanelMapState::waiting : win::PanelMapState::marked);
   status.panel_count = static_cast<std::uint32_t>(state.map.size());
   for (std::size_t i = 0; i < state.map.size() && i < win::MaxPanelTextures; ++i)
     status.panels[i] = state.map[i];
@@ -776,7 +781,9 @@ DWORD run_impl() {
   // to ~20 s after the flight loads): MarkReshows times a flight, then once
   // a minute at most while a display the profile names has no texture (one
   // recreated without a copy).
-  constexpr unsigned MarkTries = 5, MarkReshows = 2;
+  // MarkMissingPictures pictures without a mark and none with one: the pages
+  // carry no marks, so the package is not loaded.
+  constexpr unsigned MarkTries = 5, MarkReshows = 2, MarkMissingPictures = 8;
   // A picture not taken within MarkPictureMs is given up (the texture is not
   // being drawn): the next texture's request replaces it, so undrawn panels
   // cannot use up the pages' marks window (the A350, 2026-11-04). A drawn
@@ -785,7 +792,7 @@ DWORD run_impl() {
   // to go first: half of the A380X's are never drawn, and picturing them
   // first held its displays back by seconds.
   constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 250, MarkQuietMs = 3000, MarkReshowGapMs = 60000, MarkPictureMs = 600,
-                          MarkShowMs = 20000, MarkUndrawnMs = 1000;
+                          MarkShowMs = 20000, MarkUndrawnMs = 1000, MarkSettleMs = 10000;
   struct MarkScan {
     struct Entry {
       std::uint64_t id{}, next_ms{};
@@ -1101,6 +1108,11 @@ DWORD run_impl() {
                       allowed ? 1u : 0u, companion ? 1u : 0u, r[0], r[1], r[2], e[0], e[1], e[2], e[3]);
         log_status(log_to, detail);
       }
+      // A texture drawn is pictured within a second or two; one the
+      // simulator keeps recreating could otherwise hold the list back.
+      panel_identity.settled = std::none_of(mark_scan.entries.begin(), mark_scan.entries.end(),
+                                            [](const MarkScan::Entry& entry) { return !entry.read && entry.tries < MarkTries; }) ||
+                               (mark_scan.shown_ms && now - mark_scan.shown_ms >= MarkSettleMs);
       if (!allowed || companion)
         return;
       if (now >= mark_scan.next_refresh) {
@@ -2157,9 +2169,14 @@ DWORD run_impl() {
         graphics.ready && inventory.empty()
             ? "Waiting for cockpit displays to be drawn. They are learned on first use; Restart Flight if the list stays empty."
         : !settings.auto_detect ? "Automatic display selection is off. Select the displays in PFD routing."
-        : panel_identity.store.textures().empty()
-            ? "Waiting for the cockpit displays' Taxi Cam marks. If this persists, check the taxi-cam-panel-marks package in Community."
-            : "Taxi Cam could not find this aircraft's displays. Choose them in Displays.";
+        // Pictures taken and none carried a mark: the package is not loaded
+        // (written after the simulator loaded its add-ons, or another
+        // package's VCockpit.html loaded after it).
+        : panel_identity.store.textures().empty() && mark_scan.empty >= MarkMissingPictures
+            ? "Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the "
+              "simulator; if that doesn't help, run the Taxi Cam installer again."
+        : panel_identity.store.textures().empty() ? "Waiting for the cockpit displays to be recognised."
+                                                  : "Taxi Cam could not find this aircraft's displays. Choose them in Displays.";
     const auto stopped_camera = camera_stop_message(scene);
     char close_blocked_message[sizeof(status.message)];
     std::snprintf(close_blocked_message, sizeof(close_blocked_message),

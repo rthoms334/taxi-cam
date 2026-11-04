@@ -735,7 +735,10 @@ DWORD WINAPI worker(void*) noexcept {
   }
   // Cockpit pages take their panel marks down when this changes.
   panel_marks_defined = set_data && SUCCEEDED(define(session, PanelMarksDefine, "L:TAXICAM_MARKS", "number", 4, 0, 0xffffffffu));
-  panel_marks_sent = panel_marks_signal.load(std::memory_order_acquire);
+  // Nothing counts as sent yet: a signal raised while the worker restarted
+  // (a profile change or reconnect) is sent now. Sending a value again is
+  // harmless, as each page acts only on a change from its own baseline.
+  panel_marks_sent = 0;
 #else
   (void)map_event;
 #endif

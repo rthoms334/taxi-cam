@@ -295,10 +295,22 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   if (ours && detail::read_file(marker, recorded) && recorded == expected)
     return Outcome::current;
   std::error_code error;
+  const bool fresh = !detail::exists(package);
   const auto core = package / L"html_ui\\Pages\\VCockpit\\Core";
+  const auto give_up = [&] {
+    std::error_code ignored;
+    if (fresh && !detail::exists(marker))
+      std::filesystem::remove_all(package, ignored);
+    return Outcome::failed;
+  };
   std::filesystem::create_directories(core, error);
   if (error)
-    return Outcome::failed;
+    return give_up();
+  // The marker first, matching no hashes until the end: a write that stops
+  // part way leaves a package Taxi Cam still owns, so the next check rewrites
+  // it and the uninstaller removes it.
+  if (!detail::write_file(marker, "incomplete\n"))
+    return give_up();
   if (!detail::write_file(package / PageRelative, patched) || !detail::write_file(package / HelperRelative, helper) ||
       !detail::write_file(package / L"manifest.json", manifest_json(minimum_game_version(manifest))))
     return Outcome::failed;

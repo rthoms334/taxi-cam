@@ -195,7 +195,8 @@ class Store {
     return out;
   }
   // A texture's key: its identifying gauge, ranked among the textures that
-  // carry it. A copy has its source's.
+  // carry it. A copy has its source's. None when its own panel is not among
+  // them (a copy whose source is gone): any key would name another texture.
   Key key_of(const Texture& texture) const {
     const auto* first = texture.first();
     if (!first)
@@ -206,7 +207,7 @@ class Store {
     for (std::size_t i = 0; i < list.size(); ++i)
       if (panel_number(list[i]->gauge(gauge)->section.data()) == panel)
         return make_key(gauge.c_str(), static_cast<unsigned>(i), static_cast<unsigned>(list.size()));
-    return make_key(gauge.c_str());
+    return {};
   }
   // The live texture showing the display named by key: the gauge's texture
   // (or the ranked one of exactly that many), then along the simulator's
@@ -216,19 +217,23 @@ class Store {
     if (!parse_key(key, parsed))
       return 0;
     // A key as long as a key can be was cut to fit: its gauge name is a prefix.
-    const auto list = owners(parsed.gauge, std::strlen(key) == KeySize - 1);
+    const bool prefix = std::strlen(key) == KeySize - 1;
+    const auto list = owners(parsed.gauge, prefix);
     if (list.size() != parsed.count)
       return 0;
     std::uint64_t id = list[parsed.rank]->id;
+    // Only into a copy that carries the gauge (one with marks of its own is
+    // another display), and the newest such copy.
     for (std::size_t step = 0; step < count; ++step) {
-      bool moved = false;
-      for (std::size_t i = 0; i < count && !moved; ++i)
-        if (feeds[i].first == id && find(feeds[i].second)) {
-          id = feeds[i].second;
-          moved = true;
-        }
-      if (!moved)
+      std::uint64_t next = 0;
+      for (std::size_t i = 0; i < count; ++i) {
+        const auto* to = feeds[i].first == id ? find(feeds[i].second) : nullptr;
+        if (to && to->copied && to->gauge(parsed.gauge, prefix) && to->id > next)
+          next = to->id;
+      }
+      if (!next)
         break;
+      id = next;
     }
     return id;
   }

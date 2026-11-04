@@ -109,6 +109,51 @@ int main() {
   require(legacy_names::airplane_folder("SimObjects\\Airplanes\\FNX_32X\\presets\\fnx\\FNX_320_CFM_SL\\config\\aircraft.CFG") ==
               std::filesystem::path("SimObjects") / "Airplanes" / "FNX_32X",
           "airplane folder from the sim path");
+  // Writing and removing the package, on a temporary simulator and Community.
+  {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / ("taxi-cam-marks-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
+    const auto simulator = root / "sim", community = root / "Community", other = root / "OtherCommunity";
+    const auto stock_page = simulator / "Packages" / "asobo-vcockpits-core" / "html_ui" / "Pages" / "VCockpit" / "Core" / "VCockpit.html";
+    fs::create_directories(stock_page.parent_path());
+    fs::create_directories(community);
+    fs::create_directories(other / marks_package::PackageName);
+    const auto write = [](const fs::path& path, std::string_view text) { std::ofstream(path, std::ios::binary) << text; };
+    write(stock_page, Stock);
+    write(simulator / "Packages" / "asobo-vcockpits-core" / "manifest.json", "{ \"minimum_game_version\": \"1.9.21\" }");
+    using marks_package::Outcome;
+    const auto package = community / marks_package::PackageName;
+    const auto marker = package / marks_package::MarkerName;
+    require(marks_package::ensure({}, community, "helper") == Outcome::no_simulator, "no simulator folder: nothing written");
+    require(marks_package::ensure(simulator, {}, "helper") == Outcome::no_community, "no Community folder: nothing written");
+    require(marks_package::ensure(simulator, community, "helper") == Outcome::written && fs::exists(marker) &&
+                fs::exists(package / marks_package::PageRelative) && fs::exists(package / "layout.json"),
+            "a first check writes the package with its marker");
+    require(marks_package::ensure(simulator, community, "helper") == Outcome::current, "an unchanged package is left alone");
+    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::written, "a changed helper rewrites it");
+    write(marker, "incomplete\n");
+    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::written,
+            "a package whose write stopped part way is rewritten");
+    // Another package's folder of the same name is never touched.
+    require(marks_package::ensure(simulator, other, "helper") == Outcome::failed && fs::exists(other / marks_package::PackageName) &&
+                !fs::exists(other / marks_package::PackageName / marks_package::MarkerName),
+            "a folder without our marker is refused");
+    require(!marks_package::remove(other) && fs::exists(other / marks_package::PackageName), "the uninstaller keeps a foreign folder");
+    // A simulator page Taxi Cam cannot extend removes the package.
+    std::string twice(Stock);
+    twice.insert(twice.find("</head>"), "    <script type=\"text/javascript\" src=\"VCockpit.js\"></script>\r\n");
+    write(stock_page, twice);
+    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::removed && !fs::exists(package),
+            "a changed stock page removes the package");
+    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::page_changed, "and keeps saying so");
+    write(stock_page, Stock);
+    require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a usable page writes it again");
+    require(marks_package::remove(community) && !fs::exists(package), "the uninstaller removes our package");
+    require(marks_package::remove(community), "nothing left to remove");
+    fs::remove_all(root, ignored);
+  }
   std::printf("marks-package: %u checks passed\n", checks);
   return 0;
 }
