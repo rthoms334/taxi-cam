@@ -3486,7 +3486,7 @@ void draw_setup(HDC dc, const win::Status& sample) {
                                                   L"Select the picture again to cancel.",
                                                   {picked})
                     : built_in ? std::wstring(tr(L"Select a panel's picture below, then choose its display, or drag it onto one. "
-                                                 L"This profile's own panels come back with Use built-in displays (Advanced)."))
+                                                 L"This aircraft's default displays come back with Use default displays (Advanced)."))
                                : std::wstring(tr(L"Select a panel's picture below, then choose its display, or drag it onto one. "
                                                  L"It is saved for this aircraft variant only."));
   // Under the displays, as in the design.
@@ -3523,9 +3523,7 @@ void draw_setup(HDC dc, const win::Status& sample) {
                             : !built_in && s.profile == profiles::DiscoveredProfileId && unsigned_side < s.discovered.sides
                                 ? s.discovered.textures[unsigned_side]
                                 : "";
-    const wchar_t* state = name.empty()  ? tr(L"Not placed")
-                           : name == own ? (built_in ? tr(L"Built in") : tr(L"Saved"))
-                                         : tr(L"Your choice");
+    const wchar_t* state = name.empty() ? tr(L"Not placed") : name == own ? (built_in ? tr(L"Default") : tr(L"Saved")) : tr(L"Your choice");
     const COLORREF state_color = name.empty() ? RGB(236, 182, 92) : name == own ? Muted : RGB(126, 176, 255);
     const int pill = std::min(chip_width(dc, state), inner / 2);
     chip(dc, x + 10 + inner - pill, y + 10, state, state_color, pill);
@@ -4032,8 +4030,7 @@ void auto_profile() {
   if (!win::prepare_profile_selection(next, s, true) || !win::save_settings(next))
     return;
   publish(next);
-  notice = set_up ? tr(L"Set-up aircraft detected. Its saved displays and calibration are active.")
-                  : tr(L"Aircraft detected. Its saved calibration is active.");
+  notice = tr(L"Aircraft detected. Its saved displays and calibration are active.");
   build_controls();
 }
 // Camera adjustment window. Everything is painted here and hit-tested, so
@@ -5332,25 +5329,71 @@ void back_step() {
   else if (step > 0)
     open_step(static_cast<unsigned>(step) - 1);
 }
-// Set-up aircraft (Overview): every saved variant, with Remove.
-std::vector<std::string> setup_list;
-void fill_setup_list(HWND hwnd) {
-  setup_list = win::saved_discovered_variants();
-  HWND list = GetDlgItem(hwnd, 801);
-  SendMessageW(list, LB_RESETCONTENT, 0, 0);
+// Saved aircraft (Overview): the aircraft that come with Taxi Cam and every
+// variant set up, in one list by name. Each can be changed in Setup; only
+// the ones set up can be removed or copied.
+struct SavedAircraft {
+  std::uint32_t profile{};  // A catalog profile, or 0 for a set-up variant.
+  std::string key;          // The set-up variant.
+  std::wstring label;
+  bool in_use{};
+};
+std::vector<SavedAircraft> saved_list;
+const SavedAircraft* selected_saved(HWND hwnd) {
+  const auto index = SendDlgItemMessageW(hwnd, 801, LB_GETCURSEL, 0, 0);
+  return index >= 0 && static_cast<std::size_t>(index) < saved_list.size() ? &saved_list[static_cast<std::size_t>(index)] : nullptr;
+}
+// The set-up variant selected in the list, or nothing for a catalog profile.
+const std::string* selected_setup(HWND hwnd) {
+  const auto* selected = selected_saved(hwnd);
+  return selected && !selected->profile ? &selected->key : nullptr;
+}
+// Remove and Copy to this aircraft follow the selection.
+void update_saved_buttons(HWND hwnd) {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  const auto* selected = selected_saved(hwnd);
+  const bool set_up = selected && !selected->profile;
+  EnableWindow(GetDlgItem(hwnd, 802), set_up);
+  EnableWindow(GetDlgItem(hwnd, 804), set_up && loaded_variant(sample)[0]);
+  SetDlgItemTextW(
+      hwnd, 803,
+      selected && selected->profile ? tr(L"Included with Taxi Cam, so it cannot be removed. Change it in Setup while it is loaded.") : L"");
+}
+void fill_saved_list(HWND hwnd) {
   const auto s = draft();
+  saved_list.clear();
+  for (const auto* profile : profiles::Catalog) {
+    std::wstring label = profile->name;
+    const bool in_use = s.profile == profile->id;
+    if (in_use)
+      label = tr_format(L"{0}   (in use)", {label});
+    saved_list.push_back({profile->id, {}, std::move(label), in_use});
+  }
   constexpr std::string_view prefix = "SimObjects/";
-  for (const auto& key : setup_list) {
+  for (auto& key : win::saved_discovered_variants()) {
     auto family = profiles::variant_family(key);
     if (family.substr(0, prefix.size()) == prefix)
       family.remove_prefix(prefix.size());
     auto label = widen(std::string(profiles::variant_name(key)).c_str()) + L"   ·   " + widen(std::string(family).c_str());
-    if (s.profile == profiles::DiscoveredProfileId && profiles::same_variant(key, s.discovered.key))
+    const bool in_use = s.profile == profiles::DiscoveredProfileId && profiles::same_variant(key, s.discovered.key);
+    if (in_use)
       label = tr_format(L"{0}   (in use)", {label});
-    SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    saved_list.push_back({0, std::move(key), std::move(label), in_use});
   }
-  EnableWindow(GetDlgItem(hwnd, 802), !setup_list.empty());
-  SetDlgItemTextW(hwnd, 803, setup_list.empty() ? tr(L"No aircraft has been set up yet.") : L"");
+  std::stable_sort(saved_list.begin(), saved_list.end(),
+                   [](const auto& a, const auto& b) { return lstrcmpiW(a.label.c_str(), b.label.c_str()) < 0; });
+  // The aircraft in use starts selected.
+  HWND list = GetDlgItem(hwnd, 801);
+  SendMessageW(list, LB_RESETCONTENT, 0, 0);
+  for (std::size_t i = 0; i < saved_list.size(); ++i) {
+    SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(saved_list[i].label.c_str()));
+    if (saved_list[i].in_use)
+      SendMessageW(list, LB_SETCURSEL, i, 0);
+  }
   // The aircraft loaded now, which Copy to this aircraft sets up.
   win::Status sample;
   {
@@ -5361,18 +5404,18 @@ void fill_setup_list(HWND hwnd) {
   const auto line = loaded[0] ? tr_format(L"Loaded now: {0}", {widen(std::string(profiles::variant_name(loaded.data())).c_str())})
                               : std::wstring(tr(L"Load an aircraft to copy a setup to it."));
   SetDlgItemTextW(hwnd, 805, line.c_str());
-  EnableWindow(GetDlgItem(hwnd, 804), !setup_list.empty() && loaded[0]);
+  update_saved_buttons(hwnd);
 }
 void remove_setup_variant(HWND hwnd) {
-  const auto index = SendDlgItemMessageW(hwnd, 801, LB_GETCURSEL, 0, 0);
-  if (index < 0 || static_cast<std::size_t>(index) >= setup_list.size()) {
-    SetDlgItemTextW(hwnd, 803, tr(L"Select an aircraft to remove."));
+  const auto* selected = selected_setup(hwnd);
+  if (!selected) {
+    SetDlgItemTextW(hwnd, 803, tr(L"Select an aircraft you set up to remove it."));
     return;
   }
-  const auto key = setup_list[static_cast<std::size_t>(index)];
+  const auto key = *selected;
   const auto name = widen(std::string(profiles::variant_name(key)).c_str());
   const auto question = tr_format(L"Remove {0}? Its displays and camera positions are deleted. You can set it up again.", {name});
-  if (MessageBoxW(hwnd, question.c_str(), tr(L"Remove set-up aircraft"), MB_OKCANCEL | MB_ICONWARNING) != IDOK)
+  if (MessageBoxW(hwnd, question.c_str(), tr(L"Remove saved aircraft"), MB_OKCANCEL | MB_ICONWARNING) != IDOK)
     return;
   const auto s = draft();
   const bool in_use = s.profile == profiles::DiscoveredProfileId && profiles::same_variant(key, s.discovered.key);
@@ -5389,15 +5432,15 @@ void remove_setup_variant(HWND hwnd) {
     if (win::prepare_profile_selection(next, s, s.auto_profile != 0) && win::save_settings(next))
       publish(next);
   }
-  fill_setup_list(hwnd);
+  fill_saved_list(hwnd);
   SetDlgItemTextW(hwnd, 803, tr_format(L"{0} removed.", {name}).c_str());
 }
 // Copies the selected set-up aircraft to the aircraft loaded now (another
 // preset of it, say), saves it and selects it, so it does not start again.
 void copy_setup_variant(HWND hwnd) {
-  const auto index = SendDlgItemMessageW(hwnd, 801, LB_GETCURSEL, 0, 0);
-  if (index < 0 || static_cast<std::size_t>(index) >= setup_list.size()) {
-    SetDlgItemTextW(hwnd, 803, tr(L"Select the aircraft to copy from."));
+  const auto* selected = selected_setup(hwnd);
+  if (!selected) {
+    SetDlgItemTextW(hwnd, 803, tr(L"Select an aircraft you set up to copy from."));
     return;
   }
   win::Status sample;
@@ -5405,7 +5448,7 @@ void copy_setup_variant(HWND hwnd) {
     const std::lock_guard lock(app_mutex);
     sample = status;
   }
-  const auto source = setup_list[static_cast<std::size_t>(index)];
+  const auto source = *selected;
   const auto target = loaded_variant(sample);
   if (!target[0]) {
     SetDlgItemTextW(hwnd, 803, tr(L"Load the aircraft to copy to first."));
@@ -5417,8 +5460,9 @@ void copy_setup_variant(HWND hwnd) {
   }
   const auto from = widen(std::string(profiles::variant_name(source)).c_str());
   const auto to = widen(std::string(profiles::variant_name(target.data())).c_str());
-  const bool replaces =
-      std::any_of(setup_list.begin(), setup_list.end(), [&](const auto& key) { return profiles::same_variant(target.data(), key); });
+  const bool replaces = std::any_of(saved_list.begin(), saved_list.end(), [&](const auto& aircraft) {
+    return !aircraft.profile && profiles::same_variant(target.data(), aircraft.key);
+  });
   const bool other = profiles::variant_family(source) != profiles::variant_family(target.data());
   win::UiMessage question;
   question.add(ui_text(L"Copy {0}'s displays, cameras and guides to {1}?"), {from, to});
@@ -5426,7 +5470,7 @@ void copy_setup_variant(HWND hwnd) {
     question.add(ui_text(L"This replaces {0}'s own setup."), {to});
   if (other)
     question.add(ui_text(L"It is a different aircraft, so its panel names may not match: check the displays with Test in cockpit."));
-  if (MessageBoxW(hwnd, question.text().c_str(), tr(L"Copy set-up aircraft"),
+  if (MessageBoxW(hwnd, question.text().c_str(), tr(L"Copy saved aircraft"),
                   MB_OKCANCEL | (replaces || other ? MB_ICONWARNING : MB_ICONQUESTION)) != IDOK)
     return;
   // Keep edits to the profile in use before it changes.
@@ -5446,24 +5490,48 @@ void copy_setup_variant(HWND hwnd) {
     publish(next);
   }
   saved_variant = {};
-  fill_setup_list(hwnd);
+  fill_saved_list(hwnd);
   SetDlgItemTextW(hwnd, 803, tr_format(L"{0} now starts from {1}'s setup and is selected.", {to, from}).c_str());
 }
-INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+// The list's buttons draw like the main window's, so a disabled Remove stays
+// dark instead of the native light grey.
+void draw_dialog_button(const DRAWITEMSTRUCT& item) {
+  const bool disabled = (item.itemState & ODS_DISABLED) != 0, down = !disabled && (item.itemState & ODS_SELECTED) != 0;
+  const bool focus = (item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT);
+  FillRect(item.hDC, &item.rcItem, card_brush);
+  HBRUSH brush = CreateSolidBrush(disabled ? RGB(20, 24, 31) : down ? Border : Card);
+  HPEN pen = CreatePen(PS_SOLID, scale(1), disabled ? RGB(36, 44, 54) : focus ? Accent : Border);
+  const auto old_brush = SelectObject(item.hDC, brush), old_pen = SelectObject(item.hDC, pen);
+  RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, scale(9), scale(9));
+  SelectObject(item.hDC, old_brush);
+  SelectObject(item.hDC, old_pen);
+  DeleteObject(brush);
+  DeleteObject(pen);
+  wchar_t label[160]{};
+  GetWindowTextW(item.hwndItem, label, 160);
+  RECT r = item.rcItem;
+  InflateRect(&r, -scale(10), 0);
+  const auto old_font = SelectObject(item.hDC, normal);
+  SetTextColor(item.hDC, disabled ? Muted : Text);
+  SetBkMode(item.hDC, TRANSPARENT);
+  DrawTextW(item.hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  SelectObject(item.hDC, old_font);
+}
+INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_INITDIALOG) {
-    place_dialog(hwnd, tr(L"Taxi Cam — Set-up aircraft"), 640, 460);
-    dialog_control(hwnd, L"STATIC", tr(L"Set-up aircraft"), -1, 20, 17, 600, 28, 0, heading);
+    place_dialog(hwnd, tr(L"Taxi Cam — Saved aircraft"), 640, 460);
+    dialog_control(hwnd, L"STATIC", tr(L"Saved aircraft"), -1, 20, 17, 600, 28, 0, heading);
     dialog_control(hwnd, L"STATIC",
-                   tr(L"Aircraft you set up, one per variant. Copy to this aircraft starts the aircraft loaded now from the "
-                      L"selected one; Remove deletes a variant's displays and camera positions."),
-                   -1, 20, 50, 600, 44, 0, small);
-    dialog_control(hwnd, L"LISTBOX", L"", 801, 20, 100, 600, 210, WS_BORDER | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP);
+                   tr(L"Every aircraft Taxi Cam has a setup for. Change one in Setup while it is loaded. Copy to this aircraft "
+                      L"starts the aircraft loaded now from one you set up; Remove deletes one you set up."),
+                   -1, 20, 50, 600, 64, 0, small);
+    dialog_control(hwnd, L"LISTBOX", L"", 801, 20, 118, 600, 192, WS_BORDER | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP);
     dialog_control(hwnd, L"STATIC", L"", 805, 20, 318, 600, 24);
     dialog_control(hwnd, L"STATIC", L"", 803, 20, 346, 600, 44, 0, small);
-    dialog_control(hwnd, L"BUTTON", tr(L"Copy to this aircraft"), 804, 20, 406, 220, 34, WS_TABSTOP);
-    dialog_control(hwnd, L"BUTTON", tr(L"Remove"), 802, 400, 406, 110, 34, WS_TABSTOP);
-    const auto close = dialog_control(hwnd, L"BUTTON", tr(L"Close"), IDCANCEL, 520, 406, 100, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
-    fill_setup_list(hwnd);
+    dialog_control(hwnd, L"BUTTON", tr(L"Copy to this aircraft"), 804, 20, 406, 220, 34, WS_TABSTOP | BS_OWNERDRAW);
+    dialog_control(hwnd, L"BUTTON", tr(L"Remove"), 802, 400, 406, 110, 34, WS_TABSTOP | BS_OWNERDRAW);
+    const auto close = dialog_control(hwnd, L"BUTTON", tr(L"Close"), IDCANCEL, 520, 406, 100, 34, WS_TABSTOP | BS_OWNERDRAW);
+    fill_saved_list(hwnd);
     SetFocus(close);
     hide_focus_cues(hwnd);
     return FALSE;
@@ -5474,6 +5542,15 @@ INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
   }
   if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORLISTBOX)
     return dialog_colors(w);
+  if (message == WM_DRAWITEM && reinterpret_cast<const DRAWITEMSTRUCT*>(l)->CtlType == ODT_BUTTON) {
+    draw_dialog_button(*reinterpret_cast<const DRAWITEMSTRUCT*>(l));
+    SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
+    return TRUE;
+  }
+  if (message == WM_COMMAND && LOWORD(w) == 801 && HIWORD(w) == LBN_SELCHANGE) {
+    update_saved_buttons(hwnd);
+    return TRUE;
+  }
   if (message == WM_COMMAND && LOWORD(w) == 802) {
     remove_setup_variant(hwnd);
     return TRUE;
@@ -5488,10 +5565,10 @@ INT_PTR CALLBACK setup_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
   }
   return FALSE;
 }
-void show_setup_list() {
+void show_saved_list() {
   const DialogTemplate layout;
-  if (DialogBoxIndirectParamW(instance, &layout.dialog, window, setup_list_dialog, 0) == -1)
-    notice = tr(L"Could not open the set-up aircraft list.");
+  if (DialogBoxIndirectParamW(instance, &layout.dialog, window, saved_list_dialog, 0) == -1)
+    notice = tr(L"Could not open the saved aircraft list.");
   build_controls();
 }
 // Where a row of controls goes: its shortcut (field, ×), controller button
@@ -5961,10 +6038,9 @@ void build_controls() {
     for (size_t i = 0; i < profiles::Catalog.size(); ++i)
       if (profiles::Catalog[i]->id == s.profile)
         SendMessageW(combo, CB_SETCURSEL, i, 0);
-    // The set-up aircraft in use follows the catalog.
+    // The set-up aircraft in use follows the catalog, named like the others.
     if (const auto* set_up = s.profile == profiles::DiscoveredProfileId ? profiles::find(s.profile) : nullptr) {
-      const auto label = tr_format(L"{0} (set up)", {set_up->name});
-      SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+      SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(set_up->name));
       SendMessageW(combo, CB_SETCURSEL, profiles::Catalog.size(), 0);
     }
     button(switch_label(tr(L"Auto aircraft"), s.auto_profile).c_str(), 230, 612, 367, 180);
@@ -6178,7 +6254,7 @@ void build_controls() {
     if (advanced) {
       int x = 262;
       if (setup.built_in) {
-        button(tr(L"Use built-in displays"), SetupBuiltInId, x, 640, 220, 32);
+        button(tr(L"Use default displays"), SetupBuiltInId, x, 640, 220, 32);
         x += 230;
       }
       button(tr(L"Texture routing…"), RoutingOpenId, x, 640, 190, 32);
@@ -6609,10 +6685,9 @@ void draw_page(HDC dc) {
     text(dc, tr(L"Aircraft"), 262, 330, 200, 26, heading);
     if (profile)
       chip(dc, 470, 332,
-           unsupported                                  ? tr(L"Not set up")
-           : choose                                     ? tr(L"Choose displays")
-           : s.profile == profiles::DiscoveredProfileId ? tr(L"Set up")
-                                                        : tr(L"Built in"),
+           unsupported ? tr(L"Not set up")
+           : choose    ? tr(L"Choose displays")
+                       : tr(L"Saved"),
            unsupported || choose ? RGB(236, 182, 92) : Accent);
     panel(dc, 244, 430, 766, 246);
     text(dc, tr(L"Cockpit displays"), 262, 440, 180, 32, heading);
@@ -7746,7 +7821,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (handle_controls_command(id, HIWORD(w)))
         return 0;
       if (id == 646) {
-        show_setup_list();
+        show_saved_list();
         return 0;
       }
       if (id >= SetupCardButtonId && id < SetupCardButtonId + static_cast<int>(GalleryColumns)) {
