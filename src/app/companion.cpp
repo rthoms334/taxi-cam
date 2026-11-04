@@ -3688,6 +3688,9 @@ std::string legacy_attempt(const win::Status& sample, std::uint32_t profile) {
 }
 // The aircraft and profile last converted.
 std::string legacy_tried;
+// A conversion left displays to choose: a pop-up says so once, the next time
+// the window is on screen (prompt_choose_displays).
+bool choose_displays_prompt{};
 // The loaded aircraft's displays could not all be converted (an encrypted
 // Marketplace panel.cfg, the iniBuilds A380): until the user chooses them,
 // Overview says so.
@@ -3739,12 +3742,14 @@ void convert_legacy_displays() {
   }
   if (!changed || !win::valid_settings(next) || !win::save_settings(next)) {
     notice = tr(L"Taxi Cam could not convert this aircraft's saved displays. Choose them again in Displays.");
+    choose_displays_prompt = true;
     build_controls();
     return;
   }
   publish(next);
   notice = missing ? tr(L"Some of this aircraft's saved displays could not be converted. Check them in Displays.")
                    : tr(L"This aircraft's saved displays now use the new display names.");
+  choose_displays_prompt = missing;
   build_controls();
 }
 // The panel marks package (marks_package.hpp), checked once a run on the
@@ -6216,6 +6221,38 @@ void show() {
   SetForegroundWindow(window);
   offer_whats_new();
 }
+// After an update that could not convert this aircraft's displays, a pop-up
+// says so once, and OK opens Displays to choose them. Only while the window is
+// on screen: a start in the tray waits until it is opened, so the pop-up never
+// takes the focus from the simulator.
+void prompt_choose_displays() {
+  static bool prompting{};
+  if (!choose_displays_prompt || prompting || preview_ui || !IsWindowVisible(window) || IsIconic(window))
+    return;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  if (!displays_to_choose(sample)) {
+    choose_displays_prompt = false;
+    return;
+  }
+  choose_displays_prompt = false;
+  prompting = true;
+  MessageBoxW(window,
+              tr(L"Taxi Cam now finds cockpit displays a new way, and could not carry over this aircraft's saved displays.\n\n"
+                 L"Choose them again in Displays: select each display's picture and place it in its slot."),
+              tr(L"Choose this aircraft's displays"), MB_OK | MB_ICONINFORMATION);
+  prompting = false;
+  // The pop-up pumps status messages: the aircraft may have changed meanwhile.
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  if (displays_to_choose(sample) && page != SetupPage)
+    open_step(0);
+}
 // Tray and Menu: Language. Unfinished fields are kept as a page change keeps
 // them, then the controls are made again in the new language. Open windows
 // other than Settings change when they are next opened or painted.
@@ -7329,6 +7366,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       sync_aircraft_session();
       auto_profile();
       convert_legacy_displays();
+      prompt_choose_displays();
       service_marks_package_notice();
       service_lvar_bindings();
       show_notifications();

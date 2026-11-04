@@ -587,6 +587,11 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"After this update, choose this aircraft's displays again in Displays.",
      L"此更新后，请在「显示屏」中重新选择此飞机的显示屏。"},
     {L"Choose displays", L"选择显示屏"},
+    {L"Taxi Cam now finds cockpit displays a new way, and could not carry over this aircraft's saved displays.\n\n"
+     L"Choose them again in Displays: select each display's picture and place it in its slot.",
+     L"Taxi Cam 现在以新的方式查找驾驶舱显示屏，无法沿用此飞机已保存的显示屏。\n\n"
+     L"请在「显示屏」中重新选择：选择每个显示屏的图片并将其放到对应位置。"},
+    {L"Choose this aircraft's displays", L"选择此飞机的显示屏"},
     {L"Some of this aircraft's saved displays could not be converted. Check them in Displays.",
      L"此飞机已保存的部分显示屏无法转换。请在「显示屏」中检查。"},
     {L"This aircraft's saved displays now use the new display names.", L"此飞机已保存的显示屏现在使用新的显示屏名称。"},

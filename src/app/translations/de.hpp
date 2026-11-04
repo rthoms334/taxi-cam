@@ -665,6 +665,11 @@ inline constexpr Translation GermanTranslations[]{
     {L"After this update, choose this aircraft's displays again in Displays.",
      L"Wählen Sie nach diesem Update die Anzeigen dieses Flugzeugs unter Anzeigen erneut aus."},
     {L"Choose displays", L"Anzeigen wählen"},
+    {L"Taxi Cam now finds cockpit displays a new way, and could not carry over this aircraft's saved displays.\n\n"
+     L"Choose them again in Displays: select each display's picture and place it in its slot.",
+     L"Taxi Cam findet Cockpit-Anzeigen jetzt auf neue Weise und konnte die gespeicherten Anzeigen dieses Flugzeugs nicht übernehmen.\n\n"
+     L"Wählen Sie sie unter Anzeigen erneut aus: Wählen Sie das Bild jeder Anzeige und platzieren Sie es in seinem Feld."},
+    {L"Choose this aircraft's displays", L"Anzeigen dieses Flugzeugs wählen"},
     {L"Some of this aircraft's saved displays could not be converted. Check them in Displays.",
      L"Einige gespeicherte Anzeigen dieses Flugzeugs konnten nicht umgestellt werden. Prüfen Sie sie unter Anzeigen."},
     {L"This aircraft's saved displays now use the new display names.",
