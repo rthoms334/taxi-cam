@@ -5357,8 +5357,15 @@ void update_saved_buttons(HWND hwnd) {
   }
   const auto* selected = selected_saved(hwnd);
   const bool set_up = selected && !selected->profile;
-  EnableWindow(GetDlgItem(hwnd, 802), set_up);
-  EnableWindow(GetDlgItem(hwnd, 804), set_up && loaded_variant(sample)[0]);
+  const bool enable[]{set_up, set_up && loaded_variant(sample)[0] != 0};
+  const int buttons[]{802, 804};
+  // A button about to be disabled gives the keyboard focus to the list first
+  // (after a Remove, say), so the dialog keeps answering Tab, Enter and Esc.
+  for (std::size_t i = 0; i < std::size(buttons); ++i)
+    if (!enable[i] && GetFocus() == GetDlgItem(hwnd, buttons[i]))
+      SendMessageW(hwnd, WM_NEXTDLGCTL, reinterpret_cast<WPARAM>(GetDlgItem(hwnd, 801)), TRUE);
+  for (std::size_t i = 0; i < std::size(buttons); ++i)
+    EnableWindow(GetDlgItem(hwnd, buttons[i]), enable[i]);
   SetDlgItemTextW(
       hwnd, 803,
       selected && selected->profile ? tr(L"Included with Taxi Cam, so it cannot be removed. Change it in Setup while it is loaded.") : L"");
@@ -5558,6 +5565,15 @@ INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
   if (message == WM_COMMAND && LOWORD(w) == 804) {
     copy_setup_variant(hwnd);
     return TRUE;
+  }
+  // Owner-drawn buttons never become the default button, so Enter (IDOK)
+  // presses the focused Remove or Copy here; anywhere else it closes.
+  if (message == WM_COMMAND && LOWORD(w) == IDOK) {
+    const int focused = GetDlgCtrlID(GetFocus());
+    if (focused == 802 || focused == 804) {
+      focused == 802 ? remove_setup_variant(hwnd) : copy_setup_variant(hwnd);
+      return TRUE;
+    }
   }
   if ((message == WM_COMMAND && (LOWORD(w) == IDOK || LOWORD(w) == IDCANCEL)) || message == WM_CLOSE) {
     EndDialog(hwnd, IDCANCEL);
