@@ -78,6 +78,22 @@ int main() {
   // An attachment naming the same texture another way: no guess.
   sections.push_back({"VCockpit17", "DUS", "Other"});
   require(legacy_names::key_for(sections, "DUS")[0] == 0, "ambiguous texture refused");
+  // Fenix A320 PFD (Part_Interior_Cockpit panel.cfg): three full-panel gauges,
+  // only the last one's block is read. FSLabs starts at htmlgauge01. A gauge
+  // too small for a block leaves the section alone.
+  constexpr std::string_view more =
+      "[VCockpit01]\r\nsize_mm=768,768\r\npixel_size=768,768\r\ntexture=$A320_PFD_Captain\r\n"
+      "htmlgauge00=WasmInstrument/WasmInstrument.html?wasm_module=FenixDisplayModule.wasm&wasm_gauge=WXR, 0,0,768,768\r\n"
+      "htmlgauge01=WasmInstrument/WasmInstrument.html?wasm_module=FenixDisplayModule.wasm&wasm_gauge=WXR_2, 0,0,768,768\r\n"
+      "htmlgauge02=WasmInstrument/WasmInstrument.html?wasm_module=FenixDisplayModule.wasm&wasm_gauge=PFD_Captain, 0,0,768,768\r\n"
+      "[VCockpit03]\r\nsize_mm=768,768\r\npixel_size=768,768\r\ntexture=$DU1\r\n\r\n"
+      "htmlgauge01=WasmInstrument/WasmInstrument.html?wasm_module=fsl-a32x.wasm&wasm_gauge=LCDScreen_1,\t\t   0,    0, 768,768\r\n"
+      "[VCockpit09]\r\nsize_mm=100,100\r\npixel_size=100,100\r\ntexture=$TINY\r\nhtmlgauge00=Tiny/Tiny.html, 0,0,10,10\r\n";
+  const auto more_sections = legacy_names::parse_panel_cfg(more);
+  require(std::string(legacy_names::key_for(more_sections, "$A320_PFD_Captain").data()) == "VCockpit01/PFD_Captain",
+          "a gauge under a later block is skipped");
+  require(std::string(legacy_names::key_for(more_sections, "$DU1").data()) == "VCockpit03/LCDScreen_1", "gauges from htmlgauge01");
+  require(std::string(legacy_names::key_for(more_sections, "$TINY").data()) == "VCockpit09", "no gauge fits: the section alone");
   require(legacy_names::airplane_folder("SimObjects\\Airplanes\\FNX_32X\\presets\\fnx\\FNX_320_CFM_SL\\config\\aircraft.CFG") ==
               std::filesystem::path("SimObjects") / "Airplanes" / "FNX_32X",
           "airplane folder from the sim path");

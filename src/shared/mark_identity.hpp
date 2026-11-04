@@ -134,7 +134,9 @@ class Store {
     return taken;
   }
   // The live texture showing the display named by key: of several (a source
-  // and its copies), the end of the copy chain, then the newest.
+  // and its copies), the end of the copy chain, then the newest. Keys name a
+  // gauge whose block can be read: a gauge under a later gauge's block never
+  // is (legacy_display_names.hpp picks the same one).
   std::uint64_t resolve(const char* key, const std::pair<std::uint64_t, std::uint64_t>* feeds, std::size_t count) const noexcept {
     std::uint64_t best = 0;
     bool best_end = false;

@@ -235,11 +235,12 @@ inline constexpr AircraftProfile A380 = [] {
                     768,
                     1024,
                     5};
-  // Part_Interior_Cockpit panel.cfg: SCREEN_DU_PFDL, SCREEN_DU_PFDR, SCREEN_DU_SD.
+  // Part_Interior_Cockpit panel.cfg: SCREEN_DU_PFDL, SCREEN_DU_PFDR, SCREEN_DU_SD (whose
+  // sd gauge block lies under sdv2's, so its marks name it sdv2).
   p.panel_textures = {"VCockpit05/pfd", "VCockpit06/pfd", ""};
   // The system display below the EWD (panel.cfg VCockpit04, 768 x 1024 like
   // the PFDs), read from the installed package on 2026-11-02.
-  p.door_lower_texture = "VCockpit04/sd";
+  p.door_lower_texture = "VCockpit04/sdv2";
   // Door: Robert's live A380X door camera (2026-11-02) on the system display
   // above its bottom strip. The ECAM control panel's VIDEO key selects page 15
   // of A32NX_ECAM_SD_CURRENT_PAGE_INDEX (read live; -1 when it is deselected).

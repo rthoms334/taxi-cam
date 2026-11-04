@@ -317,7 +317,7 @@ void door_camera_persists() {
   select_fixture(L"door-camera");
   auto saved = customized(profiles::A380);
   // Two displays: without the system display the A380X places by default.
-  require(std::strcmp(saved.display_override.textures[2], "VCockpit04/sd") == 0 && saved.door_side == 2,
+  require(std::strcmp(saved.display_override.textures[2], "VCockpit04/sdv2") == 0 && saved.door_side == 2,
           "A fresh A380X starts its door camera on its system display");
   saved.display_override = {};
   saved.door_side = 1;
@@ -359,7 +359,7 @@ void door_camera_persists() {
           "A fresh A340-600 profile starts its door camera on the lower ECAM");
   patch(path, L"door_camera", L"display", nullptr);
   require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.door_side == 2 &&
-              std::strcmp(loaded.display_override.textures[2], "VCockpit04/sd") == 0 && loaded.display_override.areas[2].bottom == 664 &&
+              std::strcmp(loaded.display_override.textures[2], "VCockpit04/sdv2") == 0 && loaded.display_override.areas[2].bottom == 664 &&
               loaded.display_override.areas[2].right == 768 && valid_settings(loaded),
           "The A380X places its system display above its bottom strip as the lower display for the door camera");
   require(std::strcmp(loaded.lvar_bindings[CameraDoor].name, "A32NX_ECAM_SD_CURRENT_PAGE_INDEX") == 0 &&
