@@ -113,7 +113,7 @@ inline void build_discovered(DiscoveredProfile& out) noexcept {
   p.composition = A350Etacs;
   p.formats = {28, 29};
   p.camera_padding = l.padding;
-  p.pfd_detection = PfdDetectionPolicy::named;
+  p.display_layout = DisplayLayout::fitted;
   p.sides = l.sides;
   // The cameras take side 0's panel shape, from the A380 panes made for its
   // camera area; every other side shows that picture at its shape.
@@ -186,7 +186,7 @@ inline bool valid_override(unsigned sides, bool fit_texture, const DisplayInsets
 // The sides a catalog profile has with these choices: a pilot pair gains the
 // lower display the user placed (named_lower_side).
 inline unsigned override_sides(const AircraftProfile& base, const DisplayOverride& o) noexcept {
-  return base.sides == 2 && pair_detection(base) && o.textures[2][0] ? 3u : base.sides;
+  return base.sides == 2 && pilot_pair(base) && o.textures[2][0] ? 3u : base.sides;
 }
 inline bool valid_override(const AircraftProfile& base, const DisplayOverride& o) noexcept {
   return valid_override(override_sides(base, o), base.fit_texture, base.camera_padding, o);

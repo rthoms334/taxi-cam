@@ -1999,8 +1999,7 @@ DWORD run_impl() {
       std::snprintf(aircraft_message, sizeof(aircraft_message), "%s Aircraft type: %.96s.",
                     identity.fresh ? "The loaded aircraft is not supported by the selected profile." : "Waiting for aircraft identity.",
                     identity.type[0] ? identity.type.data() : "unavailable");
-    const bool single_display =
-        selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    const bool single_display = selected_profile && selected_profile->display_layout == profiles::DisplayLayout::shared_texture;
     // Displays are found by their panel marks only.
     const char* target_message =
         graphics.ready && inventory.empty()

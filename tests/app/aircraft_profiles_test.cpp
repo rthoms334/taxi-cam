@@ -467,9 +467,9 @@ int main() {
     assert(pmdg == profile->waiting_white_text);
     // A scanned texture name implies the single-display rule. The iniBuilds
     // A340-300 texture is identified by shape only (its package is encrypted).
-    assert(!profile->display_texture[0] || profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
+    assert(!profile->display_texture[0] || profile->display_layout == profiles::DisplayLayout::shared_texture);
     if (profile->id == profiles::IniA343.id) {
-      assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display && profile->display_texture[0] == '\0');
+      assert(profile->display_layout == profiles::DisplayLayout::shared_texture && profile->display_texture[0] == '\0');
       assert(profile->width == 1560 && profile->height == 2340 && profile->mips == 1 && profile->sides == 3);
       // 2 x 3 grid of 780 x 780 cells in ND / PFD rows; the right column holds
       // CAPT PFD (1,0), F/O PFD (1,1) and SD (1,2).
@@ -494,7 +494,7 @@ int main() {
       continue;
     }
     if (profile->id == profiles::AerosoftA346.id) {
-      assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
+      assert(profile->display_layout == profiles::DisplayLayout::shared_texture);
       assert(std::strcmp(profile->display_texture, "$GAUGES_UNIFIED") == 0);
       assert(profile->width == 4096 && profile->height == 4096 && profile->mips == 0 && profile->formats[0] == 0);
       assert(profile->taxi_control == profiles::TaxiControl::lvar_off);
@@ -533,7 +533,7 @@ int main() {
       assert(!profiles::matches_display(*profile, 2048, 2048, 1, 28));
       continue;
     }
-    if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
+    if (profile->display_layout == profiles::DisplayLayout::shared_texture) {
       const auto left = profiles::display_rect(*profile, 0);
       const auto right = profiles::display_rect(*profile, 1);
       assert(profile->width == 2048 && profile->height == 2048 && profile->mips == 0);

@@ -113,7 +113,7 @@ inline constexpr const char* contention_site_name(ContentionSite value) noexcept
 struct GraphicsStatus {
   bool ready{};
   // draws counts fully observed recordings; idle retains only per-resource
-  // activity required by the complete PFD detector inventory.
+  // activity shown in the display inventory.
   std::uint64_t device{}, resources{}, lists{}, draws{}, hook_failures{}, clear_states{};
   const char* error = "not_started";
   std::uint64_t selected_draws{}, selected_rt_metadata{}, selected_rt_callbacks{}, selected_pending_matches{};

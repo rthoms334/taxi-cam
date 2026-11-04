@@ -311,7 +311,6 @@ void a350_named_discovery_case() {
   for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
     clear_fixture(r);
     win::set_aircraft_profile(profile->id);
-    r.pfd_inventory_complete = true;
     std::array<std::shared_ptr<win::Resource>, 6> items{};
     for (unsigned i = 0; i < items.size(); ++i) {
       items[i] = display(i);
@@ -448,7 +447,6 @@ void ini_explicit_discovery_case() {
   auto& r = win::registry();
   clear_fixture(r);
   win::set_aircraft_profile(profiles::IniA380.id);
-  r.pfd_inventory_complete = true;
   for (unsigned i = 0; i < 8; ++i) {
     const auto item = display(i);
     item->id = 163 + i;

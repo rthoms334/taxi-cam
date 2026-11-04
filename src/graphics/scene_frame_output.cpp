@@ -299,7 +299,7 @@ bool SceneFrameOutput::prepare_patches(std::uint64_t calibration_frame) noexcept
       // Single-display gauges and set-up aircraft panels are whole
       // rectangles instead; the patch is then exactly that rectangle.
       const auto* profile = profiles::find(patch_profile_);
-      const bool gauge = profile && (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display || profile->fit_texture);
+      const bool gauge = profile && (profile->display_layout == profiles::DisplayLayout::shared_texture || profile->fit_texture);
       if (!profile || (!gauge && upper_height(profile->height) != height) ||
           !(gauge ? record_calibration_area(list_, patch->rtv, width, height, calibration_frame)
                   : record_calibration(list_, patch->rtv, width, profile->height, calibration_frame)))

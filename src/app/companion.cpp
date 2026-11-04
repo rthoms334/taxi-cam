@@ -462,7 +462,7 @@ double number(int id, double previous, bool& ok) {
 }
 bool single_display_profile(const win::Settings& s) noexcept {
   const auto* profile = profiles::find(s.profile);
-  return profile && profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+  return profile && profile->display_layout == profiles::DisplayLayout::shared_texture;
 }
 // Indexed by CameraMode; CameraModeOrder is the left-to-right card order.
 constexpr const wchar_t* CameraModeNames[]{ui_text(L"Performance"), ui_text(L"Balanced"), ui_text(L"Smooth"), ui_text(L"Custom"),
@@ -1347,7 +1347,7 @@ void release_snapshot_image() {
 }
 // Texture each display side is routed to, from the bridge's status.
 std::array<std::uint64_t, MaxDisplaySides> routed_texture_ids(const win::Status& sample, const profiles::AircraftProfile& profile) {
-  const bool single = profile.pfd_detection == profiles::PfdDetectionPolicy::single_display;
+  const bool single = profile.display_layout == profiles::DisplayLayout::shared_texture;
   return {sample.left_id, single ? sample.left_id : sample.right_id,
           profiles::own_lower_texture(profile) ? sample.lower_id : sample.left_id};
 }
@@ -2011,7 +2011,7 @@ std::wstring setup_blocker(const win::Status& sample) {
 // own panel is no choice, so the profile stays as it comes.
 profiles::DisplayOverride built_in_choices(const profiles::AircraftProfile& base, profiles::DisplayOverride choices) {
   // A pilot pair's side 2: the lower display the user placed.
-  const unsigned sides = base.sides == 2 && profiles::pair_detection(base) ? MaxDisplaySides : base.sides;
+  const unsigned sides = base.sides == 2 && profiles::pilot_pair(base) ? MaxDisplaySides : base.sides;
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     std::fill(std::begin(choices.textures[side]), std::end(choices.textures[side]), '\0');
     const auto& pick = setup.names[side];
@@ -6067,7 +6067,7 @@ void draw_page(HDC dc) {
         profile && s.door_side < MaxDisplaySides && win::camera_action_sides(*profile, win::CameraSd) && s.door_side == MaxDisplaySides - 1;
     // A pilot pair without its lower display placed yet: that comes first.
     const auto* base = profiles::base_profile(s.profile);
-    const bool place_lower = base && profile && profile->sides < MaxDisplaySides && profiles::pair_detection(*base);
+    const bool place_lower = base && profile && profile->sides < MaxDisplaySides && profiles::pilot_pair(*base);
     text(dc,
          s.door_side == win::DoorSideNone && place_lower ? tr(L"Place the lower display in Setup > Displays to show the door camera there.")
          : s.door_side == win::DoorSideNone              ? tr(L"Choose the display it fills. The lower display is the usual place.")
@@ -7107,7 +7107,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         // A pilot pair places its lower display first, in Displays.
         const auto* base = profiles::base_profile(draft().profile);
         const auto* profile = profiles::find(draft().profile);
-        open_step(base && profile && profile->sides < MaxDisplaySides && profiles::pair_detection(*base) ? 0 : 2);
+        open_step(base && profile && profile->sides < MaxDisplaySides && profiles::pilot_pair(*base) ? 0 : 2);
         return 0;
       }
       if (handle_controls_command(id, HIWORD(w)))

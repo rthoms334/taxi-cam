@@ -95,7 +95,7 @@ void publish_and_detect() {
   require(first && profiles::find(profiles::DiscoveredProfileId) == first && profiles::discovered_current(fenix),
           "find() returns the published layout's profile");
   require(first->id == profiles::DiscoveredProfileId && std::wstring(first->name) == L"FNX_320_CFM_SL" &&
-              first->pfd_detection == profiles::PfdDetectionPolicy::named && !profiles::commandable_buttons(*first) &&
+              first->display_layout == profiles::DisplayLayout::fitted && !profiles::commandable_buttons(*first) &&
               profiles::side_mask(*first) == 3 && !profiles::separate_lower_texture(*first) && first->mounts == profiles::DiscoveredMounts,
           "A set-up aircraft routes by name and uses shortcuts only");
   require(std::strcmp(first->panel_textures[1], "$PFD_FO") == 0, "Names come from the layout");
@@ -422,13 +422,11 @@ void placed_lower_display() {
           "A placed lower display adds no TAXI latch");
   // It may be any cockpit panel, such as the A380X's 1646 x 1024 MFD; the
   // pilot displays and automatic detection keep the display shape.
-  require(profiles::lower_any_panel(*chosen) && !profiles::lower_any_panel(profiles::A380) &&
-              profiles::side_display(*chosen, 2, 1646, 1024, 5, 28) && !profiles::side_display(*chosen, 0, 1646, 1024, 5, 28) &&
-              profiles::side_display(*chosen, 0, 768, 1024, 5, 28) && !profiles::side_display(*chosen, 2, 1646, 1024, 1, 28),
+  require(profiles::lower_any_panel(*chosen) && !profiles::lower_any_panel(profiles::A380),
           "Only the placed lower display takes a panel of another shape");
   require(profiles::drawable(*chosen, 1646, 1024, 5, 28) && !profiles::drawable(profiles::A380, 1646, 1024, 5, 28) &&
-              !profiles::matches_detection(*chosen, 1646, 1024, 5, 28) && !profiles::lower_any_panel(profiles::Pmdg777),
-          "Detection and the profiles without a placed lower display are unchanged");
+              !profiles::lower_any_panel(profiles::Pmdg777),
+          "Profiles without a placed lower display are unchanged");
   Settings s;
   s.display_override = lower;
   s.door_side = 2;

@@ -333,9 +333,6 @@ struct Registry {
   std::unordered_map<SIZE_T, View> rtvs;
   std::unordered_map<SIZE_T, DXGI_FORMAT> dsvs;
   TaxiButtonRoutes routes;
-  // A dropped resource can make a truncated allocation group look complete.
-  // Keep this false for the device lifetime once observation loses coverage.
-  std::atomic<bool> pfd_inventory_complete{true};
   const profiles::AircraftProfile* profile = &profiles::A380;
   unsigned active_mask{}, calibration_mask{};
   // Active sides still inside their minimum PLEASE WAIT time.
@@ -1009,21 +1006,21 @@ bool named_set_ready(const Registry& r) noexcept {
   }
   return true;
 }
-// The detector can assign only this set. A generic pair, or another mip/format
-// that still matches the profile size, must not end discovery.
+// The aircraft's own display set. A generic pair, or another mip/format that
+// still matches the profile size, must not end discovery.
 bool backfill_resources_ready(const Registry& r) noexcept {
   // Discovery has no display set: panel textures first drawn later still join.
   if (!r.profile || panel_discovery_on.load(std::memory_order_relaxed))
     return false;
   if (r.profile->id == profiles::A359.id || r.profile->id == profiles::A35K.id)
     return display_set_ready(r, 3, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
-  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group)
+  if (r.profile->id == profiles::IniA380.id)
     return display_set_ready(r, 8, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
   if (r.profile->id == profiles::A380.id)
     return display_set_ready(r, 2, static_cast<DXGI_FORMAT>(r.profile->formats[0]), r.profile->mips);
-  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display)
+  if (r.profile->display_layout == profiles::DisplayLayout::shared_texture)
     return live_display_resources(r) >= 1;
-  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::named)
+  if (r.profile->display_layout == profiles::DisplayLayout::fitted)
     return named_set_ready(r);
   return false;
 }
@@ -1298,7 +1295,6 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         }
         maybe_stop_live_backfill(r);
       } else {
-        r.pfd_inventory_complete = false;
         if (settled)
           *settled = false;
       }
@@ -1312,11 +1308,9 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         r.deferred_sources.push({native, item->id, initial});
       }
       if (!attach(native, item)) {
-        r.pfd_inventory_complete = false;
         error("resource_lifetime_notification_failed");
       }
     } else if (item) {
-      r.pfd_inventory_complete = false;
       item->retire();
       error("resource_registry_full");
       if (settled)
@@ -2542,7 +2536,7 @@ void stage_pfd(List& item, std::uint64_t id) noexcept {
         const boundary::ScopedBypass bypass;
         // Single-display gauges and set-up aircraft panels are whole
         // rectangles; other profiles calibrate the upper region of their column.
-        const bool gauge = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display || r.profile->fit_texture;
+        const bool gauge = r.profile->display_layout == profiles::DisplayLayout::shared_texture || r.profile->fit_texture;
         if (gauge ? record_calibration_area(native, retained, area.right - area.left, area.bottom - area.top, GetTickCount64() / 16,
                                             area.left, area.top)
                   : record_calibration(native, retained, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16,
@@ -4985,7 +4979,7 @@ std::vector<PfdTargetObservation> pfd_inventory() {
     result = pfd_inventory_locked(r);
   }
   // The numeric snapshot owns no native references; UI ranking does not need
-  // the registry lock. Never truncate the inventory used by autodetection.
+  // the registry lock. Never truncate the inventory (the routing choices).
   std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.draws > b.draws; });
   return result;
 }
@@ -5355,15 +5349,15 @@ bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower
   const bool previous_explicit = r.routes.lower_explicit();
   if (separate)
     r.routes.select_lower(0);
-  bool assigned = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display
+  bool assigned = r.profile->display_layout == profiles::DisplayLayout::shared_texture
                       ? (!left || !right || left == right) && r.routes.select_single(left ? left : right, separate)
                       : r.routes.select_explicit({left, right});
   if (separate) {
     assigned = assigned && r.routes.select_lower(lower);
+    // A refused choice puts an explicit lower back; a named one returns
+    // with the next naming pass.
     if (!assigned && previous_lower && !r.routes.targets[2] && previous_explicit)
       r.routes.select_lower(previous_lower);
-    else if (!assigned && previous_lower && !r.routes.targets[2])
-      r.routes.adopt_lower(previous_lower);
   }
   if (assigned && live_display_rtvs(r) != live_display_resources(r))
     rearm_live_backfill(r);
@@ -5486,7 +5480,6 @@ void drain_deferred_lifecycle(Registry& r) {
     // event, invalidating every open match and publication without touching a
     // native object. Later creations re-register their own handles.
     scene_handoff().unregister_resource(r.key, 0);
-    r.pfd_inventory_complete = false;
   }
   DeferredSourceCandidate candidate;
   std::array<DeferredSourceCandidate, 8> retry{};
@@ -5501,8 +5494,7 @@ void drain_deferred_lifecycle(Registry& r) {
   }
   for (unsigned i = 0; i < retries; ++i)
     r.deferred_sources.push(retry[i]);
-  if (r.deferred_sources.take_overflow())
-    r.pfd_inventory_complete = false;
+  (void)r.deferred_sources.take_overflow();  // Lost candidates register on their next use.
   if (r.views_stale.exchange(false, std::memory_order_acq_rel)) {
     // Same recovery as descriptor-range refusal: forget every view and relearn
     // display associations from live binds. No recording proof is touched.
