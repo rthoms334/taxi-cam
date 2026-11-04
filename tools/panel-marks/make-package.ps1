@@ -5,7 +5,7 @@
 # time this runs, plus taxi-cam-marks.js. Developer experiments only; the
 # installer does not run PowerShell.
 #
-#   tools/panel-marks/make-package.ps1 [-MaxShowMs 20000]   # cap on how long marks stay up
+#   tools/panel-marks/make-package.ps1 [-MaxShowMs 45000]   # cap on how long marks stay up
 #   tools/panel-marks/make-package.ps1 -Check     # stale against the stock file?
 #   tools/panel-marks/make-package.ps1 -Remove
 #
@@ -79,7 +79,7 @@ $page = $text.Insert($m.Index + $m.Length, $line)
 $helper = Get-Content -Raw (Join-Path $PSScriptRoot "..\..\src\panel_marks\$helperName")
 if ($MaxShowMs -gt 0) {
     $before = $helper
-    $helper = $helper -replace 'MAX_SHOW_MS = \d+;', "MAX_SHOW_MS = $MaxShowMs;"
+    $helper = $helper -replace 'MAX_SHOW_MS = \d+', "MAX_SHOW_MS = $MaxShowMs"
     if ($helper -eq $before) { throw 'MAX_SHOW_MS not found in the helper.' }
 }
 

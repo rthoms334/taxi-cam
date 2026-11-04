@@ -2330,6 +2330,9 @@ int area_picker_gauge_at(POINT point) {
   for (std::size_t i = 0; i < p.gauges.size(); ++i) {
     const auto box = win::area_edit::to_screen(picture, p.texture_width, p.texture_height, p.gauges[i].second);
     const auto& r = p.gauges[i].second;
+    // A gauge filling the panel is the Whole panel button's area.
+    if (r.left == 0 && r.top == 0 && r.right >= p.texture_width && r.bottom >= p.texture_height)
+      continue;
     const std::uint64_t size = std::uint64_t{r.right - r.left} * (r.bottom - r.top);
     if (PtInRect(&box, point) && size < best_size) {
       best = static_cast<int>(i);
@@ -2368,11 +2371,10 @@ INT_PTR CALLBACK area_picker_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l)
       ScreenToClient(hwnd, &point);
       const int hit = win::area_edit::hit(area_picker_picture(), p.texture_width, p.texture_height, p.area, point, scale(9), scale(6));
       const int gauge = area_picker_gauge_at(point);
-      LPCWSTR shape = p.dragging            ? win::area_edit::cursor(p.handle)
-                      : hit >= 0 && hit < 8 ? win::area_edit::cursor(hit)
-                      : gauge >= 0          ? IDC_HAND
-                      : hit == 8            ? win::area_edit::cursor(8)
-                                            : nullptr;
+      LPCWSTR shape = p.dragging   ? win::area_edit::cursor(p.handle)
+                      : hit >= 0   ? win::area_edit::cursor(hit)
+                      : gauge >= 0 ? IDC_HAND
+                                   : nullptr;
       if (shape) {
         SetCursor(LoadCursorW(nullptr, shape));
         SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
@@ -2407,10 +2409,10 @@ INT_PTR CALLBACK area_picker_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l)
   if (message == WM_LBUTTONDOWN && p.ready) {
     const POINT point{static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))};
     const int hit = win::area_edit::hit(area_picker_picture(), p.texture_width, p.texture_height, p.area, point, scale(9), scale(6));
-    // A handle is grabbed first; inside the frame a gauge under the pointer
-    // is picked, and elsewhere the frame moves.
-    const int gauge = area_picker_gauge_at(point);
-    if (hit >= 0 && (hit < 8 || gauge < 0)) {
+    // On the frame or a handle the frame moves or resizes; outside it a click
+    // on a gauge makes that gauge the area.
+    const int gauge = hit < 0 ? area_picker_gauge_at(point) : -1;
+    if (hit >= 0) {
       p.dragging = true;
       p.handle = hit;
       p.start = p.area;

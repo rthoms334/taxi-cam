@@ -793,6 +793,11 @@ DWORD run_impl() {
     std::array<unsigned, 6> empty_formats{}, read_formats{};
     std::uint64_t next_log_ms{};
     bool shown_again = false;  // Pages asked to show their marks again, not yet told to take them down.
+    // This aircraft session's pages asked to show their marks as soon as it
+    // has an unread texture: their own window starts when the page loads and
+    // can run out during the flight load, before any picture is taken (the
+    // A350, 2026-11-04: nothing read until the first re-show, ~45 s later).
+    bool session_shown = false;
   } mark_scan;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
   const auto service_scene = [&] {
@@ -1035,7 +1040,7 @@ DWORD run_impl() {
         mark_scan.epoch = epoch;
         mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = 0;
         mark_scan.last_reshow_ms = 0;
-        mark_scan.shown_again = false;
+        mark_scan.shown_again = mark_scan.session_shown = false;
       }
       const bool companion = snapshot.result == win::DisplaySnapshotResult::pending;
       if (mark_scan.pending_id && companion) {
@@ -1093,6 +1098,15 @@ DWORD run_impl() {
             mark_scan.last_new_ms = now;
           }
         }
+      }
+      if (!mark_scan.session_shown &&
+          std::any_of(mark_scan.entries.begin(), mark_scan.entries.end(), [](const MarkScan::Entry& entry) { return !entry.read; })) {
+        mark_scan.session_shown = mark_scan.shown_again = true;
+        native_camera::signal_panel_marks_show();
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "Display marks: cockpit pages asked to show their marks for aircraft session %llu.",
+                      static_cast<unsigned long long>(epoch));
+        log_status(log_to, detail);
       }
       // Textures drawn since their last picture first: their picture is
       // taken at once. Then the others.

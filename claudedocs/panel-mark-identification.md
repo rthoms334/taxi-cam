@@ -223,11 +223,15 @@ panel size.
   reads its two verification pixels. On most displays that corner is black,
   so the near-black block barely shows.
 - **When.** From panel load (+0.5 s) until Taxi Cam has read it, at most
-  `MAX_SHOW_MS` (20 s). The page reads `L:TAXICAM_MARKS` when it loads; the
-  bridge's SimConnect worker sets it to a new value once the bridge has read
-  the panels, and every page polls it every 250 ms and takes its blocks down
-  when it changes. An L:var outlives the flight, so only a change after the
-  page loaded counts. Without Taxi Cam the cap removes them after 20 s.
+  `MAX_SHOW_MS` (45 s of running simulation). The page reads
+  `L:TAXICAM_MARKS` when it loads; the bridge's SimConnect worker sets it to a
+  new value once the bridge has read the panels, and every page polls it every
+  250 ms and takes its blocks down when it changes. An L:var outlives the
+  flight, so only a change after the page loaded counts. Without Taxi Cam the
+  cap removes them after 45 s. The bridge also asks the pages to show their
+  marks (a new negative value) as soon as an aircraft session has an unread
+  panel texture: on the A350 (2026-11-04) the page's own window ran out during
+  the flight load, and nothing was read until the first re-show ~45 s later.
 - **Guarded.** Every step is in try/catch, and an exception removes what was
   drawn. The helper can't stop a page loading.
 - **Visibility.** A small dark rectangle in a gauge's top-right corner for
@@ -332,7 +336,11 @@ and aircraft that put a full-page element above `document.body` children
 - E9: the bright, centred blocks were far too visible, and the 2-minute
   load window kept them up much longer than needed. This led to the current
   design (dark 2 px blocks top-right, read by the bridge's own scan, taken
-  down on its signal, 20 s cap). Not yet run live.
+  down on its signal, then a 20 s cap, now 45 s).
+- A350, 2026-11-04 (level 56): all 17 panels read again, and named routing
+  resolved `@EFIS#0/2,@EFIS#1/2,@CTR` to 261, 260 and 259. But nothing was
+  read until the bridge's first re-show, so it took about 70 s from the start
+  of the scan. Hence the show request at session start (not yet run live).
 
 ## Done locally
 

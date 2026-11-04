@@ -20,7 +20,7 @@
     var COLOURS = [0, 1, 2, 3, 4, 5, 6, 7].map(function (c) {
         return "rgb(" + (c & 4 ? LEVEL : 0) + "," + (c & 2 ? LEVEL : 0) + "," + (c & 1 ? LEVEL : 0) + ")";
     });
-    var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, IDLE_POLL_MS = 1000, START_MS = 500, MAX_SHOW_MS = 20000, HARD_SHOW_MS = 120000;
+    var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, IDLE_POLL_MS = 1000, START_MS = 500, MAX_SHOW_MS = 45000, HARD_SHOW_MS = 120000;
 
     function crc16(bytes) {
         var crc = 0xffff;
