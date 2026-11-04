@@ -345,16 +345,16 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.composition.tail_upper = {0.34f, 0.52f};
   p.composition.tail_corner = {0.305f, 0.65f};
   p.composition.tail_inner = {0.355f, 0.65f};
-  // The aircraft draws its PFDs in one-mip typeless targets and then into the
-  // five-mip panel textures named in panel.cfg; routing by name stamps the
-  // named $PFD_CPT/$PFD_FO panel textures (2026-10-04 panel table: eight
-  // 768 x 1024 five-mip displays). The allocation-group fallback still pairs
-  // only the one-mip typeless group.
+  // The aircraft draws its PFDs in one-mip typeless targets and then into
+  // five-mip 768 x 1024 panel textures, which the cameras are drawn on. Its
+  // package is encrypted, so the keys come from Robert's choice in Displays
+  // (2026-11-04, routed and Ready live): the two PFD panels' first gauge is
+  // ini-crash-report, ranked by panel number, and the system display is the
+  // fourth of the six DU panels.
   p.mips = 1;
   p.panel_mips = 5;
-  p.panel_textures = {"$PFD_CPT", "$PFD_FO", ""};
-  // Its system display, a five-mip 768 x 1024 panel like the PFDs (same table).
-  p.door_lower_texture = "$SD";
+  p.panel_textures = {"@ini-crash-report#0/2", "@ini-crash-report#1/2", ""};
+  p.door_lower_texture = "@DU#3/6";
   // Door: Robert's live iniBuilds A380 door camera (2026-11-02), in black and
   // white in the picture of the system display's VIDEO page, between its tabs
   // and its TAT/SAT strip. The ECAM control panel's VIDEO key selects page 16
