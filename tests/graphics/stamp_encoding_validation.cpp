@@ -15,6 +15,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <vector>
+#include "../../src/graphics/display_keep.hpp"
 #include "../../src/graphics/pfd_stamp_d3d12.hpp"
 #include "../support/gpu_queue.hpp"
 
@@ -145,6 +146,17 @@ void run(bool warp) {
   check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(rtvs.put())), "RTV heap");
   const auto stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
   const D3D12_RECT destination{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
+  // Display draws leave the panel marks alone: one at the corner, one inside,
+  // one clipped by the right edge. Each keeps the sentinel cleared below.
+  namespace keep = taxi_camera::standalone::display_keep;
+  const keep::Point marks[]{{0, 0}, {100, 50}, {Width - 1, Height - 1}};
+  keep::set_marks(marks, 3);
+  const auto marked = [&](UINT x, UINT y) {
+    for (const auto& m : marks)
+      if (x >= m.x && x < m.x + keep::MarkWidth && y >= m.y && y < m.y + keep::MarkHeight)
+        return true;
+    return false;
+  };
   for (UINT n = 0; n < Cases.size(); ++n) {
     const auto& c = Cases[n];
     auto& target = targets[c.bgra ? 1 : 0];
@@ -173,8 +185,9 @@ void run(bool warp) {
     constexpr float sentinel[]{.25f, .5f, .75f, .5f};
     list->ClearRenderTargetView(rtv, sentinel, 0, nullptr);
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    require(stamps[n].record_private_patch(list.value, device.value, pixels->GetGPUVirtualAddress(), Width, Height, &destination),
-            "record production private stamp");
+    require(stamps[n].record_patch(list.value, device.value, pixels->GetGPUVirtualAddress(), Width, Height, &destination, nullptr, true,
+                                   taxi_camera::PfdStateGroup::all, true),
+            "record production display stamp around the marks");
     transition(list.value, target.value, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
     src.pResource = target.value;
@@ -193,6 +206,7 @@ void run(bool warp) {
     require(SUCCEEDED(taxi_camera::PfdStampD3D12::prepare_shaders()) && taxi_camera::PfdStampD3D12::shader_compiles() == 4,
             "A later stamp or prepare_shaders recompiled cached stamp bytecode");
   }
+  keep::set_marks(nullptr, 0);
   check(list->Close(), "close");
   ID3D12CommandList* lists[]{list.value};
   queue->ExecuteCommandLists(1, lists);
@@ -220,9 +234,13 @@ void run(bool warp) {
     };
     for (UINT y = 0; y < Height; ++y)
       for (UINT x = 0; x < Width; ++x) {
+        if (marked(x, y)) {
+          require(std::abs(stored(x, y, 3) - 128) <= 1, "A panel mark kept its pixel under the stamp");
+          continue;
+        }
         const auto source = source_pixel(x, y);
         const bool camera = source[3] == 255;
-        require(stored(x, y, 3) == 255, "Every stamped pixel is opaque on the display");
+        require(stored(x, y, 3) == 255, "Every other stamped pixel is opaque on the display");
         bool exact = true;
         for (UINT channel = 0; channel < 3; ++channel) {
           const int code = source[channel];

@@ -116,7 +116,7 @@ if ($Validate) {
     $fontGpu = Add-Compile (Join-Path $out 'gs-font-validation.exe') (@('-municode', (Join-Path $taskRoot 'tests/graphics/gs_font_validation.cpp')) + $libs) 'GS font validation compilation failed.'
     $dynamicGpu = Add-Compile (Join-Path $out 'dynamic-state-validation.exe') (@((Join-Path $taskRoot 'tests/graphics/dynamic_state_validation.cpp')) + $stampObjects + $libs) 'Dynamic graphics-state validation compilation failed.'
     $sampleGpu = Add-Compile (Join-Path $out 'sample-positions-validation.exe') (@((Join-Path $taskRoot 'tests/graphics/sample_positions_validation.cpp')) + $stampObjects + $libs) 'Sample-position validation compilation failed.'
-    $encodingGpu = Add-Compile (Join-Path $out 'stamp-encoding-validation.exe') (@((Join-Path $taskRoot 'tests/graphics/stamp_encoding_validation.cpp')) + $stampObjects + $libs) 'Stamp encoding validation compilation failed.'
+    $encodingGpu = Add-Compile (Join-Path $out 'stamp-encoding-validation.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/stamp_encoding_validation.cpp')) + $stampObjects + $libs) 'Stamp encoding validation compilation failed.'
     $tailTest = Add-Compile (Join-Path $out 'scene-queue-tail-test.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/scene_queue_tail_test.cpp')) + $graphicsObjects + $libs) 'Live capture regression compilation failed.'
     $runtimeContention = Add-Compile (Join-Path $out 'scene-runtime-contention-test.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/scene_runtime_contention_test.cpp')) + $runtimeContentionObjects + $libs) 'Camera service contention regression compilation failed.'
     $queuePatchTest = Add-Compile (Join-Path $out 'queue-patch-snapshot-test.exe') (@('-fno-access-control', (Join-Path $taskRoot 'tests/graphics/queue_patch_snapshot_test.cpp')) + $runtimeContentionObjects + $libs) 'Queue patch snapshot compilation failed.'
@@ -167,6 +167,8 @@ if ($Validate) {
         @{Name='native-query-scope'; Sources=@('tests/graphics/query_scope_test.cpp')},
         @{Name='pfd-copy-proof'; Sources=@('tests/graphics/pfd_copy_proof_test.cpp')},
         @{Name='pfd-submission-proof'; Sources=@('tests/graphics/pfd_submission_proof_test.cpp')},
+        @{Name='display-keep'; Sources=@('tests/graphics/display_keep_test.cpp')},
+        @{Name='display-marks'; Sources=@('tests/app/display_marks_test.cpp')},
         @{Name='metadata-batch-cache'; Sources=@('tests/graphics/metadata_batch_cache_test.cpp')},
         @{Name='taxi-routes'; Sources=@('tests/graphics/taxi_button_routes_test.cpp')},
         @{Name='target-assignment'; Sources=@('tests/graphics/target_assignment_test.cpp')},

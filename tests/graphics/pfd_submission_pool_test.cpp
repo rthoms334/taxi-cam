@@ -1,4 +1,5 @@
 #include "../../src/graphics/pfd_submission_pool.hpp"
+#include "../../src/graphics/display_keep.hpp"
 #include "../../src/hooks/queue_submit_observer.hpp"
 
 #include <d3d12sdklayers.h>
@@ -739,6 +740,18 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     execute({}, setup, {});
     // Every panel pixel: the camera patch, the instrument's redraw colour, or
     // the panel pattern.
+    namespace keep = taxi_camera::standalone::display_keep;
+    // Panel marks inside the patch: its corner, inside the redraw, and one
+    // clipped by the patch's right edge.
+    const keep::Point marks[]{{8, 4}, {12, 7}, {8 + PatchWidth - 1, 9}};
+    bool marks_listed = false, marks_painted = false;
+    const auto marked = [&](UINT x, UINT y) {
+      if (marks_listed)
+        for (const auto& m : marks)
+          if (x >= m.x && x < m.x + keep::MarkWidth && y >= m.y && y < m.y + keep::MarkHeight)
+            return true;
+      return false;
+    };
     const auto expect = [&](bool camera, bool redraw, const char* message) {
       auto* list = record(1);
       transition(list, panel.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -758,10 +771,10 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
         for (UINT x = 0; x < Width; ++x) {
           const auto* pixel = bytes + panel_footprint.Offset + y * panel_footprint.Footprint.RowPitch + x * 4;
           const bool patch = x >= 8 && x < 8 + PatchWidth && y >= 4 && y < 4 + PatchHeight;
-          const bool redrawn = redraw && x >= 10 && x < 14 && y >= 5 && y < 9;
+          const bool redrawn = (redraw && x >= 10 && x < 14 && y >= 5 && y < 9) || (marks_painted && marked(x, y));
           const auto own = panel_pixel(x, y);
           const std::array<std::uint8_t, 4> wanted =
-              patch && camera
+              patch && camera && !marked(x, y)
                   ? std::array<std::uint8_t, 4>{static_cast<std::uint8_t>(180 + x - 8), static_cast<std::uint8_t>(70 + y - 4), 219, 255}
               : redrawn ? std::array<std::uint8_t, 4>{51, 102, 153, 255}
                         : own;
@@ -855,6 +868,40 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     require(static_cast<bool>(ran), "Record a shadow copy that runs");
     execute({ran}, nullptr, {});
     require(restored.load() == 6 && dropped.load() == 5, "A completed shadow copy reported a drop");
+    // Panel marks. With marks listed, a camera copy leaves each of them on the
+    // panel and writes every other pixel of its area.
+    auto plain = stamp;
+    plain.save = nullptr;
+    plain.completed = nullptr;
+    plain.completed_value = 0;
+    keep::set_marks(marks, 3);
+    marks_listed = true;
+    const auto around = context->pool.record(plain);
+    require(static_cast<bool>(around), "Record a camera copy around the marks");
+    execute({around}, nullptr, {});
+    expect(true, true, "A camera copy wrote a panel mark or missed a camera pixel");
+    // A mark painted while the camera runs (here: the panel pattern turned to
+    // the redraw colour at each mark) is not in the shadow; the restore keeps
+    // it and puts back every other pixel.
+    auto* paint = record(0);
+    transition(paint, panel.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    for (const auto& m : marks) {
+      const D3D12_RECT dot{static_cast<LONG>(m.x), static_cast<LONG>(m.y), static_cast<LONG>(m.x + keep::MarkWidth),
+                           static_cast<LONG>(m.y + keep::MarkHeight)};
+      paint->ClearRenderTargetView(panel_rtv, colour, 1, &dot);
+    }
+    transition(paint, panel.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    success(paint->Close(), "Close mark painting");
+    execute({}, paint, {});
+    restore.completed = nullptr;
+    restore.completed_value = 0;
+    const auto kept = context->pool.record(restore);
+    require(static_cast<bool>(kept), "Record a restore around the marks");
+    execute({kept}, nullptr, {});
+    marks_painted = true;
+    expect(false, true, "A restore erased a panel mark or left a camera pixel");
+    keep::set_marks(nullptr, 0);
+    marks_listed = marks_painted = false;
   }
   success(device->GetDeviceRemovedReason(), "D3D12 device removed");
   if (diagnostics.p) {
