@@ -266,9 +266,13 @@ void service_mark_identity(MarkIdentityState& state,
                            std::uint64_t epoch,
                            const profiles::AircraftProfile* profile) noexcept {
   try {
+    // A new aircraft session keeps what was read: a texture's marks hold for
+    // its life (the FSLabs A321 starts two more sessions on the cockpit it
+    // already drew, 2026-11-04), and an aircraft change destroys the old
+    // panel textures, which retain() drops.
     if (epoch != state.epoch) {
-      state = {};
       state.epoch = epoch;
+      state.logged = false;
     }
     const auto records = win::display_resource_records();
     const auto alive = [&](std::uint64_t id) {
@@ -1016,9 +1020,13 @@ DWORD run_impl() {
     };
     const auto service_mark_scan = [&](bool allowed, const win::Status& log_to, const auto& log_marks) {
       const auto epoch = native_camera::get_aircraft_session_epoch();
+      // Textures already read stay read (service_mark_identity); a new
+      // session starts its re-show allowance and counts again.
       if (epoch != mark_scan.epoch) {
-        mark_scan = {};
         mark_scan.epoch = epoch;
+        mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = 0;
+        mark_scan.last_reshow_ms = 0;
+        mark_scan.shown_again = false;
       }
       const bool companion = snapshot.result == win::DisplaySnapshotResult::pending;
       if (mark_scan.pending_id && companion) {
