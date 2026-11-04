@@ -768,15 +768,21 @@ DWORD run_impl() {
   // loads): MarkReshows times a flight, then once a minute at most while a
   // display the profile names has no texture (one recreated without a copy).
   constexpr unsigned MarkTries = 5, MarkReshows = 2;
-  constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 500, MarkQuietMs = 3000, MarkReshowGapMs = 60000;
+  // A picture not taken within MarkPictureMs is given up (the texture is not
+  // being drawn): the next texture's request replaces it, so undrawn panels
+  // cannot use up the pages' marks window (the A350, 2026-11-04).
+  constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 500, MarkQuietMs = 3000, MarkReshowGapMs = 60000, MarkPictureMs = 1500;
   struct MarkScan {
     struct Entry {
       std::uint64_t id{}, next_ms{};
       unsigned tries{};
       bool read{};
       std::uint64_t seen_ms{};  // When the scan first listed the texture.
+      // Its draws and submissions now, and when its last picture was asked:
+      // a texture drawn since is pictured first.
+      std::uint64_t activity{}, tried_activity{};
     };
-    std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{};
+    std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{}, pending_ms{};
     std::vector<Entry> entries;
     unsigned unsignalled{}, read{}, reshows{};
     // Pictures the scan took: with marks, without, and not taken (timeout,
@@ -1037,7 +1043,7 @@ DWORD run_impl() {
       }
       if (mark_scan.pending_id) {
         const auto poll = win::poll_display_snapshot(now);
-        if (poll.result == win::DisplaySnapshotResult::pending)
+        if (poll.result == win::DisplaySnapshotResult::pending && now - mark_scan.pending_ms < MarkPictureMs)
           return;
         const auto id = std::exchange(mark_scan.pending_id, 0);
         const bool ready = poll.result == win::DisplaySnapshotResult::ready;
@@ -1065,22 +1071,32 @@ DWORD run_impl() {
         std::erase_if(mark_scan.entries, [&](const MarkScan::Entry& entry) {
           return std::none_of(records.begin(), records.end(), [&](const auto& record) { return record.id == entry.id; });
         });
-        for (const auto& record : records)
-          if ((record.draws || record.activity) && !mark_entry(record.id)) {
-            mark_scan.entries.push_back({record.id, now, 0, false, now});
+        for (const auto& record : records) {
+          if (!(record.draws || record.activity))
+            continue;
+          if (auto* entry = mark_entry(record.id))
+            entry->activity = record.draws + record.activity;
+          else {
+            mark_scan.entries.push_back({record.id, now, 0, false, now, record.draws + record.activity, 0});
             mark_scan.last_new_ms = now;
           }
-      }
-      for (auto& entry : mark_scan.entries) {
-        if (entry.read || entry.tries >= MarkTries || entry.next_ms > now)
-          continue;
-        if (win::request_display_snapshot(entry.id, now) == win::DisplaySnapshotResult::pending) {
-          mark_scan.pending_id = entry.id;
-          return;
         }
-        ++entry.tries;
-        entry.next_ms = now + MarkRetryMs;
       }
+      // Textures drawn since their last picture first: their picture is
+      // taken at once. Then the others.
+      for (const bool drawn : {true, false})
+        for (auto& entry : mark_scan.entries) {
+          if (entry.read || entry.tries >= MarkTries || entry.next_ms > now || (drawn && entry.activity == entry.tried_activity))
+            continue;
+          entry.tried_activity = entry.activity;
+          if (win::request_display_snapshot(entry.id, now) == win::DisplaySnapshotResult::pending) {
+            mark_scan.pending_id = entry.id;
+            mark_scan.pending_ms = now;
+            return;
+          }
+          ++entry.tries;
+          entry.next_ms = now + MarkRetryMs;
+        }
       // Every texture read or given up on, and none new for a while.
       if (mark_scan.entries.empty() || now - mark_scan.last_new_ms < MarkQuietMs ||
           !std::all_of(
