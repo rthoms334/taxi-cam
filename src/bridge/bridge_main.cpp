@@ -11,7 +11,6 @@
 #include "../graphics/camera_compositor_d3d12.hpp"
 #include "../graphics/capture_progress.hpp"
 #include "../graphics/display_exposure.hpp"
-#include "../graphics/display_keep.hpp"
 #include "../graphics/taxi_button_routes.hpp"
 #include "../graphics/video_memory.hpp"
 #include "../hooks/render_boundary_observer.hpp"
@@ -29,6 +28,7 @@
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
+#include "display_marks.hpp"
 #include "freeze_watchdog.hpp"
 #include "native_hooks.hpp"
 
@@ -1060,11 +1060,8 @@ DWORD WINAPI watchdog_run(void*) noexcept {
 }
 // Panel marks: camera writes leave two pixels at each routed display's gauge
 // corner alone, where GlassOut marks and checks every panel it streams
-// (display_keep.hpp). Marks go at the gauge corners from the built-in
-// profile, which stay put when the user moves the camera area, and at the
-// current area's corners (a set-up aircraft's gauge is unknown; the
-// texture's own corner too). Always on: two pixels cannot be seen, and a
-// panel streamer started after the cameras still finds its marks.
+// (display_keep.hpp, display_marks.hpp). Always on: two pixels cannot be seen,
+// and a panel streamer started after the cameras still finds its marks.
 class DisplayMarks {
  public:
   void service(const win::Status& status) noexcept {
@@ -1073,7 +1070,8 @@ class DisplayMarks {
       return;
     next_poll_ = now + 1000;
     std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points{};
-    const unsigned count = corners(status.active_profile, points);
+    const unsigned count = standalone::display_keep::profile_marks(profiles::find(status.active_profile),
+                                                                   profiles::base_profile(status.active_profile), points);
     if (count == count_ && std::equal(points.begin(), points.begin() + count, points_.begin(), same))
       return;
     count_ = count;
@@ -1087,38 +1085,6 @@ class DisplayMarks {
  private:
   static bool same(const standalone::display_keep::Point& a, const standalone::display_keep::Point& b) noexcept {
     return a.x == b.x && a.y == b.y && a.gauge == b.gauge;
-  }
-  static unsigned corners(std::uint32_t profile_id,
-                          std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks>& out) noexcept {
-    unsigned count = 0;
-    // Gauge corners go first, so an area corner on a gauge corner stays a gauge mark.
-    const auto add = [&](unsigned x, unsigned y, bool gauge) noexcept {
-      for (unsigned i = 0; i < count; ++i)
-        if (out[i].x == x && out[i].y == y)
-          return;
-      if (count < out.size())
-        out[count++] = {x, y, gauge};
-    };
-    const auto* current = profiles::find(profile_id);
-    const auto* base = profiles::base_profile(profile_id);
-    if (!current)
-      return 0;
-    const unsigned sides = std::min<unsigned>(current->sides, MaxDisplaySides);
-    for (const bool gauge : {true, false})
-      for (unsigned side = 0; side < sides; ++side) {
-        const auto* p = gauge ? base : current;
-        if (p && !p->fit_texture) {
-          const auto region = profiles::display_rect(*p, side), content = profiles::display_content_rect(*p, side);
-          add(region.left, region.top, gauge);
-          add(content.left, content.top, gauge);
-        } else if (current->fit_texture) {
-          if (gauge)
-            add(0, 0, true);
-          else
-            add(current->areas[side].left, current->areas[side].top, false);
-        }
-      }
-    return count;
   }
   std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points_{};
   std::uint64_t next_poll_ = 0;

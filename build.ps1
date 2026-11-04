@@ -168,6 +168,7 @@ if ($Validate) {
         @{Name='pfd-copy-proof'; Sources=@('tests/graphics/pfd_copy_proof_test.cpp')},
         @{Name='pfd-submission-proof'; Sources=@('tests/graphics/pfd_submission_proof_test.cpp')},
         @{Name='display-keep'; Sources=@('tests/graphics/display_keep_test.cpp')},
+        @{Name='display-marks'; Sources=@('tests/app/display_marks_test.cpp')},
         @{Name='metadata-batch-cache'; Sources=@('tests/graphics/metadata_batch_cache_test.cpp')},
         @{Name='taxi-routes'; Sources=@('tests/graphics/taxi_button_routes_test.cpp')},
         @{Name='target-assignment'; Sources=@('tests/graphics/target_assignment_test.cpp')},
