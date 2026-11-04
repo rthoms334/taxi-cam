@@ -763,15 +763,25 @@ DWORD run_impl() {
   // once by itself, not only when the Displays page asks for a picture, and
   // the pages are then told to take their marks down. It uses the one
   // snapshot slot only while the companion's own picture is not pending.
-  // A texture still unread when the scan is done gets its marks shown again
-  // (the A350 creates its display textures up to ~20 s after the flight
-  // loads): MarkReshows times a flight, then once a minute at most while a
-  // display the profile names has no texture (one recreated without a copy).
+  // The marks are on the cockpit's real screens, so they go as soon as every
+  // display the aircraft's profile names is found, and do not come back
+  // while it stays found: the rest of the cockpit's panels are not waited
+  // for (the FBW A380X never draws about half of its 22 panel textures, so
+  // waiting for them kept the marks up and brought them back twice after
+  // Ready, 2026-11-04). Otherwise they stay up at most MarkShowMs; opening
+  // the companion's aircraft setup asks for them once a session, as its list
+  // names only textures whose marks were read. They are shown again only for
+  // a texture created since they were last shown, while a display is still
+  // to find or the setup is open (the A350 creates its display textures up
+  // to ~20 s after the flight loads): MarkReshows times a flight, then once
+  // a minute at most while a display the profile names has no texture (one
+  // recreated without a copy).
   constexpr unsigned MarkTries = 5, MarkReshows = 2;
   // A picture not taken within MarkPictureMs is given up (the texture is not
   // being drawn): the next texture's request replaces it, so undrawn panels
   // cannot use up the pages' marks window (the A350, 2026-11-04).
-  constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 500, MarkQuietMs = 3000, MarkReshowGapMs = 60000, MarkPictureMs = 1500;
+  constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 500, MarkQuietMs = 3000, MarkReshowGapMs = 60000, MarkPictureMs = 1500,
+                          MarkShowMs = 20000;
   struct MarkScan {
     struct Entry {
       std::uint64_t id{}, next_ms{};
@@ -782,7 +792,8 @@ DWORD run_impl() {
       // a texture drawn since is pictured first.
       std::uint64_t activity{}, tried_activity{};
     };
-    std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{}, pending_ms{};
+    // shown_ms: when the pages were last asked to show their marks.
+    std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{}, pending_ms{}, shown_ms{};
     std::vector<Entry> entries;
     unsigned unsignalled{}, read{}, reshows{};
     // Pictures the scan took: with marks, without, and not taken (timeout,
@@ -798,6 +809,8 @@ DWORD run_impl() {
     // can run out during the flight load, before any picture is taken (the
     // A350, 2026-11-04: nothing read until the first re-show, ~45 s later).
     bool session_shown = false;
+    bool setup_open = false;   // The companion's aircraft setup, at the last pass.
+    bool setup_shown = false;  // Marks asked for when the setup opened, this session.
   } mark_scan;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
   const auto service_scene = [&] {
@@ -1039,8 +1052,8 @@ DWORD run_impl() {
       if (epoch != mark_scan.epoch) {
         mark_scan.epoch = epoch;
         mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = 0;
-        mark_scan.last_reshow_ms = 0;
-        mark_scan.shown_again = mark_scan.session_shown = false;
+        mark_scan.last_reshow_ms = mark_scan.shown_ms = 0;
+        mark_scan.shown_again = mark_scan.session_shown = mark_scan.setup_shown = false;
       }
       const bool companion = snapshot.result == win::DisplaySnapshotResult::pending;
       if (mark_scan.pending_id && companion) {
@@ -1099,14 +1112,74 @@ DWORD run_impl() {
           }
         }
       }
-      if (!mark_scan.session_shown &&
-          std::any_of(mark_scan.entries.begin(), mark_scan.entries.end(), [](const MarkScan::Entry& entry) { return !entry.read; })) {
-        mark_scan.session_shown = mark_scan.shown_again = true;
+      // Every display the profile names found, and the companion's aircraft
+      // setup closed: nothing on the cockpit's screens is needed any more.
+      const auto* profile = panel_identity.profile;
+      bool keyed = false, missing = false;
+      for (unsigned side = 0; profile && side < profile->sides && side < MaxDisplaySides; ++side)
+        if (profile->panel_textures[side][0]) {
+          keyed = true;
+          missing = missing || !panel_identity.named[side];
+        }
+      const bool setup = settings.panel_setup != 0;
+      const bool found = keyed && !missing && !setup;
+      const bool setup_opened = setup && !mark_scan.setup_open;
+      mark_scan.setup_open = setup;
+      const auto unread_since = [&](std::uint64_t since) {
+        return static_cast<unsigned>(std::count_if(mark_scan.entries.begin(), mark_scan.entries.end(),
+                                                   [&](const MarkScan::Entry& entry) { return !entry.read && entry.seen_ms >= since; }));
+      };
+      const auto read_entries = [&] {
+        return static_cast<unsigned>(
+            std::count_if(mark_scan.entries.begin(), mark_scan.entries.end(), [](const MarkScan::Entry& entry) { return entry.read; }));
+      };
+      const auto ask_show = [&] {
+        mark_scan.shown_again = true;
+        mark_scan.shown_ms = now;
         native_camera::signal_panel_marks_show();
+        for (auto& entry : mark_scan.entries)
+          if (!entry.read) {
+            entry.tries = 0;
+            entry.next_ms = now + MarkRetryMs;
+          }
+      };
+      // Unread textures are given up on: with the marks down a picture of one
+      // has nothing to read. A texture created later is still pictured, and
+      // a page loaded since shows its marks by itself: reading them takes
+      // those down too.
+      const auto take_down = [&](const char* why) {
+        native_camera::signal_panel_marks_read();
+        for (auto& entry : mark_scan.entries)
+          if (!entry.read)
+            entry.tries = MarkTries;
+        char detail[192];
+        std::snprintf(detail, sizeof(detail),
+                      "Display marks: %u of %zu panel textures read; cockpit pages told to take their marks down (%s).", read_entries(),
+                      mark_scan.entries.size(), why);
+        log_status(log_to, detail);
+        mark_scan.unsignalled = 0;
+        mark_scan.shown_again = false;
+      };
+      if (found) {
+        if (mark_scan.unsignalled || mark_scan.shown_again)
+          take_down("displays found");
+      } else if (setup_opened && !mark_scan.setup_shown && unread_since(0)) {
+        // The setup lists only textures whose marks were read: once a session.
+        mark_scan.setup_shown = true;
+        ask_show();
+        char detail[128];
+        std::snprintf(detail, sizeof(detail),
+                      "Display marks: aircraft setup opened; cockpit pages asked to show their marks for %u textures.", unread_since(0));
+        log_status(log_to, detail);
+      } else if (!mark_scan.session_shown && unread_since(0)) {
+        mark_scan.session_shown = true;
+        ask_show();
         char detail[128];
         std::snprintf(detail, sizeof(detail), "Display marks: cockpit pages asked to show their marks for aircraft session %llu.",
                       static_cast<unsigned long long>(epoch));
         log_status(log_to, detail);
+      } else if (mark_scan.shown_again && now - mark_scan.shown_ms >= MarkShowMs) {
+        take_down("time limit");
       }
       // Textures drawn since their last picture first: their picture is
       // taken at once. Then the others.
@@ -1129,44 +1202,24 @@ DWORD run_impl() {
               mark_scan.entries.begin(), mark_scan.entries.end(),
               [](const MarkScan::Entry& entry) { return entry.read || entry.tries >= MarkTries; }))
         return;
-      char detail[192];
-      const auto unread = static_cast<unsigned>(
-          std::count_if(mark_scan.entries.begin(), mark_scan.entries.end(), [](const MarkScan::Entry& entry) { return !entry.read; }));
-      // Unread textures: the pages may have taken their marks down before the
-      // texture existed. Ask them to show the marks again and try once more.
-      const auto* profile = panel_identity.profile;
-      bool missing = false;
-      for (unsigned side = 0; profile && side < profile->sides && side < MaxDisplaySides; ++side)
-        missing = missing || (profile->panel_textures[side][0] && !panel_identity.named[side]);
-      // Later, only for a texture that appeared since the last time: one that
-      // never carries marks must not bring them back every minute.
-      const bool fresh = std::any_of(mark_scan.entries.begin(), mark_scan.entries.end(),
-                                     [&](const MarkScan::Entry& entry) { return !entry.read && entry.seen_ms > mark_scan.last_reshow_ms; });
-      if (unread && (mark_scan.reshows < MarkReshows || (missing && fresh && now - mark_scan.last_reshow_ms >= MarkReshowGapMs))) {
+      // A display still to find (or the setup open) and a texture created
+      // since the marks were last shown: its page may have taken them down
+      // before the texture existed. Never once the displays are found.
+      const auto fresh = unread_since(mark_scan.shown_ms + 1);
+      if (!found && fresh && (mark_scan.reshows < MarkReshows || (missing && now - mark_scan.last_reshow_ms >= MarkReshowGapMs))) {
         ++mark_scan.reshows;
         mark_scan.last_reshow_ms = now;
-        mark_scan.shown_again = true;
-        native_camera::signal_panel_marks_show();
-        for (auto& entry : mark_scan.entries)
-          if (!entry.read) {
-            entry.tries = 0;
-            entry.next_ms = now + MarkRetryMs;
-          }
+        ask_show();
+        char detail[192];
         std::snprintf(detail, sizeof(detail),
-                      "Display marks: %u of %zu panel textures unread; cockpit pages asked to show their marks again (%u).", unread,
-                      mark_scan.entries.size(), mark_scan.reshows);
+                      "Display marks: %u panel textures new and unread; cockpit pages asked to show their marks again (%u).", fresh,
+                      mark_scan.reshows);
         log_status(log_to, detail);
         return;
       }
       // The pages may take their marks down. A later read signals again.
-      if (mark_scan.unsignalled || mark_scan.shown_again) {
-        native_camera::signal_panel_marks_read();
-        std::snprintf(detail, sizeof(detail), "Display marks: %u of %zu panel textures read; cockpit pages told to take their marks down.",
-                      mark_scan.read, mark_scan.entries.size());
-        log_status(log_to, detail);
-        mark_scan.unsignalled = 0;
-        mark_scan.shown_again = false;
-      }
+      if (mark_scan.unsignalled || mark_scan.shown_again)
+        take_down("scan done");
     };
     // One snapshot per companion serial. It needs graphics observation while
     // pending, like calibration, but never a camera or a matching aircraft:

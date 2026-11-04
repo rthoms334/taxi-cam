@@ -232,6 +232,16 @@ panel size.
   marks (a new negative value) as soon as an aircraft session has an unread
   panel texture: on the A350 (2026-11-04) the page's own window ran out during
   the flight load, and nothing was read until the first re-show ~45 s later.
+- **Take-down policy (bridge).** The bridge signals "read" as soon as every
+  display the profile names is found, without waiting for the cockpit's other
+  panel textures, and never asks for the marks again while those stay found.
+  Otherwise they stay up at most 20 s (`MarkShowMs`). Opening the companion's
+  aircraft setup asks for them once an aircraft session (the setup lists only
+  read textures), under the same 20 s limit. Re-shows are only for a texture created since the
+  last show, while a display is still to find or the setup is open. Before
+  this (FBW A380X, 2026-11-04) the scan waited on every texture: about 13 of
+  22 are never drawn, entries churned, the scan never finished, so the marks
+  stayed until the page cap and came back twice after Ready.
 - **Guarded.** Every step is in try/catch, and an exception removes what was
   drawn. The helper can't stop a page loading.
 - **Visibility.** A small dark rectangle in a gauge's top-right corner for
