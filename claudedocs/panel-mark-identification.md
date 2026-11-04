@@ -174,8 +174,8 @@ The format is in `src/shared/panel_marks.hpp`; the JS mirror is
 
 **Cells.** A block is a grid of square cells, 16 wide, with a one-cell
 border of 0. Each cell is one of 8 colours whose channels are each 0 or the
-helper's level, so it carries 3 bits. The helper paints `kLevel` = 16 (near
-black) in 2 px cells (`kCell`). A transfer curve keeps 0 at 0 and only raises
+helper's level, so it carries 3 bits. The helper paints `kLevel` = 56 (dark
+grey; 16 was read as about 1 on the A350's WASM displays, 2026-11-04) in 2 px cells (`kCell`). A transfer curve keeps 0 at 0 and only raises
 the level (an sRGB texture encoding it again gives about 70), so a channel
 counts as 1 at ≥ 8 and as 0 at ≤ 2. The decoder samples 9 points around
 each cell's centre and needs 5 to agree. Bright (255) blocks from the first

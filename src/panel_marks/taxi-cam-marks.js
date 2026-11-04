@@ -16,7 +16,7 @@
     var FINDER = [7, 0, 7, 0, 4, 2, 1, 6, 3, 5, 0, 7, 4, 0, 1, 7];
     // A 1 bit is LEVEL in its channel, a 0 bit 0: near-black, one texture
     // pixel per page pixel, so CELL page pixels a cell.
-    var LEVEL = 16, CELL = 2;
+    var LEVEL = 56, CELL = 2;
     var COLOURS = [0, 1, 2, 3, 4, 5, 6, 7].map(function (c) {
         return "rgb(" + (c & 4 ? LEVEL : 0) + "," + (c & 2 ? LEVEL : 0) + "," + (c & 1 ? LEVEL : 0) + ")";
     });

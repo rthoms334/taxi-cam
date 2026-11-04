@@ -14,16 +14,20 @@ namespace taxi_camera::panel_marks {
 //
 // A block is a grid of square cells, 16 wide, each one of 8 colours whose
 // channels are each 0 or the helper's level (3 bits: red 4, green 2, blue 1).
-// The helper paints near-black (kLevel) at one texture pixel per page pixel so
-// the block is hard to see; a transfer curve keeps 0 at 0 and only raises the
-// level, and older bright (255) blocks still read. Row 0 is a fixed finder;
+// The helper paints dark grey (kLevel) at one texture pixel per page pixel so
+// the block is hard to see; a transfer curve keeps 0 at 0 and moves the level
+// either way, and older bright (255) blocks still read. Row 0 is a fixed finder;
 // column 0 of every later row alternates 0 and 7 (timing); the other 15 cells
 // of each later row carry the payload, most significant bit first, followed by
 // a CRC-16. The helper draws a one-cell 0 border around the block.
 inline constexpr unsigned kColumns = 16, kDataColumns = kColumns - 1, kBitsPerCell = 3, kRowBits = kDataColumns * kBitsPerCell;
 inline constexpr std::uint8_t kVersion = 1;
 // The helper's channel value for a 1 bit, and its cell edge in page pixels.
-inline constexpr std::uint8_t kLevel = 16;
+// 56 survives the transfer curve either way: an sRGB encode raises it to
+// about 130, an sRGB-to-linear decode lowers it to about 10 (the iniBuilds
+// A350's WASM displays read the earlier 16 as about 1, 2026-11-04). A channel
+// is 1 from kHigh and 0 up to kLow.
+inline constexpr std::uint8_t kLevel = 56, kHigh = 6, kLow = 2;
 inline constexpr unsigned kCell = 2;
 inline constexpr std::array<std::uint8_t, kColumns> kFinder{7, 0, 7, 0, 4, 2, 1, 6, 3, 5, 0, 7, 4, 0, 1, 7};
 // Payload bytes before the CRC: version, length of the rest, fields.
@@ -148,8 +152,8 @@ class Decoder {
  private:
   int cls(unsigned x, unsigned y) const noexcept {
     const auto* p = pixels_ + y * pitch_ + std::size_t{x} * 4;
-    // 0 stays 0 under any transfer curve; the level only rises.
-    const auto bit = [](std::uint8_t v) { return v >= kLevel / 2 ? 1 : v <= kLevel / 8 ? 0 : -1; };
+    // 0 stays 0 under any transfer curve; the level may rise or fall.
+    const auto bit = [](std::uint8_t v) { return v >= kHigh ? 1 : v <= kLow ? 0 : -1; };
     const int r = bit(p[red_]), g = bit(p[1]), b = bit(p[blue_]);
     return r < 0 || g < 0 || b < 0 ? -1 : r << 2 | g << 1 | b;
   }

@@ -222,17 +222,18 @@ int main() {
             message);
     require(std::fabs(found[0].pitch_x - 2) < 0.01 && std::fabs(found[0].pitch_y - 2) < 0.01, "dark block pitch is 2 px");
   }
-  // A transfer curve (an sRGB display texture encoding the level again)
-  // raises the level; 0 stays 0. BGRA too.
-  {
+  // A transfer curve moves the level: an sRGB encode raises 56 to about 130,
+  // a decode lowers it to about 10 (the A350's WASM displays); 0 stays 0.
+  // BGRA too.
+  for (const std::uint8_t level : {std::uint8_t{130}, std::uint8_t{10}}) {
     auto image = page(512, 512, 8);
     const auto m = gauge("VCockpit07", "ISIS", 0, 0, 0, 512, 512, 512, 512, kCell);
-    draw(image, m, 512 - block_width(m) - kCell, kCell, 70);
+    draw(image, m, 512 - block_width(m) - kCell, kCell, level);
     for (unsigned y = 0; y < image.height; ++y)
       for (unsigned x = 0; x < image.width; ++x)
         std::swap(image.at(x, y)[0], image.at(x, y)[2]);
     Mark found[2];
-    require(find(image, found, 2, true) == 1 && std::strcmp(found[0].gauge_name.data(), "ISIS") == 0, "raised level decodes in BGRA");
+    require(find(image, found, 2, true) == 1 && std::strcmp(found[0].gauge_name.data(), "ISIS") == 0, "a moved level decodes in BGRA");
   }
   // A dark block with one cell changed fails the CRC.
   {

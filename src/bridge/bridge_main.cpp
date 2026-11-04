@@ -788,6 +788,9 @@ DWORD run_impl() {
     // Pictures the scan took: with marks, without, and not taken (timeout,
     // lost, unavailable), logged every 10 s while it scans.
     unsigned pictures{}, empty{}, failed{};
+    // DXGI formats of the pictures without marks (a curve on the way into
+    // some formats can hide a level), and of those with.
+    std::array<unsigned, 6> empty_formats{}, read_formats{};
     std::uint64_t next_log_ms{};
     bool shown_again = false;  // Pages asked to show their marks again, not yet told to take them down.
   } mark_scan;
@@ -1051,16 +1054,25 @@ DWORD run_impl() {
           log_marks(id, poll);
         ++mark_scan.pictures;
         mark_scan.empty += ready && !poll.mark_count;
+        if (ready) {
+          auto& formats = poll.mark_count ? mark_scan.read_formats : mark_scan.empty_formats;
+          if (std::find(formats.begin(), formats.end(), poll.format) == formats.end())
+            if (const auto free = std::find(formats.begin(), formats.end(), 0u); free != formats.end())
+              *free = poll.format;
+        }
         mark_scan.failed += !ready;
         mark_result(id, ready ? &poll : nullptr);
       }
       if ((allowed || !mark_scan.entries.empty()) && now >= mark_scan.next_log_ms) {
         mark_scan.next_log_ms = now + 10000;
-        char detail[192];
+        char detail[256];
+        const auto& e = mark_scan.empty_formats;
+        const auto& r = mark_scan.read_formats;
         std::snprintf(detail, sizeof(detail),
-                      "Display mark scan: textures=%zu read=%u pictures=%u empty=%u failed=%u reshows=%u allowed=%u companion=%u",
+                      "Display mark scan: textures=%zu read=%u pictures=%u empty=%u failed=%u reshows=%u allowed=%u companion=%u "
+                      "formats_read=%u,%u,%u formats_empty=%u,%u,%u,%u",
                       mark_scan.entries.size(), mark_scan.read, mark_scan.pictures, mark_scan.empty, mark_scan.failed, mark_scan.reshows,
-                      allowed ? 1u : 0u, companion ? 1u : 0u);
+                      allowed ? 1u : 0u, companion ? 1u : 0u, r[0], r[1], r[2], e[0], e[1], e[2], e[3]);
         log_status(log_to, detail);
       }
       if (!allowed || companion)
