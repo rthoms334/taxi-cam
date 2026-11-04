@@ -308,7 +308,7 @@ void configure(const Options& options) {
       std::string marks = "failed";
       try {
         marks = standalone::marks_package::outcome_name(standalone::marks_package::ensure(
-            simulator, standalone::marks_package::community_folder(), standalone::marks_package::helper_text()));
+            simulator, standalone::marks_package::community_folder(simulator), standalone::marks_package::helper_text()));
       } catch (...) {
       }
       // Without the package no cockpit display can be recognised, so the
@@ -448,9 +448,11 @@ void uninstall(const Options& options) {
   if (!settings_backup.empty())
     remove_directory_tree(settings_backup);
   // The panel marks package overrides a stock cockpit page; without Taxi Cam
-  // to keep it current it must go. Best effort, after everything else.
+  // to keep it current it must go, from every simulator's Community folder
+  // (a PC can have both builds). Best effort, after everything else.
   try {
-    standalone::marks_package::remove(standalone::marks_package::community_folder());
+    for (const auto& community : standalone::marks_package::community_folders())
+      standalone::marks_package::remove(community);
   } catch (...) {
   }
 }

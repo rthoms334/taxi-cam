@@ -299,10 +299,15 @@ RCDATA 201):
   helper changed (SHA-256 in `taxi-cam-marks.stock.txt`) rewrites it; a stock
   page without exactly one `VCockpit.js` line removes the package. A write
   while MSFS runs takes effect at the next start (notice shown).
-- Community from `UserCfg.opt` `InstalledPackagesPath` (Store, then Steam);
-  the simulator folder from the installer's chosen folder (Setup) or the
-  simulator the companion attaches to (no process scan of its own). Steam
-  paths are unverified (the dev box is Store).
+- Community from the `InstalledPackagesPath` of the simulator in use: Steam's
+  `UserCfg.opt` (`%APPDATA%`) for an install under `steamapps`, the Store's
+  (`%LOCALAPPDATA%\Packages\Microsoft.Limitless_…`) otherwise, falling back to
+  Steam's only when the Store has none. The simulator folder is the
+  installer's chosen folder (Setup) or the simulator the companion attaches
+  to (no process scan of its own). The uninstaller removes the package from
+  every Community folder it finds. The owner's PC has both builds; the first
+  Steam start (2026-11-04) showed the old Store-then-Steam order checking the
+  Store's package while Steam ran without one.
 - `tools/panel-marks/make-package.ps1` stays as a developer tool; the
   companion rewrites its package on the next start (different marker text).
 

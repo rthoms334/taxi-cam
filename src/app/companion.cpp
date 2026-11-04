@@ -3718,6 +3718,10 @@ bool displays_to_choose(const win::Status& sample) {
   const auto s = draft();
   return legacy_tried == legacy_attempt(sample, s.profile) && legacy_displays(s);
 }
+// The attached simulator's Community folder, once the panel marks package
+// has been checked for it (check_marks_package, on the connection worker).
+std::mutex marks_community_mutex;
+std::filesystem::path marks_community;
 void convert_legacy_displays() {
   win::Status sample;
   {
@@ -3747,7 +3751,15 @@ void convert_legacy_displays() {
   if (attempt == legacy_tried)
     return;
   legacy_tried = attempt;
-  const auto sections = win::legacy_names::aircraft_sections(win::marks_package::community_folder(), path);
+  // Community panel.cfg files come from the attached simulator's folder.
+  std::filesystem::path community;
+  {
+    const std::lock_guard lock(marks_community_mutex);
+    community = marks_community;
+  }
+  if (community.empty())
+    community = win::marks_package::community_folder(std::filesystem::path(expected_simulator).parent_path());
+  const auto sections = win::legacy_names::aircraft_sections(community, path);
   auto next = s;
   bool changed = false, missing = false;
   const auto put = [&](char (&name)[profiles::MaxPanelName], const char* from) {
@@ -3783,14 +3795,22 @@ void convert_legacy_displays() {
 // The panel marks package (marks_package.hpp), checked once a run on the
 // connection worker for the simulator Taxi Cam attaches to; a new or updated
 // package takes effect at the next simulator start.
+// The Community folder is the attached simulator's own: Steam and Store
+// builds on one PC have one each (Steam test, 2026-11-04: the Store package
+// was checked while Steam ran without one).
 std::atomic<int> marks_package_outcome{-1};
 void check_marks_package(const std::wstring& simulator_exe) {
   if (marks_package_outcome.load(std::memory_order_acquire) >= 0 || simulator_exe.empty())
     return;
   auto outcome = win::marks_package::Outcome::failed;
   try {
-    outcome = win::marks_package::ensure(std::filesystem::path(simulator_exe).parent_path(), win::marks_package::community_folder(),
-                                         win::marks_package::helper_text());
+    const auto simulator = std::filesystem::path(simulator_exe).parent_path();
+    const auto community = win::marks_package::community_folder(simulator);
+    {
+      const std::lock_guard lock(marks_community_mutex);
+      marks_community = community;
+    }
+    outcome = win::marks_package::ensure(simulator, community, win::marks_package::helper_text());
   } catch (...) {
   }
   marks_package_outcome.store(static_cast<int>(outcome), std::memory_order_release);

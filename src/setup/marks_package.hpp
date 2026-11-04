@@ -11,10 +11,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+// bcrypt.h needs windows.h first; this line keeps the two apart.
 #include <bcrypt.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -192,34 +195,62 @@ inline bool exists(const std::filesystem::path& path) {
 }
 }  // namespace detail
 
-// The Community folder from the simulator's UserCfg.opt (Microsoft Store,
-// then Steam), or empty.
-inline std::filesystem::path community_folder() {
-  const std::filesystem::path options[]{
-      detail::environment(L"LOCALAPPDATA") + L"\\Packages\\Microsoft.Limitless_8wekyb3d8bbwe\\LocalCache\\UserCfg.opt",
-      detail::environment(L"APPDATA") + L"\\Microsoft Flight Simulator 2024\\UserCfg.opt"};
-  for (const auto& option : options) {
-    std::string text;
-    if (!detail::read_file(option, text))
+// The Community folder named by one simulator's UserCfg.opt, or empty.
+inline std::filesystem::path community_from(const std::filesystem::path& options) {
+  std::string text;
+  if (!detail::read_file(options, text))
+    return {};
+  std::istringstream lines(text);
+  for (std::string line; std::getline(lines, line);) {
+    const auto key = line.find("InstalledPackagesPath");
+    const auto open = key == std::string::npos ? key : line.find('"', key);
+    const auto close = open == std::string::npos ? open : line.find('"', open + 1);
+    if (close == std::string::npos)
       continue;
-    std::istringstream lines(text);
-    for (std::string line; std::getline(lines, line);) {
-      const auto key = line.find("InstalledPackagesPath");
-      const auto open = key == std::string::npos ? key : line.find('"', key);
-      const auto close = open == std::string::npos ? open : line.find('"', open + 1);
-      if (close == std::string::npos)
-        continue;
-      const auto folder = line.substr(open + 1, close - open - 1);
-      const int wide = MultiByteToWideChar(CP_UTF8, 0, folder.data(), static_cast<int>(folder.size()), nullptr, 0);
-      std::wstring path(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
-      if (wide > 0)
-        MultiByteToWideChar(CP_UTF8, 0, folder.data(), static_cast<int>(folder.size()), path.data(), wide);
-      const auto community = std::filesystem::path(path) / L"Community";
-      if (detail::exists(community))
-        return community;
-    }
+    const auto folder = line.substr(open + 1, close - open - 1);
+    const int wide = MultiByteToWideChar(CP_UTF8, 0, folder.data(), static_cast<int>(folder.size()), nullptr, 0);
+    std::wstring path(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
+    if (wide > 0)
+      MultiByteToWideChar(CP_UTF8, 0, folder.data(), static_cast<int>(folder.size()), path.data(), wide);
+    const auto community = std::filesystem::path(path) / L"Community";
+    if (detail::exists(community))
+      return community;
   }
   return {};
+}
+// Each simulator keeps its UserCfg.opt in its own place: the Microsoft Store
+// build under LOCALAPPDATA\Packages, the Steam build under APPDATA.
+inline std::filesystem::path store_options() {
+  return detail::environment(L"LOCALAPPDATA") + L"\\Packages\\Microsoft.Limitless_8wekyb3d8bbwe\\LocalCache\\UserCfg.opt";
+}
+inline std::filesystem::path steam_options() {
+  return detail::environment(L"APPDATA") + L"\\Microsoft Flight Simulator 2024\\UserCfg.opt";
+}
+// A Steam install lives under steamapps (steamapps\common\MSFS2024).
+inline bool steam_simulator(const std::filesystem::path& simulator) {
+  auto text = simulator.wstring();
+  for (auto& c : text)
+    c = static_cast<wchar_t>(towlower(c));
+  return text.find(L"\\steamapps\\") != std::wstring::npos || text.find(L"/steamapps/") != std::wstring::npos;
+}
+// The Community folder of the simulator installed at `simulator` (its folder
+// or executable), or empty. A PC can have both builds, each with its own
+// Community folder, so it is never the other build's: Steam's for a Steam
+// install; the Store's otherwise, or Steam's where the Store build has no
+// settings (an install in an unusual place).
+inline std::filesystem::path community_folder(const std::filesystem::path& simulator) {
+  if (steam_simulator(simulator))
+    return community_from(steam_options());
+  const auto store = community_from(store_options());
+  return store.empty() ? community_from(steam_options()) : store;
+}
+// Every simulator's Community folder on this PC, for the uninstaller.
+inline std::vector<std::filesystem::path> community_folders() {
+  std::vector<std::filesystem::path> out;
+  for (const auto& options : {store_options(), steam_options()})
+    if (auto community = community_from(options); !community.empty() && std::find(out.begin(), out.end(), community) == out.end())
+      out.push_back(std::move(community));
+  return out;
 }
 // The stock vcockpits package under a simulator folder, or empty.
 inline std::filesystem::path stock_package(const std::filesystem::path& simulator) {

@@ -152,6 +152,36 @@ int main() {
     require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a usable page writes it again");
     require(marks_package::remove(community) && !fs::exists(package), "the uninstaller removes our package");
     require(marks_package::remove(community), "nothing left to remove");
+
+    // A PC with both builds: each simulator's own Community folder, never
+    // the other's (Steam test, 2026-11-04: the Store's was checked while
+    // Steam ran without a package).
+    const auto local = root / "local", roaming = root / "roaming";
+    const auto store_community = root / "store-packages" / "Community", steam_community = root / "steam-packages" / "Community";
+    fs::create_directories(local / "Packages" / "Microsoft.Limitless_8wekyb3d8bbwe" / "LocalCache");
+    fs::create_directories(roaming / "Microsoft Flight Simulator 2024");
+    fs::create_directories(store_community);
+    fs::create_directories(steam_community);
+    const auto store_cfg = local / "Packages" / "Microsoft.Limitless_8wekyb3d8bbwe" / "LocalCache" / "UserCfg.opt";
+    write(store_cfg, "InstalledPackagesPath \"" + (root / "store-packages").string() + "\"\r\n");
+    write(roaming / "Microsoft Flight Simulator 2024" / "UserCfg.opt",
+          "InstalledPackagesPath \"" + (root / "steam-packages").string() + "\"\r\n");
+    wchar_t saved_local[MAX_PATH]{}, saved_roaming[MAX_PATH]{};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", saved_local, MAX_PATH);
+    GetEnvironmentVariableW(L"APPDATA", saved_roaming, MAX_PATH);
+    SetEnvironmentVariableW(L"LOCALAPPDATA", local.c_str());
+    SetEnvironmentVariableW(L"APPDATA", roaming.c_str());
+    require(marks_package::community_folder("F:\\SteamLibrary\\steamapps\\common\\MSFS2024") == steam_community &&
+                marks_package::community_folder("F:/SteamLibrary/steamapps/common/MSFS2024/FlightSimulator2024.exe") == steam_community,
+            "a Steam install uses Steam's Community folder");
+    require(marks_package::community_folder("C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content") == store_community,
+            "a Store install uses the Store's");
+    require(marks_package::community_folders() == std::vector<fs::path>{store_community, steam_community}, "the uninstaller sees both");
+    fs::remove(store_cfg);
+    require(marks_package::community_folder("C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content") == steam_community,
+            "an install without Store settings falls back to Steam's");
+    SetEnvironmentVariableW(L"LOCALAPPDATA", saved_local);
+    SetEnvironmentVariableW(L"APPDATA", saved_roaming);
     fs::remove_all(root, ignored);
   }
   std::printf("marks-package: %u checks passed\n", checks);
