@@ -3197,7 +3197,7 @@ void plan_display_submission(void*,
   // display a render target: nothing samples it before a later Execute's
   // copy, which then saves it.
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
-    const auto& shadow = r.shadows[side];
+    auto& shadow = r.shadows[side];
     if (modes[side] != ShadowMode::queue || shadow.clean)
       continue;
     const auto& target = *shadow.target;
@@ -3218,6 +3218,16 @@ void plan_display_submission(void*,
       ++restore_count;
     } else if (shadow.saved) {
       r.shadow_lost_writes.fetch_add(1, std::memory_order_relaxed);
+      // Saved on another queue, which an Execute leaving the display alone
+      // may host (a carried camera copy): nothing orders a restore here after
+      // it, so every write on this queue would miss the shadow until the
+      // camera stops, and the stop's restore would wait for that queue. Once
+      // that save has completed, the shadow is taken again on this queue (a
+      // baseline) with this Execute's camera copy.
+      if (shadow.confirmed && shadow.queue != queue) {
+        shadow.saved = shadow.confirmed = false;
+        shadow.queue = nullptr;
+      }
     }
   }
   if (!candidates && !snapshot_overlay && !restore_count && !copies) {
