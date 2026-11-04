@@ -5895,12 +5895,13 @@ void draw_page(HDC dc) {
   if (page == OverviewPage) {
     panel(dc, 244, 124, 766, 84);
     const bool unsupported = unsupported_aircraft(sample);
+    // While no displays are drawn yet, the line below says so; the heading
+    // stays short enough for the 410 left of the buttons.
     text(dc,
          connection_disconnected.load(std::memory_order_acquire) ? tr(L"Disconnected")
          : !sample.graphics_ready                                ? tr(L"Waiting for the simulator")
          : unsupported                                           ? tr(L"This aircraft is not set up yet")
-         : has_displays                                          ? tr(L"Native bridge connected")
-                                                                 : tr(L"Native bridge connected — waiting for cockpit displays"),
+                                                                 : tr(L"Native bridge connected"),
          262, 134, 410, 30, heading, unsupported || (sample.graphics_ready && has_displays) ? Accent : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
