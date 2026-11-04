@@ -1,4 +1,4 @@
-#include "../../src/app/marks_package.hpp"
+#include "../../src/setup/marks_package.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include "../../src/app/legacy_display_names.hpp"

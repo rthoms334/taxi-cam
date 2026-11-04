@@ -38,7 +38,7 @@
 #include "whats_new_image.hpp"
 #include "localization.hpp"
 #include "legacy_display_names.hpp"
-#include "marks_package.hpp"
+#include "../setup/marks_package.hpp"
 #include "area_edit.hpp"
 
 namespace {

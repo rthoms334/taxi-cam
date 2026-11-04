@@ -290,7 +290,7 @@ activity detector removed too.
 
 ## Install and update (done, 2026-11-04)
 
-`src/app/marks_package.hpp`, the helper embedded in `taxi-cam.exe` (app.rc
+`src/setup/marks_package.hpp`, the helper embedded in `taxi-cam.exe` (app.rc
 RCDATA 201):
 - Setup's `configure` writes the package (best effort, outcome in
   `setup-diagnostics.log` as "Panel marks package: …"); `uninstall` removes it

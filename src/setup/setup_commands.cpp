@@ -5,7 +5,7 @@
 #include <cwchar>
 #include <string>
 #include <vector>
-#include "../app/marks_package.hpp"
+#include "marks_package.hpp"
 #include "../shared/version.hpp"
 #include "json_writer.hpp"
 #include "prerequisites.hpp"
