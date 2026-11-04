@@ -11,7 +11,8 @@
 namespace taxi_camera::standalone {
 // "What's new" notes live in changelog.json at the repository root. The
 // companion fetches that file from main when What's new opens and shows the
-// entries at or below the installed version, newest first. A feature's picture
+// installed version's entry, then entries for newer versions under "Coming in
+// the next update", then earlier ones (whats_new_blocks). A feature's picture
 // is a file under docs/whats-new/ in the same repository, fetched the same way.
 inline constexpr std::size_t kChangelogMaxBytes = 64 * 1024, kChangelogMaxReleases = 64, kChangelogMaxChanges = 32, kChangelogMaxText = 400,
                              kChangelogMaxFeatures = 8, kChangelogMaxTitle = 80, kChangelogMaxImagePath = 120;
