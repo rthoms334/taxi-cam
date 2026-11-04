@@ -1086,35 +1086,38 @@ class DisplayMarks {
 
  private:
   static bool same(const standalone::display_keep::Point& a, const standalone::display_keep::Point& b) noexcept {
-    return a.x == b.x && a.y == b.y;
+    return a.x == b.x && a.y == b.y && a.gauge == b.gauge;
   }
   static unsigned corners(std::uint32_t profile_id,
                           std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks>& out) noexcept {
     unsigned count = 0;
-    const auto add = [&](unsigned x, unsigned y) noexcept {
+    // Gauge corners go first, so an area corner on a gauge corner stays a gauge mark.
+    const auto add = [&](unsigned x, unsigned y, bool gauge) noexcept {
       for (unsigned i = 0; i < count; ++i)
         if (out[i].x == x && out[i].y == y)
           return;
       if (count < out.size())
-        out[count++] = {x, y};
+        out[count++] = {x, y, gauge};
     };
     const auto* current = profiles::find(profile_id);
     const auto* base = profiles::base_profile(profile_id);
     if (!current)
       return 0;
-    for (unsigned side = 0; side < current->sides && side < MaxDisplaySides; ++side) {
-      for (const auto* p : {base, current}) {
-        if (!p || p->fit_texture)
-          continue;
-        const auto region = profiles::display_rect(*p, side), content = profiles::display_content_rect(*p, side);
-        add(region.left, region.top);
-        add(content.left, content.top);
+    const unsigned sides = std::min<unsigned>(current->sides, MaxDisplaySides);
+    for (const bool gauge : {true, false})
+      for (unsigned side = 0; side < sides; ++side) {
+        const auto* p = gauge ? base : current;
+        if (p && !p->fit_texture) {
+          const auto region = profiles::display_rect(*p, side), content = profiles::display_content_rect(*p, side);
+          add(region.left, region.top, gauge);
+          add(content.left, content.top, gauge);
+        } else if (current->fit_texture) {
+          if (gauge)
+            add(0, 0, true);
+          else
+            add(current->areas[side].left, current->areas[side].top, false);
+        }
       }
-      if (current->fit_texture) {
-        add(0, 0);
-        add(current->areas[side].left, current->areas[side].top);
-      }
-    }
     return count;
   }
   std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points_{};

@@ -741,14 +741,14 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     // Every panel pixel: the camera patch, the instrument's redraw colour, or
     // the panel pattern.
     namespace keep = taxi_camera::standalone::display_keep;
-    // Panel marks inside the patch: its corner, inside the redraw, and one
-    // clipped by the patch's right edge.
-    const keep::Point marks[]{{8, 4}, {12, 7}, {8 + PatchWidth - 1, 9}};
+    // Panel marks inside the patch: gauge marks at its corner and inside the
+    // redraw, and an area mark clipped by the patch's right edge.
+    const keep::Point marks[]{{8, 4, true}, {12, 7, true}, {8 + PatchWidth - 1, 9, false}};
     bool marks_listed = false, marks_painted = false;
-    const auto marked = [&](UINT x, UINT y) {
+    const auto marked = [&](UINT x, UINT y, bool gauge_only = false) {
       if (marks_listed)
         for (const auto& m : marks)
-          if (x >= m.x && x < m.x + keep::MarkWidth && y >= m.y && y < m.y + keep::MarkHeight)
+          if ((m.gauge || !gauge_only) && x >= m.x && x < m.x + keep::MarkWidth && y >= m.y && y < m.y + keep::MarkHeight)
             return true;
       return false;
     };
@@ -771,7 +771,7 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
         for (UINT x = 0; x < Width; ++x) {
           const auto* pixel = bytes + panel_footprint.Offset + y * panel_footprint.Footprint.RowPitch + x * 4;
           const bool patch = x >= 8 && x < 8 + PatchWidth && y >= 4 && y < 4 + PatchHeight;
-          const bool redrawn = (redraw && x >= 10 && x < 14 && y >= 5 && y < 9) || (marks_painted && marked(x, y));
+          const bool redrawn = (redraw && x >= 10 && x < 14 && y >= 5 && y < 9) || (marks_painted && marked(x, y, true));
           const auto own = panel_pixel(x, y);
           const std::array<std::uint8_t, 4> wanted =
               patch && camera && !marked(x, y)
@@ -881,13 +881,14 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     execute({around}, nullptr, {});
     expect(true, true, "A camera copy wrote a panel mark or missed a camera pixel");
     // A mark painted while the camera runs (here: the panel pattern turned to
-    // the redraw colour at each mark) is not in the shadow; the restore keeps
-    // it and puts back every other pixel.
+    // the redraw colour at each mark) is not in the shadow. The restore keeps
+    // the gauge marks and puts back every other pixel, the area mark included.
     auto* paint = record(0);
     transition(paint, panel.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     for (const auto& m : marks) {
-      const D3D12_RECT dot{static_cast<LONG>(m.x), static_cast<LONG>(m.y), static_cast<LONG>(m.x + keep::MarkWidth),
-                           static_cast<LONG>(m.y + keep::MarkHeight)};
+      // Clipped to the patch, like the mark itself: outside it nothing is restored.
+      const D3D12_RECT dot{static_cast<LONG>(m.x), static_cast<LONG>(m.y),
+                           static_cast<LONG>(std::min(m.x + keep::MarkWidth, 8 + PatchWidth)), static_cast<LONG>(m.y + keep::MarkHeight)};
       paint->ClearRenderTargetView(panel_rtv, colour, 1, &dot);
     }
     transition(paint, panel.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -899,7 +900,7 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     require(static_cast<bool>(kept), "Record a restore around the marks");
     execute({kept}, nullptr, {});
     marks_painted = true;
-    expect(false, true, "A restore erased a panel mark or left a camera pixel");
+    expect(false, true, "A restore erased a gauge mark, kept an area mark or left a camera pixel");
     keep::set_marks(nullptr, 0);
     marks_listed = marks_painted = false;
   }

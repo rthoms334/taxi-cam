@@ -20,19 +20,25 @@ namespace taxi_camera::standalone::display_keep {
 // Marks are texture coordinates, not tied to one texture: the worker lists
 // the gauge corners and camera-area corners of the routed displays. A mark
 // that lands on another texture costs that texture two unwritten pixels.
+// Gauge marks are fixed for the aircraft, where GlassOut paints; area marks
+// move with the camera area, and the camera may cover a new one before the
+// worker lists it. Camera writes leave out every mark; shadow restores, which
+// put back the panel's own pixels, leave out only gauge marks, so a mark
+// painted while the camera ran survives and an area mark goes back whole.
 inline constexpr unsigned MarkWidth = 2, MarkHeight = 1, MaxMarks = 16;
 // One writer (the bridge worker) and readers on simulator threads, which
 // never wait for it. List k of the published generations lives in buffer
 // k & 1; version is 2g after g publications and 2g + 1 while generation g + 1
 // is written into the other buffer.
 struct MarkList {
-  std::array<std::atomic<std::uint32_t>, MaxMarks> marks{};  // x << 16 | y
+  std::array<std::atomic<std::uint32_t>, MaxMarks> marks{};  // gauge << 31 | x << 16 | y
   std::atomic<unsigned> count{};
 };
 inline std::array<MarkList, 2> lists{};
 inline std::atomic<std::uint32_t> version{};
 struct Point {
   unsigned x = 0, y = 0;
+  bool gauge = false;
 };
 // Worker only. An empty list writes every area whole.
 inline void set_marks(const Point* points, unsigned count) noexcept {
@@ -42,7 +48,8 @@ inline void set_marks(const Point* points, unsigned count) noexcept {
   version.store(2 * published + 1, std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_release);
   for (unsigned i = 0; i < count; ++i)
-    list.marks[i].store((std::min(points[i].x, 0xffffu) << 16) | std::min(points[i].y, 0xffffu), std::memory_order_relaxed);
+    list.marks[i].store((points[i].gauge ? 1u << 31 : 0u) | (std::min(points[i].x, 0x7fffu) << 16) | std::min(points[i].y, 0xffffu),
+                        std::memory_order_relaxed);
   list.count.store(count, std::memory_order_relaxed);
   version.store(2 * published + 2, std::memory_order_release);
 }
@@ -70,14 +77,15 @@ inline unsigned read_marks(std::array<std::uint32_t, MaxMarks>& out) noexcept {
   out = last;
   return last_count;
 }
-// The pieces of an area that leave out every mark inside it, in rows from
-// top to bottom. Without a mark inside, the area itself is the only piece.
+// The pieces of an area that leave out every mark inside it (gauge_only: only
+// gauge marks), in rows from top to bottom. Without a mark inside, the area
+// itself is the only piece.
 struct Pieces {
   static constexpr unsigned Capacity = 2 * MaxMarks + 1 + MaxMarks;
   std::array<D3D12_RECT, Capacity> rects{};
   unsigned count = 0;
 };
-inline Pieces pieces(const D3D12_RECT& area) noexcept {
+inline Pieces pieces(const D3D12_RECT& area, bool gauge_only = false) noexcept {
   Pieces out;
   std::array<D3D12_RECT, MaxMarks> inside{};
   unsigned n = 0;
@@ -85,7 +93,9 @@ inline Pieces pieces(const D3D12_RECT& area) noexcept {
   const auto total = read_marks(listed);
   for (unsigned i = 0; i < total; ++i) {
     const auto value = listed[i];
-    const LONG x = static_cast<LONG>(value >> 16), y = static_cast<LONG>(value & 0xffff);
+    if (gauge_only && !(value >> 31))
+      continue;
+    const LONG x = static_cast<LONG>((value >> 16) & 0x7fff), y = static_cast<LONG>(value & 0xffff);
     const D3D12_RECT mark{std::max(x, area.left), std::max(y, area.top), std::min<LONG>(x + MarkWidth, area.right),
                           std::min<LONG>(y + MarkHeight, area.bottom)};
     if (mark.left < mark.right && mark.top < mark.bottom)
@@ -118,16 +128,17 @@ inline Pieces pieces(const D3D12_RECT& area) noexcept {
   return out;
 }
 // CopyTextureRegion of source box {0, 0, width, height} to (x, y), split
-// around the marks inside the destination area.
+// around the marks inside the destination area (gauge_only as for pieces).
 inline void copy_region(ID3D12GraphicsCommandList* list,
                         const D3D12_TEXTURE_COPY_LOCATION* destination,
                         UINT x,
                         UINT y,
                         const D3D12_TEXTURE_COPY_LOCATION* source,
                         UINT width,
-                        UINT height) noexcept {
+                        UINT height,
+                        bool gauge_only = false) noexcept {
   const D3D12_RECT area{static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + width), static_cast<LONG>(y + height)};
-  const auto split = pieces(area);
+  const auto split = pieces(area, gauge_only);
   for (unsigned i = 0; i < split.count; ++i) {
     const auto& r = split.rects[i];
     const D3D12_BOX box{static_cast<UINT>(r.left) - x,  static_cast<UINT>(r.top) - y,    0,
