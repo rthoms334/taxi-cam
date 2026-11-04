@@ -7,7 +7,8 @@
 #include "../../src/app/settings_store.hpp"
 #include "../../src/camera/aircraft_identity.hpp"
 #include "../../src/camera/view_resize.hpp"
-#include "../../src/graphics/pfd_target_detector.hpp"
+#include "../../src/graphics/pfd_observation.hpp"
+#include "../../src/profiles/catalog.hpp"
 using namespace taxi_camera;
 namespace {
 // The vertical-FOV interpretation matches the live -900 horizon/gear fit.
@@ -391,7 +392,10 @@ int main() {
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 87));
-  // The named $PFD_CPT/$PFD_FO panel textures are five-mip; no other count.
+  // Its PFD panel textures, named by their marks, are five-mip; no other count.
+  assert(std::string_view(profiles::IniA380.panel_textures[0]) == "@ini-crash-report#0/2" &&
+         std::string_view(profiles::IniA380.panel_textures[1]) == "@ini-crash-report#1/2" &&
+         std::string_view(profiles::IniA380.door_lower_texture) == "@DU#3/6");
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 5, 28));
   assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 2, 28));
   assert(!profiles::matches_display(profiles::IniA380, 768, 1024, 12, 87));
@@ -466,10 +470,12 @@ int main() {
     assert(pmdg == profile->waiting_white_text);
     // A scanned texture name implies the single-display rule. The iniBuilds
     // A340-300 texture is identified by shape only (its package is encrypted).
-    assert(!profile->display_texture[0] || profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
+    assert(!profile->display_texture[0] || profile->display_layout == profiles::DisplayLayout::shared_texture);
     if (profile->id == profiles::IniA343.id) {
-      assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display && profile->display_texture[0] == '\0');
-      assert(profile->width == 1560 && profile->height == 2340 && profile->mips == 1 && profile->sides == 3);
+      assert(profile->display_layout == profiles::DisplayLayout::shared_texture && profile->display_texture[0] == '\0');
+      assert(profile->width == 2340 && profile->height == 2340 && profile->mips == 5 && profile->sides == 3);
+      assert(std::string_view(profile->panel_textures[0]) == "@DisplayManager" &&
+             std::string_view(profile->panel_textures[2]) == "@DisplayManager");
       // 2 x 3 grid of 780 x 780 cells in ND / PFD rows; the right column holds
       // CAPT PFD (1,0), F/O PFD (1,1) and SD (1,2).
       const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1),
@@ -481,11 +487,12 @@ int main() {
         const auto content = profiles::display_content_rect(*profile, side);
         assert(content.right - content.left == 748 && content.bottom - content.top == 768);
       }
-      // The scanned display is one-mip R8G8B8A8_TYPELESS; typed views are admitted
-      // for patch output. The five-mip 2340 x 2340 texture beside it is not.
-      assert(profiles::matches_display(*profile, 1560, 2340, 1, 27) && profiles::matches_display(*profile, 1560, 2340, 1, 28));
-      assert(!profiles::matches_display(*profile, 1560, 2340, 5, 27) && !profiles::matches_display(*profile, 2340, 2340, 5, 28));
-      assert(!profiles::matches_display(*profile, 1560, 2340, 1, 10));
+      // The cameras draw on the five-mip 2340 x 2340 panel texture its marks
+      // name, not the unmarked one-mip 1560 x 2340 texture the grid is drawn
+      // on first, and Displays accepts the panel.
+      assert(profiles::matches_display(*profile, 2340, 2340, 5, 28) && profiles::named_display(*profile, 2340, 2340, 5, 28));
+      assert(!profiles::matches_display(*profile, 1560, 2340, 1, 27) && !profiles::matches_display(*profile, 2340, 2340, 1, 28));
+      assert(!profiles::matches_display(*profile, 2340, 2340, 5, 10));
       assert(profile->composition.tail_corner == profiles::AerosoftA346.composition.tail_corner);
       // The A350-900's taxi cameras, and its own door camera.
       assert(profile->mounts[0] == profiles::A359.mounts[0] && profile->mounts[1] == profiles::A359.mounts[1] &&
@@ -493,7 +500,7 @@ int main() {
       continue;
     }
     if (profile->id == profiles::AerosoftA346.id) {
-      assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
+      assert(profile->display_layout == profiles::DisplayLayout::shared_texture);
       assert(std::strcmp(profile->display_texture, "$GAUGES_UNIFIED") == 0);
       assert(profile->width == 4096 && profile->height == 4096 && profile->mips == 0 && profile->formats[0] == 0);
       assert(profile->taxi_control == profiles::TaxiControl::lvar_off);
@@ -532,7 +539,7 @@ int main() {
       assert(!profiles::matches_display(*profile, 2048, 2048, 1, 28));
       continue;
     }
-    if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
+    if (profile->display_layout == profiles::DisplayLayout::shared_texture) {
       const auto left = profiles::display_rect(*profile, 0);
       const auto right = profiles::display_rect(*profile, 1);
       assert(profile->width == 2048 && profile->height == 2048 && profile->mips == 0);
@@ -702,26 +709,10 @@ int main() {
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);
     assert(profile->composition.nose_height == 255 && profile->composition.tail_top == 259);
   }
-  static PfdTargetDetector detector;
-  detector.configure(profiles::A359);
-  std::array<PfdTargetObservation, 4> observations{
-      {{10, 0, 1644, 1024, 1, 28}, {20, 0, 1644, 1024, 1, 28}, {30, 0, 1644, 1024, 1, 28}, {40, 0, 768, 1024, 5, 28}}};
-  detector.observe(observations.data(), observations.size(), 0);
-  for (unsigned i = 1; i <= 3; ++i) {
-    observations[0].draws += 100;
-    observations[1].draws += 100;
-    observations[2].draws += 20;
-    observations[3].draws += 1000;
-    detector.observe(observations.data(), observations.size(), i * 1000);
-  }
-  assert(detector.snapshot().valid && detector.snapshot().targets[0] == 20 && detector.snapshot().targets[1] == 10);
-  detector.configure(profiles::A380);
-  assert(!detector.snapshot().valid);
-  assert(!detector.observe(observations.data(), observations.size(), 4000).valid);
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 0, 28));
   assert(!profiles::matches_display(profiles::A359, 1644, 1024, 1, 0));
   guide_settings_tests();
   std::puts(
       "PASS aircraft profiles: isolated settings, variant identity, pane dimensions, mirrored display regions, "
-      "mount geometry, guide position/colour roundtrip/bounds/defaults/isolation and detector reset");
+      "mount geometry, guide position/colour roundtrip/bounds/defaults/isolation");
 }

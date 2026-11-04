@@ -10,12 +10,11 @@
 #include <cstdint>
 
 namespace taxi_camera::standalone::display_keep {
-// Panel marks. GlassOut identifies each cockpit display by a two-pixel mark
-// its page helper paints once at the gauge's top-left corner, and checks the
-// mark in every frame it streams. A single camera write over those pixels
-// hides that display from GlassOut until it identifies panels again (live,
-// PMDG 777 DUS, 2026-11-03). Every camera write into a display, shadow
-// restores included, therefore leaves each mark inside its area alone.
+// Panel marks. Panel streaming tools can tell cockpit displays apart by the
+// two pixels at each gauge's top-left corner. A camera write over those
+// pixels stopped a display from streaming (live, PMDG 777 DUS, 2026-11-03),
+// so every camera write into a display, shadow restores included, leaves
+// each gauge corner inside its area alone.
 //
 // Marks are texture coordinates, not tied to one texture: the worker lists
 // the gauge corners and camera-area corners of the routed displays. A mark

@@ -13,7 +13,7 @@ namespace taxi_camera::profiles {
 // camera yet; the user's own choices are kept from then on.
 struct DoorTemplate {
   std::string_view family;
-  const char* panel;  // panel.cfg texture= name
+  const char* panel;  // panel-mark key (mark_identity.hpp)
   DiscoveredLayout::Shape shape;
   DisplayRect area;  // On the panel; empty for all of it.
   std::array<double, 6> mount;
@@ -21,13 +21,14 @@ struct DoorTemplate {
 };
 // Fenix A319/A320/A321: the pedestal VIDEO button (Cockpit_Behavior.xml,
 // S_PED_COCKPIT_DOOR_VIDEO, momentary) shows the cabin on the lower ECAM
-// ($A320_ECAM_Lower, 768 x 768, five mips in the 2026-11-01 setup). The area
+// ([VCockpit04] ECAM_Lower, texture=$A320_ECAM_Lower, 768 x 768, five mips in
+// the 2026-11-01 setup; marks read live 2026-11-04). The area
 // leaves the ECAM's bottom status lines (TAT, SAT, time, GW) showing below
 // the picture, as set on the user's A320 on 2026-11-02. The mount is Robert's
 // live A320 door camera (2026-11-02), behind the cockpit door looking aft and
 // down; the A319 and A321 start from it too (not checked live).
 inline constexpr std::array<DoorTemplate, 1> DoorTemplates{{{"SimObjects/Airplanes/FNX_32X",
-                                                             "$A320_ECAM_Lower",
+                                                             "@ECAM_Lower",
                                                              {768, 768, 5},
                                                              {0, 0, 768, 666},
                                                              {-0.4, 2.84, 9.4, -52.93, 166.49, 1.55},
@@ -47,7 +48,7 @@ inline const DoorTemplate* door_template(std::string_view variant) noexcept {
   return nullptr;
 }
 // Gives a layout the template's panel as its lower display (side 2); a layout
-// that already has a lower display keeps it. The panel stops being an anchor.
+// that already has a lower display keeps it.
 // False, leaving the layout unchanged, when the result is not a valid layout.
 inline bool add_door_display(DiscoveredLayout& layout, const DoorTemplate& t) noexcept {
   if (layout.sides >= MaxDisplaySides)
@@ -58,12 +59,6 @@ inline bool add_door_display(DiscoveredLayout& layout, const DoorTemplate& t) no
   next.sides = MaxDisplaySides;
   std::strcpy(next.textures[2], t.panel);
   next.shapes[2] = t.shape;
-  std::size_t kept = 0;
-  for (const auto& anchor : layout.anchors)
-    if (anchor.name[0] && std::strcmp(anchor.name, t.panel) != 0)
-      next.anchors[kept++] = anchor;
-  for (; kept < MaxPanelAnchors; ++kept)
-    next.anchors[kept] = {};
   if (!valid_layout(next))
     return false;
   layout = next;

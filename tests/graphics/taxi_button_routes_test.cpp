@@ -2,7 +2,6 @@
 #include <cstdio>
 #include <limits>
 
-#include "../../src/graphics/pfd_target_detector.hpp"
 #include "../../src/graphics/taxi_button_routes.hpp"
 
 int main() {
@@ -77,234 +76,58 @@ int main() {
   assert(routes.assign(1, 303));  // A forgotten ID may be explicitly assigned again.
   assert(routes.active_mask(true, 3u) == 2);
 
-  taxi_camera::TaxiButtonRoutes replacements;
-  assert(!replacements.adopt_detected({0, 1}));
-  assert(!replacements.adopt_detected({1, 1}));
-  taxi_camera::TaxiButtonRoutes single;
-  assert(!single.adopt_detected({77, 0}));
-  assert(!single.adopt_single(0));
-  assert((single.adopt_single(77) && single.targets == taxi_camera::TaxiButtonRoutes::Sides{77, 77, 77}));
-  assert(single.adopt_single(77) && !single.adopt_single(78));
-  assert(single.active_mask(true, 7u) == 7 && single.matches(77, 4u) && !single.matches(78, 4u));
-  taxi_camera::TaxiButtonIntent sd;
-  assert(sd.observe(10, true, 4u).buttons == 4 && sd.observe(20, true, 0xffu).buttons == 7);
-  taxi_camera::TaxiButtonRoutes chosen;
-  assert((chosen.select_single(55) && chosen.targets == taxi_camera::TaxiButtonRoutes::Sides{55, 55, 55} && chosen.assigned_mask() == 7));
-  assert(chosen.select_single(0) && chosen.assigned_mask() == 0);
-  assert((chosen.select_explicit({5, 6}) && chosen.targets == taxi_camera::TaxiButtonRoutes::Sides{5, 6, 0} && chosen.assigned_mask() == 3));
-  assert(!chosen.matches(5, 4u) && chosen.active_mask(true, 7u) == 3);
-  assert(single.active_mask(true, 3u) == 3);
-  assert(single.active_mask(true, 1u) == 1 && single.active_mask(true, 2u) == 2);
-  assert(single.matches(77, 1) && single.matches(77, 2));
-  single.forget(77);
-  assert(single.targets[0] == 0 && single.targets[1] == 0);
-  assert(single.adopt_single(77));  // Texture recreation must rebind without an Auto toggle.
-  assert((single.targets == taxi_camera::TaxiButtonRoutes::Sides{77, 77, 77}));
-  single.forget(77);
-  assert(single.assign(0, 88));
-  assert(!single.adopt_single(77));  // A surviving explicit side stays authoritative.
-  assert(replacements.adopt_detected({11569, 11170}));
-  replacements.forget(11170);
-  assert(replacements.adopt_detected({43712, 11569}));  // New right ID is larger than surviving left.
-  assert((replacements.targets == taxi_camera::TaxiButtonRoutes::Sides{11569, 43712, 0}));
-  assert(replacements.matches(11569, 1) && replacements.matches(43712, 2));
-  assert(replacements.adopt_detected({43712, 11569}));  // Reordered detections never swap live sides.
-  assert(replacements.targets[0] == 11569);
-  replacements.forget(11569);
-  assert(!replacements.adopt_detected({60000, 50000}));  // A pair without the survivor cannot replace it.
-  assert(replacements.targets[0] == 0 && replacements.targets[1] == 43712);
-  assert(replacements.adopt_detected({60000, 43712}));  // Symmetric left-only replacement.
-  assert(replacements.targets[0] == 60000 && replacements.targets[1] == 43712);
-  replacements.forget(60000);
-  replacements.forget(43712);
-  assert(!replacements.adopt_detected({80000, 70000}));       // Both lost: no new creation-order guess.
-  assert(replacements.adopt_detected({70000, 80000}, true));  // Exact names restore semantic identity.
-  assert(replacements.targets[0] == 70000 && replacements.targets[1] == 80000);
-  replacements.forget(70000);
-  replacements.forget(80000);
-  assert(replacements.assign(1, 90000));
-  assert(replacements.adopt_detected({100000, 90000}));  // Explicit manual side remains authoritative.
-  assert(replacements.targets[1] == 90000);
-
-  // Existing live A350 textures stay eligible across the deliberate A35K ->
-  // A359 profile change. Clearing only public IDs used to leave assigned_ set,
-  // permanently refusing even a newly confirmed pair in the new profile.
-  static taxi_camera::PfdTargetDetector profile_detector;
-  taxi_camera::TaxiButtonRoutes profile_routes;
-  std::array<taxi_camera::PfdTargetObservation, 2> live{{{280, 10000, 1644, 1024, 1, 27}, {279, 9000, 1644, 1024, 1, 27}}};
-  std::uint64_t now = 10000;
-  const auto confirm = [&](const taxi_camera::profiles::AircraftProfile& profile) {
-    profile_detector.configure(profile);
-    assert(!profile_detector.observe(live.data(), live.size(), now).valid);
-    for (unsigned window = 1; window <= 3; ++window) {
-      live[0].draws += 100;
-      live[1].draws += 90;
-      now += 1000;
-      const auto& observed = profile_detector.observe(live.data(), live.size(), now);
-      assert(observed.valid == (window == 3));
-    }
-    return profile_detector.snapshot().targets;
-  };
-  const auto old_pair = confirm(taxi_camera::profiles::A35K);
-  assert(profile_routes.adopt_detected(old_pair));
-  assert((old_pair == std::array<std::uint64_t, 2>{280, 279}));
-  profile_routes.reset();  // Same operation used by the deliberate profile switch.
-  assert(profile_routes.active_mask(true, 3u) == 0);
-  const auto new_pair = confirm(taxi_camera::profiles::A359);
-  assert(new_pair == old_pair);  // No new texture creation is required.
-  assert(profile_routes.adopt_detected(new_pair));
-  assert(profile_routes.active_mask(true, 3u) == 3);
-  assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
-  profile_routes.forget(280);
-  profile_routes.forget(279);
-  assert(!profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
-  assert(profile_routes.active_mask(true, 3u) == 0);  // Ordinary both-lost remains ambiguous.
-  profile_routes.reset();                                     // A deliberate reload of the same aircraft releases old ownership.
-  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
-  assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
-  profile_routes.reset();
-  live = {{{380, 0, 768, 1024, 5, 28}, {379, 0, 768, 1024, 5, 28}}};
-  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A380)));
-  assert(profile_routes.matches(380, 1) && profile_routes.matches(379, 2));
-  profile_routes.reset();
-  live = {{{480, 0, 1644, 1024, 1, 27}, {479, 0, 1644, 1024, 1, 27}}};
-  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
-  assert(profile_routes.matches(480, 1) && profile_routes.matches(479, 2));
-  profile_routes.reset();
-  assert(!profile_routes.adopt_detected({0, 279}));
-  assert(!profile_routes.adopt_detected({280, 280}));
-  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A35K)));
-  std::puts("Aircraft session reacquisition: PASS; same-aircraft reload, A350/A380 round trip, ordinary both-lost still refused");
-  // An explicit partial choice is authoritative for that side, independent of
-  // detector ordering. Zero is Auto, never a resource identity.
-  taxi_camera::TaxiButtonRoutes selections;
-  assert(selections.select_explicit({280, 279}));
-  assert(!selections.select_explicit({280, 280}));
-  assert((selections.targets == taxi_camera::TaxiButtonRoutes::Sides{280, 279}));
-  assert(selections.select_explicit({280, 0}));
-  assert(selections.active_mask(true, 3u) == 1);
-  assert(!selections.adopt_detected({800, 700}));  // No matching manual anchor.
-  assert(selections.targets[0] == 280 && selections.targets[1] == 0);
-  assert(selections.adopt_detected({900, 280}));
-  assert(selections.targets[0] == 280 && selections.targets[1] == 900);
-  assert(selections.select_explicit({0, 279}));
-  assert(selections.active_mask(true, 3u) == 2);
-  assert(selections.adopt_detected({279, 901}));
-  assert(selections.targets[0] == 901 && selections.targets[1] == 279);
-  selections.forget(901);
-  selections.forget(279);
-  assert(!selections.adopt_detected({902, 903}));  // Ordinary destruction still refuses.
-  assert(selections.select_explicit({0, 0}));
-  assert(selections.active_mask(true, 3u) == 0);
-  assert(selections.adopt_detected({902, 903}));  // Explicit both-Auto releases old ownership.
-  assert(selections.targets[0] == 902 && selections.targets[1] == 903);
-  assert(!selections.select_explicit({904, 904}));
-  assert(selections.targets[0] == 902 && selections.targets[1] == 903);
-  assert(selections.select_explicit({903, 902}));  // Explicit swap replaces both atomically.
-  assert(selections.matches(903, 1) && selections.matches(902, 2));
-  // Losing the complete ini allocation group withdraws only heuristic sides.
-  // It does not weaken manual anchors or the existing both-lost refusal.
-  taxi_camera::TaxiButtonRoutes ranked;
-  assert(ranked.adopt_detected({211, 209}));
-  ranked.forget_detected();
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{0, 0}));
-  assert(!ranked.adopt_detected({311, 309}));
-  assert(ranked.select_explicit({0, 0}));
-  assert(ranked.adopt_detected({311, 309}));
-  assert(ranked.assign(0, 311));  // Making one side explicit preserves it.
-  ranked.forget_detected();
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{311, 0}));
-  assert(ranked.adopt_detected({411, 311}));
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{311, 411}));
-  ranked.forget_detected();
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{311, 0}));
-  assert(ranked.select_explicit({0, 509}));
-  assert(ranked.adopt_detected({511, 509}));
-  ranked.forget_detected();
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{0, 509}));
-  assert(ranked.select_explicit({511, 509}));
-  ranked.forget_detected();
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{511, 509}));
-  ranked.reset();
-  assert(ranked.adopt_detected({611, 609}, true));  // Semantic names are not rank evidence.
-  ranked.forget_detected();
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{611, 609}));
-  ranked.reset();
-  assert(ranked.adopt_detected({711, 709}));
-  assert(!ranked.select_explicit({711, 711}));
-  ranked.forget_detected();
-  assert((ranked.targets == taxi_camera::TaxiButtonRoutes::Sides{0, 0}));
-  std::puts("Ranked auto selection invalidation: PASS; explicit and semantic sides preserved, both-lost still refused");
-  taxi_camera::TaxiButtonRoutes recovered;
-  assert(recovered.adopt_detected({20, 18}));
-  recovered.forget(18);
-  assert(!recovered.adopt_detected({30, 28}));
-  assert(recovered.replace_detected({30, 28}));
-  recovered.forget(28);
-  assert(recovered.replace_detected({40, 38}));  // Repeated recovery keeps automatic provenance.
-  assert(recovered.select_explicit({40, 0}));    // Same as old automatic still becomes explicit.
-  assert(!recovered.replace_detected({50, 48}));
-  recovered.forget_detected();
-  assert((recovered.targets == taxi_camera::TaxiButtonRoutes::Sides{40, 0}));
-  assert(recovered.select_explicit({0, 38}));
-  assert(!recovered.replace_detected({50, 48}));
-  assert((recovered.targets == taxi_camera::TaxiButtonRoutes::Sides{0, 38}));
-  recovered.reset();
-  assert(!recovered.replace_detected({0, 48}) && !recovered.replace_detected({50, 50}));
-  assert(recovered.replace_detected({50, 48}));
-  recovered.forget_detected();
-  assert((recovered.targets == taxi_camera::TaxiButtonRoutes::Sides{0, 0}));
-  assert(recovered.adopt_detected({60, 58}, true));
-  recovered.forget(58);
-  assert(!recovered.replace_detected({70, 68}));  // Semantic identity is also authoritative.
-  std::puts("Ranked fallback recovery: PASS; automatic provenance retained, explicit single sides preserved");
-  std::puts("Explicit manual/Auto routing: PASS; partial anchors preserved, duplicate pair unchanged");
-  // PMDG 777: both NDs share DUS; the lower DU is a separate EICASCDU texture.
   using Sides = taxi_camera::TaxiButtonRoutes::Sides;
-  taxi_camera::TaxiButtonRoutes lower;
-  assert(lower.adopt_single(272, true) && (lower.targets == Sides{272, 272, 0}));
-  assert(lower.adopt_single(272, true) && !lower.adopt_single(273, true));
-  assert(lower.active_mask(true, 7u) == 3);
-  assert(!lower.adopt_lower(0) && !lower.adopt_lower(272));  // Never the ND texture.
-  assert(lower.adopt_lower(271) && lower.adopt_lower(271) && !lower.adopt_lower(270));
-  assert((lower.targets == Sides{272, 272, 271}) && !lower.lower_explicit());
-  assert(lower.active_mask(true, 4u) == 4 && lower.active_mask(true, 7u) == 7 && lower.active_mask(false, 7u) == 0);
-  assert(lower.matches(271, 4) && !lower.matches(271, 3) && lower.matches(272, 1) && !lower.matches(272, 4));
-  assert(!lower.select_lower(272));  // The lower slot never takes the ND texture.
-  assert(lower.select_lower(270) && lower.lower_explicit() && lower.targets[2] == 270);
-  assert(!lower.adopt_lower(271) && lower.targets[2] == 270);  // Explicit choice is kept.
-  assert(!lower.select_single(270, true));                     // Taken by the lower slot.
-  assert(lower.select_single(269, true) && (lower.targets == Sides{269, 269, 270}));
-  lower.forget(270);
-  assert(lower.targets[2] == 0 && !lower.lower_explicit() && lower.active_mask(true, 4u) == 0);
-  assert(lower.adopt_lower(271));  // A lone lower texture rebinds automatically.
-  lower.forget(269);
-  assert(lower.adopt_single(268, true) && (lower.targets == Sides{268, 268, 271}));  // ND rebinds; lower kept.
-  assert(lower.select_single(0, true) && (lower.targets == Sides{0, 0, 271}));
-  // A transient texture shifted the order: the automatic lower guess holds the
-  // display a later detection confirms. The display wins; explicit choices stay.
-  taxi_camera::TaxiButtonRoutes shifted;
-  assert(shifted.adopt_single(299, true) && shifted.adopt_lower(229));
-  shifted.forget(299);
-  assert(shifted.adopt_single(229, true) && (shifted.targets == Sides{229, 229, 0}));
-  assert(shifted.adopt_lower(228) && (shifted.targets == Sides{229, 229, 228}));
-  taxi_camera::TaxiButtonRoutes explicit_choice;
-  assert(explicit_choice.select_lower(229) && !explicit_choice.adopt_single(229, true) && (explicit_choice.targets == Sides{0, 0, 229}));
-  // Without a separate lower texture every side still shares one texture.
+  // Displays are routed by the names their panel marks give them.
+  taxi_camera::TaxiButtonRoutes named;
+  assert(!named.adopt_named({0, 0, 0}, 2) && named.active_mask(true, 3u) == 0);
+  assert(named.adopt_named({280, 279, 0}, 2) && (named.targets == Sides{280, 279, 0}) && named.named(0) && named.named(1));
+  assert(!named.adopt_named({280, 279, 0}, 2));  // Nothing changed.
+  named.forget(280);
+  assert((named.targets == Sides{0, 279, 0}) && !named.named(0) && named.active_mask(true, 3u) == 2);
+  assert(named.adopt_named({281, 279, 0}, 2) && (named.targets == Sides{281, 279, 0}));  // A recreated texture takes its name.
+  assert(named.adopt_named({279, 281, 0}, 2) && (named.targets == Sides{279, 281, 0}));  // Swapped names move both sides at once.
+  // An explicit choice wins over a name, side by side.
+  assert(named.select_explicit({500, 0}) && !named.named(0));
+  assert(named.adopt_named({279, 281, 0}, 2) && (named.targets == Sides{500, 281, 0}));
+  // A texture the user put on one side never also serves another by name.
+  assert(named.select_explicit({281, 0}));
+  assert(!named.adopt_named({279, 281, 0}, 2) && named.targets[1] == 0);
+  assert(named.targets[0] == 281);
+  assert(!named.select_explicit({904, 904}) && named.targets[0] == 281);
+  assert(named.select_explicit({0, 0}) && named.adopt_named({279, 281, 0}, 2) && (named.targets == Sides{279, 281, 0}));
+  assert(named.select_explicit({281, 279}) && named.matches(281, 1) && named.matches(279, 2));  // Explicit swap replaces both.
+  assert(!named.adopt_named({279, 281, 0}, 2) && (named.targets == Sides{281, 279, 0}));
+  named.reset();  // A profile change or reload releases the old sides.
+  assert(named.active_mask(true, 3u) == 0 && named.adopt_named({480, 479, 0}, 2) && named.matches(480, 1));
+  std::puts("Named routing: PASS; names adopted, recreated and swapped; explicit sides authoritative");
+  // PMDG 777: both NDs share DUS; the lower DU is a separate EICASCDU texture.
+  taxi_camera::TaxiButtonRoutes dus;
+  assert(dus.adopt_named({229, 229, 228}, 3) && (dus.targets == Sides{229, 229, 228}) && dus.active_mask(true, 7u) == 7);
+  assert(dus.matches(228, 4) && !dus.matches(228, 3) && dus.matches(229, 1) && !dus.matches(229, 4));
+  assert(!dus.select_lower(229));  // The lower slot never takes the ND texture.
+  assert(dus.select_lower(227) && dus.lower_explicit());
+  assert(!dus.adopt_named({229, 229, 228}, 3) && dus.targets[2] == 227);  // Explicit lower kept.
+  assert(!dus.select_single(227, true));                                  // Taken by the lower slot.
+  assert(dus.select_single(230, true) && (dus.targets == Sides{230, 230, 227}));
+  assert(!dus.adopt_named({229, 229, 228}, 3) && dus.targets[0] == 230);
+  dus.forget(227);
+  assert(dus.targets[2] == 0 && !dus.lower_explicit());
+  assert(dus.adopt_named({229, 229, 228}, 3) && dus.targets[2] == 228);  // The lower DU takes its name again.
+  assert(dus.select_single(0, true) && dus.adopt_named({229, 229, 228}, 3) && (dus.targets == Sides{229, 229, 228}));
+  // Without a separate lower texture every side shares one texture.
   taxi_camera::TaxiButtonRoutes shared;
-  assert(shared.adopt_single(55) && (shared.targets == Sides{55, 55, 55}));
-  std::puts("Lower DU routing: PASS; separate texture, explicit choice kept, automatic rebind, shared profiles unchanged");
-  // A pilot pair's placed lower display, found by name, leaves the pair to
-  // detection; detection and an explicit pair keep it; destruction frees it.
+  assert(shared.select_single(55) && (shared.targets == Sides{55, 55, 55}) && shared.assigned_mask() == 7);
+  assert(shared.select_single(0) && shared.assigned_mask() == 0);
+  assert(shared.adopt_named({56, 56, 56}, 3) && (shared.targets == Sides{56, 56, 56}));
+  std::puts("Lower DU routing: PASS; separate texture, explicit choice kept, names rebind");
+  // A pilot pair's placed lower display, found by name; an explicit pair keeps it.
   taxi_camera::TaxiButtonRoutes placed;
   assert(placed.adopt_named({0, 0, 901}, 3) && placed.named(2) && (placed.targets == Sides{0, 0, 901}));
-  assert(placed.adopt_detected({701, 702}) && (placed.targets == Sides{701, 702, 901}));
   assert(placed.select_explicit({702, 701}) && (placed.targets == Sides{702, 701, 901}));
-  taxi_camera::TaxiButtonRoutes taken;
-  assert(taken.adopt_named({0, 0, 901}, 3) && !taken.adopt_detected({901, 702}) && (taken.targets == Sides{0, 0, 901}));
-  assert(taken.adopt_detected({701, 702}) && (taken.targets == Sides{701, 702, 901}));
-  taken.forget(901);
-  assert((taken.targets == Sides{701, 702, 0}) && taken.adopt_named({0, 0, 905}, 3) && (taken.targets == Sides{701, 702, 905}));
-  std::puts("Placed lower display: PASS; named alone, pair still detected, kept by detection and explicit choices");
+  placed.forget(901);
+  assert((placed.targets == Sides{702, 701, 0}) && placed.adopt_named({0, 0, 905}, 3) && (placed.targets == Sides{702, 701, 905}));
+  std::puts("Placed lower display: PASS; named alone, kept by explicit choices");
+  taxi_camera::TaxiButtonIntent sd;
+  assert(sd.observe(10, true, 4u).buttons == 4 && sd.observe(20, true, 0xffu).buttons == 7);
   std::puts("Taxi button routes: PASS");
 }

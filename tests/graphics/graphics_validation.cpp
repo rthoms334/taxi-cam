@@ -1059,23 +1059,19 @@ void native_case(bool warp,
     for (const auto& item : win::pfd_inventory())
       require(item.draws != 0, "All eight pre-existing typeless displays recover their actual application RTV association");
   win::discover_pfds(GetTickCount64());
-  const auto learned_pair = win::target_ids();
-  if (a350) {
-    // This pixel fixture has only two typed surfaces and no native draws yet.
-    // It must not masquerade as the complete powered three-EFIS group. The
-    // explicit assignments below still exercise every camera/calibration path.
-    require(!learned_pair[0] && !learned_pair[1], "Incomplete idle A350 fixture cannot bypass EFIS-group automatic confirmation");
-  } else if (profile.pfd_detection == taxi_camera::profiles::PfdDetectionPolicy::dominant_activity) {
-    require(learned_pair[0] && learned_pair[1] && learned_pair[0] != learned_pair[1],
-            "Exactly two learned displays adopt so ready and calibration have targets");
-  } else {
+  require(!win::target_ids()[0] && !win::target_ids()[1], "Displays are never guessed from activity: no named texture, no route");
+  if (!a350) {
+    // Displays are routed by the names their panel marks give them
+    // (bridge_main.cpp service_mark_identity publishes them).
     std::array<std::uint64_t, 8> learned_ids{};
     const auto learned = win::pfd_inventory();
-    for (std::size_t i = 0; i < learned.size(); ++i)
+    for (std::size_t i = 0; i < learned.size() && i < learned_ids.size(); ++i)
       learned_ids[i] = learned[i].id;
-    std::sort(learned_ids.begin(), learned_ids.end());
-    require(learned_pair == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{learned_ids[7], learned_ids[5]},
-            "Complete late-discovered ini group retains automatic last and third-last selection");
+    std::sort(learned_ids.begin(), learned_ids.begin() + std::min<std::size_t>(learned.size(), learned_ids.size()));
+    win::set_named_targets({learned_ids[1], learned_ids[0], 0});
+    win::discover_pfds(GetTickCount64());
+    require(win::target_ids()[0] == learned_ids[1] && win::target_ids()[1] == learned_ids[0],
+            "Named displays adopt so ready and calibration have targets");
   }
   const auto key = win::graphics_status().device;
   const auto successful_copies = [] {
@@ -2629,14 +2625,16 @@ void native_case(bool warp,
     require(typed == 8, "Learn-on-use admits the complete ini A380 allocation group");
     std::sort(group_ids.begin(), group_ids.end());
     win::discover_pfds(GetTickCount64());
+    require(!win::target_ids()[0] && !win::target_ids()[1], "A complete allocation group is not guessed from creation order");
+    win::set_named_targets({group_ids[7], group_ids[5], 0});
+    win::discover_pfds(GetTickCount64());
     const auto complete_pair = win::target_ids();
-    require(complete_pair[0] == group_ids[7] && complete_pair[1] == group_ids[5],
-            "Complete idle allocation group adopts last/third-last so ready and calibration have targets");
-    require(win::assign_targets(group_ids[0], 0), "Explicit singleton outside the automatic ranked pair");
+    require(complete_pair[0] == group_ids[7] && complete_pair[1] == group_ids[5], "Named displays of the group adopt");
+    require(win::assign_targets(group_ids[0], 0), "Explicit singleton outside the named pair");
     win::discover_pfds(GetTickCount64());
     const auto recovered = win::target_ids();
-    require(recovered[0] == group_ids[0] && recovered[1] == 0,
-            "Explicit singleton remains selected while the unassigned side waits for compatible automatic evidence");
+    require(recovered[0] == group_ids[0] && recovered[1] == group_ids[5],
+            "An explicit side stays selected; the other keeps its named texture");
   }
   std::printf(
       "PASS native %s: private patch copies, legacy/enhanced boundaries, replay, profile-admitted typed formats, query OFF==ON, exact "

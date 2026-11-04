@@ -956,20 +956,6 @@ void inventory_checks() {
   require(complete.size() == resources.size(), "UI inventory must retain the full resource set beyond the IPC display limit");
   require(std::is_sorted(complete.begin(), complete.end(), [](const auto& a, const auto& b) { return a.draws > b.draws; }),
           "Inventory must preserve descending draw ranking after sorting outside the lock");
-  auto direct = std::make_unique<taxi_camera::PfdTargetDetector>();
-  auto from_ui = std::make_unique<taxi_camera::PfdTargetDetector>();
-  direct->configure(*r.profile);
-  from_ui->configure(*r.profile);
-  for (std::uint64_t time : {1000, 2000, 3000, 4000}) {
-    resources[3]->draws += 100;
-    resources[17]->draws += 100;
-    const auto snapshot = win::pfd_inventory_locked(r), sorted = win::pfd_inventory();
-    const auto& a = direct->observe(snapshot.data(), snapshot.size(), time);
-    const auto& b = from_ui->observe(sorted.data(), sorted.size(), time);
-    require(a.valid == b.valid && a.targets == b.targets && a.stable_windows == b.stable_windows,
-            "Detector outcome must be identical for complete unsorted metadata and UI-ranked inventory");
-  }
-  require(direct->snapshot().valid, "Complete unsorted inventory must still produce an active stable target pair");
   for (const auto& item : resources)
     r.resources.erase(item->native);
 }

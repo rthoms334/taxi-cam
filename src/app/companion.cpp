@@ -11,6 +11,7 @@
 #include <atomic>
 #include <climits>
 #include <cwchar>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,13 +38,16 @@
 #include "changelog_fetch.hpp"
 #include "whats_new_image.hpp"
 #include "localization.hpp"
+#include "legacy_display_names.hpp"
+#include "../setup/marks_package.hpp"
+#include "area_edit.hpp"
 
 namespace {
 using namespace taxi_camera;
 namespace win = standalone;
 using win::decimal, win::tr, win::tr_format;
 constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, WhatsNewImageMessage = WM_APP + 4,
-               ExitWithSimulatorMessage = WM_APP + 5;
+               ExitWithSimulatorMessage = WM_APP + 5, AreaPickerMessage = WM_APP + 6;
 constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CAM_VERSION_MINOR, TAXI_CAM_VERSION_PATCH};
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
@@ -460,7 +464,7 @@ double number(int id, double previous, bool& ok) {
 }
 bool single_display_profile(const win::Settings& s) noexcept {
   const auto* profile = profiles::find(s.profile);
-  return profile && profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+  return profile && profile->display_layout == profiles::DisplayLayout::shared_texture;
 }
 // Indexed by CameraMode; CameraModeOrder is the left-to-right card order.
 constexpr const wchar_t* CameraModeNames[]{ui_text(L"Performance"), ui_text(L"Balanced"), ui_text(L"Smooth"), ui_text(L"Custom"),
@@ -1346,7 +1350,7 @@ void release_snapshot_image() {
 }
 // Texture each display side is routed to, from the bridge's status.
 std::array<std::uint64_t, MaxDisplaySides> routed_texture_ids(const win::Status& sample, const profiles::AircraftProfile& profile) {
-  const bool single = profile.pfd_detection == profiles::PfdDetectionPolicy::single_display;
+  const bool single = profile.display_layout == profiles::DisplayLayout::shared_texture;
   return {sample.left_id, single ? sample.left_id : sample.right_id,
           profiles::own_lower_texture(profile) ? sample.lower_id : sample.left_id};
 }
@@ -1856,6 +1860,9 @@ struct AircraftSetup {
   std::string picked;
   std::uint64_t picked_texture{};
   std::array<std::uint64_t, MaxDisplaySides> textures{};
+  // Each display's area on its panel (Display area picker), empty for the
+  // display's own. Saved with the picks (apply_setup_areas).
+  std::array<profiles::DisplayRect, MaxDisplaySides> areas{};
   bool dragging{};
   int drag_slot = -1;
   POINT drag_from{};
@@ -1961,6 +1968,7 @@ void sync_setup(const win::Status& sample) {
   setup.stored = setup.unsaved = setup.leave_warned = false;
   setup.manual_before = setup.door_on_before = 0;
   setup.names = {};
+  setup.areas = {};
   // Each display starts on the texture it uses in this flight: the one the
   // user placed, else the bridge's.
   setup.textures = {s.left_id ? s.left_id : sample.left_id, s.right_id ? s.right_id : sample.right_id, sample.lower_id};
@@ -1973,12 +1981,16 @@ void sync_setup(const win::Status& sample) {
   if (const auto* built_in = setup.built_in ? profiles::find(setup.built_in) : nullptr) {
     for (unsigned side = 0; side < MaxDisplaySides; ++side)
       setup.names[side] = side < built_in->sides && built_in->panel_textures[side] ? built_in->panel_textures[side] : "";
+    if (s.profile == setup.built_in)
+      setup.areas = std::to_array(s.display_override.areas);
     return;
   }
   // The selected set-up aircraft, when it is the one loaded or none is yet.
   if (s.profile == profiles::DiscoveredProfileId && (!key[0] || profiles::same_variant(key.data(), s.discovered.key)))
-    for (unsigned side = 0; side < s.discovered.sides && side < MaxDisplaySides; ++side)
+    for (unsigned side = 0; side < s.discovered.sides && side < MaxDisplaySides; ++side) {
       setup.names[side] = s.discovered.textures[side];
+      setup.areas[side] = s.display_override.areas[side];
+    }
 }
 // A set-up aircraft's displays: the lower one only when a panel is on it.
 unsigned placed_sides() {
@@ -1992,19 +2004,17 @@ std::wstring setup_aircraft_name() {
   const auto* profile = profiles::find(draft().profile);
   return profile ? std::wstring(profile->name) : std::wstring(tr(L"this aircraft"));
 }
-// The aircraft loaded is the selected profile's, with names of its own,
-// and the bridge could not pair them in this flight (panel_shift).
-bool names_unpaired(const win::Status& sample) {
-  if (sample.panel_shift >= 0 || static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::paired)
-    return false;
-  // The saved profile: a setup's trial runs the picks themselves, which are
-  // not names saved for this aircraft.
-  const auto s = setup.trial ? setup.before : draft();
-  if (const auto* built_in = setup.built_in ? profiles::find(setup.built_in) : nullptr)
-    return built_in->panel_textures[0] && built_in->panel_textures[0][0];
-  return s.profile == profiles::DiscoveredProfileId && setup.key[0] && profiles::same_variant(setup.key.data(), s.discovered.key);
-}
 // What stops the setup now; empty when the picks can be saved.
+// The bridge pictured cockpit panels and none carried a mark: the panel
+// marks package is not loaded in this simulator session.
+const wchar_t* package_inactive_text() {
+  return tr(
+      L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the "
+      L"simulator; if that doesn't help, run the Taxi Cam installer again.");
+}
+bool package_inactive(const win::Status& sample) {
+  return fresh_status(sample) && static_cast<win::PanelMapState>(sample.panel_state) == win::PanelMapState::inactive;
+}
 std::wstring setup_blocker(const win::Status& sample) {
   // Pictures and the panel list need the bridge connection.
   if (!fresh_status(sample) || !sample.graphics_ready || !draft().enabled)
@@ -2013,36 +2023,18 @@ std::wstring setup_blocker(const win::Status& sample) {
     return tr(L"Waiting for the simulator to report which aircraft is loaded.");
   if (!sample.panel_discovery)
     return tr(L"Waiting for the bridge to track this cockpit's panels.");
-  switch (static_cast<win::PanelMapState>(sample.panel_state)) {
-    case win::PanelMapState::waiting:
-      return tr(L"Reading this cockpit's panels. This takes a few seconds after the flight has loaded.");
-    case win::PanelMapState::unavailable:
-    case win::PanelMapState::unresolved:
-      return tr(L"Taxi Cam cannot read this cockpit's panel list in this simulator version, so this aircraft cannot be set up yet.");
-    case win::PanelMapState::incomplete:
-      return tr(L"This cockpit's panel list is not complete. Wait a few seconds after the cockpit has loaded.");
-    case win::PanelMapState::paired:
-      break;
-  }
-  // The saved names of the aircraft loaded did not pair this flight
-  // (panel_shift): the names under the pictures can be off, so none are
-  // saved. What is placed is still used, by picture, for this flight.
-  if (names_unpaired(sample))
-    return tr(
-        L"This flight's panel names don't match their pictures, so displays can't be saved now. What you place is used until "
-        L"Taxi Cam closes.");
-  // A built-in profile's names are its own, so no clean load is needed.
-  if (!sample.panel_clean && !setup.built_in)
-    return tr(
-        L"Another aircraft was loaded before this one in this simulator session, so panel names can be one texture off. "
-        L"Restart the simulator, load this aircraft first, then set it up.");
+  if (package_inactive(sample))
+    return package_inactive_text();
+  // Panels are named by the marks their pages paint when they load.
+  if (static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::marked)
+    return tr(L"Reading this cockpit's panels. This takes a few seconds after the flight has loaded.");
   return {};
 }
 // A built-in profile's choices from the picks: a pick that is the profile's
 // own panel is no choice, so the profile stays as it comes.
 profiles::DisplayOverride built_in_choices(const profiles::AircraftProfile& base, profiles::DisplayOverride choices) {
   // A pilot pair's side 2: the lower display the user placed.
-  const unsigned sides = base.sides == 2 && profiles::pair_detection(base) ? MaxDisplaySides : base.sides;
+  const unsigned sides = base.sides == 2 && profiles::pilot_pair(base) ? MaxDisplaySides : base.sides;
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     std::fill(std::begin(choices.textures[side]), std::end(choices.textures[side]), '\0');
     const auto& pick = setup.names[side];
@@ -2085,6 +2077,12 @@ void preview_cameras(win::Settings& s, unsigned placed) {
 // An aircraft being set up runs the trial from its first placed display,
 // with the cameras on every placed display not tested: they show before the
 // setup is saved, and saving that layout keeps them running (no restart).
+// The displays' areas from the picker, onto settings about to be saved or
+// tried: a display without a panel has none.
+void apply_setup_areas(win::Settings& s) {
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
+    s.display_override.areas[side] = setup.names[side].empty() ? profiles::DisplayRect{} : setup.areas[side];
+}
 void apply_setup_trial() {
   win::Status sample;
   {
@@ -2105,6 +2103,7 @@ void apply_setup_trial() {
     if (!setup.trial)
       setup.before = s;
     s.display_override = built_in_choices(*base, s.display_override);
+    apply_setup_areas(s);
     win::fit_door_camera(s);
     s.calibration_mask = setup.testing & ((1u << profiles::override_sides(*base, s.display_override)) - 1);
     s.manual_mask = s.taxi_selected_mask = s.taxi_desired_mask = 0;
@@ -2131,7 +2130,7 @@ void apply_setup_trial() {
   for (unsigned side = 0; side < sides; ++side)
     names[side] = setup.names[side].empty() ? fallback : setup.names[side].c_str();
   profiles::DiscoveredLayout layout;
-  if (!fallback || win::learn_layout(sample, names, sides, layout, false) != win::LayoutLearning::learned) {
+  if (!fallback || win::learn_layout(sample, names, sides, layout) != win::LayoutLearning::learned) {
     // Without a test asked for, the cameras wait for a placed display, and a
     // test just turned off takes its bars down (the map may be pairing again).
     if (!setup.testing) {
@@ -2153,6 +2152,7 @@ void apply_setup_trial() {
     setup.before = s;
   s.profile = profiles::DiscoveredProfileId;
   s.discovered = layout;
+  apply_setup_areas(s);
   win::fit_door_camera(s);
   s.calibration_mask = setup.testing & ((1u << sides) - 1);
   preview_cameras(s, placed & ~s.calibration_mask);
@@ -2204,6 +2204,315 @@ void route_placed_displays() {
 bool store_aircraft_setup(const win::Status& sample, bool quiet);
 bool save_setup_picks(const win::Status& sample, bool quiet);
 void apply_setup_picks();
+// Displays: a display's area, picked over a large picture of its panel. Each
+// gauge the panel's marks name is outlined and labelled; a click on one makes
+// it the area, and the frame's handles resize it and its inside moves it.
+// Done keeps it for the display (setup.areas), saved with the picks.
+struct AreaPicker {
+  unsigned side{};
+  bool ready{}, dragging{}, done{};
+  profiles::DisplayRect area{}, start{};
+  int handle = -1;
+  POINT from{};
+  unsigned texture_width{}, texture_height{};
+  win::area_edit::Limits limits{};
+  std::vector<std::pair<std::wstring, profiles::DisplayRect>> gauges;
+} area_picker;
+constexpr int AreaPickerWholeId = 713, AreaPickerInfoId = 712;
+// The picture's place in the dialog: the snapshot fitted into its well.
+RECT area_picker_picture() {
+  const auto well = rectangle(20, 92, 860, 520);
+  if (!snapshot_view.image || snapshot_view.width <= 0 || snapshot_view.height <= 0)
+    return well;
+  const int ww = well.right - well.left, wh = well.bottom - well.top;
+  const double fit = std::min(double(ww) / snapshot_view.width, double(wh) / snapshot_view.height);
+  const int w = std::max(1, int(snapshot_view.width * fit)), h = std::max(1, int(snapshot_view.height * fit));
+  const int left = well.left + (ww - w) / 2, top = well.top + (wh - h) / 2;
+  return {left, top, left + w, top + h};
+}
+// The display's own area when nothing is chosen: a built-in profile's region
+// on its own panel, else the whole panel.
+profiles::DisplayRect own_setup_area(unsigned side, unsigned tw, unsigned th) {
+  const auto* base = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr;
+  if (base && side < base->sides && base->panel_textures[side] && setup.names[side] == base->panel_textures[side])
+    return profiles::display_rect(*base, side);
+  return {0, 0, tw, th};
+}
+// The texture a display's picture is taken from.
+std::uint64_t setup_side_texture(unsigned side) {
+  if (side < MaxDisplaySides && setup.textures[side])
+    return setup.textures[side];
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  return picked_id(setup_items(sample), side);
+}
+// Once the picture is in: the texture's size, its gauges, and the area to
+// start from (the one chosen, else the display's own, else a lone gauge).
+void prepare_area_picker(const win::Status& sample) {
+  auto& p = area_picker;
+  p.texture_width = sample.snapshot_width;
+  p.texture_height = sample.snapshot_height;
+  const int tw = static_cast<int>(p.texture_width), th = static_cast<int>(p.texture_height);
+  p.gauges.clear();
+  for (std::uint32_t i = 0; i < sample.panel_count && i < win::MaxPanelTextures; ++i) {
+    if (sample.panels[i].id != snapshot_view.id)
+      continue;
+    for (std::uint32_t g = 0; g < sample.gauge_count && g < win::MaxPanelGauges; ++g) {
+      const auto& gauge = sample.gauges[g];
+      if (gauge.panel != i)
+        continue;
+      p.gauges.push_back({widen(std::string(gauge.name, strnlen(gauge.name, sizeof(gauge.name))).c_str()),
+                          {gauge.x, gauge.y, static_cast<unsigned>(gauge.x + gauge.width), static_cast<unsigned>(gauge.y + gauge.height)}});
+    }
+  }
+  const auto* base = setup.built_in ? profiles::base_profile(setup.built_in) : nullptr;
+  p.limits = base ? win::area_edit::limits(*base) : win::area_edit::Limits{};
+  auto start = setup.areas[p.side];
+  if (profiles::empty_area(start)) {
+    const auto own = own_setup_area(p.side, p.texture_width, p.texture_height);
+    const bool whole = own.left == 0 && own.top == 0 && own.right == p.texture_width && own.bottom == p.texture_height;
+    start = whole && p.gauges.size() == 1 ? p.gauges[0].second : own;
+  }
+  p.area = win::area_edit::fit(start, tw, th, p.limits);
+  p.ready = tw > 0 && th > 0;
+}
+void update_area_picker_info(HWND hwnd) {
+  const auto& p = area_picker;
+  if (!p.ready)
+    return;
+  win::UiMessage message;
+  message.add(ui_text(L"From {0}, {1} · {2} × {3} of {4} × {5}"),
+              {std::to_wstring(p.area.left), std::to_wstring(p.area.top), std::to_wstring(p.area.right - p.area.left),
+               std::to_wstring(p.area.bottom - p.area.top), std::to_wstring(p.texture_width), std::to_wstring(p.texture_height)});
+  SetDlgItemTextW(hwnd, AreaPickerInfoId, message.text().c_str());
+}
+void paint_area_picker(HDC dc) {
+  const auto well = rectangle(20, 92, 860, 520);
+  HBRUSH fill = CreateSolidBrush(Sidebar);
+  FillRect(dc, &well, fill);
+  DeleteObject(fill);
+  if (!snapshot_view.image || !area_picker.ready)
+    return;
+  const auto picture = area_picker_picture();
+  HDC memory = CreateCompatibleDC(dc);
+  const auto old_bitmap = SelectObject(memory, snapshot_view.image);
+  SetStretchBltMode(dc, HALFTONE);
+  SetBrushOrgEx(dc, 0, 0, nullptr);
+  StretchBlt(dc, picture.left, picture.top, picture.right - picture.left, picture.bottom - picture.top, memory, 0, 0, snapshot_view.width,
+             snapshot_view.height, SRCCOPY);
+  SelectObject(memory, old_bitmap);
+  DeleteDC(memory);
+  const auto& p = area_picker;
+  const auto saved = SaveDC(dc);
+  SelectObject(dc, GetStockObject(NULL_BRUSH));
+  SelectObject(dc, small);
+  SetBkMode(dc, OPAQUE);
+  SetBkColor(dc, Sidebar);
+  HPEN gauge_pen = CreatePen(PS_DOT, 1, RGB(126, 176, 255));
+  SelectObject(dc, gauge_pen);
+  SetTextColor(dc, RGB(126, 176, 255));
+  for (const auto& [name, rect] : p.gauges) {
+    auto box = win::area_edit::to_screen(picture, p.texture_width, p.texture_height, rect);
+    Rectangle(dc, box.left, box.top, box.right, box.bottom);
+    InflateRect(&box, -scale(4), -scale(3));
+    DrawTextW(dc, name.c_str(), -1, &box, DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
+  HPEN frame = CreatePen(PS_SOLID, scale(2), Accent);
+  SelectObject(dc, frame);
+  const auto a = win::area_edit::to_screen(picture, p.texture_width, p.texture_height, p.area);
+  Rectangle(dc, a.left, a.top, a.right, a.bottom);
+  HPEN outline = CreatePen(PS_SOLID, scale(1), Accent);
+  SelectObject(dc, outline);
+  SelectObject(dc, GetStockObject(WHITE_BRUSH));
+  for (const auto& h : win::area_edit::handles(picture, p.texture_width, p.texture_height, p.area))
+    Rectangle(dc, h.x - scale(5), h.y - scale(5), h.x + scale(6), h.y + scale(6));
+  RestoreDC(dc, saved);
+  DeleteObject(gauge_pen);
+  DeleteObject(frame);
+  DeleteObject(outline);
+}
+// The gauge under a point of the picture, -1 for none: the smallest one, as
+// gauges can lie inside others.
+int area_picker_gauge_at(POINT point) {
+  const auto& p = area_picker;
+  const auto picture = area_picker_picture();
+  int best = -1;
+  std::uint64_t best_size = UINT64_MAX;
+  for (std::size_t i = 0; i < p.gauges.size(); ++i) {
+    const auto box = win::area_edit::to_screen(picture, p.texture_width, p.texture_height, p.gauges[i].second);
+    const auto& r = p.gauges[i].second;
+    // A gauge filling the panel is the Whole panel button's area.
+    if (r.left == 0 && r.top == 0 && r.right >= p.texture_width && r.bottom >= p.texture_height)
+      continue;
+    const std::uint64_t size = std::uint64_t{r.right - r.left} * (r.bottom - r.top);
+    if (PtInRect(&box, point) && size < best_size) {
+      best = static_cast<int>(i);
+      best_size = size;
+    }
+  }
+  return best;
+}
+INT_PTR CALLBACK area_picker_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+  auto& p = area_picker;
+  if (message == WM_INITDIALOG) {
+    place_dialog(hwnd, tr(L"Taxi Cam — Display area"), 900, 700);
+    win::UiMessage title;
+    title.add(ui_text(L"Display area: {0}"), {display_side_title(draft(), p.side)});
+    dialog_control(hwnd, L"STATIC", title.text().c_str(), -1, 20, 17, 860, 28, 0, heading);
+    dialog_control(hwnd, L"STATIC",
+                   tr(L"Click a gauge to use it, or drag the frame and its handles. The cameras are drawn inside this area."), -1, 20, 54,
+                   860, 30);
+    dialog_control(hwnd, L"STATIC", L"", AreaPickerInfoId, 20, 530, 860, 24, 0, small);
+    dialog_control(hwnd, L"BUTTON", tr(L"Whole panel"), AreaPickerWholeId, 20, 650, 140, 34, WS_TABSTOP);
+    dialog_control(hwnd, L"BUTTON", tr(L"Cancel"), IDCANCEL, 652, 650, 110, 34, WS_TABSTOP);
+    const auto done = dialog_control(hwnd, L"BUTTON", tr(L"Done"), IDOK, 772, 650, 108, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    SetTimer(hwnd, 1, 200, nullptr);
+    SetFocus(done);
+    hide_focus_cues(hwnd);
+    return FALSE;
+  }
+  if (message == WM_SETCURSOR) {
+    if (button_cursor(hwnd, w, l)) {
+      SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
+      return TRUE;
+    }
+    if (p.ready && reinterpret_cast<HWND>(w) == hwnd && LOWORD(l) == HTCLIENT) {
+      POINT point{};
+      GetCursorPos(&point);
+      ScreenToClient(hwnd, &point);
+      const int hit = win::area_edit::hit(area_picker_picture(), p.texture_width, p.texture_height, p.area, point, scale(9), scale(6));
+      const int gauge = area_picker_gauge_at(point);
+      LPCWSTR shape = p.dragging   ? win::area_edit::cursor(p.handle)
+                      : hit >= 0   ? win::area_edit::cursor(hit)
+                      : gauge >= 0 ? IDC_HAND
+                                   : nullptr;
+      if (shape) {
+        SetCursor(LoadCursorW(nullptr, shape));
+        SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
+        return TRUE;
+      }
+    }
+  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC)
+    return dialog_colors(w);
+  if (message == WM_TIMER) {
+    // Loads the picture once it is taken (the snapshot dialog's loader).
+    update_snapshot_dialog(hwnd);
+    if (!p.ready && snapshot_view.image) {
+      win::Status sample;
+      {
+        const std::lock_guard lock(app_mutex);
+        sample = status;
+      }
+      prepare_area_picker(sample);
+      update_area_picker_info(hwnd);
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return TRUE;
+  }
+  if (message == WM_PAINT) {
+    PAINTSTRUCT paint;
+    HDC dc = BeginPaint(hwnd, &paint);
+    paint_area_picker(dc);
+    EndPaint(hwnd, &paint);
+    return TRUE;
+  }
+  if (message == WM_LBUTTONDOWN && p.ready) {
+    const POINT point{static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))};
+    const int hit = win::area_edit::hit(area_picker_picture(), p.texture_width, p.texture_height, p.area, point, scale(9), scale(6));
+    // On the frame or a handle the frame moves or resizes; outside it a click
+    // on a gauge makes that gauge the area.
+    const int gauge = hit < 0 ? area_picker_gauge_at(point) : -1;
+    if (hit >= 0) {
+      p.dragging = true;
+      p.handle = hit;
+      p.start = p.area;
+      p.from = point;
+      SetCapture(hwnd);
+    } else if (gauge >= 0) {
+      p.area = win::area_edit::fit(p.gauges[static_cast<std::size_t>(gauge)].second, static_cast<int>(p.texture_width),
+                                   static_cast<int>(p.texture_height), p.limits);
+      update_area_picker_info(hwnd);
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return TRUE;
+  }
+  if (message == WM_MOUSEMOVE && p.dragging) {
+    const POINT point{static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))};
+    const auto picture = area_picker_picture();
+    const int tw = static_cast<int>(p.texture_width), th = static_cast<int>(p.texture_height);
+    const int dx = MulDiv(point.x - p.from.x, tw, std::max<int>(picture.right - picture.left, 1));
+    const int dy = MulDiv(point.y - p.from.y, th, std::max<int>(picture.bottom - picture.top, 1));
+    p.area = win::area_edit::drag(p.start, p.handle, dx, dy, tw, th, p.limits);
+    update_area_picker_info(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return TRUE;
+  }
+  if ((message == WM_LBUTTONUP || message == WM_CAPTURECHANGED) && p.dragging) {
+    p.dragging = false;
+    if (message == WM_LBUTTONUP)
+      ReleaseCapture();
+    return TRUE;
+  }
+  if (message == WM_COMMAND && LOWORD(w) == AreaPickerWholeId && p.ready) {
+    p.area = win::area_edit::fit({0, 0, p.texture_width, p.texture_height}, static_cast<int>(p.texture_width),
+                                 static_cast<int>(p.texture_height), p.limits);
+    update_area_picker_info(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return TRUE;
+  }
+  if (message == WM_COMMAND && LOWORD(w) == IDOK) {
+    p.done = p.ready;
+    EndDialog(hwnd, IDOK);
+    return TRUE;
+  }
+  if ((message == WM_COMMAND && LOWORD(w) == IDCANCEL) || message == WM_CLOSE) {
+    EndDialog(hwnd, IDCANCEL);
+    return TRUE;
+  }
+  if (message == WM_DESTROY) {
+    KillTimer(hwnd, 1);
+    release_snapshot_image();
+  }
+  return FALSE;
+}
+// Opens the area picker for a display; Done saves its area with the picks.
+void show_area_picker(unsigned side) {
+  if (side >= setup.sides || setup.names[side].empty())
+    return;
+  const auto id = setup_side_texture(side);
+  if (!id) {
+    notice = tr(L"Place a panel on this display first.");
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
+  release_snapshot_image();
+  snapshot_view = {};
+  snapshot_view.id = id;
+  snapshot_view.serial = request_display_snapshot(id);
+  snapshot_view.requested_ms = GetTickCount64();
+  area_picker = {};
+  area_picker.side = side;
+  snapshot_dialog_open = true;
+  const DialogTemplate layout;
+  const auto result = DialogBoxIndirectParamW(instance, &layout.dialog, window, area_picker_dialog, 0);
+  snapshot_dialog_open = false;
+  if (result == -1) {
+    notice = tr(L"Could not open the display area.");
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
+  if (!area_picker.done)
+    return;
+  // The display's own area is no choice.
+  const auto own = own_setup_area(side, area_picker.texture_width, area_picker.texture_height);
+  setup.areas[side] = win::area_edit::same(area_picker.area, own) ? profiles::DisplayRect{} : area_picker.area;
+  apply_setup_picks();
+  InvalidateRect(window, nullptr, FALSE);
+}
 void refresh_setup_picking();
 // One panel per side: placing another side's panel swaps the two.
 void place_setup_panel(unsigned side) {
@@ -2235,12 +2544,19 @@ void place_setup_panel(unsigned side) {
     if (other != side && setup.names[other] == name) {
       setup.names[other] = setup.names[side];
       setup.textures[other] = setup.textures[side];
+      setup.areas[other] = setup.areas[side];
     }
+  // A new panel starts from its own area; the picker opens to choose it.
+  if (setup.names[side] != name)
+    setup.areas[side] = {};
   setup.names[side] = name;
   setup.textures[side] = setup.picked_texture;
   setup.picked.clear();
   setup.picked_texture = 0;
   apply_setup_picks();
+  // Once the drop is handled; only where the user is looking.
+  if (IsWindowVisible(window))
+    PostMessageW(window, AreaPickerMessage, side, 0);
 }
 // Swaps the two pilot displays: their pictures look alike, so the setup can
 // put each on the other's side (FSLabs A321, 2026-11-03).
@@ -2249,6 +2565,7 @@ void swap_pilot_displays() {
     return;
   std::swap(setup.names[0], setup.names[1]);
   std::swap(setup.textures[0], setup.textures[1]);
+  std::swap(setup.areas[0], setup.areas[1]);
   setup.testing = (setup.testing & ~3u) | ((setup.testing & 1u) << 1) | ((setup.testing >> 1) & 1u);
   apply_setup_picks();
   refresh_setup_picking();
@@ -2782,6 +3099,7 @@ void service_thumbnails() {
 struct HitArea {
   RECT bounds{};
   std::uint64_t id{};  // Picture to enlarge; 0 opens Displays.
+  int side = -1;       // A Displays slot's picture: opens its area picker.
 };
 std::vector<HitArea> hit_areas;
 const HitArea* hit_area_at(POINT point) {
@@ -2828,18 +3146,23 @@ COLORREF route_color(RouteSource source) {
          : source == RouteSource::none   ? RGB(236, 182, 92)
                                          : Muted;
 }
-int route_chip(HDC dc, int x, int y, RouteSource source) {
+// How a display was found, in words: the pilot needs that, not the panel's
+// internal name.
+const wchar_t* route_label(RouteSource source) {
   switch (source) {
     case RouteSource::named:
-      return chip(dc, x, y, tr(L"Named"), Accent);
+      return tr(L"Found");
     case RouteSource::chosen:
-      return chip(dc, x, y, tr(L"Your choice"), RGB(126, 176, 255));
+      return tr(L"Your choice");
     case RouteSource::detected:
-      return chip(dc, x, y, tr(L"Detected"), Muted);
+      return tr(L"Detected");
     case RouteSource::none:
-      return chip(dc, x, y, tr(L"Not found"), RGB(236, 182, 92));
+      break;
   }
-  return 0;
+  return tr(L"Not found");
+}
+int route_chip(HDC dc, int x, int y, RouteSource source) {
+  return chip(dc, x, y, route_label(source), route_color(source));
 }
 // Draws a texture's picture, or the part `crop` (texture pixels) of it,
 // fitted and centred in box. Returns the drawn rectangle; empty without one.
@@ -2919,10 +3242,8 @@ LRESULT CALLBACK drag_ghost_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM 
     SelectObject(dc, old_pen);
     DeleteObject(fill);
     DeleteObject(pen);
-    draw_thumbnail(dc, rectangle(8, 8, DragGhostWidth - 16, DragGhostHeight - 44), setup.picked_texture, L"");
-    const auto name = widen(setup.picked.c_str());
-    text(dc, name.c_str(), 10, DragGhostHeight - 32, DragGhostWidth - 20, 24, small, Text,
-         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // The picture alone: panel names stay internal.
+    draw_thumbnail(dc, rectangle(8, 8, DragGhostWidth - 16, DragGhostHeight - 16), setup.picked_texture, L"");
     EndPaint(hwnd, &paint);
     return 0;
   }
@@ -3009,12 +3330,11 @@ void draw_display_strip(HDC dc, const win::Status& sample) {
     const auto crop = profiles::display_rect(*profile, card.side);
     draw_thumbnail(dc, picture, id, tr(L"No display"), fits ? &crop : nullptr);
     hit_areas.push_back({rectangle(x, y, width, DisplayCardSwitches - 4), 0});
-    // The panel's name in a pill coloured by how it was found.
-    const auto* candidate = find_candidate(sample, id);
-    const auto name = candidate_name(candidate);
-    const auto label = !id ? std::wstring(tr(L"Not found")) : name.empty() ? L"#" + std::to_wstring(id) : name;
-    const int pill = std::min(chip_width(dc, label.c_str()), inner / 2);
-    chip(dc, x + 10 + inner - pill, row, label.c_str(), route_color(route_source(s, sample, card.side, id)), pill);
+    // How it was found, in a pill of that colour; the picture shows which.
+    const auto source = route_source(s, sample, card.side, id);
+    const auto* label = route_label(source);
+    const int pill = std::min(chip_width(dc, label), inner / 2);
+    chip(dc, x + 10 + inner - pill, row, label, route_color(source), pill);
     text(dc, display_side_title(s, card.side), x + 10, row, inner - pill - 8, 22, heading, Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
@@ -3213,11 +3533,27 @@ void draw_setup(HDC dc, const win::Status& sample) {
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const auto id = picked_id(items, unsigned_side);
     const auto box = rectangle(x + 10, y + 40, inner, SetupSlotPicture);
-    draw_thumbnail(dc, box, id, L"");
+    const auto drawn = draw_thumbnail(dc, box, id, L"");
+    // The display's area on its panel, chosen in the area picker.
+    if (const auto* thumbnail = id && !name.empty() ? find_thumbnail(id) : nullptr; thumbnail && thumbnail->texture_width) {
+      const auto area = profiles::empty_area(setup.areas[unsigned_side])
+                            ? own_setup_area(unsigned_side, thumbnail->texture_width, thumbnail->texture_height)
+                            : setup.areas[unsigned_side];
+      const auto r = win::area_edit::to_screen(drawn, thumbnail->texture_width, thumbnail->texture_height, area);
+      HPEN pen = CreatePen(PS_SOLID, scale(2), Accent);
+      const auto old_pen = SelectObject(dc, pen);
+      const auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+      Rectangle(dc, r.left, r.top, r.right, r.bottom);
+      SelectObject(dc, old_brush);
+      SelectObject(dc, old_pen);
+      DeleteObject(pen);
+    }
     if (id)
-      hit_areas.push_back({box, id});
-    text(dc, name.empty() ? tr(L"Nothing placed yet") : widen(name.c_str()).c_str(), x + 10, y + 46 + SetupSlotPicture, inner, 18, small,
-         name.empty() ? Muted : Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      hit_areas.push_back({box, id, name.empty() ? -1 : static_cast<int>(unsigned_side)});
+    // The picture says which display it is; panel names stay internal.
+    if (name.empty())
+      text(dc, tr(L"Nothing placed yet"), x + 10, y + 46 + SetupSlotPicture, inner, 18, small, Muted,
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
   panel(dc, 244, SetupGalleryTop, 766, 676 - SetupGalleryTop);
   text(dc, tr(L"All cockpit displays"), 262, SetupGalleryTop + 8, 200, 30, heading);
@@ -3232,7 +3568,7 @@ void draw_setup(HDC dc, const win::Status& sample) {
   }
 }
 // A gallery card of Displays: the panel's picture, the displays it is
-// placed on, its name and size. The picked panel is outlined.
+// placed on, and its size. The picked panel is outlined.
 bool draw_page_button(const DRAWITEMSTRUCT& item) {
   const int id = static_cast<int>(item.CtlID);
   if (id < SetupCardButtonId || id >= SetupCardButtonId + static_cast<int>(GalleryColumns))
@@ -3270,16 +3606,14 @@ bool draw_page_button(const DRAWITEMSTRUCT& item) {
       chip(item.hDC, 12, chip_y, display_side_title(s, side), Accent);
       chip_y += 26;
     }
+  // The picture says which display it is: panel names (an iniBuilds gauge is
+  // "ini-crash-report") stay internal, so only its size is written.
   SetBkMode(item.hDC, TRANSPARENT);
-  SelectObject(item.hDC, normal);
-  SetTextColor(item.hDC, Text);
-  RECT name_box{r.left + scale(10), r.bottom - scale(48), r.right - scale(10), r.bottom - scale(26)};
-  DrawTextW(item.hDC, widen(panel_name(*found).c_str()).c_str(), -1, &name_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   wchar_t details[64];
-  std::swprintf(details, 64, L"%u × %u · m%u", found->width, found->height, found->mips);
+  std::swprintf(details, 64, L"%u × %u", found->width, found->height);
   SelectObject(item.hDC, small);
   SetTextColor(item.hDC, Muted);
-  RECT details_box{r.left + scale(10), r.bottom - scale(26), r.right - scale(10), r.bottom - scale(6)};
+  RECT details_box{r.left + scale(10), r.bottom - scale(48), r.right - scale(10), r.bottom - scale(6)};
   DrawTextW(item.hDC, details, -1, &details_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   return true;
 }
@@ -3304,7 +3638,7 @@ void show_whats_new() {
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
-  if (!open_whats_new(win::whats_new_blocks(releases, InstalledVersion, result.published_known ? &result.published : nullptr))) {
+  if (!open_whats_new(win::whats_new_blocks(releases, InstalledVersion))) {
     notice = tr(L"Could not open What's new.");
     InvalidateRect(window, nullptr, FALSE);
     return;
@@ -3349,6 +3683,199 @@ bool apply(bool save = true) {
   return true;
 }
 // Runs on the UI thread, including when hidden to the tray.
+// Display choices saved before panel marks name displays by panel.cfg
+// texture= (legacy_display_names.hpp); a catalog profile can too. Converted
+// once per aircraft from its own panel.cfg files and saved, so the bridge
+// finds them by their marks.
+bool legacy_display_name(const char* name) {
+  return name && name[0] && !mark_identity::is_key(name);
+}
+// Whether the displays in use still name a panel.cfg texture=.
+bool legacy_displays(const win::Settings& s) {
+  const auto* base = profiles::base_profile(s.profile);
+  const bool set_up = s.profile == profiles::DiscoveredProfileId;
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
+    if (legacy_display_name(s.display_override.textures[side]) ||
+        (set_up && side < s.discovered.sides && legacy_display_name(s.discovered.textures[side])) ||
+        (!set_up && base && side < base->sides && legacy_display_name(base->panel_textures[side]) && !s.display_override.textures[side][0]))
+      return true;
+  return false;
+}
+std::string legacy_attempt(const win::Status& sample, std::uint32_t profile) {
+  return std::string(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path))) + "|" + std::to_string(profile);
+}
+// The aircraft and profile last converted.
+std::string legacy_tried;
+// A conversion left displays to choose: a pop-up says so once, the next time
+// the window is on screen (prompt_choose_displays).
+bool choose_displays_prompt{};
+// The loaded aircraft's displays could not all be converted (an encrypted
+// Marketplace panel.cfg, the iniBuilds A380): until the user chooses them,
+// Overview says so.
+bool displays_to_choose(const win::Status& sample) {
+  if (!fresh_status(sample) || !sample.identity_sample_ms || legacy_tried.empty())
+    return false;
+  const auto s = draft();
+  return legacy_tried == legacy_attempt(sample, s.profile) && legacy_displays(s);
+}
+// The attached simulator's Community folder, once the panel marks package
+// has been checked for it (check_marks_package, on the connection worker).
+std::mutex marks_community_mutex;
+std::filesystem::path marks_community;
+void convert_legacy_displays() {
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  if (!fresh_status(sample) || !sample.identity_sample_ms)
+    return;
+  const auto s = draft();
+  const auto* base = profiles::base_profile(s.profile);
+  const bool set_up = s.profile == profiles::DiscoveredProfileId;
+  const auto legacy = legacy_display_name;
+  if (!legacy_displays(s))
+    return;
+  // Only from the panel.cfg of the aircraft these settings are for: a profile
+  // kept over a newly loaded aircraft (Auto aircraft waits for a second
+  // sample, finds no profile, or is off) is converted once its own aircraft
+  // is loaded.
+  const bool own =
+      set_up ? profiles::same_variant(std::string_view(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path))),
+                                      s.discovered.key)
+             : sample.detected_profile && profiles::base_profile(sample.detected_profile) == base;
+  if (!own)
+    return;
+  const std::string path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
+  const auto attempt = legacy_attempt(sample, s.profile);
+  if (attempt == legacy_tried)
+    return;
+  legacy_tried = attempt;
+  // Community panel.cfg files come from the attached simulator's folder.
+  std::filesystem::path community;
+  {
+    const std::lock_guard lock(marks_community_mutex);
+    community = marks_community;
+  }
+  if (community.empty())
+    community = win::marks_package::community_folder(std::filesystem::path(expected_simulator).parent_path());
+  const auto sections = win::legacy_names::aircraft_sections(community, path);
+  auto next = s;
+  bool changed = false, missing = false;
+  const auto put = [&](char (&name)[profiles::MaxPanelName], const char* from) {
+    const auto key = win::legacy_names::key_for(sections, from);
+    if (!key[0]) {
+      missing = true;
+      return;
+    }
+    std::fill(std::begin(name), std::end(name), '\0');
+    std::strncpy(name, key.data(), profiles::MaxPanelName - 1);
+    changed = true;
+  };
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+    if (legacy(next.display_override.textures[side]))
+      put(next.display_override.textures[side], s.display_override.textures[side]);
+    else if (!set_up && base && side < base->sides && legacy(base->panel_textures[side]) && !s.display_override.textures[side][0])
+      put(next.display_override.textures[side], base->panel_textures[side]);
+    if (set_up && side < next.discovered.sides && legacy(next.discovered.textures[side]))
+      put(next.discovered.textures[side], s.discovered.textures[side]);
+  }
+  if (!changed || !win::valid_settings(next) || !win::save_settings(next)) {
+    notice = tr(L"Taxi Cam could not convert this aircraft's saved displays. Choose them again in Displays.");
+    choose_displays_prompt = true;
+    build_controls();
+    return;
+  }
+  publish(next);
+  notice = missing ? tr(L"Some of this aircraft's saved displays could not be converted. Check them in Displays.")
+                   : tr(L"This aircraft's saved displays now use the new display names.");
+  choose_displays_prompt = missing;
+  build_controls();
+}
+// The panel marks package (marks_package.hpp), checked once a run on the
+// connection worker for the simulator Taxi Cam attaches to; a new or updated
+// package takes effect at the next simulator start.
+// The Community folder is the attached simulator's own: Steam and Store
+// builds on one PC have one each (Steam test, 2026-11-04: the Store package
+// was checked while Steam ran without one).
+std::atomic<int> marks_package_outcome{-1};
+void check_marks_package(const std::wstring& simulator_exe) {
+  if (marks_package_outcome.load(std::memory_order_acquire) >= 0 || simulator_exe.empty())
+    return;
+  auto outcome = win::marks_package::Outcome::failed;
+  try {
+    const auto simulator = std::filesystem::path(simulator_exe).parent_path();
+    const auto community = win::marks_package::community_folder(simulator);
+    {
+      const std::lock_guard lock(marks_community_mutex);
+      marks_community = community;
+    }
+    outcome = win::marks_package::ensure(simulator, community, win::marks_package::helper_text());
+  } catch (...) {
+  }
+  marks_package_outcome.store(static_cast<int>(outcome), std::memory_order_release);
+}
+void show_alert(std::wstring title, std::wstring body, std::wstring primary, std::wstring secondary, std::function<void()> act);
+// The package is loaded with the simulator's add-ons, before the simulator
+// starts Taxi Cam: a package written or changed now, or one that could not be
+// written, means no display can be recognised until the simulator starts
+// again, so the pilot is told in front of the simulator.
+void service_marks_package_notice() {
+  static bool shown = false;
+  const auto outcome = marks_package_outcome.load(std::memory_order_acquire);
+  if (shown || outcome < 0)
+    return;
+  shown = true;
+  using win::marks_package::Outcome;
+  const wchar_t* title = tr(L"Taxi Cam can't recognise your displays");
+  switch (static_cast<Outcome>(outcome)) {
+    case Outcome::current:
+      return;
+    case Outcome::written:
+      title = tr(L"Restart the simulator once");
+      notice =
+          tr(L"Taxi Cam has just set up the package that lets it recognise your cockpit displays, but the simulator had already "
+             L"loaded its add-ons. Restart the simulator so Taxi Cam can find your displays.");
+      break;
+    case Outcome::removed:
+    case Outcome::page_changed:
+      title = tr(L"Update Taxi Cam");
+      notice =
+          tr(L"This simulator version changed the cockpit page Taxi Cam uses to recognise your displays, so it can't find them. "
+             L"Update Taxi Cam to find them again.");
+      break;
+    case Outcome::no_community:
+      notice = tr(L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.");
+      break;
+    default:
+      notice = tr(L"Taxi Cam could not add its display package to the simulator's Community folder. Run the Taxi Cam installer again.");
+      break;
+  }
+  show_alert(title, notice, tr(L"OK"), L"", {});
+  build_controls();
+}
+// The package is not loaded in this simulator session although Taxi Cam did
+// not have to write it (another package's cockpit page loaded after it, or a
+// file removed by hand): an alert once a run, unless the restart alert above
+// already said so.
+void service_package_inactive_alert() {
+  static bool shown = false;
+  if (shown || preview_ui)
+    return;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  if (!package_inactive(sample))
+    return;
+  shown = true;
+  using win::marks_package::Outcome;
+  const auto outcome = marks_package_outcome.load(std::memory_order_acquire);
+  if (outcome >= 0 && static_cast<Outcome>(outcome) != Outcome::current)
+    return;
+  show_alert(tr(L"Taxi Cam can't recognise your displays"), package_inactive_text(), tr(L"OK"), L"", {});
+}
 void sync_aircraft_session() {
   auto s = draft();
   win::Status sample;
@@ -3603,9 +4130,7 @@ std::vector<LiveGuidePoint> live_guide_points(const LiveLayout& l, const win::Se
 }
 // Texture pixels on the picture, in display area mode.
 POINT live_texture_point(const RECT& picture, unsigned x, unsigned y) {
-  const auto tw = std::max<unsigned>(live_view.texture_width, 1), th = std::max<unsigned>(live_view.texture_height, 1);
-  return {picture.left + MulDiv(static_cast<int>(x), picture.right - picture.left, static_cast<int>(tw)),
-          picture.top + MulDiv(static_cast<int>(y), picture.bottom - picture.top, static_cast<int>(th))};
+  return win::area_edit::to_screen(picture, live_view.texture_width, live_view.texture_height, x, y);
 }
 // The area shown: the one being dragged, else the side's area now.
 profiles::DisplayRect live_area_now(const profiles::AircraftProfile& profile) {
@@ -3712,11 +4237,7 @@ const wchar_t* live_camera_title(bool split, unsigned feed) {
 }
 // Corner and edge handles of the area: 0-3 corners, 4-7 edge midpoints.
 std::array<POINT, 8> live_area_handles(const LiveLayout& l, const profiles::DisplayRect& a) {
-  const unsigned cx = (a.left + a.right) / 2, cy = (a.top + a.bottom) / 2;
-  const auto& p = l.picture;
-  return {live_texture_point(p, a.left, a.top),    live_texture_point(p, a.right, a.top), live_texture_point(p, a.right, a.bottom),
-          live_texture_point(p, a.left, a.bottom), live_texture_point(p, cx, a.top),      live_texture_point(p, a.right, cy),
-          live_texture_point(p, cx, a.bottom),     live_texture_point(p, a.left, cy)};
+  return win::area_edit::handles(l.picture, live_view.texture_width, live_view.texture_height, a);
 }
 // What a point of the picture would drag: a display area handle (index 0-7)
 // or its frame (8, to move it), a guide point (its guide), or a camera pane
@@ -4146,34 +4667,7 @@ void live_drag(HWND hwnd, POINT p) {
     const int tw = static_cast<int>(live_view.texture_width), th = static_cast<int>(live_view.texture_height);
     const int dx = MulDiv(p.x - live_view.area_from.x, tw, std::max<int>(l.picture.right - l.picture.left, 1));
     const int dy = MulDiv(p.y - live_view.area_from.y, th, std::max<int>(l.picture.bottom - l.picture.top, 1));
-    const auto& a0 = live_view.area_start;
-    int left = static_cast<int>(a0.left), top = static_cast<int>(a0.top), right = static_cast<int>(a0.right),
-        bottom = static_cast<int>(a0.bottom);
-    const int h = live_view.area_handle;
-    // Large enough to keep a camera inside the profile's padding (and a
-    // catalog profile's whole-display minimum, valid_override).
-    const auto& pad = profile->camera_padding;
-    const int least = profile->fit_texture ? 16 : 64;
-    const int min_width = std::max(least, static_cast<int>(pad.left + pad.right) + 16);
-    const int min_height = std::max(least, static_cast<int>(pad.top + pad.bottom) + 16);
-    if (h == 8) {
-      const int w = right - left, ht = bottom - top;
-      left = std::clamp(left + dx, 0, std::max(tw - w, 0));
-      top = std::clamp(top + dy, 0, std::max(th - ht, 0));
-      right = left + w;
-      bottom = top + ht;
-    } else {
-      if (h == 0 || h == 3 || h == 7)
-        left = std::clamp(left + dx, 0, std::max(right - min_width, 0));
-      if (h == 1 || h == 2 || h == 5)
-        right = std::clamp(right + dx, std::min(left + min_width, tw), tw);
-      if (h == 0 || h == 1 || h == 4)
-        top = std::clamp(top + dy, 0, std::max(bottom - min_height, 0));
-      if (h == 2 || h == 3 || h == 6)
-        bottom = std::clamp(bottom + dy, std::min(top + min_height, th), th);
-    }
-    live_view.area = {static_cast<unsigned>(std::max(left, 0)), static_cast<unsigned>(std::max(top, 0)),
-                      static_cast<unsigned>(std::max(right, 0)), static_cast<unsigned>(std::max(bottom, 0))};
+    live_view.area = win::area_edit::drag(live_view.area_start, live_view.area_handle, dx, dy, tw, th, win::area_edit::limits(*profile));
     InvalidateRect(hwnd, nullptr, FALSE);
     return;
   }
@@ -4316,10 +4810,8 @@ LRESULT CALLBACK live_view_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
           cursor = IDC_HAND;
         else if (const auto* profile = profiles::find(s.profile)) {
           const auto hit = live_hit(live_layout(hwnd, profile), s, *profile, p);
-          const LPCWSTR area[]{IDC_SIZENWSE, IDC_SIZENESW, IDC_SIZENWSE, IDC_SIZENESW, IDC_SIZENS,
-                               IDC_SIZEWE,   IDC_SIZENS,   IDC_SIZEWE,   IDC_SIZEALL};
           if (hit.kind == LiveHit::Kind::area && hit.index >= 0 && hit.index < 9)
-            cursor = area[hit.index];
+            cursor = win::area_edit::cursor(hit.index);
           else if (hit.kind == LiveHit::Kind::guide)
             cursor = IDC_SIZEALL;
           else if (hit.kind == LiveHit::Kind::pane)
@@ -4515,9 +5007,13 @@ bool save_built_in_displays(bool built_in_only, bool stay = false) {
   setup.testing = 0;
   const unsigned sides_before = profiles::override_sides(*base, s.display_override);
   s.display_override = built_in_choices(*base, s.display_override);
+  apply_setup_areas(s);
   if (built_in_only) {
     for (auto& texture : s.display_override.textures)
       std::fill(std::begin(texture), std::end(texture), '\0');
+    for (auto& area : s.display_override.areas)
+      area = {};
+    setup.areas = {};
     win::update_target_assignment(s.left_id, s.right_id, s.route_request, 0, 0);
   } else {
     route_picks(s, setup_items(sample));
@@ -4603,6 +5099,7 @@ bool store_aircraft_setup(const win::Status& sample, bool quiet) {
     return false;
   }
   next.enabled = s.enabled;
+  apply_setup_areas(next);
   const bool same = earlier.profile == profiles::DiscoveredProfileId && profiles::same_variant(layout.key, earlier.discovered.key);
   // A newly placed lower display is where the door camera goes, as on a
   // built-in profile: saved first without one, the variant kept no door
@@ -5809,6 +6306,177 @@ void show() {
   SetForegroundWindow(window);
   offer_whats_new();
 }
+// An alert in front of everything, the simulator included, for something the
+// pilot must do before Taxi Cam can work. The companion often runs only in
+// the tray, so a notice in its window would go unseen. The alert is shown
+// without taking the keyboard from the simulator, centred on the monitor of
+// the window in front (the simulator while flying). One at a time: a newer
+// alert replaces the one on screen.
+constexpr wchar_t AlertClass[] = L"380TaxiCamera.Alert";
+constexpr int AlertWidth = 460, AlertPadding = 24, AlertTitleHeight = 28, AlertButtonHeight = 34, AlertButtonWidth = 150;
+struct AlertView {
+  HWND window{};
+  std::wstring title, body, primary, secondary;
+  std::function<void()> act;  // The primary button's action, after the alert closes.
+  RECT primary_rect{}, secondary_rect{};
+  int body_height{};
+} alert_view;
+void close_alert() {
+  if (alert_view.window)
+    DestroyWindow(alert_view.window);
+  alert_view.window = nullptr;
+}
+void draw_alert_button(HDC dc, const RECT& r, const std::wstring& label, bool primary) {
+  HBRUSH brush = CreateSolidBrush(primary ? Accent : Card);
+  HPEN pen = CreatePen(PS_SOLID, scale(1), primary ? Accent : Border);
+  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
+  RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(9), scale(9));
+  SelectObject(dc, oldb);
+  SelectObject(dc, oldp);
+  DeleteObject(brush);
+  DeleteObject(pen);
+  SelectObject(dc, normal);
+  SetTextColor(dc, primary ? Background : Text);
+  SetBkMode(dc, TRANSPARENT);
+  auto bounds = r;
+  DrawTextW(dc, label.c_str(), -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+LRESULT CALLBACK alert_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+  auto& v = alert_view;
+  switch (message) {
+    case WM_MOUSEACTIVATE:
+      return MA_NOACTIVATE;  // A click works without taking the keyboard from the simulator.
+    case WM_SETCURSOR: {
+      POINT p{};
+      GetCursorPos(&p);
+      ScreenToClient(hwnd, &p);
+      const bool over = PtInRect(&v.primary_rect, p) || (!v.secondary.empty() && PtInRect(&v.secondary_rect, p));
+      SetCursor(LoadCursorW(nullptr, over ? IDC_HAND : IDC_ARROW));
+      return TRUE;
+    }
+    case WM_LBUTTONUP: {
+      const POINT p{static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))};
+      if (PtInRect(&v.primary_rect, p)) {
+        auto act = std::move(v.act);
+        close_alert();
+        if (act)
+          act();
+      } else if (!v.secondary.empty() && PtInRect(&v.secondary_rect, p)) {
+        close_alert();
+      }
+      return 0;
+    }
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC dc = BeginPaint(hwnd, &ps);
+      RECT client;
+      GetClientRect(hwnd, &client);
+      HBRUSH fill = CreateSolidBrush(Card);
+      FillRect(dc, &client, fill);
+      DeleteObject(fill);
+      // An amber frame: it needs the pilot, like the amber chips on Overview.
+      HBRUSH frame = CreateSolidBrush(RGB(236, 182, 92));
+      for (int i = 0; i < scale(2); ++i) {
+        RECT edge{client.left + i, client.top + i, client.right - i, client.bottom - i};
+        FrameRect(dc, &edge, frame);
+      }
+      DeleteObject(frame);
+      SetBkMode(dc, TRANSPARENT);
+      const int pad = scale(AlertPadding);
+      RECT title{pad, pad, client.right - pad, pad + scale(AlertTitleHeight)};
+      SelectObject(dc, heading);
+      SetTextColor(dc, Text);
+      DrawTextW(dc, v.title.c_str(), -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      RECT body{pad, title.bottom + scale(10), client.right - pad, title.bottom + scale(10) + v.body_height};
+      SelectObject(dc, normal);
+      SetTextColor(dc, Muted);
+      DrawTextW(dc, v.body.c_str(), -1, &body, DT_LEFT | DT_WORDBREAK);
+      draw_alert_button(dc, v.primary_rect, v.primary, true);
+      if (!v.secondary.empty())
+        draw_alert_button(dc, v.secondary_rect, v.secondary, false);
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+    case WM_DESTROY:
+      if (v.window == hwnd)
+        v.window = nullptr;
+      return 0;
+  }
+  return DefWindowProcW(hwnd, message, w, l);
+}
+// primary closes the alert, then runs act; secondary (empty for none) only
+// closes it.
+void show_alert(std::wstring title, std::wstring body, std::wstring primary, std::wstring secondary, std::function<void()> act) {
+  if (preview_ui)
+    return;
+  close_alert();
+  static bool registered = false;
+  if (!registered) {
+    WNDCLASSEXW type{};
+    type.cbSize = sizeof(type);
+    type.hInstance = instance;
+    type.lpfnWndProc = alert_procedure;
+    type.lpszClassName = AlertClass;
+    type.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    registered = RegisterClassExW(&type) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+  }
+  if (!registered)
+    return;
+  auto& v = alert_view;
+  v.title = std::move(title);
+  v.body = std::move(body);
+  v.primary = std::move(primary);
+  v.secondary = std::move(secondary);
+  v.act = std::move(act);
+  const int width = scale(AlertWidth), pad = scale(AlertPadding);
+  // The body's height at the alert's width.
+  HDC screen = GetDC(nullptr);
+  const auto old_font = SelectObject(screen, normal);
+  RECT measure{0, 0, width - 2 * pad, 0};
+  DrawTextW(screen, v.body.c_str(), -1, &measure, DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
+  SelectObject(screen, old_font);
+  ReleaseDC(nullptr, screen);
+  v.body_height = measure.bottom - measure.top;
+  const int buttons_top = pad + scale(AlertTitleHeight) + scale(10) + v.body_height + scale(20);
+  const int height = buttons_top + scale(AlertButtonHeight) + pad;
+  v.primary_rect = {width - pad - scale(AlertButtonWidth), buttons_top, width - pad, buttons_top + scale(AlertButtonHeight)};
+  v.secondary_rect = {v.primary_rect.left - scale(10) - scale(AlertButtonWidth), buttons_top, v.primary_rect.left - scale(10),
+                      buttons_top + scale(AlertButtonHeight)};
+  MONITORINFO monitor{};
+  monitor.cbSize = sizeof(monitor);
+  GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &monitor);
+  const auto& area = monitor.rcWork;
+  const int x = area.left + (area.right - area.left - width) / 2, y = area.top + (area.bottom - area.top - height) / 2;
+  v.window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, AlertClass, v.title.c_str(), WS_POPUP, x, y, width,
+                             height, nullptr, nullptr, instance, nullptr);
+  if (v.window)
+    ShowWindow(v.window, SW_SHOWNOACTIVATE);
+}
+// After an update that could not convert this aircraft's displays, an alert
+// says so once, in front of the simulator; Choose displays opens Displays.
+void prompt_choose_displays() {
+  if (!choose_displays_prompt || preview_ui)
+    return;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  if (!fresh_status(sample) || !sample.identity_sample_ms)
+    return;  // Not known yet: ask once the aircraft is.
+  choose_displays_prompt = false;
+  if (!displays_to_choose(sample))
+    return;
+  show_alert(tr(L"Choose this aircraft's displays"),
+             tr(L"Taxi Cam now recognises cockpit displays a new way and could not carry over this aircraft's saved displays. "
+                L"Choose them once in Displays: Taxi Cam keeps your choice from then on."),
+             tr(L"Choose displays"), tr(L"Later"), [] {
+               // The pilot asked for Displays: no second check that could
+               // leave them on another page.
+               show();
+               open_step(0);
+             });
+}
 // Tray and Menu: Language. Unfinished fields are kept as a page change keeps
 // them, then the controls are made again in the new language. Open windows
 // other than Settings change when they are next opened or painted.
@@ -5897,24 +6565,44 @@ void draw_page(HDC dc) {
     const bool unsupported = unsupported_aircraft(sample);
     // While no displays are drawn yet, the line below says so; the heading
     // stays short enough for the 410 left of the buttons.
+    // Without the package nothing can be recognised: the card says so in
+    // amber, first thing on the page.
+    const bool inactive = package_inactive(sample);
+    constexpr COLORREF Amber = RGB(236, 182, 92);
     text(dc,
          connection_disconnected.load(std::memory_order_acquire) ? tr(L"Disconnected")
          : !sample.graphics_ready                                ? tr(L"Waiting for the simulator")
+         : inactive                                              ? tr(L"Taxi Cam can't recognise your displays")
          : unsupported                                           ? tr(L"This aircraft is not set up yet")
                                                                  : tr(L"Native bridge connected"),
-         262, 134, 410, 30, heading, unsupported || (sample.graphics_ready && has_displays) ? Accent : Text,
+         262, 134, 410, 30, heading,
+         inactive                                                 ? Amber
+         : unsupported || (sample.graphics_ready && has_displays) ? Accent
+                                                                  : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
-    const auto line = late_empty_pfds    ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
+    // Two lines at most in this box: the alert and Displays give the rest.
+    const auto line = inactive ? std::wstring(tr(L"Display package not active. Restart the simulator, or run the installer again."))
+                      : late_empty_pfds  ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
                                                            L"Restart Flight only if the list stays empty."))
                       : sample.heartbeat ? widen(sample.message)
                                          : live;
     // Left of Auto-connect and Disconnect (686-992), as the heading is.
-    text(dc, line.c_str(), 262, 166, 410, 36, small, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+    text(dc, line.c_str(), 262, 166, 410, 36, small,
+         inactive          ? Amber
+         : late_empty_pfds ? Accent
+                           : Muted,
+         DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
     panel(dc, 244, 222, 766, 84);
     text(dc, tr(L"Setup"), 262, 230, 120, 26, heading);
-    text(dc, unsupported ? tr(L"This aircraft is not set up yet. Start with Displays.") : tr(L"Open any step to change it."), 382, 230, 610,
-         26, small, unsupported ? Accent : Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // After an update whose display names could not be converted, the user
+    // chooses this aircraft's displays again.
+    const bool choose = !unsupported && displays_to_choose(sample);
+    text(dc,
+         unsupported ? tr(L"This aircraft is not set up yet. Start with Displays.")
+         : choose    ? tr(L"After this update, choose this aircraft's displays again in Displays.")
+                     : tr(L"Open any step to change it."),
+         382, 230, 610, 26, small, unsupported || choose ? Accent : Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const auto s = draft();
     const auto* profile = profiles::find(s.profile);
     panel(dc, 244, 320, 766, 96);
@@ -5922,9 +6610,10 @@ void draw_page(HDC dc) {
     if (profile)
       chip(dc, 470, 332,
            unsupported                                  ? tr(L"Not set up")
+           : choose                                     ? tr(L"Choose displays")
            : s.profile == profiles::DiscoveredProfileId ? tr(L"Set up")
                                                         : tr(L"Built in"),
-           unsupported ? RGB(236, 182, 92) : Accent);
+           unsupported || choose ? RGB(236, 182, 92) : Accent);
     panel(dc, 244, 430, 766, 246);
     text(dc, tr(L"Cockpit displays"), 262, 440, 180, 32, heading);
     text(dc, tr(L"Select one to change it in Displays."), 446, 440, 314, 32, small, Muted,
@@ -6000,7 +6689,7 @@ void draw_page(HDC dc) {
         profile && s.door_side < MaxDisplaySides && win::camera_action_sides(*profile, win::CameraSd) && s.door_side == MaxDisplaySides - 1;
     // A pilot pair without its lower display placed yet: that comes first.
     const auto* base = profiles::base_profile(s.profile);
-    const bool place_lower = base && profile && profile->sides < MaxDisplaySides && profiles::pair_detection(*base);
+    const bool place_lower = base && profile && profile->sides < MaxDisplaySides && profiles::pilot_pair(*base);
     text(dc,
          s.door_side == win::DoorSideNone && place_lower ? tr(L"Place the lower display in Setup > Displays to show the door camera there.")
          : s.door_side == win::DoorSideNone              ? tr(L"Choose the display it fills. The lower display is the usual place.")
@@ -6365,6 +7054,8 @@ DWORD WINAPI connection_worker(void*) {
         exchange_control(mailbox);
         win::LaunchDiagnostics launch_diagnostics;
         const bool allow_load = win::fresh_load_allowed(load_started_this_session);
+        if (!preview_ui)
+          check_marks_package(attach.path.empty() ? expected_simulator : attach.path);
         const auto loaded = win::load_bridge(attached, attach.path.empty() ? expected_simulator : attach.path,
                                              installation + L"\\taxi-camera-bridge.dll", &running, &launch_diagnostics, allow_load);
         if (launch_diagnostics.load_started)
@@ -6545,7 +7236,8 @@ void poll_updates() {
     check_updates(false);
 }
 // A step pill: its number in a circle, then its name. The current step is
-// filled; on Overview, Displays stands out while the aircraft is not set up.
+// filled; on Overview, Displays stands out while the aircraft is not set up
+// or its displays are to be chosen again.
 void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
   win::Status sample;
   {
@@ -6553,7 +7245,7 @@ void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
     sample = status;
   }
   const bool current = setup_step(page) == static_cast<int>(step);
-  const bool attention = page == OverviewPage && step == 0 && unsupported_aircraft(sample);
+  const bool attention = page == OverviewPage && step == 0 && (unsupported_aircraft(sample) || displays_to_choose(sample));
   const bool down = (item.itemState & ODS_SELECTED) != 0;
   const auto& r = item.rcItem;
   HBRUSH surround = CreateSolidBrush(on_card ? Card : Background);
@@ -6741,7 +7433,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (const auto* area = hit_area_at(point)) {
-        if (area->id)
+        if (area->side >= 0)
+          show_area_picker(static_cast<unsigned>(area->side));
+        else if (area->id)
           show_display_snapshot(area->id);
         else
           open_step(0);
@@ -6902,10 +7596,18 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       return TRUE;
     }
+    case AreaPickerMessage:
+      if (page == SetupPage)
+        show_area_picker(static_cast<unsigned>(w));
+      return 0;
     case StatusMessage:
       refresh_connection_button();
       sync_aircraft_session();
       auto_profile();
+      convert_legacy_displays();
+      prompt_choose_displays();
+      service_marks_package_notice();
+      service_package_inactive_alert();
       service_lvar_bindings();
       show_notifications();
       update_gallery_buttons();
@@ -7038,7 +7740,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         // A pilot pair places its lower display first, in Displays.
         const auto* base = profiles::base_profile(draft().profile);
         const auto* profile = profiles::find(draft().profile);
-        open_step(base && profile && profile->sides < MaxDisplaySides && profiles::pair_detection(*base) ? 0 : 2);
+        open_step(base && profile && profile->sides < MaxDisplaySides && profiles::pilot_pair(*base) ? 0 : 2);
         return 0;
       }
       if (handle_controls_command(id, HIWORD(w)))

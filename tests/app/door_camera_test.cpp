@@ -23,13 +23,9 @@ profiles::DiscoveredLayout fenix_layout() {
   std::strcpy(l.key, "SimObjects/Airplanes/FNX_32X/presets/fnx/FNX_320_CFM_SL");
   l.sides = 2;
   l.shapes[0] = l.shapes[1] = {768, 768, 5};
-  std::strcpy(l.textures[0], "$A320_PFD_Captain");
-  std::strcpy(l.textures[1], "$A320_PFD_FO");
-  const char* anchors[]{"$A320_ECAM_Upper", "$A320_ND_Captain", "$A320_ECAM_Lower", "$A320_ND_FO"};
-  for (unsigned i = 0; i < 4; ++i) {
-    std::strcpy(l.anchors[i].name, anchors[i]);
-    l.anchors[i].width = l.anchors[i].height = 768;
-  }
+  // Panel-mark keys read on the live A320 (2026-11-04).
+  std::strcpy(l.textures[0], "@PFD_Captain");
+  std::strcpy(l.textures[1], "@PFD_FO");
   return l;
 }
 }  // namespace
@@ -99,18 +95,14 @@ int main() {
   require(!profiles::door_template("SimObjects/Airplanes/FNX_32X_copy/presets/x/y") && !profiles::door_template(""),
           "Other aircraft do not");
   auto layout = fenix_layout();
-  require(profiles::add_door_display(layout, *door) && layout.sides == 3 && std::strcmp(layout.textures[2], "$A320_ECAM_Lower") == 0 &&
+  require(profiles::add_door_display(layout, *door) && layout.sides == 3 && std::strcmp(layout.textures[2], "@ECAM_Lower") == 0 &&
               layout.shapes[2].width == 768 && layout.shapes[2].mips == 5,
           "The lower ECAM is added");
-  require(std::strcmp(layout.anchors[2].name, "$A320_ND_FO") == 0 && !layout.anchors[3].name[0] && !layout.anchors[3].width &&
-              profiles::valid_layout(layout),
-          "and stops being an anchor");
+  require(profiles::valid_layout(layout), "and the layout stays valid");
   auto chosen = fenix_layout();
   chosen.sides = 3;
-  std::strcpy(chosen.textures[2], "$A320_ECAM_Upper");
+  std::strcpy(chosen.textures[2], "@ECAM_Upper");
   chosen.shapes[2] = {768, 768, 5};
-  std::strcpy(chosen.anchors[0].name, "$A320_Standby");
-  chosen.anchors[0].width = chosen.anchors[0].height = 256;
   const auto before = chosen;
   require(profiles::add_door_display(chosen, *door) && profiles::same_layout(chosen, before), "A lower display already chosen is kept");
   auto broken = fenix_layout();

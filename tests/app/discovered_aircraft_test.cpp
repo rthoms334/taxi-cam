@@ -7,7 +7,6 @@
 #include <vector>
 #include "../../src/app/settings_store.hpp"
 #include "../../src/camera/aircraft_identity.hpp"
-#include "../../src/camera/display_panels.hpp"
 #include "../../src/shared/discovered_setup.hpp"
 
 using namespace taxi_camera;
@@ -41,11 +40,6 @@ profiles::DiscoveredLayout fenix_layout(const char* path = Fenix320) {
   l.shapes[0] = l.shapes[1] = {768, 768, 5};
   std::strcpy(l.textures[0], "$PFD_CAPT");
   std::strcpy(l.textures[1], "$PFD_FO");
-  std::strcpy(l.anchors[0].name, "$ND_CAPT");
-  l.anchors[0].width = l.anchors[0].height = 768;
-  std::strcpy(l.anchors[1].name, "$EFB");
-  l.anchors[1].width = 1024;
-  l.anchors[1].height = 768;
   return l;
 }
 
@@ -87,8 +81,6 @@ void layouts() {
   mixed.shapes[1] = {1024, 768, 5};
   require(profiles::valid_layout(mixed), "Sides can be panels of different sizes");
   refused([](auto& l) { l.padding = {400, 0, 400, 0}; }, "Padding leaves a camera area");
-  refused([](auto& l) { std::strcpy(l.anchors[0].name, "$PFD_FO"); }, "A display is not its own anchor");
-  refused([](auto& l) { l.anchors[0] = {}; }, "Anchors have no gaps");
   refused([](auto& l) { l.key[std::strlen(l.key) + 1] = 'x'; }, "Unused key bytes stay zero");
   refused([](auto& l) { std::strcpy(l.textures[2], "$ECAM"); }, "Unused sides stay empty");
   refused([](auto& l) { std::strcpy(l.key, "SimObjects/Airplanes/FNX_32X/config"); }, "A key is already a variant key");
@@ -103,12 +95,10 @@ void publish_and_detect() {
   require(first && profiles::find(profiles::DiscoveredProfileId) == first && profiles::discovered_current(fenix),
           "find() returns the published layout's profile");
   require(first->id == profiles::DiscoveredProfileId && std::wstring(first->name) == L"FNX_320_CFM_SL" &&
-              first->pfd_detection == profiles::PfdDetectionPolicy::named && !profiles::commandable_buttons(*first) &&
+              first->display_layout == profiles::DisplayLayout::fitted && !profiles::commandable_buttons(*first) &&
               profiles::side_mask(*first) == 3 && !profiles::separate_lower_texture(*first) && first->mounts == profiles::DiscoveredMounts,
           "A set-up aircraft routes by name and uses shortcuts only");
-  require(std::strcmp(first->panel_textures[1], "$PFD_FO") == 0 && std::strcmp(first->panel_shapes[1].name, "$EFB") == 0 &&
-              first->panel_shapes[1].width == 1024 && !first->panel_shapes[2].name,
-          "Names and anchors come from the layout");
+  require(std::strcmp(first->panel_textures[1], "$PFD_FO") == 0, "Names come from the layout");
   require(first->fit_texture && profiles::matches_display(*first, 768, 768, 5, 28) && profiles::matches_display(*first, 1024, 768, 5, 29) &&
               profiles::matches_display(*first, 2048, 1536, 10, 28) && !profiles::matches_display(*first, 768, 768, 1, 28) &&
               !profiles::matches_display(*first, 768, 768, 5, 87),
@@ -232,8 +222,6 @@ void settings_files(const std::wstring& root) {
   // calibration, and a variant never saved starts from the starting mounts.
   auto changed = fenix_layout();
   std::strcpy(changed.textures[0], "$ND_CAPT");
-  std::memset(changed.anchors[0].name, 0, sizeof(changed.anchors[0].name));
-  std::strcpy(changed.anchors[0].name, "$PFD_CAPT");
   Settings again;
   require(load_settings(again, L"missing", profiles::DiscoveredProfileId, {}, &changed) &&
               profiles::same_layout(again.discovered, changed) && again.mounts == s.mounts,
@@ -297,8 +285,7 @@ void selection() {
 void learning() {
   Status status{};
   std::strcpy(status.aircraft_path, Fenix320);
-  status.panel_clean = 1;
-  status.panel_state = static_cast<std::uint32_t>(PanelMapState::paired);
+  status.panel_state = static_cast<std::uint32_t>(PanelMapState::marked);
   const struct {
     const char* name;
     std::uint32_t width, height;
@@ -314,31 +301,20 @@ void learning() {
   }
   profiles::DiscoveredLayout l{};
   require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::learned && profiles::valid_layout(l),
-          "A clean map gives a layout");
+          "A marked map gives a layout");
   require(std::strcmp(l.key, Fenix320Key) == 0 && l.shapes[0].width == 768 && l.shapes[0].mips == 5 && l.shapes[1].height == 768,
           "Key and each side's panel shape");
-  require(std::strcmp(l.anchors[0].name, "$ECAM_UPPER") == 0 && std::strcmp(l.anchors[1].name, "$ND_CAPT") == 0 &&
-              std::strcmp(l.anchors[2].name, "$EFB") == 0 && std::strcmp(l.anchors[3].name, "$ND_FO") == 0 && !l.anchors[4].name[0],
-          "Anchors are the unique panels within two creations of each display");
   profiles::DiscoveredLayout three{};
   require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", "$ND_FO"}, 3, three) == LayoutLearning::learned && three.sides == 3 &&
               std::strcmp(three.textures[2], "$ND_FO") == 0 && profiles::valid_layout(three),
           "A lower display is a third side");
-  for (const auto& anchor : three.anchors)
-    require(std::strcmp(anchor.name, "$ND_FO") != 0, "A display is never an anchor");
   require(learn_layout(status, {"$PFD_CAPT", "$EFB", nullptr}, 2, l) == LayoutLearning::learned && l.shapes[1].width == 1024 &&
               l.shapes[1].height == 768 && profiles::valid_layout(l),
           "Sides can be panels of different sizes");
   require(learn_layout(status, {"$PFD_CAPT", "$NONE", nullptr}, 2, l) == LayoutLearning::unknown_panel, "Names come from the map");
-  status.panel_clean = 0;
-  require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::not_clean,
-          "Nothing is learned after a switch to another aircraft");
-  require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l, false) == LayoutLearning::learned,
-          "A cockpit test, never saved, uses the map anyway");
-  status.panel_clean = 1;
-  status.panel_state = static_cast<std::uint32_t>(PanelMapState::incomplete);
-  require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::not_paired, "Only a complete map");
-  status.panel_state = static_cast<std::uint32_t>(PanelMapState::paired);
+  status.panel_state = static_cast<std::uint32_t>(PanelMapState::waiting);
+  require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::not_paired, "Only a marked map");
+  status.panel_state = static_cast<std::uint32_t>(PanelMapState::marked);
   std::strcpy(status.aircraft_path, "Airbus");
   require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::no_variant, "Only a known variant");
 }
@@ -394,7 +370,7 @@ void display_choices(const std::wstring& root) {
   require(chosen && profiles::find(profiles::A380.id) == chosen && profiles::base_profile(profiles::A380.id) == &profiles::A380 &&
               profiles::override_current(&profiles::A380, choices),
           "find() returns the profile with the user's choices");
-  require(std::strcmp(chosen->panel_textures[0], "SCREEN_DU_NDL") == 0 && std::strcmp(chosen->panel_textures[1], "SCREEN_DU_PFDR") == 0 &&
+  require(std::strcmp(chosen->panel_textures[0], "SCREEN_DU_NDL") == 0 && std::strcmp(chosen->panel_textures[1], "@pfd#1/2") == 0 &&
               chosen->display_regions[1].bottom == 900 && chosen->display_regions[0].bottom == profiles::A380.display_regions[0].bottom,
           "Only the chosen sides change");
   require(profiles::publish_override(&profiles::A380, choices) == chosen, "The same choices keep their profile");
@@ -446,13 +422,11 @@ void placed_lower_display() {
           "A placed lower display adds no TAXI latch");
   // It may be any cockpit panel, such as the A380X's 1646 x 1024 MFD; the
   // pilot displays and automatic detection keep the display shape.
-  require(profiles::lower_any_panel(*chosen) && !profiles::lower_any_panel(profiles::A380) &&
-              profiles::side_display(*chosen, 2, 1646, 1024, 5, 28) && !profiles::side_display(*chosen, 0, 1646, 1024, 5, 28) &&
-              profiles::side_display(*chosen, 0, 768, 1024, 5, 28) && !profiles::side_display(*chosen, 2, 1646, 1024, 1, 28),
+  require(profiles::lower_any_panel(*chosen) && !profiles::lower_any_panel(profiles::A380),
           "Only the placed lower display takes a panel of another shape");
   require(profiles::drawable(*chosen, 1646, 1024, 5, 28) && !profiles::drawable(profiles::A380, 1646, 1024, 5, 28) &&
-              !profiles::matches_detection(*chosen, 1646, 1024, 5, 28) && !profiles::lower_any_panel(profiles::Pmdg777),
-          "Detection and the profiles without a placed lower display are unchanged");
+              !profiles::lower_any_panel(profiles::Pmdg777),
+          "Profiles without a placed lower display are unchanged");
   Settings s;
   s.display_override = lower;
   s.door_side = 2;
@@ -577,13 +551,6 @@ void door_shapes() {
           "A built-in display's door camera takes its camera area's shape");
   profiles::publish_override(&profiles::A380, {});
 }
-void trimming() {
-  std::vector<display_identity::Creation> burst;
-  for (const std::uint32_t mips : {5u, 5u, 10u, 5u, 11u, 12u})
-    burst.push_back({burst.size() + 1, 0, 768, 768, mips, 28});
-  display_identity::trim_trailing_ui(burst);
-  require(burst.size() == 4 && burst.back().mips == 5 && burst[2].mips == 10, "Only trailing UI textures are dropped");
-}
 }  // namespace
 
 int main() {
@@ -607,7 +574,6 @@ int main() {
     fenix_template_other_lower(root);
     selection();
     learning();
-    trimming();
     display_choices(root);
     placed_lower_display();
     camera_shapes();
