@@ -12,7 +12,6 @@
 #endif
 #include <windows.h>
 #include <bcrypt.h>
-#include <tlhelp32.h>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -220,62 +219,6 @@ inline std::filesystem::path community_folder() {
         return community;
     }
   }
-  return {};
-}
-// The folder holding FlightSimulator2024.exe: the running simulator's, else
-// the Microsoft Store default, else Steam's. Empty when none is found.
-inline std::filesystem::path simulator_folder() {
-  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot != INVALID_HANDLE_VALUE) {
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    std::filesystem::path found;
-    for (BOOL more = Process32FirstW(snapshot, &entry); more && found.empty(); more = Process32NextW(snapshot, &entry)) {
-      if (_wcsicmp(entry.szExeFile, L"FlightSimulator2024.exe") != 0)
-        continue;
-      if (const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID)) {
-        wchar_t path[MAX_PATH]{};
-        DWORD size = MAX_PATH;
-        if (QueryFullProcessImageNameW(process, 0, path, &size))
-          found = std::filesystem::path(path).parent_path();
-        CloseHandle(process);
-      }
-    }
-    CloseHandle(snapshot);
-    if (!found.empty())
-      return found;
-  }
-  std::vector<std::filesystem::path> candidates{L"C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content"};
-  HKEY key{};
-  if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", 0, KEY_READ, &key) == ERROR_SUCCESS) {
-    wchar_t steam[MAX_PATH]{};
-    DWORD size = sizeof(steam);
-    if (RegQueryValueExW(key, L"SteamPath", nullptr, nullptr, reinterpret_cast<BYTE*>(steam), &size) == ERROR_SUCCESS) {
-      const std::filesystem::path root(steam);
-      candidates.push_back(root / L"steamapps\\common\\Microsoft Flight Simulator 2024");
-      // Other Steam libraries.
-      std::string vdf;
-      if (detail::read_file(root / L"steamapps\\libraryfolders.vdf", vdf)) {
-        std::istringstream lines(vdf);
-        for (std::string line; std::getline(lines, line);) {
-          const auto key_at = line.find("\"path\"");
-          const auto open = key_at == std::string::npos ? key_at : line.find('"', key_at + 6);
-          const auto close = open == std::string::npos ? open : line.find('"', open + 1);
-          if (close == std::string::npos)
-            continue;
-          std::string folder;
-          for (std::size_t i = open + 1; i < close; ++i)
-            if (!(line[i] == '\\' && i + 1 < close && line[i + 1] == '\\'))
-              folder += line[i];
-          candidates.push_back(std::filesystem::path(folder) / L"steamapps\\common\\Microsoft Flight Simulator 2024");
-        }
-      }
-    }
-    RegCloseKey(key);
-  }
-  for (const auto& candidate : candidates)
-    if (detail::exists(candidate / L"FlightSimulator2024.exe"))
-      return candidate;
   return {};
 }
 // The stock vcockpits package under a simulator folder, or empty.

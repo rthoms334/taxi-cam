@@ -3725,20 +3725,20 @@ void convert_legacy_displays() {
                    : tr(L"This aircraft's saved displays now use the new display names.");
   build_controls();
 }
-// The panel marks package (marks_package.hpp), checked once at start off the
-// window thread; a new or updated package takes effect at the next
-// simulator start.
+// The panel marks package (marks_package.hpp), checked once a run on the
+// connection worker for the simulator Taxi Cam attaches to; a new or updated
+// package takes effect at the next simulator start.
 std::atomic<int> marks_package_outcome{-1};
-DWORD WINAPI marks_package_worker(void*) {
+void check_marks_package(const std::wstring& simulator_exe) {
+  if (marks_package_outcome.load(std::memory_order_acquire) >= 0 || simulator_exe.empty())
+    return;
+  auto outcome = win::marks_package::Outcome::failed;
   try {
-    marks_package_outcome.store(
-        static_cast<int>(win::marks_package::ensure(win::marks_package::simulator_folder(), win::marks_package::community_folder(),
-                                                    win::marks_package::helper_text())),
-        std::memory_order_release);
+    outcome = win::marks_package::ensure(std::filesystem::path(simulator_exe).parent_path(), win::marks_package::community_folder(),
+                                         win::marks_package::helper_text());
   } catch (...) {
-    marks_package_outcome.store(static_cast<int>(win::marks_package::Outcome::failed), std::memory_order_release);
   }
-  return 0;
+  marks_package_outcome.store(static_cast<int>(outcome), std::memory_order_release);
 }
 void service_marks_package_notice() {
   static bool shown = false;
@@ -6749,6 +6749,8 @@ DWORD WINAPI connection_worker(void*) {
         exchange_control(mailbox);
         win::LaunchDiagnostics launch_diagnostics;
         const bool allow_load = win::fresh_load_allowed(load_started_this_session);
+        if (!preview_ui)
+          check_marks_package(attach.path.empty() ? expected_simulator : attach.path);
         const auto loaded = win::load_bridge(attached, attach.path.empty() ? expected_simulator : attach.path,
                                              installation + L"\\taxi-camera-bridge.dll", &running, &launch_diagnostics, allow_load);
         if (launch_diagnostics.load_started)
@@ -7905,9 +7907,6 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
                               CW_USEDEFAULT, scale(1070), scale(810), nullptr, nullptr, instance, nullptr);
   if (!main)
     return 1;
-  if (!preview_ui)
-    if (const HANDLE package = CreateThread(nullptr, 0, marks_package_worker, nullptr, 0, nullptr))
-      CloseHandle(package);
   worker = CreateThread(nullptr, 0, connection_worker, nullptr, 0, nullptr);
   if (!worker) {
     DestroyWindow(main);

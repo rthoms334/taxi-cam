@@ -299,8 +299,9 @@ RCDATA 201):
   page without exactly one `VCockpit.js` line removes the package. A write
   while MSFS runs takes effect at the next start (notice shown).
 - Community from `UserCfg.opt` `InstalledPackagesPath` (Store, then Steam);
-  the simulator folder from the running process, the Store default, or Steam
-  libraries. Steam paths are unverified (the dev box is Store).
+  the simulator folder from the installer's chosen folder (Setup) or the
+  simulator the companion attaches to (no process scan of its own). Steam
+  paths are unverified (the dev box is Store).
 - `tools/panel-marks/make-package.ps1` stays as a developer tool; the
   companion rewrites its package on the next start (different marker text).
 
