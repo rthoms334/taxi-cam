@@ -259,7 +259,6 @@ inline constexpr Translation FrenchTranslations[]{
     {L"NDs", L"ND"},
     {L"Named", L"Nommé"},
     {L"Native bridge connected", L"Pont natif connecté"},
-    {L"Native bridge connected — waiting for cockpit displays", L"Pont natif connecté — en attente des écrans du cockpit"},
     {L"Native bridge loaded. Waiting for graphics and aircraft.", L"Pont natif chargé. En attente des graphismes et de l'avion."},
     {L"Native bridge startup is pending.", L"Démarrage du pont natif en attente."},
     {L"Native taxi cameras", L"Caméras de roulage natives"},

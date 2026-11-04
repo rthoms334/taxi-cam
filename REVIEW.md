@@ -6,7 +6,7 @@ These rules set what a pull-request review reports and how severe each finding i
 
 ### Important: answer before merge
 
-A defect that this change introduces, or makes reachable, and that would ship. Every Important finding needs an answer: fix it, or reply with the reason it is not a defect and resolve the conversation.
+A defect that this change introduces, or makes reachable, and that would ship. Every Important finding needs an answer: fix it, reply with the reason it is not a defect, or reply with the owner's decision to accept it without a fix; then resolve the conversation. Only the owner accepts a defect.
 
 - **Simulator stability.** The bridge DLL runs inside `FlightSimulator2024.exe`, so a crash, hang or stall there takes the simulator down for every user. Examples: a simulator thread that waits on a bridge lock without `BoundedLock` and a budget ([render-thread freeze guards](docs/render-thread-freeze-guards.md)); a GPU resource reused or released before the fence that covers it completes; a queue `Wait` without its `Signal`; hook removal or unload without quiescence ([hooks](docs/hooks.md)); an exception or unchecked failure crossing a hook boundary.
 - **Simulator memory and identity.** A read or write of simulator memory that skips the existing access guards, bounds, rereads or identity proofs; a fixed build address, offset or package version used instead of a resolved contract ([dynamic camera compatibility](docs/dynamic-camera-compatibility.md)); a refusal path weakened so the bridge guesses instead of refusing.

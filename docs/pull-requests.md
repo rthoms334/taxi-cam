@@ -32,14 +32,15 @@ Important findings and nits become review threads on the changed line. When a li
 - Follow-up lines are the pull request's own changes that are new since the last review, including the lines on either side of a deletion and whole renamed files. When `main` has been merged in, the comparison starts from the last reviewed commit merged with `main`, so `main`'s changes are left out; if that merge conflicts, a full review runs instead. When nothing is left (for example, after only merging `main`), Claude is not run at all.
 - A force push that rewrites the reviewed commit out of the branch gets a full review again.
 
-The reviewer reads the earlier threads, whether each was resolved, and the replies from people with write access. It drops a finding that a reply explains is not a defect. A finding whose thread is still open is not posted twice. If you resolve a thread but the reviewer still finds the defect on a later push, it opens a new thread.
+The reviewer reads the earlier threads, whether each was resolved, and the replies from people with write access. It drops a finding that a reply explains is not a defect, or that a reply records the owner accepted without a fix, unless the code has since made that defect more likely or its effect larger. A finding whose thread is still open is not posted twice. If you resolve a thread without such a reply and the reviewer still finds the defect on a later push, it opens a new thread.
 
 ### Answering findings
 
 With **Require conversation resolution before merging** turned on (see [setup](#one-time-setup)), every thread blocks the merge until it is resolved:
 
-- **Fix it**, push, and resolve the thread, or
-- **reply with the reason** it is not a defect, then resolve the thread.
+- **Fix it**, push, and resolve the thread,
+- **reply with the reason** it is not a defect, then resolve the thread, or
+- **reply with the owner's decision** to accept a real defect without a fix (for example, an edge case that needs an unlikely chain of conditions and has a small effect), then resolve the thread. Only the owner accepts a defect.
 
 The **AI review** check fails only when the review could not run (no credential, a timeout, invalid output). Findings never fail it; their unresolved threads block the merge instead.
 

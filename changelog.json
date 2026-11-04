@@ -15,7 +15,8 @@
         "The iniBuilds A340-300's displays are found again, and its display panel can be placed in Displays.",
         "The cameras now pause only in outside camera views, such as chase, drone, fixed and showcase. Other views the simulator reports, like an unusual one after a flight loads, no longer pause them.",
         "Resizing a display's camera area during a flight now waits for the cameras' new pictures instead of giving up on them, and Taxi Cam asks for the cameras again if they have to be set up afresh.",
-        "The camera picture now stays steady on the cockpit displays: the aircraft's own display no longer flickers through it now and then."
+        "The camera picture now stays steady on the cockpit displays: the aircraft's own display no longer flickers through it now and then.",
+        "The connection heading on Overview now fits while Taxi Cam waits for the cockpit displays, instead of being cut off."
       ]
     },
     {
