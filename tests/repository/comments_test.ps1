@@ -15,7 +15,7 @@ $excludedPrefixes = @('.github/', 'build/', 'licenses/')
 $excludedFiles = @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'REVIEW.md')
 $thirdPartyFiles = @()
 $noCommentExtensions = @('.json', '.md', '.ico', '.png', '.jpg', '.txt')
-$cFamilyExtensions = @('.cpp', '.hpp', '.h', '.c', '.rc', '.S', '.hlsl')
+$cFamilyExtensions = @('.cpp', '.hpp', '.h', '.c', '.rc', '.S', '.hlsl', '.js')
 $powerShellExtensions = @('.ps1', '.psm1', '.psd1')
 $hashExtensions = @('.cfg', '.clang-format', '.gitignore', '.gitattributes', '.yml', '.yaml', '.py', '.toml', '.ini')
 $markupExtensions = @('.manifest', '.xml')
@@ -25,6 +25,7 @@ $singleline = [Text.RegularExpressions.RegexOptions]::Singleline
 $cToken = New-Object Text.RegularExpressions.Regex (
     '(?<raw>(?:u8|[uUL])?R"(?<delimiter>[^()\\\s"]{0,16})\((?<body>.*?)\)\k<delimiter>")' +
     '|(?<string>(?:u8|[uUL])?"(?:\\.|[^"\\\r\n])*")' +
+    '|(?<template>`(?:\\.|[^`\\])*`)' +
     '|(?<char>(?<![\w.])(?:u8|[uUL])?''(?:\\.|[^''\\\r\n])+'')' +
     '|(?<comment>//[^\r\n]*|/\*.*?\*/)'), $singleline
 $pascalToken = New-Object Text.RegularExpressions.Regex ('(?<string>''(?:[^''\r\n]|'''')*'')|(?<comment>//[^\r\n]*|\{.*?\}|\(\*.*?\*\))'), $singleline
@@ -138,7 +139,8 @@ spans */ int after = 0;
 $found = @(Get-CComments $cSample)
 Assert-That ((Get-Texts $found) -join '|' -ceq "// first|// shader|/* block */|/* second`nspans */") "C-family comments were [$((Get-Texts $found) -join '|')]."
 Assert-That ($found[0].Line -eq 2 -and $found[1].Line -eq 3 -and $found[2].Line -eq 4 -and $found[3].Line -eq 4) 'C-family comment lines were wrong.'
-$psSample = "#requires -Version 5.1`n`$a = '# not'; `$b = `"# not`" # trailing`n<# block #>`n@'`n# here-string`n'@"
+Assert-That ((Get-Texts (Get-CComments 'const a = `x // not`, b = /\d+/.exec(s); // real')) -join '|' -ceq '// real') 'JavaScript template or regular-expression text was taken for a comment.'
+$psSample ="#requires -Version 5.1`n`$a = '# not'; `$b = `"# not`" # trailing`n<# block #>`n@'`n# here-string`n'@"
 Assert-That ((Get-Texts (Get-PowerShellComments $psSample)) -join '|' -ceq '#requires -Version 5.1|# trailing|<# block #>') 'PowerShell comments were wrong.'
 $innoSample = "[Setup]`n; setup note`nAppName=x ; kept`n[Code]`nconst A = '{ not }'; // code note`n{ brace note }`n(* star note *)"
 $innoFound = @(Get-InnoComments $innoSample)
