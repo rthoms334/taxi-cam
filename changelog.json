@@ -5,11 +5,17 @@
       "date": "2026-11-03",
       "features": [
         {
+          "title": "Every display recognised by name",
+          "text": "Taxi Cam now recognises each cockpit display by a tiny code it shows for a moment while the flight loads: the small coloured square in a display's top-right corner. It's gone as soon as the displays are found. After updating, some aircraft need their displays chosen once more: Taxi Cam asks, takes you to Displays, and keeps your choice from then on.",
+          "image": "docs/whats-new/1.3.2/panel-marks.jpg"
+        },
+        {
           "title": "Taxi cameras in GlassOut",
           "text": "Stream your taxi cameras to a phone, tablet or second screen with GlassOut. On the PMDG 777, a cockpit display showing a Taxi Cam camera now streams in GlassOut like any other panel, even after you move its camera area. There's nothing to set up."
         }
       ],
       "fixes": [
+        "The iniBuilds A340-300's displays are found again, and its display panel can be placed in Displays.",
         "The cameras now pause only in outside camera views, such as chase, drone, fixed and showcase. Other views the simulator reports, like an unusual one after a flight loads, no longer pause them.",
         "Resizing a display's camera area during a flight now waits for the cameras' new pictures instead of giving up on them, and Taxi Cam asks for the cameras again if they have to be set up afresh.",
         "The camera picture now stays steady on the cockpit displays: the aircraft's own display no longer flickers through it now and then."
