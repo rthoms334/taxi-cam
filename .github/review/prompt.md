@@ -54,7 +54,7 @@ Give each survivor a severity using `REVIEW.md`:
 - `pre-existing`: Important-grade, but the change did not introduce it.
 - `nit`: minor. Keep at most five, the most useful.
 
-Then drop any survivor that repeats a finding in `previous.json` (the same underlying defect, however it is worded or located), with one exception: if that earlier thread is resolved, or a reply says the defect was fixed, and the defect is still present at head, keep it and say in its body that it is still present. A reply that explains why it is not a defect is a reason to drop it.
+Then drop any survivor that repeats a finding in `previous.json` (the same underlying defect, however it is worded or located), with one exception: if that earlier thread is resolved, or a reply says the defect was fixed, and the defect is still present at head, keep it and say in its body that it is still present. Drop it even then when a reply explains why it is not a defect, or records the owner's decision to accept it without a fix (for example, an edge case judged unlikely with a small effect). An acceptance covers only the defect as the reply describes it: if the code at head makes it more likely or its effect larger, keep it.
 
 Order the findings: `important`, then `pre-existing`, then `nit`, most severe first within each.
 
