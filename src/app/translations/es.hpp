@@ -664,6 +664,10 @@ inline constexpr Translation SpanishTranslations[]{
      L"Tras esta actualización, vuelve a elegir las pantallas de esta aeronave en Pantallas."},
     {L"Choose displays", L"Elegir pantallas"},
     {L"Taxi Cam can't recognise your displays", L"Taxi Cam no puede reconocer tus pantallas"},
+    {L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the simulator; if "
+     L"that doesn't help, run the Taxi Cam installer again.",
+     L"El paquete de pantallas de Taxi Cam no está activo en el simulador, así que no puede reconocer las pantallas de cabina. Reinicia el "
+     L"simulador; si no basta, vuelve a ejecutar el instalador de Taxi Cam."},
     {L"Restart the simulator once", L"Reinicia el simulador una vez"},
     {L"Taxi Cam has just set up the package that lets it recognise your cockpit displays, but the simulator had already loaded its "
      L"add-ons. Restart the simulator so Taxi Cam can find your displays.",

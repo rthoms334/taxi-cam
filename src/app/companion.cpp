@@ -2005,6 +2005,16 @@ std::wstring setup_aircraft_name() {
   return profile ? std::wstring(profile->name) : std::wstring(tr(L"this aircraft"));
 }
 // What stops the setup now; empty when the picks can be saved.
+// The bridge pictured cockpit panels and none carried a mark: the panel
+// marks package is not loaded in this simulator session.
+const wchar_t* package_inactive_text() {
+  return tr(
+      L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the "
+      L"simulator; if that doesn't help, run the Taxi Cam installer again.");
+}
+bool package_inactive(const win::Status& sample) {
+  return fresh_status(sample) && static_cast<win::PanelMapState>(sample.panel_state) == win::PanelMapState::inactive;
+}
 std::wstring setup_blocker(const win::Status& sample) {
   // Pictures and the panel list need the bridge connection.
   if (!fresh_status(sample) || !sample.graphics_ready || !draft().enabled)
@@ -2013,6 +2023,8 @@ std::wstring setup_blocker(const win::Status& sample) {
     return tr(L"Waiting for the simulator to report which aircraft is loaded.");
   if (!sample.panel_discovery)
     return tr(L"Waiting for the bridge to track this cockpit's panels.");
+  if (package_inactive(sample))
+    return package_inactive_text();
   // Panels are named by the marks their pages paint when they load.
   if (static_cast<win::PanelMapState>(sample.panel_state) != win::PanelMapState::marked)
     return tr(L"Reading this cockpit's panels. This takes a few seconds after the flight has loaded.");
@@ -3821,6 +3833,28 @@ void service_marks_package_notice() {
   }
   show_alert(title, notice, tr(L"OK"), L"", {});
   build_controls();
+}
+// The package is not loaded in this simulator session although Taxi Cam did
+// not have to write it (another package's cockpit page loaded after it, or a
+// file removed by hand): an alert once a run, unless the restart alert above
+// already said so.
+void service_package_inactive_alert() {
+  static bool shown = false;
+  if (shown || preview_ui)
+    return;
+  win::Status sample;
+  {
+    const std::lock_guard lock(app_mutex);
+    sample = status;
+  }
+  if (!package_inactive(sample))
+    return;
+  shown = true;
+  using win::marks_package::Outcome;
+  const auto outcome = marks_package_outcome.load(std::memory_order_acquire);
+  if (outcome >= 0 && static_cast<Outcome>(outcome) != Outcome::current)
+    return;
+  show_alert(tr(L"Taxi Cam can't recognise your displays"), package_inactive_text(), tr(L"OK"), L"", {});
 }
 void sync_aircraft_session() {
   auto s = draft();
@@ -6417,14 +6451,10 @@ void prompt_choose_displays() {
              tr(L"Taxi Cam now recognises cockpit displays a new way and could not carry over this aircraft's saved displays. "
                 L"Choose them once in Displays: Taxi Cam keeps your choice from then on."),
              tr(L"Choose displays"), tr(L"Later"), [] {
-               win::Status now;
-               {
-                 const std::lock_guard lock(app_mutex);
-                 now = status;
-               }
+               // The pilot asked for Displays: no second check that could
+               // leave them on another page.
                show();
-               if (displays_to_choose(now) && page != SetupPage)
-                 open_step(0);
+               open_step(0);
              });
 }
 // Tray and Menu: Language. Unfinished fields are kept as a page change keeps
@@ -6515,20 +6545,33 @@ void draw_page(HDC dc) {
     const bool unsupported = unsupported_aircraft(sample);
     // While no displays are drawn yet, the line below says so; the heading
     // stays short enough for the 410 left of the buttons.
+    // Without the package nothing can be recognised: the card says so in
+    // amber, first thing on the page.
+    const bool inactive = package_inactive(sample);
+    constexpr COLORREF Amber = RGB(236, 182, 92);
     text(dc,
          connection_disconnected.load(std::memory_order_acquire) ? tr(L"Disconnected")
          : !sample.graphics_ready                                ? tr(L"Waiting for the simulator")
+         : inactive                                              ? tr(L"Taxi Cam can't recognise your displays")
          : unsupported                                           ? tr(L"This aircraft is not set up yet")
                                                                  : tr(L"Native bridge connected"),
-         262, 134, 410, 30, heading, unsupported || (sample.graphics_ready && has_displays) ? Accent : Text,
+         262, 134, 410, 30, heading,
+         inactive                                                 ? Amber
+         : unsupported || (sample.graphics_ready && has_displays) ? Accent
+                                                                  : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
-    const auto line = late_empty_pfds    ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
+    const auto line = inactive           ? std::wstring(package_inactive_text())
+                      : late_empty_pfds  ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
                                                            L"Restart Flight only if the list stays empty."))
                       : sample.heartbeat ? widen(sample.message)
                                          : live;
     // Left of Auto-connect and Disconnect (686-992), as the heading is.
-    text(dc, line.c_str(), 262, 166, 410, 36, small, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+    text(dc, line.c_str(), 262, 166, 410, 36, small,
+         inactive          ? Amber
+         : late_empty_pfds ? Accent
+                           : Muted,
+         DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
     panel(dc, 244, 222, 766, 84);
     text(dc, tr(L"Setup"), 262, 230, 120, 26, heading);
     // After an update whose display names could not be converted, the user
@@ -7543,6 +7586,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       convert_legacy_displays();
       prompt_choose_displays();
       service_marks_package_notice();
+      service_package_inactive_alert();
       service_lvar_bindings();
       show_notifications();
       update_gallery_buttons();

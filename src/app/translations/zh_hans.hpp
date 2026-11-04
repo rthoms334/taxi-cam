@@ -588,6 +588,9 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"After this update, choose this aircraft's displays again in Displays.", L"此更新后，请在「显示屏」中重新选择此飞机的显示屏。"},
     {L"Choose displays", L"选择显示屏"},
     {L"Taxi Cam can't recognise your displays", L"Taxi Cam 无法识别你的显示屏"},
+    {L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the simulator; if "
+     L"that doesn't help, run the Taxi Cam installer again.",
+     L"Taxi Cam 的显示屏包未在模拟器中启用，因此无法识别驾驶舱显示屏。请重启模拟器；如果仍无效，请重新运行 Taxi Cam 安装程序。"},
     {L"Restart the simulator once", L"请重启一次模拟器"},
     {L"Taxi Cam has just set up the package that lets it recognise your cockpit displays, but the simulator had already loaded its "
      L"add-ons. Restart the simulator so Taxi Cam can find your displays.",

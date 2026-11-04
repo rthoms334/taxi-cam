@@ -264,6 +264,8 @@ struct MarkIdentityState {
   // gauge read on one panel may have an unread twin, so its key could be
   // saved unranked and later name the twin.
   bool settled{};
+  // Pictures taken and none carried a mark (PanelMapState::inactive).
+  bool inactive{};
 };
 void service_mark_identity(MarkIdentityState& state,
                            const win::Status& status,
@@ -342,8 +344,9 @@ void service_mark_identity(MarkIdentityState& state,
   }
 }
 void publish_panel_map(const MarkIdentityState& state, win::Status& status) noexcept {
-  status.panel_state =
-      static_cast<std::uint32_t>(state.map.empty() || !state.settled ? win::PanelMapState::waiting : win::PanelMapState::marked);
+  status.panel_state = static_cast<std::uint32_t>(state.inactive && state.map.empty()   ? win::PanelMapState::inactive
+                                                  : state.map.empty() || !state.settled ? win::PanelMapState::waiting
+                                                                                        : win::PanelMapState::marked);
   status.panel_count = static_cast<std::uint32_t>(state.map.size());
   for (std::size_t i = 0; i < state.map.size() && i < win::MaxPanelTextures; ++i)
     status.panels[i] = state.map[i];
@@ -1108,6 +1111,7 @@ DWORD run_impl() {
                       allowed ? 1u : 0u, companion ? 1u : 0u, r[0], r[1], r[2], e[0], e[1], e[2], e[3]);
         log_status(log_to, detail);
       }
+      panel_identity.inactive = panel_identity.store.textures().empty() && mark_scan.empty >= MarkMissingPictures;
       // A texture drawn is pictured within a second or two; one the
       // simulator keeps recreating could otherwise hold the list back.
       panel_identity.settled = std::none_of(mark_scan.entries.begin(), mark_scan.entries.end(),
@@ -2172,7 +2176,7 @@ DWORD run_impl() {
         // Pictures taken and none carried a mark: the package is not loaded
         // (written after the simulator loaded its add-ons, or another
         // package's VCockpit.html loaded after it).
-        : panel_identity.store.textures().empty() && mark_scan.empty >= MarkMissingPictures
+        : panel_identity.inactive
             ? "Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the "
               "simulator; if that doesn't help, run the Taxi Cam installer again."
         : panel_identity.store.textures().empty() ? "Waiting for the cockpit displays to be recognised."

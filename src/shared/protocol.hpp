@@ -142,6 +142,10 @@ struct PanelTexture {
 enum class PanelMapState : std::uint32_t {
   waiting,  // no panel marks read in this flight yet
   marked,   // panels lists the textures whose marks were read
+  // Panel textures were pictured and none carried a mark: the panel marks
+  // package is not loaded (written after the simulator loaded its add-ons,
+  // or another package's VCockpit.html loaded after it).
+  inactive,
 };
 inline constexpr std::size_t MaxPanelTextures = 32, MaxCandidates = 32;
 // A gauge a panel's marks name, its rectangle in that panel's texture pixels.

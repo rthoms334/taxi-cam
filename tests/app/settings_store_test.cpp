@@ -394,7 +394,7 @@ void door_camera_persists() {
               loaded.display_override.areas[2].bottom == 925 && loaded.display_override.areas[2].right == 806 && valid_settings(loaded),
           "The A350 places its centre display, the system page only, for the door camera");
   require(load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.door_side == 2 &&
-              std::strcmp(loaded.display_override.textures[2], "$SD") == 0 && loaded.display_override.areas[2].top == 84 &&
+              std::strcmp(loaded.display_override.textures[2], "@DU#3/6") == 0 && loaded.display_override.areas[2].top == 84 &&
               loaded.display_override.areas[2].bottom == 655 && loaded.mounts[3] == profiles::IniA380DoorMount && valid_settings(loaded),
           "The iniBuilds A380 places the VIDEO page picture of its system display, with its shipped door camera");
   require(std::strcmp(loaded.lvar_bindings[CameraDoor].name, "INI_ECAM_ACTIVE_PAGE") == 0 &&
