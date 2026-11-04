@@ -779,9 +779,13 @@ DWORD run_impl() {
   constexpr unsigned MarkTries = 5, MarkReshows = 2;
   // A picture not taken within MarkPictureMs is given up (the texture is not
   // being drawn): the next texture's request replaces it, so undrawn panels
-  // cannot use up the pages' marks window (the A350, 2026-11-04).
-  constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 500, MarkQuietMs = 3000, MarkReshowGapMs = 60000, MarkPictureMs = 1500,
-                          MarkShowMs = 20000;
+  // cannot use up the pages' marks window (the A350, 2026-11-04). A drawn
+  // display is pictured and read in about 0.2 s (FBW A380X, 2026-11-04). A
+  // texture not drawn since it was listed waits MarkUndrawnMs for drawn ones
+  // to go first: half of the A380X's are never drawn, and picturing them
+  // first held its displays back by seconds.
+  constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 250, MarkQuietMs = 3000, MarkReshowGapMs = 60000, MarkPictureMs = 600,
+                          MarkShowMs = 20000, MarkUndrawnMs = 1000;
   struct MarkScan {
     struct Entry {
       std::uint64_t id{}, next_ms{};
@@ -1032,8 +1036,12 @@ DWORD run_impl() {
     // try later.
     const auto mark_result = [&](std::uint64_t id, const win::DisplaySnapshotPoll* poll) {
       const std::size_t marks = poll ? poll->mark_count : 0;
-      if (marks)
+      if (marks) {
         panel_identity.store.read(id, poll->marks.data(), marks);
+        // Route by the new marks on this pass, not up to a second later:
+        // the marks come down once the profile's displays are found.
+        next_inventory = 0;
+      }
       auto* entry = mark_entry(id);
       if (!entry || entry->read)
         return;
@@ -1107,7 +1115,7 @@ DWORD run_impl() {
           if (auto* entry = mark_entry(record.id))
             entry->activity = record.draws + record.activity;
           else {
-            mark_scan.entries.push_back({record.id, now, 0, false, now, record.draws + record.activity, 0});
+            mark_scan.entries.push_back({record.id, now, 0, false, now, record.draws + record.activity, record.draws + record.activity});
             mark_scan.last_new_ms = now;
           }
         }
@@ -1185,7 +1193,8 @@ DWORD run_impl() {
       // taken at once. Then the others.
       for (const bool drawn : {true, false})
         for (auto& entry : mark_scan.entries) {
-          if (entry.read || entry.tries >= MarkTries || entry.next_ms > now || (drawn && entry.activity == entry.tried_activity))
+          if (entry.read || entry.tries >= MarkTries || entry.next_ms > now || (drawn && entry.activity == entry.tried_activity) ||
+              (!drawn && now - entry.seen_ms < MarkUndrawnMs))
             continue;
           entry.tried_activity = entry.activity;
           if (win::request_display_snapshot(entry.id, now) == win::DisplaySnapshotResult::pending) {
