@@ -22,12 +22,16 @@ $markupExtensions = @('.manifest', '.xml')
 $toolDirectives = @('^//\s*clang-format (off|on)$', '^//\s*NOLINT(NEXTLINE)?(\([^)]*\))?$', '^#requires\s')
 
 $singleline = [Text.RegularExpressions.RegexOptions]::Singleline
-$cToken = New-Object Text.RegularExpressions.Regex (
+$cTokens = (
     '(?<raw>(?:u8|[uUL])?R"(?<delimiter>[^()\\\s"]{0,16})\((?<body>.*?)\)\k<delimiter>")' +
     '|(?<string>(?:u8|[uUL])?"(?:\\.|[^"\\\r\n])*")' +
     '|(?<template>`(?:\\.|[^`\\])*`)' +
-    '|(?<char>(?<![\w.])(?:u8|[uUL])?''(?:\\.|[^''\\\r\n])+'')' +
-    '|(?<comment>//[^\r\n]*|/\*.*?\*/)'), $singleline
+    '|(?<char>(?<![\w.])(?:u8|[uUL])?''(?:\\.|[^''\\\r\n])*'')' +
+    '|(?<comment>//[^\r\n]*|/\*.*?\*/)')
+$assemblyHashComment = '|(?<comment>(?m:^|(?<=[ \t]))#(?![ \t]*(?:include|define|undef|if|ifdef|ifndef|elif|else|endif|pragma|error|warning|line)\b)[^\r\n]*)'
+$cToken = New-Object Text.RegularExpressions.Regex ($cTokens), $singleline
+$assemblyToken = New-Object Text.RegularExpressions.Regex ($cTokens + $assemblyHashComment), $singleline
+$assemblyRawStringOpener = New-Object Text.RegularExpressions.Regex '(?:\basm|\b__asm__)\s*(?:volatile\s*)?\(\s*$'
 $pascalToken = New-Object Text.RegularExpressions.Regex ('(?<string>''(?:[^''\r\n]|'''')*'')|(?<comment>//[^\r\n]*|\{.*?\}|\(\*.*?\*\))'), $singleline
 $markupComment = New-Object Text.RegularExpressions.Regex ('<!--.*?-->'), $singleline
 $newline = New-Object Text.RegularExpressions.Regex "`n"
@@ -47,13 +51,15 @@ function Get-LineNumber([int[]]$LineIndex, [int]$Offset) {
 function New-Comment([int]$Line, [string]$Text) {
     return [pscustomobject]@{ Line = $Line; Text = $Text.Trim() }
 }
-function Get-CComments([string]$Text, [int[]]$LineIndex = (New-LineIndex $Text), [int]$Offset = 0) {
-    foreach ($match in $cToken.Matches($Text)) {
+function Get-CComments([string]$Text, [int[]]$LineIndex = (New-LineIndex $Text), [int]$Offset = 0, [switch]$Assembly) {
+    $tokens = if ($Assembly) { $assemblyToken } else { $cToken }
+    foreach ($match in $tokens.Matches($Text)) {
         if ($match.Groups['comment'].Success) {
             New-Comment (Get-LineNumber $LineIndex ($Offset + $match.Index)) $match.Value
         } elseif ($match.Groups['raw'].Success) {
             $body = $match.Groups['body']
-            Get-CComments $body.Value $LineIndex ($Offset + $body.Index)
+            $before = $Text.Substring([Math]::Max(0, $match.Index - 32), [Math]::Min(32, $match.Index))
+            Get-CComments $body.Value $LineIndex ($Offset + $body.Index) -Assembly:($assemblyRawStringOpener.IsMatch($before))
         }
     }
 }
@@ -107,6 +113,7 @@ function Test-CommentRule([string]$Path) {
 }
 function Get-FileComments([string]$Path, [string]$Text) {
     $extension = [IO.Path]::GetExtension($Path)
+    if ($extension -ceq '.S') { return @(Get-CComments $Text -Assembly) }
     if ($cFamilyExtensions -ccontains $extension) { return @(Get-CComments $Text) }
     if ($powerShellExtensions -contains $extension) { return @(Get-PowerShellComments $Text) }
     if ($extension -eq '.iss') { return @(Get-InnoComments $Text) }
@@ -140,7 +147,13 @@ $found = @(Get-CComments $cSample)
 Assert-That ((Get-Texts $found) -join '|' -ceq "// first|// shader|/* block */|/* second`nspans */") "C-family comments were [$((Get-Texts $found) -join '|')]."
 Assert-That ($found[0].Line -eq 2 -and $found[1].Line -eq 3 -and $found[2].Line -eq 4 -and $found[3].Line -eq 4) 'C-family comment lines were wrong.'
 Assert-That ((Get-Texts (Get-CComments 'const a = `x // not`, b = /\d+/.exec(s); // real')) -join '|' -ceq '// real') 'JavaScript template or regular-expression text was taken for a comment.'
-$psSample ="#requires -Version 5.1`n`$a = '# not'; `$b = `"# not`" # trailing`n<# block #>`n@'`n# here-string`n'@"
+Assert-That ((Get-Texts (Get-CComments "a = ''; done(); // after empty`nb = '' + ' // not';")) -join '|' -ceq '// after empty') 'An empty single-quoted string desynchronised the scanner.'
+$asmSample = "#include `"x.h`"`n#define A 1`n  movq %rcx, %rdi # copy`n# whole line`n  .ascii `"# not`"`n"
+Assert-That ((Get-Texts (Get-FileComments 'a.S' $asmSample)) -join '|' -ceq '# copy|# whole line') 'GAS # comments in .S files were missed.'
+$asmRaw = "asm(R`"(`n  pushq %rbp # saved`n)`");`nconst char* shader = R`"(`n#define B 1`n)`";"
+$asmRawFound = @(Get-CComments $asmRaw)
+Assert-That ((Get-Texts $asmRawFound) -join '|' -ceq '# saved' -and $asmRawFound[0].Line -eq 2) 'GAS # comments in asm raw strings were missed, or shader directives were counted.'
+$psSample = "#requires -Version 5.1`n`$a = '# not'; `$b = `"# not`" # trailing`n<# block #>`n@'`n# here-string`n'@"
 Assert-That ((Get-Texts (Get-PowerShellComments $psSample)) -join '|' -ceq '#requires -Version 5.1|# trailing|<# block #>') 'PowerShell comments were wrong.'
 $innoSample = "[Setup]`n; setup note`nAppName=x ; kept`n[Code]`nconst A = '{ not }'; // code note`n{ brace note }`n(* star note *)"
 $innoFound = @(Get-InnoComments $innoSample)
