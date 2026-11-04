@@ -775,6 +775,10 @@ DWORD run_impl() {
     std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{};
     std::vector<Entry> entries;
     unsigned unsignalled{}, read{}, reshows{};
+    // Pictures the scan took: with marks, without, and not taken (timeout,
+    // lost, unavailable), logged every 10 s while it scans.
+    unsigned pictures{}, empty{}, failed{};
+    std::uint64_t next_log_ms{};
     bool shown_again = false;  // Pages asked to show their marks again, not yet told to take them down.
   } mark_scan;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
@@ -1031,7 +1035,19 @@ DWORD run_impl() {
         const bool ready = poll.result == win::DisplaySnapshotResult::ready;
         if (ready && poll.mark_count)
           log_marks(id, poll);
+        ++mark_scan.pictures;
+        mark_scan.empty += ready && !poll.mark_count;
+        mark_scan.failed += !ready;
         mark_result(id, ready ? &poll : nullptr);
+      }
+      if ((allowed || !mark_scan.entries.empty()) && now >= mark_scan.next_log_ms) {
+        mark_scan.next_log_ms = now + 10000;
+        char detail[192];
+        std::snprintf(detail, sizeof(detail),
+                      "Display mark scan: textures=%zu read=%u pictures=%u empty=%u failed=%u reshows=%u allowed=%u companion=%u",
+                      mark_scan.entries.size(), mark_scan.read, mark_scan.pictures, mark_scan.empty, mark_scan.failed, mark_scan.reshows,
+                      allowed ? 1u : 0u, companion ? 1u : 0u);
+        log_status(log_to, detail);
       }
       if (!allowed || companion)
         return;
