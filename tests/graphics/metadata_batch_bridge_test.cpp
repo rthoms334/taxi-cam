@@ -780,6 +780,161 @@ void display_session_reset_checks() {
   r.ready = old_ready;
   r.close_forward_verified = old_verified;
 }
+// The planner runs on the application's submit thread while other recording
+// threads take the registry for short hook calls. An Execute planned without
+// it carries no camera copy, so it waits within the submit budget: a holder
+// that lets go in time is waited for, one that does not is given up on.
+void submission_registry_wait_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_verified = r.close_forward_verified;
+  const auto old_key = r.key;
+  const auto* old_profile = r.profile;
+  auto item = std::make_shared<win::List>();
+  item->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x7a0000);
+  item->id = 795;
+  item->observation_epoch = r.observation_epoch.load();
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x8a0000);
+  target->id = 895;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  item->submission_proof.reset(1, true);
+  item->submission_proof.observe_legacy({reinterpret_cast<std::uint64_t>(target->native), target->id}, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_COMMON, 0);
+  item->submission_proof.close(1, true);
+  item->closed_recording = 1;
+  r.lists[item->native] = item;
+  target->display_shape = target->display_shape || win::display_shaped(target->desc);  // As admission decides it.
+  r.resources[target->native] = target;
+  r.profile = &taxi_camera::profiles::A380;
+  r.ready = r.close_forward_verified = true;
+  r.key = 0;  // No runtime device/patch exists. Tokens above must never reach COM.
+  ID3D12CommandList* batch[]{item->native};
+  const auto busy = static_cast<unsigned>(win::DisplaySubmissionOutcome::registry_busy);
+  const auto plan_while_held = [&](std::uint64_t hold_us) {
+    std::atomic<bool> held{false};
+    std::thread owner([&] {
+      const std::lock_guard guard(r.mutex);
+      held.store(true, std::memory_order_release);
+      const auto until = taxi_camera::bounded_lock_now_us() + hold_us;
+      while (taxi_camera::bounded_lock_now_us() < until)
+        SwitchToThread();
+    });
+    while (!held.load(std::memory_order_acquire))
+      SwitchToThread();
+    const auto started = taxi_camera::bounded_lock_now_us();
+    taxi_camera::SceneCaptureManager::DisplaySubmissionPlan plan;
+    win::plan_display_submission(nullptr, nullptr, 1, batch, plan);
+    const auto waited = taxi_camera::bounded_lock_now_us() - started;
+    owner.join();
+    return waited;
+  };
+  // A short hold, as a recording thread's hook call: the planner reads the
+  // batch (crediting the display's activity) instead of reporting busy.
+  auto busy_before = r.queue_outcomes[busy].load();
+  auto activity_before = target->submission_activity.load();
+  plan_while_held(taxi_camera::wait_budget::submit_us / 10);
+  require(r.queue_outcomes[busy] == busy_before && target->submission_activity == activity_before + 1,
+          "A registry hold shorter than the submit budget left the Execute unplanned");
+  // A hold past the budget: the submit thread gives up in bounded time.
+  busy_before = r.queue_outcomes[busy].load();
+  activity_before = target->submission_activity.load();
+  const auto waited = plan_while_held(taxi_camera::wait_budget::submit_us * 50);
+  require(r.queue_outcomes[busy] == busy_before + 1 && target->submission_activity == activity_before,
+          "A registry hold past the submit budget was not reported busy");
+  require(waited >= taxi_camera::wait_budget::submit_us / 2 && waited < taxi_camera::wait_budget::submit_us * 40,
+          "The planner's registry wait did not respect the submit budget");
+  r.lists.erase(item->native);
+  r.resources.erase(target->native);
+  r.key = old_key;
+  r.profile = old_profile;
+  r.close_forward_verified = old_verified;
+  r.ready = old_ready;
+}
+// A shadow saved on one queue while the instrument writes the display on
+// another is taken again there once every copy on the old queue completed. A
+// copy dropped there never completes: the side must not keep missing every
+// write for the rest of the camera period, so it goes to direct stamps once
+// the misses have gone on past the confirm window, and not before. Misses
+// that stopped that long ago are forgotten. The worker's tick can predate a
+// miss the submit thread just recorded.
+void shadow_retake_fallback_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto* old_profile = r.profile;
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x8b0000);
+  target->id = 896;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  target->display_shape = win::display_shaped(target->desc);
+  r.resources[target->native] = target;
+  r.profile = &taxi_camera::profiles::A380;
+  r.ready = true;
+  r.routes.select_explicit({target->id, 0});
+  r.active_mask = 1;
+  r.calibration_mask = 0;
+  win::refresh_selected(r);
+  auto* const old_queue = reinterpret_cast<ID3D12CommandQueue*>(0x8c0000);
+  auto* const writer = reinterpret_cast<ID3D12CommandQueue*>(0x8d0000);
+  const auto completed = r.shadow_completed[0].load();
+  const auto prepare = [&](std::uint64_t retake_ms, std::uint64_t seen_ms) {
+    auto& shadow = r.shadows[0];
+    shadow = {};
+    shadow.mode = win::Registry::ShadowMode::queue;
+    shadow.target = target;
+    shadow.area = win::shadow_area(r, 0, *target);
+    shadow.queue = old_queue;
+    shadow.retake_queue = writer;
+    shadow.retake_ms = retake_ms;
+    shadow.retake_seen_ms = seen_ms;
+    shadow.saved = shadow.confirmed = true;
+    shadow.first_save_serial = shadow.serial = completed + 2;  // A copy on the old queue is still outstanding.
+    shadow.handled_drop = r.shadow_dropped[0].load();
+  };
+  const auto fallbacks = r.shadow_fallbacks.load();
+  const std::uint64_t now = 100000;
+  const auto& shadow = r.shadows[0];
+  prepare(now - 100, now);
+  require(
+      win::update_shadow(r, 0, now) == win::Registry::ShadowMode::queue && r.shadow_fallbacks == fallbacks && shadow.retake_queue == writer,
+      "A retake still inside the confirm window gave up on the shadow");
+  prepare(now + 50, now + 50);
+  require(
+      win::update_shadow(r, 0, now) == win::Registry::ShadowMode::queue && r.shadow_fallbacks == fallbacks && shadow.retake_queue == writer,
+      "A miss recorded after the worker's tick wrapped around and dropped the shadow");
+  prepare(now - 3 * win::kShadowConfirmMs, now - win::kShadowConfirmMs - 1);
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::queue && r.shadow_fallbacks == fallbacks && shadow.saved &&
+              shadow.queue == old_queue && !shadow.retake_queue,
+          "Misses that stopped past the confirm window were not forgotten");
+  prepare(now - win::kShadowConfirmMs - 1, now - 10);
+  const auto mode = win::update_shadow(r, 0, now);
+  require(mode == win::Registry::ShadowMode::direct && r.shadow_fallbacks == fallbacks + 1 && !shadow.saved && !shadow.queue &&
+              !shadow.retake_queue,
+          "Misses going on past the confirm window kept the side on queue copies");
+  r.shadows[0] = {};
+  r.routes.reset();
+  r.active_mask = 0;
+  win::refresh_selected(r);
+  r.resources.erase(target->native);
+  r.profile = old_profile;
+  r.ready = old_ready;
+}
 void inventory_checks() {
   namespace win = taxi_camera::standalone;
   auto& r = win::registry();
@@ -1130,6 +1285,8 @@ int main() {
     deferred_settlement_checks();
     known_list_and_idle_checks();
     display_session_reset_checks();
+    submission_registry_wait_checks();
+    shadow_retake_fallback_checks();
     inventory_checks();
     auto& r = win::registry();
     auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x1000);

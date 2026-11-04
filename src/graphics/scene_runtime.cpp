@@ -2,6 +2,7 @@
 #include "../bridge/native_hooks.hpp"
 #include "../hooks/render_boundary_observer.hpp"
 #include "camera_compositor_d3d12.hpp"
+#include "display_keep.hpp"
 #include "scene_frame_output.hpp"
 
 #include <algorithm>
@@ -514,8 +515,8 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
   source.PlacedFootprint = patch.footprint;
   dest.pResource = target;
   dest.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-  const D3D12_BOX box{0, 0, 0, width, height, 1};
-  list->CopyTextureRegion(&dest, static_cast<UINT>(destination.left), static_cast<UINT>(destination.top), 0, &source, &box);
+  standalone::display_keep::copy_region(list, &dest, static_cast<UINT>(destination.left), static_cast<UINT>(destination.top), &source,
+                                        width, height);
   transition(false);
   ++item->status.stamps;
   return true;
