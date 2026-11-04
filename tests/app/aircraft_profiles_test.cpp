@@ -470,7 +470,9 @@ int main() {
     assert(!profile->display_texture[0] || profile->display_layout == profiles::DisplayLayout::shared_texture);
     if (profile->id == profiles::IniA343.id) {
       assert(profile->display_layout == profiles::DisplayLayout::shared_texture && profile->display_texture[0] == '\0');
-      assert(profile->width == 1560 && profile->height == 2340 && profile->mips == 1 && profile->sides == 3);
+      assert(profile->width == 2340 && profile->height == 2340 && profile->mips == 5 && profile->sides == 3);
+      assert(std::string_view(profile->panel_textures[0]) == "@DisplayManager" &&
+             std::string_view(profile->panel_textures[2]) == "@DisplayManager");
       // 2 x 3 grid of 780 x 780 cells in ND / PFD rows; the right column holds
       // CAPT PFD (1,0), F/O PFD (1,1) and SD (1,2).
       const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1),
@@ -482,11 +484,12 @@ int main() {
         const auto content = profiles::display_content_rect(*profile, side);
         assert(content.right - content.left == 748 && content.bottom - content.top == 768);
       }
-      // The scanned display is one-mip R8G8B8A8_TYPELESS; typed views are admitted
-      // for patch output. The five-mip 2340 x 2340 texture beside it is not.
-      assert(profiles::matches_display(*profile, 1560, 2340, 1, 27) && profiles::matches_display(*profile, 1560, 2340, 1, 28));
-      assert(!profiles::matches_display(*profile, 1560, 2340, 5, 27) && !profiles::matches_display(*profile, 2340, 2340, 5, 28));
-      assert(!profiles::matches_display(*profile, 1560, 2340, 1, 10));
+      // The cameras draw on the five-mip 2340 x 2340 panel texture its marks
+      // name, not the unmarked one-mip 1560 x 2340 texture the grid is drawn
+      // on first, and Displays accepts the panel.
+      assert(profiles::matches_display(*profile, 2340, 2340, 5, 28) && profiles::named_display(*profile, 2340, 2340, 5, 28));
+      assert(!profiles::matches_display(*profile, 1560, 2340, 1, 27) && !profiles::matches_display(*profile, 2340, 2340, 1, 28));
+      assert(!profiles::matches_display(*profile, 2340, 2340, 5, 10));
       assert(profile->composition.tail_corner == profiles::AerosoftA346.composition.tail_corner);
       // The A350-900's taxi cameras, and its own door camera.
       assert(profile->mounts[0] == profiles::A359.mounts[0] && profile->mounts[1] == profiles::A359.mounts[1] &&

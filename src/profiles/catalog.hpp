@@ -585,6 +585,14 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
 // and (1,2) on the lower ECAM. Rows are therefore ND / PFD pairs:
 // CAPT ND, CAPT PFD / F/O ND, F/O PFD / E/WD, SD. CAPT PFD at (1,0) follows
 // that pattern and is not yet re-checked.
+// Since displays are found only by panel marks (2026-11-04) the cameras draw
+// on the cockpit panel texture, 2340 x 2340 with five mips: its
+// DisplayManager gauge holds the same grid at 0,0, and the FMGS pages sit to
+// its right. The one-mip 1560 x 2340 texture the grid is drawn on first
+// carries no marks and is not copied into the panel (the bridge saw no copy),
+// so name routing cannot reach it; Displays offered only the panel and
+// refused it for its shape.
+inline constexpr unsigned IniA343PanelSize = 2340, IniA343PanelMips = 5;
 inline constexpr unsigned IniA343DisplayWidth = 1560;
 inline constexpr unsigned IniA343DisplayHeight = 2340;
 inline constexpr unsigned IniA343Cell = 780;
@@ -607,9 +615,9 @@ inline constexpr AircraftProfile IniA343 = [] {
                     {"", "", ""},
                     {"", "", ""},
                     {{A359.mounts[0], A359.mounts[1], A359.mounts[2], IniA343DoorMount}},
-                    IniA343DisplayWidth,
-                    IniA343DisplayHeight,
-                    1,
+                    IniA343PanelSize,
+                    IniA343PanelSize,
+                    IniA343PanelMips,
                     TaxiControl::manual_only,
                     {"", "", ""},
                     {{ini_a343_cell(1, 0), ini_a343_cell(1, 1), ini_a343_cell(1, 2)}}};
@@ -621,6 +629,9 @@ inline constexpr AircraftProfile IniA343 = [] {
   p.door_lower_area = {IniA343Cell, 2 * IniA343Cell, IniA343DisplayWidth, 2210};
   p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
   p.door_lvar_trigger = standalone::lvar_equals_trigger(15);
+  // Its panel's marks (2026-11-04): VCockpit02 gauge 0 DisplayManager, the
+  // only gauge of that name.
+  p.panel_textures = {"@DisplayManager", "@DisplayManager", "@DisplayManager"};
   return p;
 }();
 inline constexpr std::array<const AircraftProfile*, 10> Catalog{&A380,         &A359,         &A35K,     &IniA380,      &Pmdg777,
