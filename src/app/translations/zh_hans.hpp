@@ -357,7 +357,6 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"Taxi Cam on GitHub", L"Taxi Cam 的 GitHub 页面"},
     {L"Taxi Cam update ready", L"Taxi Cam 更新已就绪"},
     {L"Taxi Cam updates", L"Taxi Cam 更新"},
-    {L"Taxi Cam {0} (not released yet)", L"Taxi Cam {0}（尚未发布）"},
     {L"Taxi Cam {0} has been downloaded and verified.\n\nClose Taxi Cam and start the installer now?",
      L"Taxi Cam {0} 已下载并通过验证。\n\n是否现在关闭 Taxi Cam 并启动安装程序？"},
     {L"Taxi Cam — Camera adjustment", L"Taxi Cam — 摄像头调整"},
@@ -591,6 +590,8 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the simulator; if "
      L"that doesn't help, run the Taxi Cam installer again.",
      L"Taxi Cam 的显示屏包未在模拟器中启用，因此无法识别驾驶舱显示屏。请重启模拟器；如果仍无效，请重新运行 Taxi Cam 安装程序。"},
+    {L"Display package not active. Restart the simulator, or run the installer again.",
+     L"显示屏包未启用。请重启模拟器，或重新运行安装程序。"},
     {L"Restart the simulator once", L"请重启一次模拟器"},
     {L"Taxi Cam has just set up the package that lets it recognise your cockpit displays, but the simulator had already loaded its "
      L"add-ons. Restart the simulator so Taxi Cam can find your displays.",

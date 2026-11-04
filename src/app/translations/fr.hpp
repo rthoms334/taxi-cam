@@ -399,7 +399,6 @@ inline constexpr Translation FrenchTranslations[]{
     {L"Taxi Cam on GitHub", L"Taxi Cam sur GitHub"},
     {L"Taxi Cam update ready", L"Mise à jour de Taxi Cam prête"},
     {L"Taxi Cam updates", L"Mises à jour de Taxi Cam"},
-    {L"Taxi Cam {0} (not released yet)", L"Taxi Cam {0} (pas encore publiée)"},
     {L"Taxi Cam {0} has been downloaded and verified.\n\nClose Taxi Cam and start the installer now?",
      L"Taxi Cam {0} a été téléchargé et vérifié.\n\nFermer Taxi Cam et lancer le programme d'installation maintenant ?"},
     {L"Taxi Cam — Camera adjustment", L"Taxi Cam — Réglage des caméras"},
@@ -668,6 +667,8 @@ inline constexpr Translation FrenchTranslations[]{
      L"that doesn't help, run the Taxi Cam installer again.",
      L"Le paquet d'écrans de Taxi Cam n'est pas actif dans le simulateur : il ne peut pas reconnaître les écrans du cockpit. Redémarrez le "
      L"simulateur ; si cela ne suffit pas, relancez le programme d'installation de Taxi Cam."},
+    {L"Display package not active. Restart the simulator, or run the installer again.",
+     L"Paquet d'écrans inactif. Redémarrez le simulateur ou relancez l'installation."},
     {L"Restart the simulator once", L"Redémarrez le simulateur une fois"},
     {L"Taxi Cam has just set up the package that lets it recognise your cockpit displays, but the simulator had already loaded its "
      L"add-ons. Restart the simulator so Taxi Cam can find your displays.",

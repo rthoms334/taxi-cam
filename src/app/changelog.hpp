@@ -72,20 +72,6 @@ inline bool parse_changelog_version(std::string_view text, ChangelogVersion& val
   value = {parts[0], parts[1], parts[2]};
   return true;
 }
-// A published release tag, "v1.3.1-build.59" (or "v1.3.1"), as its version.
-inline bool parse_release_tag(std::string_view tag, ChangelogVersion& value) {
-  if (tag.size() > 64 || tag.empty() || tag[0] != 'v')
-    return false;
-  tag.remove_prefix(1);
-  if (const auto build = tag.find("-build."); build != std::string_view::npos) {
-    const auto number = tag.substr(build + 7);
-    if (number.empty() || number.size() > 9 || (number.size() > 1 && number[0] == '0') ||
-        number.find_first_not_of("0123456789") != std::string_view::npos)
-      return false;
-    tag = tag.substr(0, build);
-  }
-  return parse_changelog_version(tag, value);
-}
 inline std::wstring changelog_version_text(const ChangelogVersion& v) {
   return std::to_wstring(v.major) + L"." + std::to_wstring(v.minor) + L"." + std::to_wstring(v.patch);
 }
@@ -440,9 +426,8 @@ inline std::wstring changelog_date_text(const std::string& date) {
 // What's new top to bottom: the installed release shown in full (its features
 // with their pictures, then fixes and other changes), then notes for versions
 // newer than the installed one under "Coming in the next update", then earlier
-// releases, both as compact lists. When the latest published release is known,
-// a shown release newer than it (a build of main, a pull-request build or a
-// release candidate) says it is not released yet in its title.
+// releases, both as compact lists. Titles are the version only: the section
+// says when notes are still to come.
 struct WhatsNewBlock {
   enum class Kind {
     heading,  // text: "Taxi Cam 1.2.0", detail: its date.
@@ -459,10 +444,7 @@ struct WhatsNewBlock {
   const wchar_t* wording{};
   std::wstring value{};
 };
-// published: the latest published release's version, or null when unknown.
-inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRelease>& releases,
-                                                   const ChangelogVersion& installed,
-                                                   const ChangelogVersion* published = nullptr) {
+inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRelease>& releases, const ChangelogVersion& installed) {
   using Kind = WhatsNewBlock::Kind;
   std::vector<WhatsNewBlock> blocks;
   const auto chrome = [](Kind kind, const wchar_t* wording, std::wstring value = {}) {
@@ -471,16 +453,13 @@ inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRe
       text.replace(at, 3, value);
     return WhatsNewBlock{kind, text, {}, {}, wording, std::move(value)};
   };
-  // A release's title, saying so when it is newer than the latest published one.
-  const auto title = [&](Kind kind, const ChangelogRelease& release, bool mark_unreleased) {
-    auto block = mark_unreleased && published && release.version > *published
-                     ? chrome(kind, ui_text(L"Taxi Cam {0} (not released yet)"), changelog_version_text(release.version))
-                     : WhatsNewBlock{kind, L"Taxi Cam " + changelog_version_text(release.version), {}, {}};
+  const auto title = [&](Kind kind, const ChangelogRelease& release) {
+    WhatsNewBlock block{kind, L"Taxi Cam " + changelog_version_text(release.version), {}, {}};
     block.detail = release.date.empty() ? std::wstring{} : changelog_date_text(release.date);
     return block;
   };
-  const auto compact = [&](const ChangelogRelease& release, bool mark_unreleased) {
-    blocks.push_back(title(Kind::release, release, mark_unreleased));
+  const auto compact = [&](const ChangelogRelease& release) {
+    blocks.push_back(title(Kind::release, release));
     for (const auto& feature : release.features)
       blocks.push_back({Kind::bullet, changelog_widen(feature.title) + L": " + changelog_widen(feature.text), {}, {}});
     for (const auto& fix : release.fixes)
@@ -493,7 +472,7 @@ inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRe
     blocks.push_back(chrome(Kind::note, ui_text(L"No notes are listed for Taxi Cam {0} yet."), changelog_version_text(installed)));
   } else {
     const auto& release = shown.front();
-    blocks.push_back(title(Kind::heading, release, true));
+    blocks.push_back(title(Kind::heading, release));
     if (!release.features.empty())
       blocks.push_back(chrome(Kind::section, ui_text(L"New features")));
     for (const auto& feature : release.features)
@@ -512,11 +491,11 @@ inline std::vector<WhatsNewBlock> whats_new_blocks(const std::vector<ChangelogRe
   if (!upcoming.empty())
     blocks.push_back(chrome(Kind::section, ui_text(L"Coming in the next update")));
   for (const auto& next : upcoming)
-    compact(next, false);
+    compact(next);
   if (shown.size() > 1)
     blocks.push_back(chrome(Kind::section, ui_text(L"Earlier versions")));
   for (std::size_t i = 1; i < shown.size(); ++i)
-    compact(shown[i], true);
+    compact(shown[i]);
   return blocks;
 }
 

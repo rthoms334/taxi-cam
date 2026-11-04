@@ -3638,7 +3638,7 @@ void show_whats_new() {
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
-  if (!open_whats_new(win::whats_new_blocks(releases, InstalledVersion, result.published_known ? &result.published : nullptr))) {
+  if (!open_whats_new(win::whats_new_blocks(releases, InstalledVersion))) {
     notice = tr(L"Could not open What's new.");
     InvalidateRect(window, nullptr, FALSE);
     return;
@@ -6561,7 +6561,8 @@ void draw_page(HDC dc) {
                                                                   : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
-    const auto line = inactive           ? std::wstring(package_inactive_text())
+    // Two lines at most in this box: the alert and Displays give the rest.
+    const auto line = inactive ? std::wstring(tr(L"Display package not active. Restart the simulator, or run the installer again."))
                       : late_empty_pfds  ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
                                                            L"Restart Flight only if the list stays empty."))
                       : sample.heartbeat ? widen(sample.message)

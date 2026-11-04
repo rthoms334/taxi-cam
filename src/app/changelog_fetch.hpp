@@ -14,25 +14,15 @@ inline constexpr wchar_t ChangelogHost[] = L"raw.githubusercontent.com";
 inline constexpr wchar_t ChangelogRoot[] = L"/rthoms334/taxi-cam/main/";
 inline constexpr char ChangelogFile[] = "changelog.json";
 inline constexpr std::size_t kWhatsNewImageMaxBytes = 2 * 1024 * 1024;
-// The latest published release, as the updater reads it.
-inline constexpr wchar_t ReleaseHost[] = L"api.github.com";
-inline constexpr wchar_t LatestReleasePath[] = L"/repos/rthoms334/taxi-cam/releases/latest";
-inline constexpr std::size_t kLatestReleaseMaxBytes = 1024 * 1024;
 struct ChangelogFetchResult {
   bool ok{};
   std::string path, body;
-  // With changelog.json: the latest published release's version, when GitHub
-  // gave one, so What's new can tell notes that are not released yet.
-  bool published_known{};
-  ChangelogVersion published{};
 };
 // One bounded HTTPS GET of a file in the fixed repository's main branch, off
 // the UI thread: changelog.json, or a feature picture under docs/whats-new/.
 // stop() closes the pending request so shutdown does not wait for network
 // timeouts. With a local root (the --preview UI), the file is read from that
 // repository checkout instead, so unmerged notes and pictures can be checked.
-// With changelog.json it also asks GitHub for the latest published release;
-// a failed lookup leaves published_known false and the notes still show.
 class ChangelogFetcher {
  public:
   ~ChangelogFetcher() { stop(); }
@@ -56,8 +46,6 @@ class ChangelogFetcher {
       ChangelogFetchResult result;
       result.path = path;
       result.ok = local_root_.empty() ? fetch(path, limit, result.body) : read_local(path, limit, result.body);
-      if (result.ok && path == ChangelogFile)
-        result.published_known = latest_release(result.published);
       {
         std::lock_guard lock(mutex_);
         result_ = std::move(result);
@@ -112,15 +100,6 @@ class ChangelogFetcher {
     for (const char c : path)
       request_path += static_cast<wchar_t>(c);
     return get(ChangelogHost, request_path, WINHTTP_NO_ADDITIONAL_HEADERS, limit, body);
-  }
-  bool latest_release(ChangelogVersion& version) {
-    std::string body;
-    json::Value release;
-    if (!get(ReleaseHost, LatestReleasePath, L"Accept: application/vnd.github+json\r\n", kLatestReleaseMaxBytes, body) ||
-        !json::parse(body, release))
-      return false;
-    const auto* tag = release.find("tag_name");
-    return tag && tag->is_string() && parse_release_tag(tag->text, version);
   }
   bool get(const wchar_t* host, const std::wstring& request_path, const wchar_t* headers, std::size_t limit, std::string& body) {
     HINTERNET session = WinHttpOpen(L"Taxi Cam/" TAXI_CAM_VERSION_WIDE, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,

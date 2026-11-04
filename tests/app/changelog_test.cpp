@@ -86,27 +86,6 @@ int main(int argc, char** argv) {
     require(only_ahead.size() == 7 && only_ahead[0].kind == Kind::note && only_ahead[1].text == L"Coming in the next update" &&
                 only_ahead[2].text == L"Taxi Cam 0.9.40" && only_ahead[5].text == L"Taxi Cam 0.9.2",
             "Without notes for the installed version, the coming ones still show, newest first");
-    // A build of main ahead of the latest published release says so in its title.
-    const ChangelogVersion published{0, 9, 2};
-    const auto unreleased = whats_new_blocks(releases, {0, 9, 40}, &published);
-    require(unreleased[0].kind == Kind::heading && unreleased[0].text == L"Taxi Cam 0.9.40 (not released yet)" && unreleased[0].wording &&
-                unreleased[0].value == L"0.9.40" && unreleased[0].detail == L"24 September 2026" && unreleased[5].text == L"Taxi Cam 0.9.2",
-            "An installed version newer than the published one is titled not released yet");
-    const ChangelogVersion older_published{0, 9, 1};
-    const auto both = whats_new_blocks(releases, {0, 9, 40}, &older_published);
-    require(both[5].kind == Kind::release && both[5].text == L"Taxi Cam 0.9.2 (not released yet)",
-            "Earlier unpublished versions say so too");
-    const auto released = whats_new_blocks(releases, {0, 9, 40}, &releases[0].version);
-    require(released[0].text == L"Taxi Cam 0.9.40" && !released[0].wording && released[0].detail == L"24 September 2026",
-            "A published version keeps its plain title");
-    const auto upcoming = whats_new_blocks(releases, {0, 9, 2}, &published);
-    require(upcoming[0].text == L"Taxi Cam 0.9.2" && upcoming[4].text == L"Taxi Cam 0.9.40",
-            "Coming notes are titled by their section, not marked again");
-    for (const char* tag : {"v1.3.1-build.59", "v1.3.1", "v0.9.0-build.1"})
-      require(parse_release_tag(tag, v), "Read published release tags");
-    require(parse_release_tag("v1.3.1-build.59", v) && v == ChangelogVersion{1, 3, 1}, "A tag's version leaves out its build");
-    for (const char* tag : {"", "1.3.1", "v1.3", "v1.3.1-build.", "v1.3.1-build.05", "v1.3.1-build.x", "v1.3.1-beta", "V1.3.1"})
-      require(!parse_release_tag(tag, v), "Refuse other tags");
 
     // Features with pictures and fixes (1.2.0 on).
     const std::string rich = wrap(
