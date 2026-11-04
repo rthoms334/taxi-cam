@@ -939,8 +939,9 @@ std::wstring preview_notes_root() {
   const DWORD n = GetCurrentDirectoryW(MAX_PATH, directory);
   return n && n < MAX_PATH ? std::wstring(directory) : std::wstring(L".");
 }
-// What's new (open_whats_new): the installed version's notes and earlier
-// ones, newest first. The newest release's features are cards with their
+// What's new (open_whats_new): the installed version's notes, then notes main
+// carries for later versions, then earlier ones (whats_new_blocks). The
+// installed release's features are cards with their
 // pictures, fetched one at a time from the repository while the window is
 // open; a picture that cannot be loaded is left out.
 constexpr wchar_t WhatsNewClass[] = L"TaxiCamWhatsNew";
@@ -3303,7 +3304,7 @@ void show_whats_new() {
     InvalidateRect(window, nullptr, FALSE);
     return;
   }
-  if (!open_whats_new(win::whats_new_blocks(win::releases_up_to(releases, InstalledVersion), InstalledVersion))) {
+  if (!open_whats_new(win::whats_new_blocks(releases, InstalledVersion, result.published_known ? &result.published : nullptr))) {
     notice = tr(L"Could not open What's new.");
     InvalidateRect(window, nullptr, FALSE);
     return;
