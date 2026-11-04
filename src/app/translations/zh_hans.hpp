@@ -191,7 +191,6 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"NDs", L"ND"},
     {L"Named", L"已命名"},
     {L"Native bridge connected", L"原生桥接已连接"},
-    {L"Native bridge connected — waiting for cockpit displays", L"原生桥接已连接 — 等待驾驶舱显示屏"},
     {L"Native bridge loaded. Waiting for graphics and aircraft.", L"原生桥接已载入。正在等待图形设备与机型信息。"},
     {L"Native bridge startup is pending.", L"原生桥接启动尚待完成。"},
     {L"Native taxi cameras", L"原生滑行摄像头"},
