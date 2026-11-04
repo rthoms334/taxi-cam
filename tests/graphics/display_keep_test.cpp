@@ -33,7 +33,7 @@ void pieces() {
   const D3D12_RECT du{1058, 33, 2016, 1004};
   auto split = keep::pieces(du);
   require(split.count == 1 && same(split.rects[0], 1058, 33, 2016, 1004), "No marks: the area whole");
-  // The live PMDG 777 case: GlassOut's mark at the gauge corner (1058,33).
+  // The live PMDG 777 case: the gauge corner at 1058,33.
   const keep::Point gauge[]{{1058, 33}};
   keep::set_marks(gauge, 1);
   split = keep::pieces(du);

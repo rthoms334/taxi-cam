@@ -28,7 +28,7 @@ Marks marks(const profiles::AircraftProfile* current, const profiles::AircraftPr
   return out;
 }
 void built_in() {
-  // The PMDG 777 left inboard DU: GlassOut marks its gauge at 1058,33.
+  // The PMDG 777 left inboard DU: its gauge corner is at 1058,33.
   const auto& p = profiles::Pmdg777300ER;
   const auto plain = marks(&p, &p);
   require(plain.has(1058, 33), "The 777 left inboard gauge corner is marked");

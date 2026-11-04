@@ -649,7 +649,7 @@ DWORD WINAPI watchdog_run(void*) noexcept {
   }
 }
 // Panel marks: camera writes leave two pixels at each routed display's gauge
-// corner alone, where GlassOut marks and checks every panel it streams
+// corner alone, which panel streaming tools sample to tell panels apart
 // (display_keep.hpp, display_marks.hpp). Always on: two pixels cannot be seen,
 // and a panel streamer started after the cameras still finds its marks.
 class DisplayMarks {
