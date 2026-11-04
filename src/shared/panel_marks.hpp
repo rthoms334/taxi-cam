@@ -7,20 +7,24 @@
 
 namespace taxi_camera::panel_marks {
 // Panel marks: a helper loaded into every cockpit panel page (taxi-cam-marks.js,
-// see claudedocs/panel-mark-identification.md) paints, on request, one small
-// block per gauge that names the panel and the gauge. Reading a display
-// texture once then tells which panel it is and where each gauge sits,
-// whatever order the simulator created the textures in.
+// see claudedocs/panel-mark-identification.md) paints, when the panel loads,
+// one small block per gauge that names the panel and the gauge, until Taxi Cam
+// has read it. Reading a display texture once then tells which panel it is and
+// where each gauge sits, whatever order the simulator created the textures in.
 //
-// A block is a grid of square cells, 16 wide, each one of the 8 colours whose
-// channels are all 0 or 255 (3 bits: red 4, green 2, blue 1). Those survive
-// sRGB or any other transfer curve and scaling; the edges between cells blur,
-// the centres do not. Row 0 is a fixed finder; column 0 of every later row
-// alternates black and white (timing); the other 15 cells of each later row
-// carry the payload, most significant bit first, followed by a CRC-16. The
-// helper draws a one-cell black border around the block.
+// A block is a grid of square cells, 16 wide, each one of 8 colours whose
+// channels are each 0 or the helper's level (3 bits: red 4, green 2, blue 1).
+// The helper paints near-black (kLevel) at one texture pixel per page pixel so
+// the block is hard to see; a transfer curve keeps 0 at 0 and only raises the
+// level, and older bright (255) blocks still read. Row 0 is a fixed finder;
+// column 0 of every later row alternates 0 and 7 (timing); the other 15 cells
+// of each later row carry the payload, most significant bit first, followed by
+// a CRC-16. The helper draws a one-cell 0 border around the block.
 inline constexpr unsigned kColumns = 16, kDataColumns = kColumns - 1, kBitsPerCell = 3, kRowBits = kDataColumns * kBitsPerCell;
 inline constexpr std::uint8_t kVersion = 1;
+// The helper's channel value for a 1 bit, and its cell edge in page pixels.
+inline constexpr std::uint8_t kLevel = 16;
+inline constexpr unsigned kCell = 2;
 inline constexpr std::array<std::uint8_t, kColumns> kFinder{7, 0, 7, 0, 4, 2, 1, 6, 3, 5, 0, 7, 4, 0, 1, 7};
 // Payload bytes before the CRC: version, length of the rest, fields.
 inline constexpr std::size_t kMaxPayload = 160;
@@ -118,7 +122,7 @@ class Decoder {
  public:
   Decoder(const std::uint8_t* pixels, std::uint64_t row_pitch, unsigned width, unsigned height, bool bgra) noexcept
       : pixels_(pixels), pitch_(row_pitch), width_(width), height_(height), red_(bgra ? 2 : 0), blue_(bgra ? 0 : 2) {}
-  // Finds up to max blocks. Scans every second row: a cell is at least 3
+  // Finds up to max blocks. Scans every second row: a cell is at least 2
   // texture pixels high.
   std::size_t find(Mark* out, std::size_t max) const noexcept {
     std::size_t found = 0;
@@ -144,7 +148,8 @@ class Decoder {
  private:
   int cls(unsigned x, unsigned y) const noexcept {
     const auto* p = pixels_ + y * pitch_ + std::size_t{x} * 4;
-    const auto bit = [](std::uint8_t v) { return v >= 170 ? 1 : v <= 85 ? 0 : -1; };
+    // 0 stays 0 under any transfer curve; the level only rises.
+    const auto bit = [](std::uint8_t v) { return v >= kLevel / 2 ? 1 : v <= kLevel / 8 ? 0 : -1; };
     const int r = bit(p[red_]), g = bit(p[1]), b = bit(p[blue_]);
     return r < 0 || g < 0 || b < 0 ? -1 : r << 2 | g << 1 | b;
   }
@@ -196,7 +201,7 @@ class Decoder {
     if (runs(x, y, false, kColumns, [](unsigned i) { return kFinder[i]; }, across.data()) != kColumns)
       return false;
     const double px = (across[kColumns] - across[0]) / kColumns;
-    if (px < 3)
+    if (px < kCell)
       return false;
     for (unsigned i = 0; i < kColumns; ++i) {
       const double run = across[i + 1] - across[i];
@@ -240,7 +245,7 @@ class Decoder {
     if (timing < rows - 1)
       return false;
     const double py = (down[rows - 1] - down[0]) / (rows - 1);
-    if (py < 3 || py < px * 0.6 || py > px * 1.6 || down[0] + rows * py > height_ + 1.0)
+    if (py < kCell || py < px * 0.6 || py > px * 1.6 || down[0] + rows * py > height_ + 1.0)
       return false;
     bytes = {};
     bit = 0;

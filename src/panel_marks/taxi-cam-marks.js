@@ -1,19 +1,23 @@
 // Taxi Cam panel marks. Loaded by the Taxi Cam copy of VCockpit.html (one
-// page per cockpit panel). On request it paints one small block per gauge
-// naming the panel and the gauge, so Taxi Cam can tell which display texture
-// is which. The format is src/shared/panel_marks.hpp; keep the two in step.
-// Draws nothing unless asked, never touches a gauge's top-left corner, and
-// never stops the page from loading: every step is guarded.
+// page per cockpit panel). When the panel loads it paints one small,
+// near-black block in the top-right corner of each gauge naming the panel and
+// the gauge, so Taxi Cam can tell which display texture is which. The blocks
+// go as soon as Taxi Cam has read them (it changes L:TAXICAM_MARKS), and
+// after MAX_SHOW_MS at the latest. The format is src/shared/panel_marks.hpp;
+// keep the two in step. Never touches a gauge's top-left corner, and never
+// stops the page from loading: every step is guarded.
 (function () {
     "use strict";
     var COLUMNS = 16, DATA_COLUMNS = 15, BITS = 3, ROW_BITS = DATA_COLUMNS * BITS, VERSION = 1, MAX_PAYLOAD = 160;
     var FINDER = [7, 0, 7, 0, 4, 2, 1, 6, 3, 5, 0, 7, 4, 0, 1, 7];
-    var COLOURS = ["#000000", "#0000ff", "#00ff00", "#00ffff", "#ff0000", "#ff00ff", "#ffff00", "#ffffff"];
-    // Requests: L:TAXICAM_MARKS changing to a new non-zero value shows the
-    // marks for SHOW_MS. -1 turns them off for the page's life.
-    var REQUEST_VAR = "L:TAXICAM_MARKS", POLL_MS = 500, SHOW_MS = 4000;
-    // Experiment builds also show them once after the panel loads.
-    var LOAD_SHOW_MS = 0, LOAD_DELAY_MS = 3000;
+    // A 1 bit is LEVEL in its channel, a 0 bit 0: near-black, one texture
+    // pixel per page pixel, so CELL page pixels a cell.
+    var LEVEL = 16, CELL = 2;
+    var COLOURS = [0, 1, 2, 3, 4, 5, 6, 7].map(function (c) {
+        return "rgb(" + (c & 4 ? LEVEL : 0) + "," + (c & 2 ? LEVEL : 0) + "," + (c & 1 ? LEVEL : 0) + ")";
+    });
+    // Taxi Cam changes READ_VAR once it has read the panels' blocks.
+    var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, START_MS = 500, MAX_SHOW_MS = 20000;
 
     function crc16(bytes) {
         var crc = 0xffff;
@@ -84,72 +88,19 @@
         var path = url.split("?")[0], slash = path.lastIndexOf("/");
         return path.substring(slash + 1).replace(/\.html?$/i, "");
     }
-    function query(url) {
-        var at = url.indexOf("?");
-        return at < 0 ? "" : url.substring(at + 1).replace(/(^|&)wasm_(module|gauge)=[^&]*/g, "").replace(/^&+/, "");
+    // Section names repeat across 2024 attachments (each has its own
+    // panel.cfg): a short hash of the panel.cfg path tells them apart.
+    function configTag(data) {
+        var s = String(data.sConfigFile || "").toLowerCase(), h = 0x811c9dc5;
+        for (var i = 0; i < s.length; i++)
+            h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+        return "c=" + ("000" + ((h ^ (h >>> 16)) & 0xffff).toString(16)).slice(-4);
     }
-    // A gauge's text fields other than its URL (panel.cfg's parameters after
-    // the rectangle, if the page gets them), for the experiment.
-    // Also what the gauge's BaseInstrument element says about itself (its
-    // identifier and urlConfig index), read from the element without owning
-    // BaseInstrument.js: whichever copy is loaded, stock or another add-on's.
-    function gaugeInfo(instrument) {
-        var url = instrument.sUrl || "", parts = [query(url)];
-        Object.keys(instrument).forEach(function (key) {
-            if (key !== "sUrl" && key !== "templateName" && typeof instrument[key] === "string" && instrument[key])
-                parts.push(key + "=" + instrument[key]);
-        });
-        var element = gaugeElement(instrument.iGUId);
-        if (element) {
-            try {
-                if (element.instrumentIdentifier)
-                    parts.push("id=" + element.instrumentIdentifier);
-                if (element.urlConfig && element.urlConfig.index != null)
-                    parts.push("index=" + element.urlConfig.index);
-            } catch (e) {
-            }
-        }
-        return parts.join("|");
+    function blockSize(rows) {
+        return { width: (COLUMNS + 2) * CELL, height: (rows + 2) * CELL };
     }
-    // VCockpit.js gives each gauge element a Guid attribute.
-    function gaugeElement(guid) {
-        var panel = document.getElementById("panel");
-        if (!panel || !panel.children)
-            return null;
-        for (var i = 0; i < panel.children.length; i++) {
-            var child = panel.children[i];
-            if (child && child.getAttribute && child.getAttribute("Guid") == String(guid))
-                return child;
-        }
-        return null;
-    }
-    // What the page knows about its panel, for the experiment: the panel
-    // data's keys and a gauge's keys first (the block keeps about 110
-    // characters), then every field as key=value, an array as its length and
-    // its first element's keys. Also logged for the Coherent debugger.
-    function panelInfo(data) {
-        var first = data.daInstruments && data.daInstruments[0];
-        var parts = ["K=" + Object.keys(data).join(","), "I=" + (first ? Object.keys(first).join(",") : "")];
-        Object.keys(data).forEach(function (key) {
-            var v = data[key];
-            if (Array.isArray(v))
-                parts.push(key + "[" + v.length + "]" + (v[0] && typeof v[0] === "object" ? "{" + Object.keys(v[0]).join(",") + "}" : ""));
-            else if (v && typeof v === "object")
-                parts.push(key + "=" + Object.keys(v).map(function (k) { return v[k]; }).join("x"));
-            else
-                parts.push(key + "=" + v);
-        });
-        return parts.join(";");
-    }
-    function cellSize(width, height) {
-        return Math.max(4, Math.min(10, Math.round(Math.min(width, height) / 200)));
-    }
-    function blockSize(rows, cell) {
-        return { width: (COLUMNS + 2) * cell, height: (rows + 2) * cell };
-    }
-    function drawBlock(mark, left, top) {
-        var encoded = encodeCells(encodePayload(mark)), size = blockSize(encoded.rows, mark.cell);
-        var canvas = document.createElement("canvas");
+    function drawBlock(encoded, left, top) {
+        var size = blockSize(encoded.rows), canvas = document.createElement("canvas");
         canvas.width = size.width;
         canvas.height = size.height;
         canvas.style.cssText = "position:absolute;pointer-events:none;z-index:2147483647;left:" + left + "px;top:" + top + "px;width:" +
@@ -159,7 +110,7 @@
         g.fillRect(0, 0, size.width, size.height);
         for (var i = 0; i < encoded.cells.length; i++) {
             g.fillStyle = COLOURS[encoded.cells[i]];
-            g.fillRect((1 + (i % COLUMNS)) * mark.cell, (1 + Math.floor(i / COLUMNS)) * mark.cell, mark.cell, mark.cell);
+            g.fillRect((1 + (i % COLUMNS)) * CELL, (1 + Math.floor(i / COLUMNS)) * CELL, CELL, CELL);
         }
         document.body.appendChild(canvas);
         return canvas;
@@ -167,58 +118,40 @@
     function panelData() {
         return typeof globalPanelData !== "undefined" ? globalPanelData : null;
     }
-    // The panel's texture name as the page knows it. Which field holds it is
-    // what the first experiment settles; until then the section name.
-    function panelName(data) {
-        return data.sTextureName || data.sTexture || data.texture || data.sName || "";
+    function readValue() {
+        return typeof SimVar !== "undefined" && SimVar.GetSimVarValue ? SimVar.GetSimVarValue(READ_VAR, "number") : null;
     }
-    var shown = [], hideTimer = 0;
+    var shown = [], timer = 0, done = false;
     function hide() {
+        done = true;
+        if (timer)
+            clearInterval(timer);
+        timer = 0;
         shown.forEach(function (c) {
             if (c.parentNode)
                 c.parentNode.removeChild(c);
         });
         shown = [];
-        hideTimer = 0;
     }
-    function show(ms) {
+    // One block per gauge, in its top-right corner a cell in from the edges:
+    // far from the top-left corner other tools sample.
+    function show() {
         var data = panelData();
         if (!data || !data.daInstruments || !data.vDisplaySize || !data.vLogicalSize || !document.body)
             return;
-        hide();
-        var pw = data.vDisplaySize.x, ph = data.vDisplaySize.y, cell = cellSize(pw, ph), name = panelName(data), placed = [];
+        var pw = data.vDisplaySize.x, ph = data.vDisplaySize.y, name = data.sName || "", tag = configTag(data);
         var rx = pw / data.vLogicalSize.x, ry = ph / data.vLogicalSize.y;
         data.daInstruments.forEach(function (instrument, index) {
-            var p = instrument.vPosAndSize || {}, url = instrument.sUrl || "";
+            var p = instrument.vPosAndSize || {};
             // setupInstrument's rounding.
             var x = Math.round(p.x * rx), y = Math.round(p.y * ry), w = Math.round(p.z * rx), h = Math.round(p.w * ry);
-            var mark = { kind: 0, cell: cell, gauge: index & 255, x: x, y: y, width: w, height: h, panelWidth: pw, panelHeight: ph,
-                         name: name, gaugeName: gaugeName(url), info: gaugeInfo(instrument) };
-            var size = blockSize(encodeCells(encodePayload(mark)).rows, cell);
-            // Centred in the gauge, with a cell of the gauge left all round:
-            // far from the top-left corner other tools sample.
-            if (w < size.width + 2 * cell || h < size.height + 2 * cell)
+            var encoded = encodeCells(encodePayload({ kind: 0, cell: CELL, gauge: index & 255, x: x, y: y, width: w, height: h, panelWidth: pw,
+                                                      panelHeight: ph, name: name, gaugeName: gaugeName(instrument.sUrl || ""), info: tag }));
+            var size = blockSize(encoded.rows);
+            if (w < size.width + 2 * CELL || h < size.height + 2 * CELL)
                 return;
-            var left = Math.round(x + (w - size.width) / 2), top = Math.round(y + (h - size.height) / 2);
-            placed.push({ left: left, top: top, right: left + size.width, bottom: top + size.height });
-            shown.push(drawBlock(mark, left, top));
+            shown.push(drawBlock(encoded, x + w - size.width - CELL, y + CELL));
         });
-        // One panel-level block with what the page knows, bottom right, where
-        // it overlaps no gauge block.
-        var info = panelInfo(data);
-        if (typeof console !== "undefined")
-            console.log("Taxi Cam panel marks: " + info);
-        var probe = { kind: 1, cell: cell, gauge: 255, x: 0, y: 0, width: pw, height: ph, panelWidth: pw, panelHeight: ph, name: name,
-                      gaugeName: data.sName || "", info: info };
-        var size = blockSize(encodeCells(encodePayload(probe)).rows, cell);
-        var left = pw - size.width - 2 * cell, top = ph - size.height - 2 * cell;
-        var clear = left > 2 * cell && top > 2 * cell && placed.every(function (b) {
-            return left >= b.right || left + size.width <= b.left || top >= b.bottom || top + size.height <= b.top;
-        });
-        if (clear)
-            shown.push(drawBlock(probe, left, top));
-        if (shown.length)
-            hideTimer = setTimeout(hide, ms);
     }
     function guarded(f) {
         return function () {
@@ -229,37 +162,34 @@
             }
         };
     }
-    // The first read only notes the value: a request made before this page
-    // loaded is not for it.
-    var lastRequest = null, off = false;
+    // The value when the page loaded: a later change means Taxi Cam has read
+    // the blocks (a value from an earlier flight is not for this page).
+    var baseline = null, started = 0;
     var poll = guarded(function () {
-        if (off || typeof SimVar === "undefined" || !SimVar.GetSimVarValue)
+        if (done)
             return;
-        var request = SimVar.GetSimVarValue(REQUEST_VAR, "number");
-        if (request === -1) {
-            off = true;
+        var value = readValue();
+        if (baseline === null)
+            baseline = value;
+        else if (value !== baseline || Date.now() - started > MAX_SHOW_MS)
             hide();
+    });
+    var start = guarded(function () {
+        if (done)
+            return;
+        if (!panelData() || !document.getElementById("panel")) {
+            setTimeout(start, POLL_MS);
             return;
         }
-        if (lastRequest === null) {
-            lastRequest = request;
-            return;
-        }
-        if (request && request !== lastRequest) {
-            lastRequest = request;
-            show(SHOW_MS);
-        }
+        started = Date.now();
+        show();
+        if (shown.length)
+            timer = setInterval(poll, POLL_MS);
+        else
+            done = true;
     });
     guarded(function () {
-        setInterval(poll, POLL_MS);
-        if (LOAD_SHOW_MS > 0) {
-            var waitForPanel = guarded(function () {
-                if (panelData() && document.getElementById("panel"))
-                    setTimeout(guarded(function () { show(LOAD_SHOW_MS); }), LOAD_DELAY_MS);
-                else
-                    setTimeout(waitForPanel, POLL_MS);
-            });
-            waitForPanel();
-        }
+        baseline = readValue();
+        setTimeout(start, START_MS);
     })();
 })();

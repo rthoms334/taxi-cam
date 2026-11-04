@@ -43,8 +43,9 @@ Image page(unsigned width, unsigned height, unsigned seed) {
   }
   return image;
 }
-// The helper's canvas: a one-cell black border round the cells.
-void draw(Image& image, const Mark& m, unsigned left, unsigned top) {
+// The helper's canvas: a one-cell black border round the cells, each 1 bit
+// at level (the helper paints kLevel; older blocks 255).
+void draw(Image& image, const Mark& m, unsigned left, unsigned top, std::uint8_t level = 255) {
   const auto cells = encode_cells(encode_payload(m));
   const unsigned rows = static_cast<unsigned>(cells.size() / kColumns), cell = m.cell;
   for (unsigned y = 0; y < (rows + 2) * cell; ++y)
@@ -54,31 +55,10 @@ void draw(Image& image, const Mark& m, unsigned left, unsigned top) {
       if (cx >= 1 && cx <= kColumns && cy >= 1 && cy <= rows)
         v = cells[std::size_t{cy - 1} * kColumns + cx - 1];
       auto* p = image.at(left + x, top + y);
-      p[0] = v & 4 ? 255 : 0;
-      p[1] = v & 2 ? 255 : 0;
-      p[2] = v & 1 ? 255 : 0;
+      p[0] = v & 4 ? level : 0;
+      p[1] = v & 2 ? level : 0;
+      p[2] = v & 1 ? level : 0;
     }
-}
-// The page rendered into a texture of another size, bilinear.
-Image resample(const Image& from, unsigned width, unsigned height) {
-  Image to{width, height, std::vector<std::uint8_t>(std::size_t{width} * height * 4)};
-  for (unsigned y = 0; y < height; ++y)
-    for (unsigned x = 0; x < width; ++x) {
-      const double sx = (x + 0.5) * from.width / width - 0.5, sy = (y + 0.5) * from.height / height - 0.5;
-      const int x0 = static_cast<int>(std::floor(sx)), y0 = static_cast<int>(std::floor(sy));
-      const double fx = sx - x0, fy = sy - y0;
-      const auto px = [&](int xx, int yy, int c) {
-        xx = xx < 0 ? 0 : xx >= static_cast<int>(from.width) ? static_cast<int>(from.width) - 1 : xx;
-        yy = yy < 0 ? 0 : yy >= static_cast<int>(from.height) ? static_cast<int>(from.height) - 1 : yy;
-        return double(from.rgba[(std::size_t(yy) * from.width + std::size_t(xx)) * 4 + std::size_t(c)]);
-      };
-      for (int c = 0; c < 4; ++c) {
-        const double v = (px(x0, y0, c) * (1 - fx) + px(x0 + 1, y0, c) * fx) * (1 - fy) +
-                         (px(x0, y0 + 1, c) * (1 - fx) + px(x0 + 1, y0 + 1, c) * fx) * fy;
-        to.rgba[(std::size_t{y} * width + x) * 4 + std::size_t(c)] = static_cast<std::uint8_t>(v + 0.5);
-      }
-    }
-  return to;
 }
 Mark gauge(const char* name,
            const char* gauge_name,
@@ -151,37 +131,32 @@ int main() {
             "names decoded");
     require(std::fabs(found[0].pitch_x - 4) < 0.3 && std::fabs(found[0].pitch_y - 4) < 0.3, "pitch is the cell size");
   }
-  // PMDG 777 DUS: four DUs and the 4x4 Core gauge (too small for a block),
-  // drawn on the 2048 page and shown in textures of 2048, 1600 and 800, plus
-  // 2 px corner markers at each gauge origin like another tool's.
-  for (const unsigned texture : {2048u, 1600u, 800u}) {
+  // PMDG 777 DUS: four DUs on one 2048 texture, each with its dark block in
+  // its top-right corner, plus 2 px markers at each gauge origin like another
+  // tool's.
+  {
     auto image = page(2048, 2048, 2);
-    const Mark dus[] = {gauge("DUS", "DU_LeftOutboard", 0, 30, 33, 958, 971, 2048, 2048, 10),
-                        gauge("DUS", "DU_LeftInboard", 1, 1058, 33, 958, 971, 2048, 2048, 10),
-                        gauge("DUS", "DU_RightInboard", 2, 30, 1058, 958, 971, 2048, 2048, 10),
-                        gauge("DUS", "DU_RightOutboard", 3, 1058, 1058, 958, 971, 2048, 2048, 10)};
+    const Mark dus[] = {gauge("DUS", "DU_LeftOutboard", 0, 30, 33, 958, 971, 2048, 2048, kCell),
+                        gauge("DUS", "DU_LeftInboard", 1, 1058, 33, 958, 971, 2048, 2048, kCell),
+                        gauge("DUS", "DU_RightInboard", 2, 30, 1058, 958, 971, 2048, 2048, kCell),
+                        gauge("DUS", "DU_RightOutboard", 3, 1058, 1058, 958, 971, 2048, 2048, kCell)};
     for (const auto& m : dus) {
-      draw_centred(image, m);
+      draw(image, m, m.x + m.width - block_width(m) - kCell, m.y + kCell, kLevel);
       for (unsigned i = 0; i < 2; ++i) {
         auto* p = image.at(m.x + i, m.y);
         p[0] = 255, p[1] = 0, p[2] = 255;
       }
     }
-    const auto shown = resample(image, texture, texture);
     Mark found[8];
-    const auto count = find(shown, found, 8);
-    char message[96];
-    std::snprintf(message, sizeof(message), "four DU blocks found in a %u texture", texture);
-    require(count == 4, message);
+    const auto count = find(image, found, 8);
+    require(count == 4, "four DU blocks found");
     for (const auto& m : dus) {
       const auto* f = named(found, count, "DUS", m.gauge);
       require(f && std::strcmp(f->gauge_name.data(), m.gauge_name.data()) == 0, "each DU by gauge index");
       Rect rect;
-      require(texture_rect(*f, texture, texture, rect), "rect from panel size");
-      const unsigned want_x = (m.x * texture + 1024) / 2048, want_w = (m.width * texture + 1024) / 2048;
-      require(rect.x == want_x && rect.width == want_w, "gauge rect scaled to the texture");
-      const double scale = f->pitch_x / f->cell;
-      require(std::fabs(scale - texture / 2048.0) < 0.05, "measured pitch gives the texture's scale");
+      require(texture_rect(*f, 2048, 2048, rect) && rect.x == m.x && rect.y == m.y && rect.width == m.width && rect.height == m.height,
+              "gauge rect in the texture");
+      require(f->left > m.x + m.width / 2 && f->top < m.y + 4 * kCell, "block in the gauge's top-right corner");
     }
   }
   // iniBuilds A350 EFIS (1644 x 1024) in BGRA, with a mark per side.
@@ -224,6 +199,52 @@ int main() {
       }
     Mark found[2];
     require(find(image, found, 2) == 0, "damaged block refused");
+  }
+  // The shipped helper: near-black 2 px cells in each gauge's top-right
+  // corner, read at one texture pixel per page pixel (A350 2026-11-04: every
+  // panel's page size was its texture size), on dark, grey and light screens.
+  for (const unsigned background : {0u, 4u, 60u, 235u}) {
+    auto image = page(1644, 1024, 7);
+    for (unsigned y = 0; y < image.height; ++y)
+      for (unsigned x = 0; x < image.width; ++x)
+        if (image.at(x, y)[0] == 20 && image.at(x, y)[1] == 20)
+          image.at(x, y)[0] = image.at(x, y)[1] = image.at(x, y)[2] = static_cast<std::uint8_t>(background);
+    auto m = gauge("VCockpit02", "EFIS", 0, 0, 0, 1644, 1024, 1644, 1024, kCell);
+    std::strcpy(m.info.data(), "c=af66");
+    const unsigned left = m.x + m.width - block_width(m) - kCell, top = m.y + kCell;
+    require(block_width(m) == 36 && block_height(m) <= 26, "dark block is 36 px wide and at most 26 high");
+    draw(image, m, left, top, kLevel);
+    Mark found[2];
+    char message[96];
+    std::snprintf(message, sizeof(message), "dark 2 px block found on a %u background", background);
+    require(find(image, found, 2) == 1 && std::strcmp(found[0].name.data(), "VCockpit02") == 0 &&
+                std::strcmp(found[0].info.data(), "c=af66") == 0 && found[0].left == left + kCell && found[0].top == top + kCell,
+            message);
+    require(std::fabs(found[0].pitch_x - 2) < 0.01 && std::fabs(found[0].pitch_y - 2) < 0.01, "dark block pitch is 2 px");
+  }
+  // A transfer curve (an sRGB display texture encoding the level again)
+  // raises the level; 0 stays 0. BGRA too.
+  {
+    auto image = page(512, 512, 8);
+    const auto m = gauge("VCockpit07", "ISIS", 0, 0, 0, 512, 512, 512, 512, kCell);
+    draw(image, m, 512 - block_width(m) - kCell, kCell, 70);
+    for (unsigned y = 0; y < image.height; ++y)
+      for (unsigned x = 0; x < image.width; ++x)
+        std::swap(image.at(x, y)[0], image.at(x, y)[2]);
+    Mark found[2];
+    require(find(image, found, 2, true) == 1 && std::strcmp(found[0].gauge_name.data(), "ISIS") == 0, "raised level decodes in BGRA");
+  }
+  // A dark block with one cell changed fails the CRC.
+  {
+    auto image = page(512, 512, 9);
+    const auto m = gauge("VCockpit07", "ISIS", 0, 0, 0, 512, 512, 512, 512, kCell);
+    const unsigned left = 512 - block_width(m) - kCell, top = kCell;
+    draw(image, m, left, top, kLevel);
+    for (unsigned y = 0; y < kCell; ++y)
+      for (unsigned x = 0; x < kCell; ++x)
+        image.at(left + kCell * 7 + x, top + kCell * 3 + y)[1] ^= kLevel;
+    Mark found[2];
+    require(find(image, found, 2) == 0, "damaged dark block refused");
   }
   // No marks: a busy display gives nothing.
   {

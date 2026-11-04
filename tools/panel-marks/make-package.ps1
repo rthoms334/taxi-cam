@@ -5,7 +5,7 @@
 # time this runs, plus taxi-cam-marks.js. Developer experiments only; the
 # installer does not run PowerShell.
 #
-#   tools/panel-marks/make-package.ps1 [-LoadShowMs 120000]
+#   tools/panel-marks/make-package.ps1 [-MaxShowMs 20000]   # cap on how long marks stay up
 #   tools/panel-marks/make-package.ps1 -Check     # stale against the stock file?
 #   tools/panel-marks/make-package.ps1 -Remove
 #
@@ -13,7 +13,7 @@
 param(
     [string]$Content = '',
     [string]$Community = '',
-    [int]$LoadShowMs = 0,
+    [int]$MaxShowMs = 0,
     [switch]$Check,
     [switch]$Remove
 )
@@ -77,10 +77,10 @@ $line = $m.Groups[1].Value + '<script type="text/javascript" src="/Pages/VCockpi
 $page = $text.Insert($m.Index + $m.Length, $line)
 
 $helper = Get-Content -Raw (Join-Path $PSScriptRoot "..\..\src\panel_marks\$helperName")
-if ($LoadShowMs -gt 0) {
+if ($MaxShowMs -gt 0) {
     $before = $helper
-    $helper = $helper -replace 'var LOAD_SHOW_MS = 0,', "var LOAD_SHOW_MS = $LoadShowMs,"
-    if ($helper -eq $before) { throw 'LOAD_SHOW_MS not found in the helper.' }
+    $helper = $helper -replace 'MAX_SHOW_MS = \d+;', "MAX_SHOW_MS = $MaxShowMs;"
+    if ($helper -eq $before) { throw 'MAX_SHOW_MS not found in the helper.' }
 }
 
 $core = Join-Path $package 'html_ui\Pages\VCockpit\Core'
@@ -88,7 +88,7 @@ New-Item -ItemType Directory -Force $core | Out-Null
 $utf8 = New-Object Text.UTF8Encoding($bom)
 [IO.File]::WriteAllText((Join-Path $core 'VCockpit.html'), $page, $utf8)
 [IO.File]::WriteAllText((Join-Path $core $helperName), $helper, (New-Object Text.UTF8Encoding($false)))
-Set-Content -Encoding ascii (Join-Path $package $marker) @((Sha256 $stock), $stock, "load_show_ms=$LoadShowMs")
+Set-Content -Encoding ascii (Join-Path $package $marker) @((Sha256 $stock), $stock, "max_show_ms=$MaxShowMs")
 
 $stockManifest = Get-Content -Raw (Join-Path $stockPackage 'manifest.json') | ConvertFrom-Json
 $manifest = [ordered]@{
@@ -111,5 +111,5 @@ $layout = @{ content = @($files | ForEach-Object {
     [ordered]@{ path = $_; size = (Get-Item $full).Length; date = (FileTime $full) }
 }) }
 $layout | ConvertTo-Json -Depth 5 | Set-Content -Encoding ascii (Join-Path $package 'layout.json')
-"Wrote $package from $stock (load_show_ms=$LoadShowMs)."
+"Wrote $package from $stock (max_show_ms=$MaxShowMs)."
 if (Get-Process FlightSimulator2024 -ErrorAction SilentlyContinue) { 'MSFS is running: the package takes effect at its next start.' }

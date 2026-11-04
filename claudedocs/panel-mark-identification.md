@@ -148,52 +148,45 @@ the package to load later.
 I found no public documentation of that field
 (search on 2026-11-03), so whether MSFS needs it is experiment E0.
 
-## What the page knows: the first open question
+## What the page knows (E1, answered on the A350 2026-11-04)
 
-The page knows `sName`, which the stock debug button sets to `"VCockpit01"`:
-the **section** name. It isn't known yet whether the page also gets
-`texture=`. Section names aren't unique in MSFS 2024, because every
-attachment has its own `panel.cfg`. For example, the Fenix
+The panel data has exactly `__Type, sName, vLogicalSize, vDisplaySize,
+daAttributes, daInstruments, sConfigFile`, and each gauge has `__Type, iGUId,
+sContainer, sUrl, …`. There is **no `texture=`**: the page knows its
+**section** name (`VCockpit02`) and its `panel.cfg` path.
+
+Section names aren't unique in MSFS 2024, because every attachment has its
+own `panel.cfg`. For example, the Fenix
 `Part_Interior_Panel_Refueling_Readouts/panel/panel.cfg` has its own
-`[VCockpit17]` (`texture=Panel_Refueling`), which explains the table's two
-`VCockpit17` panels.
+`[VCockpit17]` (`texture=Panel_Refueling`). So each mark carries `sName`,
+the gauge name and `c=` + a 16-bit hash of `sConfigFile` in its info text.
+The stable name is (section, config hash, gauge index). Where the texture
+name is wanted for display, the companion can read `texture=` for that
+section from the `panel.cfg` next to it.
 
-What the result of E1 would mean:
-
-- **The page gets `texture=`:** the mark carries it, and the panel-table
-  decode can go.
-- **Section only:** the mark carries `sName` plus a hash of `sConfigFile` (the
-  attachment's `panel/` folder). The companion reads `texture=` for that
-  section from the `panel.cfg` next to it. If that file isn't readable
-  (encrypted packages), the panel table is used as a name lookup by section
-  only, never by order.
-
-In both cases order pairing is gone.
-
-A second detail for E1 is gauge parameters. The A350 EFIS has the same URL on
-both sides and differs only in the parameter after the rectangle
-(`…wasm_gauge=EFIS,0,0,1644,1024,L` / `R`). The texture name separates those
-two, but for gauges it needs to be known whether the page gets the parameter.
-The prototype's panel block lists the panel data's keys and a gauge's keys,
-and the gauge blocks carry every string field of the gauge.
+On the A350 every panel's page size equalled its texture size, so the page
+draws at one texture pixel per page pixel.
 
 ## Mark format
 
 The format is in `src/shared/panel_marks.hpp`; the JS mirror is
 `src/panel_marks/taxi-cam-marks.js`.
 
-**Cells.** A block is a grid of square cells, 16 wide, with a one-cell black
-border. Each cell is one of the 8 colours whose channels are all 0 or 255, so
-it carries 3 bits. 0 and 255 are fixed points of sRGB and of any other
-transfer curve. Scaling blurs only cell edges. The decoder samples 9 points
-around each cell's centre and needs 5 to agree. A channel counts as 1 at
-≥ 170 and as 0 at ≤ 85.
+**Cells.** A block is a grid of square cells, 16 wide, with a one-cell
+border of 0. Each cell is one of 8 colours whose channels are each 0 or the
+helper's level, so it carries 3 bits. The helper paints `kLevel` = 16 (near
+black) in 2 px cells (`kCell`). A transfer curve keeps 0 at 0 and only raises
+the level (an sRGB texture encoding it again gives about 70), so a channel
+counts as 1 at ≥ 8 and as 0 at ≤ 2. The decoder samples 9 points around
+each cell's centre and needs 5 to agree. Bright (255) blocks from the first
+prototype still read at their own size; scaled 2 px blocks would not, which
+is why the page must draw at texture size.
 
 **Rows.**
 - Row 0 is a fixed finder of 16 colours (`7,0,7,0,4,2,1,6,3,5,0,7,4,0,1,7`).
   It gives the start and the horizontal pitch.
-- Column 0 of every later row alternates black and white. That timing column
-  gives the vertical pitch and the row count.
+- Column 0 of every later row alternates 0 and 7. That timing column gives
+  the vertical pitch and the row count.
 - The other 15 cells of each row carry payload bits, most significant bit
   first, then a CRC-16/CCITT-FALSE.
 
@@ -208,57 +201,59 @@ around each cell's centre and needs 5 to agree. A channel counts as 1 at
 | gauge index | u8 |
 | gauge x, y, w, h (page px) | u16 each |
 | panel width, height (page px) | u16 each |
-| panel name | u8 length + ASCII |
+| panel name (`sName`) | u8 length + ASCII |
 | gauge name | u8 length + ASCII |
-| info | u8 length + ASCII |
+| info (`c=` + config hash) | u8 length + ASCII |
 
-- The gauge name is `wasm_gauge`, or the page's file name.
-- The info text is the rest of the URL and the gauge's other string fields.
-  It is cut short first when the block runs out of room.
+The gauge name is `wasm_gauge`, or the page's file name. Kind `panel` was the
+prototype's probe block and is no longer drawn.
 
-**Size.** A 777 DU block is 8 rows. With 10 px cells on a 2048 panel it is
-180×100 px; on a 300 px ISIS it is 72×40 px. The cell size is
-`clamp(round(min(panel w, h) / 200), 4, 10)` page px.
+**Size.** With 2 px cells a block is 36 px wide and 22–26 px high (9–11 rows
+including the border): about 2% of an A350 EFIS texture's width, against
+90×55 px for the first prototype's 5 px bright cells.
 
-**Scale.** The decoder measures the pitch. The texture rectangle is the page
-rectangle × texture size / panel size, and the measured `pitch / cell`
-cross-checks that scale.
+**Scale.** The texture rectangle is the page rectangle × texture size /
+panel size.
 
 ## Placement and timing (coexisting with GlassOut)
 
-- **Where.** Each gauge's block is centred in the gauge, and a gauge smaller
-  than its block plus one cell all round gets none (the 777's 4×4 `Core`
-  gauge). No block ever touches a gauge's top-left corner, where GlassOut
-  reads its two verification pixels. One panel-level block goes bottom right,
-  only where it overlaps no gauge block.
-- **When.** Only on request. The bridge sets `L:TAXICAM_MARKS` to a new
-  non-zero value through SimConnect, and every page polls it every 500 ms.
-  - A change shows the blocks for 4 s, then they are removed.
-  - The first read on a page only notes the value, so a request made before
-    the page loaded is not for it.
-  - `-1` turns the helper off for the page's life.
-  - Without Taxi Cam nothing is ever painted, so GlassOut-only users see
-    nothing.
+- **Where.** Each gauge's block sits in the gauge's top-right corner, one
+  cell in from the edges; a gauge smaller than its block plus one cell all
+  round gets none. No block touches a gauge's top-left corner, where GlassOut
+  reads its two verification pixels. On most displays that corner is black,
+  so the near-black block barely shows.
+- **When.** From panel load (+0.5 s) until Taxi Cam has read it, at most
+  `MAX_SHOW_MS` (20 s). The page reads `L:TAXICAM_MARKS` when it loads; the
+  bridge's SimConnect worker sets it to a new value once the bridge has read
+  the panels, and every page polls it every 250 ms and takes its blocks down
+  when it changes. An L:var outlives the flight, so only a change after the
+  page loaded counts. Without Taxi Cam the cap removes them after 20 s.
 - **Guarded.** Every step is in try/catch, and an exception removes what was
   drawn. The helper can't stop a page loading.
-- **Visibility.** The blocks *are* visible in the cockpit for those 4 s, after
-  each flight load and after a re-identify. They are small, saturated
-  rectangles; say so in the docs and the changelog.
+- **Visibility.** A small dark rectangle in a gauge's top-right corner for
+  about the time the bridge needs to read the panels after the cockpit
+  appears; on a light display (EFB) it shows as a dark square for that time.
 
-The prototype adds a load-time window for experiments (`LOAD_SHOW_MS`, set by
-`make-package.ps1 -LoadShowMs`). Production uses only the request.
+First live run (A350, 2026-11-04, prototype 1): bright 5–10 px blocks,
+centred, shown 2 min after load. The user found them far too visible and too
+long; this design is the answer.
 
 ## Bridge detection path
 
 1. **Candidates.** Every panel-class texture (multi-mip RGBA render target).
    Discovery already admits these, `panel_texture_desc` in phase 1, so this
    works for built-in and unknown aircraft alike.
-2. **Request.** When the flight is loaded and panel textures exist, the bridge
-   bumps `L:TAXICAM_MARKS`. Then, for up to 4 s, it snapshots each candidate
-   through the existing machinery: a base-mip copy at a proven submission
-   boundary, then mapping the readback. The full-size bytes go through
-   `panel_marks::find_marks` before they are shrunk. The prototype already
-   does this for every picture and logs `Display marks:` / `Display mark:`.
+2. **Scan.** The bridge reads every panel texture of the flight once by
+   itself (`MarkScan` in `bridge_main.cpp`), not only when the Displays page
+   asks for a picture: one snapshot at a time through the existing
+   machinery (a base-mip copy at a proven submission boundary, then mapping
+   the readback), only while the companion's own picture is not pending. The
+   full-size bytes go through `panel_marks::find_marks` before they are
+   shrunk. A texture with no marks yet is tried again after 1 s, at most 5
+   times. When every texture is read or given up on and none has appeared
+   for 3 s, it calls `signal_panel_marks_read()` and the pages take their
+   marks down. A later read signals again. Logged as `Display mark:` and
+   `Display marks: N of M panel textures read`.
 3. **Map.**
    - (panel name, gauge index) → (texture id, rect in texture px). Gauge name
      and info are stored for display.
@@ -272,15 +267,10 @@ The prototype adds a load-time window for experiments (`LOAD_SHOW_MS`, set by
    - a routed name is missing;
    - the user opens Displays or setup;
    - Settings name a panel that the current map doesn't have.
-6. **Cost.**
-   - Offline, decoding a 2048² RGBA texture takes about 0.1 s on this machine
-     (≈ 0.1–0.14 s for the whole tool run, including reading a 16 MB file).
-   - The sweep runs on the bridge control thread, never on a hook path.
-   - Snapshots are sequential, ≈ 0.4 s each by earlier measurements, so 17
-     panels ≈ 7 s. That is longer than a 4 s window, so the sweep requests
-     again per batch, or the window grows to cover the candidates. Tuned in
-     E2–E6.
-   - Live `read_us` is in the log line.
+6. **Cost.** Live on the A350, decoding took 0.1–6 ms per texture (300² to
+   2355×1467) on the bridge control thread, never on a hook path. Snapshots
+   came about 0.4 s apart when the Displays page asked for them; 17 panels
+   took about 17 s that way, which the scan replaces.
 
 ## What it replaces
 
@@ -341,43 +331,44 @@ pairing is a separate PR, once E1–E7 pass.
 | # | Question | Why it matters |
 |---|---|---|
 | E0 | Does MSFS load an override of `VCockpit.html` from a Community package, and does it need `globally_overriden_base_sim_files`? | Whole design |
-| E1 | Which panel and gauge fields does the page get? Is `texture=` among them? | Whether the panel-table decode can go |
+| E1 | Which panel and gauge fields does the page get? Is `texture=` among them? **Answered (A350): no `texture=`; section + `sConfigFile`.** | Whether the panel-table decode can go |
 | E2–E6 | Do DOM blocks drawn over WASM / NanoVG gauges reach the panel texture, unscaled or at what scale, in all five aircraft? Do hidden or `quality=hidden` panels draw them? | Detection |
 | E7 | GlassOut active: both tools still identify, GlassOut shows no `MISMATCH`, nothing new in its log | Coexistence |
 | E8 | Does the companion run before MSFS mounts Community? | Stale-copy window |
-| E9 | Do the 4 s blocks show in a way users mind (cockpit view at flight load)? | UX |
+| E9 | Do the dark top-right blocks show in a way users mind, and how long are they up after the cockpit appears? | UX |
+| E10 | Is every page drawn at its texture size on the other four aircraft (2 px cells don't survive scaling)? | Detection |
 
 Also open: panels updating only when visible (blocks wait for the next draw),
 and aircraft that put a full-page element above `document.body` children
 (none seen).
 
-## Done locally (2026-11-03)
+## Live result 1 (A350, 2026-11-04, first prototype)
 
-- `tests/graphics/panel_marks_test.cpp`: 62 checks pass.
-  - The JS and C++ encoders agree byte for byte (golden vector from node).
-  - Round trips on a busy synthetic PFD at 1×.
-  - The 777 `DUS` layout (4 DUs) shown in 2048, 1600 and 800 textures with
-    bilinear filtering and 2 px corner markers at each gauge origin; every
-    gauge rect is scaled right.
-  - A350 EFIS in BGRA, and BGRA read as RGBA is refused.
-  - The info text is capped.
-  - A damaged cell fails the CRC.
-  - No false blocks on a busy display.
+- E0: the Community override of `VCockpit.html` loads.
+- E1: answered above (no `texture=`).
+- E2: every one of the 17 A350 panels was found by its marks, with the right
+  section and gauge names: both EFIS (PFD/ND), CTR, MFD, both HUDs, BAT,
+  three RMPs, FCU, both EFBs, both ISIS and the FAP. Page size = texture
+  size everywhere; decoding 0.1–6 ms per texture.
+- E9: the bright, centred blocks were far too visible, and the 2-minute
+  load window kept them up much longer than needed. This led to the current
+  design (dark 2 px blocks top-right, read by the bridge's own scan, taken
+  down on its signal, 20 s cap). Not yet run live.
+
+## Done locally
+
+- `tests/graphics/panel_marks_test.cpp`: the JS and C++ encoders agree byte
+  for byte (golden vector); dark 2 px blocks top-right decode on 0, 4, 60 and
+  235 backgrounds, BGRA with a raised level (70), the 777 `DUS` layout with
+  corner markers at gauge origins; bright 1× blocks still decode; damaged
+  blocks fail the CRC; no false blocks on a busy display.
 - `tools/panel-marks/stub-page.js` + `decode_raw.cpp` run the real helper
-  against a stub DOM with 777 DUS, A350 EFIS, A350 ISIS and FBW PFD panel
-  data (`fixtures/`), rasterise its canvases at texture scales 0.5, 1 and
-  1.25, and decode them. The fixtures use `VCockpit.js`'s field names. The
-  A350 fixture's `sParameters` is a made-up name for the after-rectangle
-  parameter, used to exercise the gauge info path.
-  - Every gauge and panel block is found with the right names and rects.
-  - The 777 `Core` gauge is skipped.
-- `tools/panel-marks/make-package.ps1` built the package from the installed
-  stock page into a scratch folder: one line added, manifest, layout, stock
-  hash; `-Check` reports it current. It has not been written to the real
-  Community folder.
-- The bridge decodes marks in every ready display snapshot and logs them.
-  The plain `build.ps1` is clean. `-Validate` and the smoke test have not been
-  run, and the build is not installed.
+  against a stub DOM with the 777 DUS, A350 EFIS, ISIS and FBW PFD fixtures
+  on dark, grey and light backgrounds: every gauge block is found with the
+  right names and rects.
+- `tests/camera/body_pose_provider_test.cpp --self-test` passes with the
+  `L:TAXICAM_MARKS` definition added.
+- `-Validate` and the smoke test have not been run.
 
 ## Experiment plan (fresh flight loads only; never reload or switch aircraft in a flight)
 
@@ -386,24 +377,24 @@ Community folder and needs an MSFS restart.
 
 1. Close MSFS.
 2. Install the prototype build (plain `build.ps1` + the usual install).
-3. Run `tools/panel-marks/make-package.ps1 -LoadShowMs 120000`, which shows
-   the blocks for 2 minutes after each panel loads.
+3. Run `tools/panel-marks/make-package.ps1`.
 4. Start MSFS.
 
 **Per aircraft** (A350, 777-300ER, Fenix A320, FSL A321, FBW A380X): one fresh
 flight load from the main menu.
 
-1. Within 2 minutes of the cockpit appearing, open Taxi Cam → Displays (or
-   Set up aircraft) so pictures cycle through every candidate.
-2. Note the cockpit by eye: are blocks visible on each display?
+1. Keep Taxi Cam's companion running (it connects the bridge); don't open
+   Displays and leave the cameras off for the first minute.
+2. Note the cockpit by eye: are dark blocks visible in the displays'
+   top-right corners, and how long after the cockpit appears do they go?
 3. After the flight, read `bridge.log`:
-   - `Display mark: … kind=panel … info=K=…;I=…` answers E1, the page's
-     fields. Is there a texture field?
-   - `Display marks: id=… found=N read_us=…` per texture. Expect N ≥ 1 on
-     every drawn display texture and 0 on non-panel textures. `read_us` gives
-     the cost.
-   - `texture_rect`, `pitch` and `cell` against the texture size give the
-     scale, and the 777 DU rects against `panel.cfg`.
+   - `Display mark: … name=… gauge_name=… info=c=…` per gauge found, and
+     `Display marks: N of M panel textures read; cockpit pages told to take
+     their marks down` once (its time against the cockpit appearing).
+   - `pitch` 2.00 on every mark answers E10; a panel with no mark is either
+     scaled or not drawn.
+   - `texture_rect` against the texture size, and the 777 DU rects against
+     `panel.cfg`.
    - Compare with `Display identity (proposed)` and the snapshots: does every
      marked name sit on the texture the user would pick? Count disagreements;
      the A380X twin PFDs and the Fenix boot are the interesting ones.

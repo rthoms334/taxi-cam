@@ -1169,6 +1169,22 @@ DWORD run_impl() {
     decltype(win::GraphicsStatus::queue_outcomes) outcomes{};
     decltype(win::GraphicsStatus::queue_proof_refusals) refusals{};
   } snapshot;
+  // Panel marks (src/panel_marks): every panel texture of the flight is read
+  // once by itself, not only when the Displays page asks for a picture, and
+  // the pages are then told to take their marks down. It uses the one
+  // snapshot slot only while the companion's own picture is not pending.
+  constexpr unsigned MarkTries = 5;
+  constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 500, MarkQuietMs = 3000;
+  struct MarkScan {
+    struct Entry {
+      std::uint64_t id{}, next_ms{};
+      unsigned tries{};
+      bool read{};
+    };
+    std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{};
+    std::vector<Entry> entries;
+    unsigned unsignalled{}, read{};
+  } mark_scan;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
   const auto service_scene = [&] {
     const auto begin = GetTickCount64();
@@ -1379,6 +1395,86 @@ DWORD run_impl() {
       const unsigned have = engine_camera::owned_count(owned);
       return have >= profiles::CameraViews;
     };
+    const auto mark_entry = [&](std::uint64_t id) -> MarkScan::Entry* {
+      for (auto& entry : mark_scan.entries)
+        if (entry.id == id)
+          return &entry;
+      return nullptr;
+    };
+    // A picture of a panel texture, from either owner: its marks, or another
+    // try later.
+    const auto mark_result = [&](std::uint64_t id, std::size_t marks) {
+      auto* entry = mark_entry(id);
+      if (!entry || entry->read)
+        return;
+      ++entry->tries;
+      entry->next_ms = now + MarkRetryMs;
+      if (marks) {
+        entry->read = true;
+        ++mark_scan.unsignalled;
+        ++mark_scan.read;
+      }
+    };
+    const auto service_mark_scan = [&](bool allowed, const win::Status& log_to, const auto& log_marks) {
+      const auto epoch = native_camera::get_aircraft_session_epoch();
+      if (epoch != mark_scan.epoch) {
+        mark_scan = {};
+        mark_scan.epoch = epoch;
+      }
+      const bool companion = snapshot.result == win::DisplaySnapshotResult::pending;
+      if (mark_scan.pending_id && companion) {
+        // The companion's request took the slot.
+        if (auto* entry = mark_entry(mark_scan.pending_id))
+          entry->next_ms = now + MarkRetryMs;
+        mark_scan.pending_id = 0;
+      }
+      if (mark_scan.pending_id) {
+        const auto poll = win::poll_display_snapshot(now);
+        if (poll.result == win::DisplaySnapshotResult::pending)
+          return;
+        const auto id = std::exchange(mark_scan.pending_id, 0);
+        const bool ready = poll.result == win::DisplaySnapshotResult::ready;
+        if (ready && poll.mark_count)
+          log_marks(id, poll);
+        mark_result(id, ready ? poll.mark_count : 0);
+      }
+      if (!allowed || companion)
+        return;
+      if (now >= mark_scan.next_refresh) {
+        mark_scan.next_refresh = now + MarkRefreshMs;
+        const auto records = win::display_resource_records();
+        std::erase_if(mark_scan.entries, [&](const MarkScan::Entry& entry) {
+          return std::none_of(records.begin(), records.end(), [&](const auto& record) { return record.id == entry.id; });
+        });
+        for (const auto& record : records)
+          if ((record.draws || record.activity) && !mark_entry(record.id)) {
+            mark_scan.entries.push_back({record.id, now});
+            mark_scan.last_new_ms = now;
+          }
+      }
+      for (auto& entry : mark_scan.entries) {
+        if (entry.read || entry.tries >= MarkTries || entry.next_ms > now)
+          continue;
+        if (win::request_display_snapshot(entry.id, now) == win::DisplaySnapshotResult::pending) {
+          mark_scan.pending_id = entry.id;
+          return;
+        }
+        ++entry.tries;
+        entry.next_ms = now + MarkRetryMs;
+      }
+      // Every texture read or given up on, and none new for a while: the
+      // pages may take their marks down. A later read signals again.
+      if (mark_scan.unsignalled && now - mark_scan.last_new_ms >= MarkQuietMs &&
+          std::all_of(mark_scan.entries.begin(), mark_scan.entries.end(),
+                      [](const MarkScan::Entry& entry) { return entry.read || entry.tries >= MarkTries; })) {
+        native_camera::signal_panel_marks_read();
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "Display marks: %u of %zu panel textures read; cockpit pages told to take their marks down.",
+                      mark_scan.read, mark_scan.entries.size());
+        log_status(log_to, detail);
+        mark_scan.unsignalled = 0;
+      }
+    };
     // One snapshot per companion serial. It needs graphics observation while
     // pending, like calibration, but never a camera or a matching aircraft:
     // aircraft discovery takes pictures of panel textures while it waits.
@@ -1476,10 +1572,13 @@ DWORD run_impl() {
           if (snapshot.result == win::DisplaySnapshotResult::ready)
             write_display_candidates(snapshot.id, win::target_ids());
           log_snapshot();
-          if (snapshot.result == win::DisplaySnapshotResult::ready)
+          if (snapshot.result == win::DisplaySnapshotResult::ready) {
             log_panel_marks(snapshot.id, poll);
+            mark_result(snapshot.id, poll.mark_count);
+          }
         }
       }
+      service_mark_scan(allowed, log_to, log_panel_marks);
     };
     // A set-up aircraft keeps its profile id when its layout changes (another
     // variant, or set up again), so a new layout is another aircraft profile.
@@ -1650,7 +1749,7 @@ DWORD run_impl() {
         publish_panel_map(panel_identity, pending);
         // Pictures of the panel textures for the companion's aircraft setup.
         service_snapshot(connected && settings.enabled && session_settings && discovering && !degraded, pending);
-        win::set_graphics_observation_demand(snapshot.result == win::DisplaySnapshotResult::pending);
+        win::set_graphics_observation_demand(snapshot.result == win::DisplaySnapshotResult::pending || mark_scan.pending_id);
         pending.snapshot_serial = snapshot.serial;
         pending.snapshot_id = snapshot.id;
         pending.snapshot_result = static_cast<std::uint32_t>(snapshot.result);
@@ -1772,7 +1871,7 @@ DWORD run_impl() {
         route_request = settings.route_request;
     }
     service_snapshot(connected && settings.enabled && session_settings && session.ready && !degraded, status);
-    const bool snapshot_pending = snapshot.result == win::DisplaySnapshotResult::pending;
+    const bool snapshot_pending = snapshot.result == win::DisplaySnapshotResult::pending || mark_scan.pending_id;
     const auto identity = native_camera::get_aircraft_identity();
     const bool aircraft_matches =
         native_camera::aircraft_matches_profile() && (!settings.auto_profile || identity.detected_profile == settings.profile);

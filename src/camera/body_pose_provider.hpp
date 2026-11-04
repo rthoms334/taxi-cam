@@ -163,6 +163,10 @@ TaxiButtonSample get_taxi_buttons() noexcept;
 // Permission must be refreshed; false consumes/cancels the current request.
 void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted) noexcept;
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept;
+// Cache-only: tells every cockpit page that Taxi Cam has read its panel marks
+// (L:TAXICAM_MARKS gets a value it has not had, src/panel_marks). The worker
+// sets it on its next pass; pages take their marks down when it changes.
+void signal_panel_marks_read() noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;
