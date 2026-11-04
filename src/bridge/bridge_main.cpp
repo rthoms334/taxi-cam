@@ -28,6 +28,7 @@
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
+#include "display_marks.hpp"
 #include "freeze_watchdog.hpp"
 #include "native_hooks.hpp"
 
@@ -1057,7 +1058,40 @@ DWORD WINAPI watchdog_run(void*) noexcept {
     log_contention(status, graphics, output);
   }
 }
+// Panel marks: camera writes leave two pixels at each routed display's gauge
+// corner alone, where GlassOut marks and checks every panel it streams
+// (display_keep.hpp, display_marks.hpp). Always on: two pixels cannot be seen,
+// and a panel streamer started after the cameras still finds its marks.
+class DisplayMarks {
+ public:
+  void service(const win::Status& status) noexcept {
+    const auto now = GetTickCount64();
+    if (now < next_poll_)
+      return;
+    next_poll_ = now + 1000;
+    std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points{};
+    const unsigned count = standalone::display_keep::profile_marks(profiles::find(status.active_profile),
+                                                                   profiles::base_profile(status.active_profile), points);
+    if (count == count_ && std::equal(points.begin(), points.begin() + count, points_.begin(), same))
+      return;
+    count_ = count;
+    points_ = points;
+    standalone::display_keep::set_marks(points.data(), count);
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "Display marks: camera writes leave the panel-mark pixels at %u display corners.", count);
+    log_status(status, detail);
+  }
+
+ private:
+  static bool same(const standalone::display_keep::Point& a, const standalone::display_keep::Point& b) noexcept {
+    return a.x == b.x && a.y == b.y;
+  }
+  std::array<standalone::display_keep::Point, standalone::display_keep::MaxMarks> points_{};
+  std::uint64_t next_poll_ = 0;
+  unsigned count_ = 0;
+};
 DWORD run_impl() {
+  DisplayMarks display_marks;
   log_worker_thread.store(GetCurrentThreadId(), std::memory_order_release);
   lock_holder_priority::mark_worker_thread();
   win::Mailbox mailbox;
@@ -2731,6 +2765,7 @@ DWORD run_impl() {
       logged = true;
       next_log = now + 5000;
     }
+    display_marks.service(status);
     Sleep(25);
   }
 }

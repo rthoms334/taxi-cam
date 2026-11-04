@@ -1,6 +1,7 @@
 #include "pfd_stamp_d3d12.hpp"
 #include <d3dcompiler.h>
 #include "../hooks/pfd_state_observer.hpp"
+#include "display_keep.hpp"
 #include "native_device_identity.hpp"
 
 namespace taxi_camera {
@@ -293,7 +294,7 @@ bool PfdStampD3D12::record_buffer(ID3D12GraphicsCommandList* list,
     // bind. Our intervening draw has a single-sample PSO and needs defaults.
     samples->SetSamplePositions(0, 0, nullptr);
   }
-  const bool recorded = record_private_patch(list, buffer_device, address, width, height, destination, content, draw, group);
+  const bool recorded = record_patch(list, buffer_device, address, width, height, destination, content, draw, group, true);
   if (recorded)
     state.restore(list, group);
   else if (samples)
@@ -313,6 +314,18 @@ bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
                                          const D3D12_RECT* content,
                                          bool draw,
                                          PfdStateGroup group) noexcept {
+  return record_patch(list, buffer_device, address, width, height, destination, content, draw, group, false);
+}
+bool PfdStampD3D12::record_patch(ID3D12GraphicsCommandList* list,
+                                 ID3D12Device* buffer_device,
+                                 D3D12_GPU_VIRTUAL_ADDRESS address,
+                                 UINT width,
+                                 UINT height,
+                                 const D3D12_RECT* destination,
+                                 const D3D12_RECT* content,
+                                 bool draw,
+                                 PfdStateGroup group,
+                                 bool keep_marks) noexcept {
   if (!valid_pfd_state_group(group) || (draw && group != PfdStateGroup::all) || !list || !pipeline_ || !address || address % 4 ||
       buffer_device != device_ || width < 1 || height < 2 || width > 16384 || height > 16384 ||
       list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
@@ -356,8 +369,19 @@ bool PfdStampD3D12::record_private_patch(ID3D12GraphicsCommandList* list,
     list->RSSetViewports(1, &viewport);
     list->RSSetScissorRects(1, &scissor);
   }
-  if (draw)
+  if (!draw)
+    return true;
+  const auto split = keep_marks ? standalone::display_keep::pieces(rect) : standalone::display_keep::Pieces{};
+  if (split.count <= 1) {
     list->DrawInstanced(3, 1, 0, 0);
+    return true;
+  }
+  // The same draw once per piece around the marks, each scissored to its
+  // piece. The viewport keeps the picture where it was.
+  for (unsigned i = 0; i < split.count; ++i) {
+    list->RSSetScissorRects(1, &split.rects[i]);
+    list->DrawInstanced(3, 1, 0, 0);
+  }
   return true;
 }
 bool PfdStampD3D12::record_final_buffer(ID3D12GraphicsCommandList* list,
@@ -397,7 +421,7 @@ bool PfdStampD3D12::record_final_buffer(ID3D12GraphicsCommandList* list,
   }
   // Our PSO resets any dynamic depth-bias/strip-cut overrides. The only draw
   // follows all application work; there is no application state restoration.
-  const bool recorded = record_private_patch(list, buffer_device, address, width, height, &rect, &inner);
+  const bool recorded = record_patch(list, buffer_device, address, width, height, &rect, &inner, true, PfdStateGroup::all, true);
   if (!recorded && samples)
     state.restore_sample_positions(list);
   if (samples)
