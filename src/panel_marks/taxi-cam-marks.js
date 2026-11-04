@@ -2,8 +2,12 @@
 // page per cockpit panel). When the panel loads it paints one small,
 // near-black block in the top-right corner of each gauge naming the panel and
 // the gauge, so Taxi Cam can tell which display texture is which. The blocks
-// go as soon as Taxi Cam has read them (it changes L:TAXICAM_MARKS), and
-// after MAX_SHOW_MS at the latest. The format is src/shared/panel_marks.hpp;
+// go as soon as Taxi Cam has read them, and after MAX_SHOW_MS of running
+// simulation (HARD_SHOW_MS of any time) at the latest. Taxi Cam talks to the
+// pages through L:TAXICAM_MARKS: a new positive value means "read, take them
+// down", a new negative value "show them again" (a display texture it could
+// not read). 0 is ignored: a flight load may reset the L:var. The format is
+// src/shared/panel_marks.hpp;
 // keep the two in step. Never touches a gauge's top-left corner, and never
 // stops the page from loading: every step is guarded.
 (function () {
@@ -16,8 +20,7 @@
     var COLOURS = [0, 1, 2, 3, 4, 5, 6, 7].map(function (c) {
         return "rgb(" + (c & 4 ? LEVEL : 0) + "," + (c & 2 ? LEVEL : 0) + "," + (c & 1 ? LEVEL : 0) + ")";
     });
-    // Taxi Cam changes READ_VAR once it has read the panels' blocks.
-    var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, START_MS = 500, MAX_SHOW_MS = 20000;
+    var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, IDLE_POLL_MS = 1000, START_MS = 500, MAX_SHOW_MS = 20000, HARD_SHOW_MS = 120000;
 
     function crc16(bytes) {
         var crc = 0xffff;
@@ -121,12 +124,18 @@
     function readValue() {
         return typeof SimVar !== "undefined" && SimVar.GetSimVarValue ? SimVar.GetSimVarValue(READ_VAR, "number") : null;
     }
-    var shown = [], timer = 0, done = false;
+    // The simulation clock: it stands still while the flight loads, so the
+    // cap counts only time the cockpit can be seen. null when unreadable.
+    function simTime() {
+        try {
+            return SimVar.GetSimVarValue("E:SIMULATION TIME", "seconds");
+        } catch (e) {
+            return null;
+        }
+    }
+    var shown = [], showing = false, shownAt = 0, runMs = 0, lastPoll = 0, lastSim = null;
     function hide() {
-        done = true;
-        if (timer)
-            clearInterval(timer);
-        timer = 0;
+        showing = false;
         shown.forEach(function (c) {
             if (c.parentNode)
                 c.parentNode.removeChild(c);
@@ -136,6 +145,7 @@
     // One block per gauge, in its top-right corner a cell in from the edges:
     // far from the top-left corner other tools sample.
     function show() {
+        hide();
         var data = panelData();
         if (!data || !data.daInstruments || !data.vDisplaySize || !data.vLogicalSize || !document.body)
             return;
@@ -152,6 +162,12 @@
                 return;
             shown.push(drawBlock(encoded, x + w - size.width - CELL, y + CELL));
         });
+        if (shown.length) {
+            showing = true;
+            shownAt = lastPoll = Date.now();
+            runMs = 0;
+            lastSim = simTime();
+        }
     }
     function guarded(f) {
         return function () {
@@ -162,31 +178,41 @@
             }
         };
     }
-    // The value when the page loaded: a later change means Taxi Cam has read
-    // the blocks (a value from an earlier flight is not for this page).
-    var baseline = null, started = 0;
+    // The value when the page loaded: only a later change is for this page
+    // (an L:var outlives the flight).
+    var baseline = null;
     var poll = guarded(function () {
-        if (done)
-            return;
-        var value = readValue();
+        var now = Date.now(), value = readValue();
         if (baseline === null)
             baseline = value;
-        else if (value !== baseline || Date.now() - started > MAX_SHOW_MS)
-            hide();
+        else if (value && value !== baseline) {
+            baseline = value;
+            if (value > 0)
+                hide();
+            else
+                show();
+        }
+        if (showing) {
+            var sim = simTime();
+            if (sim === null || lastSim === null || sim !== lastSim)
+                runMs += now - lastPoll;
+            lastSim = sim;
+            lastPoll = now;
+            if (runMs > MAX_SHOW_MS || now - shownAt > HARD_SHOW_MS)
+                hide();
+        }
     });
+    function loop() {
+        poll();
+        setTimeout(loop, showing ? POLL_MS : IDLE_POLL_MS);
+    }
     var start = guarded(function () {
-        if (done)
-            return;
         if (!panelData() || !document.getElementById("panel")) {
             setTimeout(start, POLL_MS);
             return;
         }
-        started = Date.now();
         show();
-        if (shown.length)
-            timer = setInterval(poll, POLL_MS);
-        else
-            done = true;
+        loop();
     });
     guarded(function () {
         baseline = readValue();

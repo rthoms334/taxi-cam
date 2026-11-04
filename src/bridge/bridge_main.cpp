@@ -1173,7 +1173,10 @@ DWORD run_impl() {
   // once by itself, not only when the Displays page asks for a picture, and
   // the pages are then told to take their marks down. It uses the one
   // snapshot slot only while the companion's own picture is not pending.
-  constexpr unsigned MarkTries = 5;
+  // A texture still unread when the scan is done gets its marks shown again
+  // (the A350 creates its display textures up to ~20 s after the flight
+  // loads), at most MarkReshows times a flight.
+  constexpr unsigned MarkTries = 5, MarkReshows = 2;
   constexpr std::uint64_t MarkRetryMs = 1000, MarkRefreshMs = 500, MarkQuietMs = 3000;
   struct MarkScan {
     struct Entry {
@@ -1183,7 +1186,8 @@ DWORD run_impl() {
     };
     std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{};
     std::vector<Entry> entries;
-    unsigned unsignalled{}, read{};
+    unsigned unsignalled{}, read{}, reshows{};
+    bool shown_again = false;  // Pages asked to show their marks again, not yet told to take them down.
   } mark_scan;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
   const auto service_scene = [&] {
@@ -1462,17 +1466,40 @@ DWORD run_impl() {
         ++entry.tries;
         entry.next_ms = now + MarkRetryMs;
       }
-      // Every texture read or given up on, and none new for a while: the
-      // pages may take their marks down. A later read signals again.
-      if (mark_scan.unsignalled && now - mark_scan.last_new_ms >= MarkQuietMs &&
-          std::all_of(mark_scan.entries.begin(), mark_scan.entries.end(),
-                      [](const MarkScan::Entry& entry) { return entry.read || entry.tries >= MarkTries; })) {
+      // Every texture read or given up on, and none new for a while.
+      if (mark_scan.entries.empty() || now - mark_scan.last_new_ms < MarkQuietMs ||
+          !std::all_of(
+              mark_scan.entries.begin(), mark_scan.entries.end(),
+              [](const MarkScan::Entry& entry) { return entry.read || entry.tries >= MarkTries; }))
+        return;
+      char detail[192];
+      const auto unread = static_cast<unsigned>(
+          std::count_if(mark_scan.entries.begin(), mark_scan.entries.end(), [](const MarkScan::Entry& entry) { return !entry.read; }));
+      // Unread textures: the pages may have taken their marks down before the
+      // texture existed. Ask them to show the marks again and try once more.
+      if (unread && mark_scan.reshows < MarkReshows) {
+        ++mark_scan.reshows;
+        mark_scan.shown_again = true;
+        native_camera::signal_panel_marks_show();
+        for (auto& entry : mark_scan.entries)
+          if (!entry.read) {
+            entry.tries = 0;
+            entry.next_ms = now + MarkRetryMs;
+          }
+        std::snprintf(detail, sizeof(detail),
+                      "Display marks: %u of %zu panel textures unread; cockpit pages asked to show their marks again (%u).", unread,
+                      mark_scan.entries.size(), mark_scan.reshows);
+        log_status(log_to, detail);
+        return;
+      }
+      // The pages may take their marks down. A later read signals again.
+      if (mark_scan.unsignalled || mark_scan.shown_again) {
         native_camera::signal_panel_marks_read();
-        char detail[160];
         std::snprintf(detail, sizeof(detail), "Display marks: %u of %zu panel textures read; cockpit pages told to take their marks down.",
                       mark_scan.read, mark_scan.entries.size());
         log_status(log_to, detail);
         mark_scan.unsignalled = 0;
+        mark_scan.shown_again = false;
       }
     };
     // One snapshot per companion serial. It needs graphics observation while

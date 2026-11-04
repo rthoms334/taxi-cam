@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <utility>
@@ -117,9 +118,8 @@ std::atomic<std::uint32_t> profile_id{1};
 // a new worker too.
 std::atomic<const profiles::AircraftProfile*> worker_profile{};
 std::atomic<std::uint64_t> session_epoch{0};
-// Panel marks read (signal_panel_marks_read): the value for L:TAXICAM_MARKS,
-// 0 for none yet.
-std::atomic<std::uint64_t> panel_marks_read{0};
+// The value for L:TAXICAM_MARKS (signal_panel_marks_read/show), 0 for none yet.
+std::atomic<std::int64_t> panel_marks_signal{0};
 constexpr DWORD PanelMarksDefine = 30;
 // Bit0: callback notification; bit1: reset serviced. Fresh telemetry is needed
 // before returning to0. Repeated invalid samples cannot churn epochs.
@@ -714,7 +714,7 @@ DWORD WINAPI worker(void*) noexcept {
     taxi_failure(manual_only ? "taxi_buttons_unavailable_use_manual_control" : "taxi_definition_unavailable");
   std::array<bool, MaxDisplaySides> taxi_events{};
   bool panel_marks_defined = false;
-  std::uint64_t panel_marks_sent = 0;
+  std::int64_t panel_marks_sent = 0;
   // Isolated telemetry readers never control the aircraft. Production sends
   // the aircraft's real input event; its own controller updates the light.
 #if !defined(TAXI_BODY_POSE_PROVIDER_VALIDATION) && !defined(TAXI_BODY_POSE_PROVIDER_EXTERNAL_VALIDATION)
@@ -735,7 +735,7 @@ DWORD WINAPI worker(void*) noexcept {
   }
   // Cockpit pages take their panel marks down when this changes.
   panel_marks_defined = set_data && SUCCEEDED(define(session, PanelMarksDefine, "L:TAXICAM_MARKS", "number", 4, 0, 0xffffffffu));
-  panel_marks_sent = panel_marks_read.load(std::memory_order_acquire);
+  panel_marks_sent = panel_marks_signal.load(std::memory_order_acquire);
 #else
   (void)map_event;
 #endif
@@ -1051,7 +1051,7 @@ DWORD WINAPI worker(void*) noexcept {
     }
     if (reconnect)
       break;
-    if (const auto marks = panel_marks_read.load(std::memory_order_acquire); panel_marks_defined && marks != panel_marks_sent) {
+    if (const auto marks = panel_marks_signal.load(std::memory_order_acquire); panel_marks_defined && marks != panel_marks_sent) {
       double value = static_cast<double>(marks);
       if (SUCCEEDED(set_data(session, PanelMarksDefine, 0, 0, 0, sizeof(value), &value)))
         panel_marks_sent = marks;
@@ -1499,13 +1499,21 @@ void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted
                                profile ? profile->id : 0, profile && profiles::commandable_buttons(*profile));
   ReleaseSRWLockExclusive(&state.lock);
 }
-void signal_panel_marks_read() noexcept {
-  // A value no page saw before: pages compare with the value at their load,
-  // and an L:var outlives the flight.
-  auto value = GetTickCount64() % 1000000000ull + 1;
-  if (value == panel_marks_read.load(std::memory_order_relaxed))
+namespace {
+// A value no page saw before: pages compare with the value at their load, and
+// an L:var outlives the flight. Positive: read; negative: show again.
+void signal_panel_marks(bool read) noexcept {
+  auto value = static_cast<std::int64_t>(GetTickCount64() % 1000000000ull + 1);
+  if (value == std::llabs(panel_marks_signal.load(std::memory_order_relaxed)))
     ++value;
-  panel_marks_read.store(value, std::memory_order_release);
+  panel_marks_signal.store(read ? value : -value, std::memory_order_release);
+}
+}  // namespace
+void signal_panel_marks_read() noexcept {
+  signal_panel_marks(true);
+}
+void signal_panel_marks_show() noexcept {
+  signal_panel_marks(false);
 }
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept {
   AcquireSRWLockShared(&state.lock);
