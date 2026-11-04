@@ -39,10 +39,6 @@ texture once and decodes the blocks, which gives name → texture plus gauge
 rectangle directly. No order and no history are involved. Settings keep
 names only, and every load identifies again.
 
-GlassOut works in a similar way: it paints marker colours from a helper in
-every cockpit page and checks two pixels at each crop origin. We copy the
-idea, not its code, and we keep out of its way.
-
 ## Where the helper loads
 
 **Choice: a Taxi Cam copy of `html_ui/Pages/VCockpit/Core/VCockpit.html`**,
@@ -71,13 +67,12 @@ facts read from the installed files on 2026-11-03:
     vLogicalSize`, rounded.
 
 We don't override `BaseInstrument.js` (trade-off below). Our page still loads it by the same path,
-so GlassOut's copy (package `zzz-glassout-hook`) keeps working unchanged.
+so any other package's copy of it keeps working unchanged.
 
 ### Why not own `BaseInstrument.js`? (re-weighed 2026-11-03)
 
-Avoiding GlassOut's file was a hard rule at first. It is now a trade-off,
-weighed on what is best for Taxi Cam first. Owning `BaseInstrument.js` still
-loses on Taxi Cam's own terms:
+Weighed on what is best for Taxi Cam, owning `BaseInstrument.js` loses on
+Taxi Cam's own terms:
 
 - **What it would add.** Every gauge class extends `BaseInstrument`, so owning
   it would give per-gauge hooks: the gauge's lifecycle and update loop, its
@@ -88,42 +83,35 @@ loses on Taxi Cam's own terms:
   paint time. The prototype now does this. If a hook were ever needed, the
   helper could wrap `BaseInstrument.prototype` at runtime from our own file,
   since it loads after `BaseInstrument.js`. That works on whichever copy is
-  loaded, stock or GlassOut's.
+  loaded.
 - **Stale-copy surface.** Stock `BaseInstrument.js` is 33,744 bytes of logic:
   screen state L:vars, flow events, the update loop. EFB and UI pages load it
   too (`fs-base-efb`, `fs-base-ui`, not only `asobo-vcockpits-core`). A stale
   copy after an update would break gauges in every aircraft and the EFB. A
   stale `VCockpit.html` is one declarative page, one line off stock, used by
   panels only.
-- **Behaviour with GlassOut installed.** This decides it. GlassOut's
-  `zzz-glassout-hook` overrides `BaseInstrument.js` and loads last. Its engine
-  rewrites the hook on boot and warns about competing overrides. We would
-  either lose the file to it, so Taxi Cam identification would silently stop
-  for every GlassOut user (the users in issues 171/172), or win it, which
-  breaks GlassOut. Editing GlassOut's files is ruled out. Neither outcome is
-  acceptable.
+- **Other packages that override it.** This decides it. `BaseInstrument.js`
+  is a shared file other Community packages may override too, and the last
+  one loaded wins. We would either lose the file, so identification would
+  silently stop for those users, or win it and break the other package. We
+  never edit another package's files. Neither outcome is acceptable.
 
-With the `VCockpit.html` choice, GlassOut installed changes nothing for Taxi
-Cam:
+With the `VCockpit.html` choice, another package's `BaseInstrument.js`
+changes nothing for Taxi Cam:
 
-- Our page loads `BaseInstrument.js` by path and gets GlassOut's copy.
-- Our helper reads gauge elements the same way on either copy.
+- Our page loads `BaseInstrument.js` by path and gets whichever copy is
+  loaded.
+- Our helper reads gauge elements the same way on any copy.
 - The two overrides are different files, so neither package needs the other.
 
-What stays to check live (E7):
-- whether GlassOut's competing-override warning also looks at
-  `Pages/VCockpit/Core/VCockpit.html` (its docs don't say);
-- whether its markers and ours ever overlap in a frame. Ours are centred in
-  gauges and theirs are at the gauge origin.
-
-If GlassOut ever overrides `VCockpit.html` too, it loads last and wins. Taxi
-Cam then finds no marks, falls back, and says so. We don't fight for the file.
+If another package ever overrides `VCockpit.html` too and loads later, it
+wins. Taxi Cam then finds no marks. We don't fight for the file.
 
 ### Other load points
 
 | Load point | Problem |
 |---|---|
-| `Instruments/Shared/BaseInstrument.js` | See above. Loses to GlassOut (or breaks it), and has the largest stale-copy surface. |
+| `Instruments/Shared/BaseInstrument.js` | See above. Contested by other packages' overrides, and has the largest stale-copy surface. |
 | `Core/VCockpit.js` | 23.5 KB of logic. A stale copy would break more, and Asobo is more likely to change it. |
 | `/JS/common.js`, `simvar.js`, `avionics.js`, `GenericDataListener.js` | Every UI page loads them (toolbar, EFB, menus), so the helper would run everywhere and a stale copy would hurt everywhere. |
 | A gauge added to each aircraft's `panel.cfg` | Edits third-party aircraft files, and aircraft updates overwrite it. |
@@ -132,19 +120,18 @@ Cam then finds no marks, falls back, and says so. We don't fight for the file.
 `Pages/VCockpit/Core/VCockpit.html`; the last package loaded wins. On this
 machine none of the ~25 Community packages does: I compared 8,325 add-on
 `html_ui` files with 4,963 stock ones, and the only override of a stock file
-is GlassOut's `BaseInstrument.js`. Candidates in future:
+is of a different file (`BaseInstrument.js`). Candidates in future:
 
-- a later GlassOut version;
-- other panel streamers or "inject into every instrument" mods;
+- panel streamers or "inject into every instrument" mods;
 - an aircraft that ships its own `VCockpit.html` (none seen).
 
-To detect a collision, the companion scans Community `layout.json` files for
-the path and the bridge finds no marks. Then Taxi Cam falls back (below) and
-says why in the bug report. It never fights for the file: we don't rename
-the package to load later.
+Not built yet: the companion could scan Community `layout.json` files for
+the path and say why no marks are found. It never fights for the file: we
+don't rename the package to load later.
 
 **Manifest.** The package declares the file in
-`globally_overriden_base_sim_files`, the same way GlassOut's manifest does.
+`globally_overriden_base_sim_files`, as Community packages that override
+base files do.
 I found no public documentation of that field
 (search on 2026-11-03), so whether MSFS needs it is experiment E0.
 
@@ -215,13 +202,13 @@ including the border): about 2% of an A350 EFIS texture's width, against
 **Scale.** The texture rectangle is the page rectangle × texture size /
 panel size.
 
-## Placement and timing (coexisting with GlassOut)
+## Placement and timing
 
 - **Where.** Each gauge's block sits in the gauge's top-right corner, one
   cell in from the edges; a gauge smaller than its block plus one cell all
-  round gets none. No block touches a gauge's top-left corner, where GlassOut
-  reads its two verification pixels. On most displays that corner is black,
-  so the near-black block barely shows.
+  round gets none. No block touches a gauge's top-left corner, which other
+  tools sample. On most displays that corner is black, so the near-black
+  block barely shows.
 - **When.** From panel load (+0.5 s) until Taxi Cam has read it, at most
   `MAX_SHOW_MS` (45 s of running simulation). The page reads
   `L:TAXICAM_MARKS` when it loads; the bridge's SimConnect worker sets it to a
@@ -272,8 +259,8 @@ long; this design is the answer.
    - (panel name, gauge index) → (texture id, rect in texture px). Gauge name
      and info are stored for display.
    - A texture with no marks stays unidentified.
-   - Two textures with the same panel name keep the newer one (GlassOut does
-     the same). This is logged.
+   - Two textures with the same panel name keep the newer one. This is
+     logged.
 4. **Between requests,** `follow_copies` keeps a mapped texture across MSFS's
    one-to-one copies (FBW A380X, FSL), which is cheap.
 5. **Request again** when:
@@ -326,7 +313,7 @@ RCDATA 201):
 | E0 | Does MSFS load an override of `VCockpit.html` from a Community package, and does it need `globally_overriden_base_sim_files`? | Whole design |
 | E1 | Which panel and gauge fields does the page get? Is `texture=` among them? **Answered (A350): no `texture=`; section + `sConfigFile`.** | Whether the panel-table decode can go |
 | E2–E6 | Do DOM blocks drawn over WASM / NanoVG gauges reach the panel texture, unscaled or at what scale, in all five aircraft? Do hidden or `quality=hidden` panels draw them? | Detection |
-| E7 | GlassOut active: both tools still identify, GlassOut shows no `MISMATCH`, nothing new in its log | Coexistence |
+| E7 | With other panel tools installed, displays are still identified and those tools keep working | Coexistence |
 | E8 | Does the companion run before MSFS mounts Community? | Stale-copy window |
 | E9 | Do the dark top-right blocks show in a way users mind, and how long are they up after the cockpit appears? | UX |
 | E10 | Is every page drawn at its texture size on the other four aircraft (2 px cells don't survive scaling)? | Detection |
@@ -402,9 +389,8 @@ flight load from the main menu.
 - no mark is decoded on the wrong texture;
 - the decode cost is well under the snapshot cost.
 
-**E7, GlassOut.** Repeat the A350 load with the GlassOut demo on and the
-`efis-1` panel open. Look for GlassOut `MISMATCH` lines or a black panel
-while blocks show.
+**E7, other panel tools.** Repeat the A350 load with another panel tool
+installed and in use. Check its panels keep working while blocks show.
 
 **E8.** Log the companion start time against MSFS's package-mount marker in
 its own logs, if there is one.
