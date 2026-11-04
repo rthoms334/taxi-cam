@@ -345,7 +345,7 @@ FOLLOW_UP_SCOPE = """# Scope: follow-up review
 The last review on this pull request covered commit `{since}`. `followup.diff` holds only what changed since then in this pull request's files. `change.diff` is the whole pull request, for context only.
 
 - Review only the code that `followup.diff` changes. Do not report anything about code it does not change, even if you notice it.
-- Check the findings in `previous.json`: if one is still present on lines that `followup.diff` changes, report it again.
+- Check the findings in `previous.json`: if one is still present on lines that `followup.diff` changes, report it again, unless a reply explains why it is not a defect or records the owner's decision to accept it (see Rank in `prompt.md`).
 - Report only `important` findings. Report no nits and no pre-existing findings.
 - Run at most two hunters: General correctness, and the one area hunter that best matches `followup.diff`. Keep at most four candidates. Voting is unchanged.
 
