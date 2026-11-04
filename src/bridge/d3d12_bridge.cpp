@@ -407,8 +407,10 @@ struct Registry {
     ID3D12Resource* buffer{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     // The queue of the first save. Copies on another queue are not ordered
-    // with this shadow's, so they neither save nor restore it.
-    ID3D12CommandQueue* queue{};
+    // with this shadow's, so they neither save nor restore it. retake_queue:
+    // the instrument wrote the display on that other queue and missed the
+    // shadow; a camera copy there may take the shadow again (a baseline).
+    ID3D12CommandQueue *queue{}, *retake_queue{};
     // saved: a save into buffer was planned. confirmed: one has completed, so
     // buffer holds panel pixels. clean: in planned order, the area holds panel
     // pixels (no camera copy since the start or the last restore).
@@ -2382,7 +2384,7 @@ bool shadow_fits(const Registry::DisplayShadow& shadow, const D3D12_RECT& area, 
 void forget_shadow(Registry::DisplayShadow& shadow) noexcept {
   shadow.mode = Registry::ShadowMode::off;
   shadow.target.reset();
-  shadow.queue = nullptr;
+  shadow.queue = shadow.retake_queue = nullptr;
   shadow.saved = shadow.confirmed = shadow.clean = false;
   shadow.restore_serial = 0;
 }
@@ -2986,10 +2988,11 @@ void drain_deferred_settlements(Registry& r) noexcept {
 // Called before manager/runtime submission serialization. The patch snapshot
 // is nonblocking: missing metadata must never make ExecuteCommandLists wait
 // for discovery or composition. The registry waits up to the submit budget,
-// like the ordering that follows: its holders are other recording threads'
-// short hook calls, and an Execute planned without it sends the instrument's
-// writes out with no camera copy (the shadow holds Close stamps), so the
-// aircraft's own picture shows until a later Execute covers it.
+// like the ordering that follows: an Execute planned without it sends the
+// instrument's writes out with no camera copy (the shadow holds Close
+// stamps), so the aircraft's own picture shows until a later Execute covers
+// it. Most holds are other recording threads' short hook calls; the bridge
+// worker holds it longer at times, and a wait behind it can still expire.
 void plan_display_submission(void*,
                              ID3D12CommandQueue* queue,
                              UINT count,
@@ -3196,6 +3199,11 @@ void plan_display_submission(void*,
   // With no camera copy in this Execute, only while the writes leave the
   // display a render target: nothing samples it before a later Execute's
   // copy, which then saves it.
+  // A shadow saved on another queue, which an Execute leaving the display
+  // alone may host (a carried camera copy), cannot go back here: nothing
+  // orders a restore on this queue after that save. Every write here would
+  // miss it until the camera stops, and the stop's restore would wait for
+  // that queue, so a camera copy on this queue takes it again (below).
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     auto& shadow = r.shadows[side];
     if (modes[side] != ShadowMode::queue || shadow.clean)
@@ -3218,16 +3226,8 @@ void plan_display_submission(void*,
       ++restore_count;
     } else if (shadow.saved) {
       r.shadow_lost_writes.fetch_add(1, std::memory_order_relaxed);
-      // Saved on another queue, which an Execute leaving the display alone
-      // may host (a carried camera copy): nothing orders a restore here after
-      // it, so every write on this queue would miss the shadow until the
-      // camera stops, and the stop's restore would wait for that queue. Once
-      // that save has completed, the shadow is taken again on this queue (a
-      // baseline) with this Execute's camera copy.
-      if (shadow.confirmed && shadow.queue != queue) {
-        shadow.saved = shadow.confirmed = false;
-        shadow.queue = nullptr;
-      }
+      if (shadow.queue != queue)
+        shadow.retake_queue = queue;
     }
   }
   if (!candidates && !snapshot_overlay && !restore_count && !copies) {
@@ -3358,8 +3358,14 @@ void plan_display_submission(void*,
     // over it are followed as usual. Waiting instead would keep this
     // display's shadow off for good.
     auto& shadow = r.shadows[side];
-    if (modes[side] == ShadowMode::queue && (shadow.clean || !shadow.saved) && shadow.buffer && shadow.target == target &&
-        same_rect(shadow.area, patch.destination) && (!shadow.queue || shadow.queue == queue) && !stamped_before(side, position)) {
+    // Taking the shadow again on the queue the instrument writes on needs
+    // every shadow copy planned on the old queue complete: none may still
+    // read or write the buffer this save fills.
+    const bool retake = modes[side] == ShadowMode::queue && shadow.saved && shadow.confirmed && shadow.queue != queue &&
+                        shadow.retake_queue == queue && r.shadow_completed[side].load(std::memory_order_acquire) >= shadow.serial;
+    if (modes[side] == ShadowMode::queue && (shadow.clean || !shadow.saved || retake) && shadow.buffer && shadow.target == target &&
+        same_rect(shadow.area, patch.destination) && (!shadow.queue || shadow.queue == queue || retake) &&
+        !stamped_before(side, position)) {
       if (!shadow.clean)
         r.shadow_baselines.fetch_add(1, std::memory_order_relaxed);
       item.copy.save = shadow.buffer;
@@ -3369,12 +3375,14 @@ void plan_display_submission(void*,
       item.copy.dropped = &r.shadow_dropped[side];
       item.copy.completed_value = ++shadow.serial;
       item.save_after = restore_items[side];
-      if (!shadow.saved) {
+      if (!shadow.saved || retake) {
         shadow.first_save_serial = shadow.serial;
         shadow.planned_ms = now;
+        shadow.confirmed = false;
       }
       shadow.saved = true;
       shadow.queue = queue;
+      shadow.retake_queue = nullptr;
       r.shadow_saves.fetch_add(1, std::memory_order_relaxed);
     }
     if (modes[side] == ShadowMode::queue || modes[side] == ShadowMode::direct) {
