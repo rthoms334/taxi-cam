@@ -91,6 +91,30 @@
         var path = url.split("?")[0], slash = path.lastIndexOf("/");
         return path.substring(slash + 1).replace(/\.html?$/i, "");
     }
+    // What else the simulator tells the page about a gauge: its URL's query
+    // without the WASM module and gauge name, and any field besides the ones
+    // the page lays it out with. Gauges that share a name (the iniBuilds
+    // A380's eight DU panels) differ here, and an encrypted Marketplace
+    // panel.cfg can't be read any other way.
+    function gaugeDetail(instrument) {
+        var parts = [], url = String(instrument.sUrl || ""), at = url.indexOf("?");
+        if (at >= 0) {
+            var query = url.substring(at + 1).split("&").filter(function (p) {
+                return p && !/^wasm_(module|gauge)=/.test(p);
+            });
+            if (query.length)
+                parts.push("q=" + query.join("&"));
+        }
+        var known = { __Type: 1, iGUId: 1, sUrl: 1, vPosAndSize: 1, templateName: 1, templateClass: 1 };
+        Object.keys(instrument).forEach(function (key) {
+            var value = instrument[key];
+            if (known[key] || value === null || value === undefined || typeof value === "object" || typeof value === "function")
+                return;
+            if (String(value) !== "")
+                parts.push(key + "=" + value);
+        });
+        return parts.join(" ");
+    }
     // Section names repeat across 2024 attachments (each has its own
     // panel.cfg): a short hash of the panel.cfg path tells them apart.
     function configTag(data) {
@@ -155,11 +179,17 @@
             var p = instrument.vPosAndSize || {};
             // setupInstrument's rounding.
             var x = Math.round(p.x * rx), y = Math.round(p.y * ry), w = Math.round(p.z * rx), h = Math.round(p.w * ry);
-            var encoded = encodeCells(encodePayload({ kind: 0, cell: CELL, gauge: index & 255, x: x, y: y, width: w, height: h, panelWidth: pw,
-                                                      panelHeight: ph, name: name, gaugeName: gaugeName(instrument.sUrl || ""), info: tag }));
-            var size = blockSize(encoded.rows);
-            if (w < size.width + 2 * CELL || h < size.height + 2 * CELL)
+            var fits = function (info) {
+                var encoded = encodeCells(encodePayload({ kind: 0, cell: CELL, gauge: index & 255, x: x, y: y, width: w, height: h, panelWidth: pw,
+                                                          panelHeight: ph, name: name, gaugeName: gaugeName(instrument.sUrl || ""), info: info }));
+                var size = blockSize(encoded.rows);
+                return w >= size.width + 2 * CELL && h >= size.height + 2 * CELL ? { encoded: encoded, size: size } : null;
+            };
+            // A small gauge keeps a block without the detail.
+            var block = fits((tag + " " + gaugeDetail(instrument)).trim()) || fits(tag);
+            if (!block)
                 return;
+            var encoded = block.encoded, size = block.size;
             shown.push(drawBlock(encoded, x + w - size.width - CELL, y + CELL));
         });
         if (shown.length) {
