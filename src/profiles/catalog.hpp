@@ -156,7 +156,9 @@ struct AircraftProfile {
   // side. Their camera keeps a shadow of the display's own pixels and writes
   // by queue copies only, so the instrument's whole picture comes back when the
   // camera stops. Every other display repaints whole and is stamped inside the
-  // instrument's own list, which no submission can drop.
+  // instrument's own list: when the stamp lands, no submission can drop it (a
+  // stamp skipped at Close, or without an observed render-target view, leaves
+  // the queue copy alone).
   std::array<bool, MaxDisplaySides> partial_repaint{};
   // A second accepted mip count (0 = none), for panel textures whose mip
   // count differs from the profile's display shape. Kept narrow: every

@@ -830,6 +830,33 @@ void run() {
   held_lock(known, false, true);
   display_plan.active = false;
   require(!queue.signals && !queue.waits, "An escaped display batch queued a timeline operation");
+  // The same batch while mutex_ is busy, so discovery is skipped too: it is
+  // planned first and still waits and escapes instead of bypassing unplanned.
+  {
+    manager->publish_list(recording);
+    manager->apply_deferred();
+    display_plan.active = true;
+    const auto before = manager->statistics();
+    std::unique_lock held(manager->mutex_);
+    auto completed = std::async(std::launch::async, [&] {
+      ID3D12CommandList* batch[]{known};
+      const auto receipt = manager->before_submission(native_queue, 1, batch);
+      if (receipt)
+        manager->after_submission(native_queue, receipt);
+      else
+        manager->forwarded_unordered(native_queue);
+      return receipt;
+    });
+    const bool returned = completed.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    held.unlock();
+    const auto receipt = completed.get();
+    display_plan.active = false;
+    const auto after = manager->statistics();
+    require(returned && !receipt && after.unordered_submissions == before.unordered_submissions + 1 &&
+                after.contended_submissions == before.contended_submissions + 1,
+            "A display batch behind a busy mutex_ bypassed before its copy was planned");
+    require(!queue.signals && !queue.waits, "An escaped display batch queued a timeline operation");
+  }
   const taxi_camera::source_state::Key source{0x1234, 1};
   require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
   {

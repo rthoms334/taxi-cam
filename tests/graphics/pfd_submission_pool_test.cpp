@@ -854,7 +854,8 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     doomed.dropped = &dropped;
     doomed.drop_sources = sources.data();
     doomed.completed_value = 0;
-    require(!context->pool.record(doomed), "A drop counter without a serial was recorded");
+    const auto refused = context->pool.record(doomed);
+    require(!refused && refused.invalid && !refused.reported, "A drop counter without a serial was recorded, or not reported as invalid");
     doomed.completed_value = 4;
     const auto cancelled = context->pool.record(doomed);
     require(static_cast<bool>(cancelled), "Record a shadow copy that is cancelled");

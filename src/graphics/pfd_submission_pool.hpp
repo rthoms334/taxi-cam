@@ -13,8 +13,7 @@ namespace taxi_camera::pfd_submission {
 // Why a copy with a drop counter did not run. The plan reports copies the pool
 // never held: no ready packet (pool_full), refused by validation (invalid),
 // recorded without the save its restore was missing (save_stripped), or the
-// submission ended before recording: a manager lock was busy and the batch
-// was forwarded as unrelated (bypassed); the lock wait expired or another
+// submission ended before recording: the lock wait expired or another
 // queue's receipt was unfinished, so the batch escaped (escaped); the plan's
 // patch generation, session or device no longer matched (stale); a list in
 // the batch was unknown (unknown_lists); a device mismatch failed the device
@@ -28,7 +27,6 @@ enum class DropSource : unsigned {
   pool_full,
   invalid,
   save_stripped,
-  bypassed,
   escaped,
   stale,
   unknown_lists,
@@ -45,9 +43,9 @@ enum class DropSource : unsigned {
   count
 };
 inline constexpr const char* drop_source_name(DropSource value) noexcept {
-  constexpr const char* names[]{"pool_full",     "invalid",       "save_stripped", "bypassed",    "escaped",      "stale",
-                                "unknown_lists", "device_failed", "no_receipt",    "wait_failed", "out_of_batch", "not_recorded",
-                                "cancelled",     "quarantined",   "close_failed",  "unsubmitted", "device_lost"};
+  constexpr const char* names[]{"pool_full",     "invalid",      "save_stripped", "escaped",      "stale",        "unknown_lists",
+                                "device_failed", "no_receipt",   "wait_failed",   "out_of_batch", "not_recorded", "cancelled",
+                                "quarantined",   "close_failed", "unsubmitted",   "device_lost"};
   static_assert(sizeof(names) / sizeof(names[0]) == static_cast<unsigned>(DropSource::count));
   return static_cast<unsigned>(value) < static_cast<unsigned>(DropSource::count) ? names[static_cast<unsigned>(value)] : "invalid_source";
 }
@@ -103,8 +101,9 @@ class Pool {
   struct Recording {
     unsigned slot = Capacity;
     ID3D12CommandList* list = nullptr;
-    // A failed recording whose drop the pool already reported (Close failed).
-    bool reported = false;
+    // A failed recording whose drop the pool already reported (Close failed),
+    // or one refused by validation before any packet was looked at.
+    bool reported = false, invalid = false;
     explicit operator bool() const noexcept { return list != nullptr; }
   };
 

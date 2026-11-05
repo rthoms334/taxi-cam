@@ -171,8 +171,11 @@ bool Pool::valid_copy(const Copy& copy) const noexcept {
 
 Pool::Recording Pool::record(const Copy& copy) noexcept {
   const standalone::OwnedWork owned;
-  if (!valid_copy(copy))
-    return {};
+  if (!valid_copy(copy)) {
+    Recording refused;
+    refused.invalid = true;
+    return refused;
+  }
   for (unsigned i = 0; i < packets_.size(); ++i) {
     auto& packet = packets_[i];
     if (packet.state != State::ready)

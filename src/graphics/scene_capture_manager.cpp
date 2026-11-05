@@ -2036,8 +2036,9 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     const auto batch = classify_unobserved(queue, count, native_lists);
     return batch.unrelated;
   };
-  if (!observe_unknown_lists(queue, count, native_lists) && bypass_unrelated())
-    return 0;
+  // Discovery skipped (mutex_ busy) lets an unrelated batch bypass, but only
+  // once the planner has shown it carries no current display copy (below).
+  const bool observed = observe_unknown_lists(queue, count, native_lists);
   DisplaySubmissionPlan display_plan;
   if (display_planner_)
     display_planner_(display_planner_context_, queue, count, native_lists, display_plan);
@@ -2052,10 +2053,13 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   // waits within the submit budget like owned work, and escapes after it.
   const bool display_work = display_plan.current();
   const auto bypass_without_display = [&]() noexcept { return !display_work && bypass_unrelated(); };
+  // A bypassed plan is never current, so its copies are counted stale.
   const auto end_plan = [&](DropSource reason) noexcept {
     display_plan.ended = reason;
     return std::uint64_t{0};
   };
+  if (!observed && bypass_without_display())
+    return end_plan(DropSource::stale);
   const auto ordered_lock = [&](auto& mutex, auto& lock) noexcept {
     // Its waits are reported as mutex_ or submission_mutex_ ones.
     constexpr auto waited_lock =
@@ -2074,7 +2078,7 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     std::unique_lock lock(mutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
       if (bypass_without_display())
-        return end_plan(DropSource::bypassed);
+        return end_plan(DropSource::stale);
       if (!ordered_lock(mutex_, lock))
         return 0;
     }
@@ -2097,14 +2101,14 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   std::unique_lock submission_lock(submission_mutex_, std::try_to_lock);
   if (!submission_lock.owns_lock()) {
     if (bypass_without_display())
-      return end_plan(DropSource::bypassed);
+      return end_plan(DropSource::stale);
     if (!ordered_lock(submission_mutex_, submission_lock))
       return 0;
   }
   std::unique_lock lock(mutex_, std::try_to_lock);
   if (!lock.owns_lock()) {
     if (bypass_without_display())
-      return end_plan(DropSource::bypassed);
+      return end_plan(DropSource::stale);
     if (!ordered_lock(mutex_, lock))
       return 0;
   }
@@ -2254,9 +2258,9 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
           if (recorded.reported && copy.dropped)
             planned.recorded = true;  // The pool already reported the drop.
           else
-            planned.unrecorded = recorded.reported                     ? pfd_submission::DropSource::close_failed
-                                 : owner->display_copies.ready_count() ? pfd_submission::DropSource::invalid
-                                                                       : pfd_submission::DropSource::pool_full;
+            planned.unrecorded = recorded.reported  ? pfd_submission::DropSource::close_failed
+                                 : recorded.invalid ? pfd_submission::DropSource::invalid
+                                                    : pfd_submission::DropSource::pool_full;
           continue;
         }
         recorded_items[i] = true;
