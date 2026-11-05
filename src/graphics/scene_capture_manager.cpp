@@ -2158,11 +2158,19 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   // cycle. Read only in this case, so the fence call under mutex_ is rare.
   // An escape quarantines in-list capture packets for good (16 in all), so a
   // batch carrying them keeps its Wait, cycle risk included, and is counted.
+  std::uint64_t simulator_completed = 0;
   const bool cross_queue_unfinished = owner->last_simulator_signal && owner->last_simulator_queue != queue &&
-                                      owner->timeline->GetCompletedValue() < owner->last_simulator_signal;
+                                      (simulator_completed = owner->timeline->GetCompletedValue()) < owner->last_simulator_signal;
   if (cross_queue_unfinished && mask)
     cross_queue_waits_.fetch_add(1, std::memory_order_relaxed);
   else if (cross_queue_unfinished) {
+    // Which queues, what was unfinished and how far behind: decides whether
+    // display copies need a timeline of their own.
+    ++stats_.escape_pairs[queue_id(queue)][queue_id(owner->last_simulator_queue)];
+    ++stats_.escape_unfinished_kind[std::min(owner->last_simulator_kind, 3u)];
+    ++stats_.escape_batch_display[display_work ? 0 : 1];
+    const auto lag = owner->last_simulator_signal - simulator_completed;
+    ++stats_.escape_lag[lag <= 2 ? lag - 1 : lag <= 4 ? 2 : 3];
     lock.unlock();
     submission_lock.unlock();
     cross_queue_escapes_.fetch_add(1, std::memory_order_relaxed);
@@ -2310,6 +2318,8 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
       if (!pending.private_work) {
         pending.device->last_simulator_queue = pending.queue;
         pending.device->last_simulator_signal = pending.value;
+        pending.device->last_simulator_kind = pending.packets ? 0u : pending.source_work ? 1u : pending.display_count ? 2u : 3u;
+        ++stats_.queue_receipts[queue_id(pending.queue)];
       }
     }
     if (!success || (refused && fatal))
@@ -2523,6 +2533,17 @@ bool SceneCaptureManager::discard_frame(std::uint64_t token) noexcept {
   return false;
 }
 
+unsigned SceneCaptureManager::queue_id(ID3D12CommandQueue* queue) noexcept {
+  for (unsigned id = 0; id < queue_ids_.size(); ++id) {
+    if (queue_ids_[id] == queue)
+      return id;
+    if (!queue_ids_[id]) {
+      queue_ids_[id] = queue;
+      return id;
+    }
+  }
+  return static_cast<unsigned>(queue_ids_.size());
+}
 SceneCaptureManager::Statistics SceneCaptureManager::statistics() const noexcept {
   const std::lock_guard lock(mutex_);
   auto result = stats_;

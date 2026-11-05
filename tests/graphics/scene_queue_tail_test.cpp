@@ -240,6 +240,14 @@ void cross_queue_escape() {
   require(!submit(other_queue) && !other_queue.waits && !other_queue.signals && owner.last_signal == 2 &&
               manager->statistics().cross_queue_escapes == 1 && manager->statistics().unordered_submissions == 1 && !owner.failed,
           "A receipt waited on another queue's unfinished receipt");
+  {
+    // queue named first (id 0), other_queue next (id 1): other_queue's batch
+    // escaped behind queue's consumer receipt, two values ahead of the GPU.
+    const auto stats = manager->statistics();
+    require(stats.queue_receipts[0] == 2 && stats.escape_pairs[1][0] == 1 && stats.escape_unfinished_kind[3] == 1 &&
+                stats.escape_batch_display[1] == 1 && stats.escape_lag[1] == 1,
+            "The first cross-queue escape was not attributed to its queues, receipt kind and lag");
+  }
   timeline.completed.store(2);
   require(submit(other_queue) && other_queue.waits == 1 && other_queue.last_wait == 2 && owner.last_simulator_signal == 3,
           "A receipt behind another queue's finished receipt was not ordered");
@@ -251,6 +259,14 @@ void cross_queue_escape() {
               owner.last_simulator_signal == 3,
           "Private work changed the last simulator receipt");
   require(!submit(queue) && manager->statistics().cross_queue_escapes == 2, "A receipt waited on private work behind another queue");
+  {
+    // Private work is no simulator receipt: the unfinished one is
+    // other_queue's, one value ahead of the GPU.
+    const auto stats = manager->statistics();
+    require(stats.escape_pairs[0][1] == 1 && stats.escape_pairs[1][0] == 1 && stats.queue_receipts[1] == 1 &&
+                stats.escape_unfinished_kind[3] == 2 && stats.escape_lag[0] == 1,
+            "An escape behind private work was not attributed to the other queue's receipt");
+  }
   timeline.completed.store(3);
   require(submit(queue) && queue.last_wait == 4 && owner.last_simulator_signal == 5 && manager->statistics().cross_queue_escapes == 2,
           "A receipt behind private work after a finished receipt was not ordered");

@@ -385,6 +385,47 @@ void log_startup(const win::Status& status, const StartupTiming& timing, const c
                 static_cast<unsigned long long>(timing.stamped ? timing.stamp_ms - timing.intent_ms : 0));
   log_status(status, detail);
 }
+// Where the issue 97 cross-queue escapes come from, written when their count
+// changes: queue pairs as batch>unfinished ids, receipts per queue id, the
+// unfinished receipt's kind, whether the batch carried a display copy, and
+// how far the timeline was behind.
+void log_cross_queue(const win::Status& status, const SceneCaptureManager::Statistics& capture) {
+  static std::atomic<std::uint64_t> logged{};
+  if (!capture.cross_queue_escapes ||
+      logged.exchange(capture.cross_queue_escapes, std::memory_order_relaxed) == capture.cross_queue_escapes)
+    return;
+  char detail[768];
+  std::size_t used = 0;
+  const auto add = [&](const char* format, auto... values) {
+    if (used >= sizeof(detail))
+      return;
+    const auto written = std::snprintf(detail + used, sizeof(detail) - used, format, values...);
+    used = written < 0 ? sizeof(detail) : std::min(sizeof(detail), used + static_cast<std::size_t>(written));
+  };
+  const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
+  add("Cross-queue escapes: total=%llu pairs=", u(capture.cross_queue_escapes));
+  bool any = false;
+  for (unsigned from = 0; from < capture.escape_pairs.size(); ++from)
+    for (unsigned to = 0; to < capture.escape_pairs[from].size(); ++to)
+      if (capture.escape_pairs[from][to]) {
+        add("%s%u>%u:%llu", any ? "," : "", from, to, u(capture.escape_pairs[from][to]));
+        any = true;
+      }
+  add("%s receipts=", any ? "" : "-");
+  any = false;
+  for (unsigned id = 0; id < capture.queue_receipts.size(); ++id)
+    if (capture.queue_receipts[id]) {
+      add("%s%u:%llu", any ? "," : "", id, u(capture.queue_receipts[id]));
+      any = true;
+    }
+  const auto& kind = capture.escape_unfinished_kind;
+  const auto& lag = capture.escape_lag;
+  add("%s unfinished=capture:%llu,source:%llu,display:%llu,consumer:%llu batch=display:%llu,other:%llu "
+      "lag=1:%llu,2:%llu,3-4:%llu,5+:%llu",
+      any ? "" : "-", u(kind[0]), u(kind[1]), u(kind[2]), u(kind[3]), u(capture.escape_batch_display[0]),
+      u(capture.escape_batch_display[1]), u(lag[0]), u(lag[1]), u(lag[2]), u(lag[3]));
+  log_status(status, detail);
+}
 void log_contention(const win::Status& status, const win::GraphicsStatus& graphics, const scene_runtime::Snapshot& output) {
   char detail[1536];
   auto used = static_cast<std::size_t>(std::snprintf(
@@ -437,6 +478,7 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
   for (unsigned i = 0; i < graphics.contention.size(); ++i)
     append("", win::contention_site_name(static_cast<win::ContentionSite>(i)), graphics.contention[i]);
   log_status(status, detail);
+  log_cross_queue(status, output.capture);
 }
 // Appended to the lock-hold record: how the interval's command-list Resets
 // were retired. fast: lock-free; locked: the rest; expired: locked ones whose

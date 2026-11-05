@@ -177,6 +177,20 @@ class SceneCaptureManager {
     // cross_queue_waits: such batches that still Waited because they carry
     // in-list capture packets, which an escape would quarantine for good.
     std::uint64_t cross_queue_escapes = 0, cross_queue_waits = 0;
+    // Diagnostic breakdown of cross_queue_escapes. Simulator queues get ids in
+    // the order their first receipt or escape names them; the last id stands
+    // for every later queue. escape_pairs[batch queue][unfinished queue];
+    // queue_receipts: simulator receipts signalled per queue. The unfinished
+    // receipt's kind: in-list capture packets, then source work, then a display
+    // copy, else a consumer only. The batch either carried a current display
+    // plan or did not. Lag: the timeline's completed value behind that
+    // receipt by 1, 2, 3-4 or 5 and more.
+    static constexpr unsigned QueueIds = 6;
+    std::array<std::array<std::uint64_t, QueueIds>, QueueIds> escape_pairs{};
+    std::array<std::uint64_t, QueueIds> queue_receipts{};
+    std::array<std::uint64_t, 4> escape_unfinished_kind{};
+    std::array<std::uint64_t, 2> escape_batch_display{};
+    std::array<std::uint64_t, 4> escape_lag{};
     std::uint64_t deferred_evidence = 0, deferred_overflows = 0;
     // Consumer recordings forwarded without ordering by a bounded escape: the
     // source model was invalidated and the device kept, unlike a contended escape.
@@ -418,6 +432,8 @@ class SceneCaptureManager {
     // Wait, as before the cross-queue escape.
     ID3D12CommandQueue* last_simulator_queue = nullptr;
     std::uint64_t last_simulator_signal = 0;
+    // Kind of that receipt, as Statistics::escape_unfinished_kind counts it.
+    unsigned last_simulator_kind = 0;
     bool active = false, failed = false;
     std::uint64_t session_generation = 1;
     bool session_active = true;
@@ -675,6 +691,10 @@ class SceneCaptureManager {
   std::atomic<std::uint64_t> contended_evidence_{}, contended_lifecycle_{}, contended_submissions_{};
   std::atomic<std::uint64_t> unordered_submissions_{}, deferred_retirement_count_{}, gated_submissions_{}, released_waits_{};
   std::atomic<std::uint64_t> cross_queue_escapes_{}, cross_queue_waits_{};
+  // mutex_ held: the Statistics id of a simulator queue, assigned on first use.
+  // Compared only, never dereferenced.
+  std::array<ID3D12CommandQueue*, Statistics::QueueIds - 1> queue_ids_{};
+  unsigned queue_id(ID3D12CommandQueue*) noexcept;
   std::atomic<std::uint64_t> deferred_evidence_count_{};
   std::unordered_map<ID3D12GraphicsCommandList*, std::size_t> list_indices_;
   std::array<Packet, MaximumPackets> packets_{};
