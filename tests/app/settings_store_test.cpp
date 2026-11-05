@@ -389,10 +389,17 @@ void door_camera_persists() {
   require(profiles::A380.mounts[3] == profiles::A380XDoorMount && profiles::IniA380.mounts[3] == profiles::IniA380DoorMount &&
               std::strcmp(profiles::IniA380.door_lvar, "INI_ECAM_ACTIVE_PAGE") == 0,
           "The two A380s ship their own door cameras");
-  require(load_settings(loaded, L"missing-installation", profiles::A359.id) && loaded.door_side == 2 &&
-              std::strcmp(loaded.display_override.textures[2], "@CTR") == 0 && loaded.display_override.areas[2].top == 268 &&
-              loaded.display_override.areas[2].bottom == 925 && loaded.display_override.areas[2].right == 806 && valid_settings(loaded),
-          "The A350 places its centre display, the system page only, for the door camera");
+  for (const auto& [a350, door] :
+       {std::pair{&profiles::A359, profiles::A350DoorMount}, std::pair{&profiles::A35K, profiles::A35KDoorMount}}) {
+    require(load_settings(loaded, L"missing-installation", a350->id) && loaded.door_side == 2 &&
+                std::strcmp(loaded.display_override.textures[2], "@CTR") == 0 && loaded.display_override.areas[2].left == 11 &&
+                loaded.display_override.areas[2].top == 402 && loaded.display_override.areas[2].right == 671 &&
+                loaded.display_override.areas[2].bottom == 875 && loaded.mounts[3] == door && valid_settings(loaded),
+            "Each A350 places its centre display, inside the system page only, for the door camera");
+    require(std::strcmp(loaded.lvar_bindings[CameraDoor].name, "INI_ECAM_ACTIVE_PAGE") == 0 &&
+                loaded.lvar_bindings[CameraDoor].trigger == lvar_equals_trigger(16),
+            "Each A350's VIDEO key turns its door camera on");
+  }
   require(load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.door_side == 2 &&
               std::strcmp(loaded.display_override.textures[2], "@DU#3/6") == 0 && loaded.display_override.areas[2].top == 84 &&
               loaded.display_override.areas[2].bottom == 655 && loaded.mounts[3] == profiles::IniA380DoorMount && valid_settings(loaded),

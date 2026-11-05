@@ -274,12 +274,16 @@ inline constexpr AircraftProfile A380 = [] {
 inline constexpr unsigned A350PfdRefreshHz = 80;
 // The door camera's display: $SD, the centre unit (1644 x 1024 like the EFIS
 // textures). Its left half holds the engine display, the system page and the
-// TAT/SAT/GW strip; its right half the ECAM messages. The area is the system
-// page between the dividers at y 266 and 927 (a 2026-11-02 A350-900 snapshot).
-inline constexpr DisplayRect A350DoorArea{0, 268, 806, 925};
-// Door: Robert's live A350-900 door camera (2026-11-02) on that area, behind
-// the cockpit door looking aft and down. The -1000's moves forward with its
-// nose camera (3.81 m); not checked live.
+// TAT/SAT/GW strip; its right half the ECAM messages. The area is Robert's
+// live one inside the system page (2026-11-05; the page between the dividers
+// at y 266 and 927 is x 0–806, y 268–925).
+inline constexpr DisplayRect A350DoorArea{11, 402, 671, 875};
+// Door: Robert's live A350-900 door camera (2026-11-02, unchanged 2026-11-05)
+// on that area, behind the cockpit door looking aft and down. The -1000's
+// moves forward with its nose camera (3.81 m); not checked live. The ECAM
+// control panel's VIDEO key selects page 16 of INI_ECAM_ACTIVE_PAGE, as on the
+// iniBuilds A380 (A350_Interior.behavior.xml; INI_ECAM_VIDEO is 1 only while
+// held; bound live 2026-11-05).
 inline constexpr std::array<double, 6> A350DoorMount{-0.4, 2.8, 24, -57, 179.88, 1.2};
 inline constexpr std::array<double, 6> A35KDoorMount{-0.4, 2.8, 27.81, -57, 179.88, 1.2};
 inline constexpr AircraftProfile A359 = [] {
@@ -306,6 +310,8 @@ inline constexpr AircraftProfile A359 = [] {
   p.panel_textures = {"@EFIS#0/2", "@EFIS#1/2", ""};
   p.door_lower_texture = "@CTR";
   p.door_lower_area = A350DoorArea;
+  p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
+  p.door_lvar_trigger = standalone::lvar_equals_trigger(16);
   return p;
 }();
 inline constexpr AircraftProfile A35K = [] {
@@ -332,6 +338,8 @@ inline constexpr AircraftProfile A35K = [] {
   p.panel_textures = {"@EFIS#0/2", "@EFIS#1/2", ""};
   p.door_lower_texture = "@CTR";
   p.door_lower_area = A350DoorArea;
+  p.door_lvar = "INI_ECAM_ACTIVE_PAGE";
+  p.door_lvar_trigger = standalone::lvar_equals_trigger(16);
   return p;
 }();
 inline constexpr std::array<double, 6> IniA380DoorMount{-0.6, 8, 20, -64.54, 158.19, 1.2};
