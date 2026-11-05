@@ -2007,7 +2007,17 @@ std::wstring setup_aircraft_name() {
 // What stops the setup now; empty when the picks can be saved.
 // The bridge pictured cockpit panels and none carried a mark: the panel
 // marks package is not loaded in this simulator session.
+bool package_conflict() noexcept;
+// Another add-on's copy of the cockpit page Taxi Cam can't add to: the package
+// was left out, so restarting or reinstalling won't help.
+const wchar_t* package_conflict_text() {
+  return tr(
+      L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a way "
+      L"Taxi Cam can't add to. Taxi Cam can't recognise your displays while that add-on is installed.");
+}
 const wchar_t* package_inactive_text() {
+  if (package_conflict())
+    return package_conflict_text();
   return tr(
       L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the "
       L"simulator; if that doesn't help, run the Taxi Cam installer again.");
@@ -3797,6 +3807,9 @@ void convert_legacy_displays() {
 // builds on one PC have one each (Steam test, 2026-11-04: the Store package
 // was checked while Steam ran without one).
 std::atomic<int> marks_package_outcome{-1};
+bool package_conflict() noexcept {
+  return marks_package_outcome.load(std::memory_order_acquire) == static_cast<int>(win::marks_package::Outcome::conflict);
+}
 // The check's result and any other package that replaces the files every
 // cockpit page loads, in launcher.log and bridge.log: bridge.log is the file
 // reporters attach, and a package that is not active leaves no other trace.
@@ -3814,9 +3827,11 @@ void log_marks_package(win::marks_package::Outcome outcome, const std::filesyste
       return out.empty() ? std::wstring(L"none") : out;
     };
     const auto overrides = win::marks_package::other_page_overrides(community);
+    const auto source = win::marks_package::page_source(community);
     const auto line = std::wstring(L"Display package: outcome=") + widen(win::marks_package::outcome_name(outcome)) + L" community=" +
                       (community.empty() ? std::wstring(L"none") : community.wstring()) + L" other_page_packages=" + names(overrides.page) +
-                      L" base_instrument_packages=" + names(overrides.base_instrument);
+                      L" page_from=" + (source.package.empty() ? std::wstring(L"stock") : source.package) + L" base_instrument_packages=" +
+                      names(overrides.base_instrument);
     const auto text = win::redact(win::report_utf8(line), win::report_redactions());
     const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
     std::wstring redacted(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
@@ -3884,6 +3899,9 @@ void service_marks_package_notice() {
       break;
     case Outcome::no_community:
       notice = tr(L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.");
+      break;
+    case Outcome::conflict:
+      notice = package_conflict_text();
       break;
     default:
       notice = tr(L"Taxi Cam could not add its display package to the simulator's Community folder. Run the Taxi Cam installer again.");
@@ -6714,7 +6732,9 @@ void draw_page(HDC dc) {
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
     // Two lines at most in this box: the alert and Displays give the rest.
-    const auto line = inactive ? std::wstring(tr(L"Display package not active. Restart the simulator, or run the installer again."))
+    const auto line = inactive && package_conflict()
+                          ? std::wstring(tr(L"Another add-on's cockpit page stops Taxi Cam recognising your displays."))
+                      : inactive ? std::wstring(tr(L"Display package not active. Restart the simulator, or run the installer again."))
                       : late_empty_pfds  ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
                                                            L"Restart Flight only if the list stays empty."))
                       : sample.heartbeat ? widen(sample.message)

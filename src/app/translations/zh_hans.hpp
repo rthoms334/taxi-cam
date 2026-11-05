@@ -600,6 +600,11 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"This simulator version changed the cockpit page Taxi Cam uses to recognise your displays, so it can't find them. Update Taxi Cam to "
      L"find them again.",
      L"此模拟器版本更改了 Taxi Cam 用于识别显示屏的驾驶舱页面，因此无法找到它们。请更新 Taxi Cam 以重新找到它们。"},
+    {L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a way Taxi Cam can't "
+     L"add to. Taxi Cam can't recognise your displays while that add-on is installed.",
+     L"Community 文件夹中的另一个插件修改了 Taxi Cam 用来识别显示屏的驾驶舱页面，而且 Taxi Cam "
+     L"无法在其中添加内容。只要该插件仍已安装，Taxi Cam 就无法识别你的显示屏。"},
+    {L"Another add-on's cockpit page stops Taxi Cam recognising your displays.", L"另一个插件的驾驶舱页面使 Taxi Cam 无法识别你的显示屏。"},
     {L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.",
      L"Taxi Cam 找不到模拟器的 Community 文件夹来放置其显示屏包。请重新运行 Taxi Cam 安装程序。"},
     {L"Taxi Cam could not add its display package to the simulator's Community folder. Run the Taxi Cam installer again.",
