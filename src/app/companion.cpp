@@ -3803,6 +3803,10 @@ std::atomic<int> marks_package_outcome{-1};
 // The profile folder and account names are replaced as in report files.
 void log_marks_package(win::marks_package::Outcome outcome, const std::filesystem::path& community) noexcept {
   try {
+    // Without a settings folder there are no logs to write, as for the bridge.
+    const auto directory = win::settings_directory();
+    if (directory.empty())
+      return;
     const auto names = [](const std::vector<std::wstring>& list) {
       std::wstring out;
       for (const auto& name : list)
@@ -3814,7 +3818,6 @@ void log_marks_package(win::marks_package::Outcome outcome, const std::filesyste
                       (community.empty() ? std::wstring(L"none") : community.wstring()) + L" other_page_packages=" + names(overrides.page) +
                       L" base_instrument_packages=" + names(overrides.base_instrument);
     const auto text = win::redact(win::report_utf8(line), win::report_redactions());
-    const auto directory = win::settings_directory();
     const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
     std::wstring redacted(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
     if (wide > 0)
