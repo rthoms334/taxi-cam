@@ -8,7 +8,8 @@
         "When another add-on, such as panel-raas, changes the cockpit page Taxi Cam uses to recognise your displays, Taxi Cam now adds its part to that add-on's version of the page, and goes back to its own if you remove that add-on.",
         "When Taxi Cam turns its cameras off to keep the simulator safe, or can't recognise your cockpit displays, its log now says why, so a bug report is enough to find the cause.",
         "Taxi Cam no longer says it can't recognise your displays while you're in the simulator's main menu. It waits until your cockpit's displays are drawn.",
-        "The aircraft's own display no longer flickers through the camera picture now and then, in the cockpit or in GlassOut's stream."
+        "The aircraft's own display no longer flickers through the camera picture now and then, in the cockpit or in GlassOut's stream.",
+        "Saved aircraft can now reset an aircraft that comes with Taxi Cam: Reset displays brings back its displays and door camera, and Factory reset brings back all of its settings. Use default displays now keeps the lower display the aircraft comes with, so the door camera stays on it."
       ]
     },
     {

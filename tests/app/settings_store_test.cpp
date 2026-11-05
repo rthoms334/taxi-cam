@@ -415,6 +415,103 @@ void door_camera_persists() {
             "Every built-in aircraft starts its door camera on a lower display");
 }
 
+// Saved aircraft's Reset displays and Factory reset of a built-in aircraft.
+// The first fixture is issue 184's iniBuilds A380 file: no displays, door
+// camera none, its VIDEO key latched.
+void built_in_resets() {
+  select_fixture(L"built-in-resets");
+  const auto selection = settings_override + L"\\settings.ini";
+  Settings other;
+  require(load_settings(other, L"missing-installation", profiles::A359.id) && save_settings(other), "Select the A350 first");
+  Settings broken;
+  require(load_settings(broken, L"missing-installation", profiles::IniA380.id), "Load the shipped iniBuilds A380");
+  broken.display_override = {};
+  broken.door_side = DoorSideNone;
+  broken.lvar_bindings[CameraDoor].trigger = static_cast<std::uint32_t>(LvarTrigger::latched);
+  std::strcpy(broken.lvar_bindings[CameraLeft].name, "MY_LEFT_CAMERA");
+  broken.mounts[0][1] = 3.25;
+  broken.mounts[profiles::DoorFeed][4] = 90;
+  broken.nose_dot = {0.125f, 0.5f};
+  broken.day_brightness = -1.25f;
+  broken.camera_mode = static_cast<UINT>(CameraMode::smooth);
+  broken.black_and_white = 0;
+  broken.manual_mask = 1;
+  broken.enabled = 0;
+  require(save_settings(broken, false), "Save the issue 184 file without selecting it");
+  require(std::stoul(ini(selection, L"aircraft", L"profile")) == profiles::A359.id, "Saving without selecting keeps the selection");
+  Settings loaded;
+  require(load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.door_side == DoorSideNone &&
+              !loaded.display_override.textures[2][0],
+          "A saved file never gets the shipped door camera back by itself");
+  Settings shipped;
+  require(load_settings(shipped, L"missing-installation", profiles::IniA380.id, {}, nullptr, true) && shipped.door_side == 2 &&
+              std::strcmp(shipped.display_override.textures[2], "@DU#3/6") == 0 && shipped.mounts == profiles::IniA380.mounts,
+          "A shipped load ignores the saved file");
+
+  auto soft = loaded;
+  soft.enabled = 0;
+  soft.manual_mask = 1;
+  require(reset_settings(soft, SettingsReset::displays) && soft.door_side == 2 &&
+              std::strcmp(soft.display_override.textures[2], "@DU#3/6") == 0 && soft.display_override.areas[2].top == 84 &&
+              soft.display_override.areas[2].bottom == 655 && soft.display_override.areas[2].right == 768 &&
+              std::strcmp(soft.lvar_bindings[CameraDoor].name, "INI_ECAM_ACTIVE_PAGE") == 0 &&
+              soft.lvar_bindings[CameraDoor].trigger == lvar_equals_trigger(16) && valid_settings(soft),
+          "Reset displays brings back the iniBuilds A380's system display, its area and its VIDEO key");
+  require(soft.mounts == loaded.mounts && soft.nose_dot == loaded.nose_dot && soft.day_brightness == loaded.day_brightness &&
+              soft.camera_mode == loaded.camera_mode && soft.black_and_white == 0 &&
+              std::strcmp(soft.lvar_bindings[CameraLeft].name, "MY_LEFT_CAMERA") == 0 && soft.enabled == 0 && soft.manual_mask == 1,
+          "Reset displays keeps camera positions, guides, looks, other choices and the session");
+  require(save_settings(soft, false) && load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.door_side == 2 &&
+              std::strcmp(loaded.display_override.textures[2], "@DU#3/6") == 0 &&
+              loaded.lvar_bindings[CameraDoor].trigger == lvar_equals_trigger(16) && loaded.mounts == soft.mounts,
+          "Reset displays saves");
+
+  auto factory = loaded;
+  require(reset_settings(factory, SettingsReset::factory) && factory.door_side == 2 && factory.mounts == shipped.mounts &&
+              factory.nose_dot == shipped.nose_dot && factory.tail_inner_right == shipped.tail_inner_right && factory.day_brightness == 0 &&
+              factory.camera_mode == shipped.camera_mode && factory.black_and_white == 1u << profiles::DoorFeed &&
+              factory.film_grain == CameraLookMask && !factory.lvar_bindings[CameraLeft].name[0] &&
+              std::memcmp(&factory.lvar_bindings, &shipped.lvar_bindings, sizeof(LvarBindings)) == 0 &&
+              factory.display_override.areas[2].top == 84 && factory.follow_taxi == shipped.follow_taxi && valid_settings(factory),
+          "Factory reset brings back everything the iniBuilds A380 ships with");
+  require(save_settings(factory, false) && load_settings(loaded, L"missing-installation", profiles::IniA380.id) &&
+              loaded.mounts == shipped.mounts && loaded.door_side == 2 && !loaded.lvar_bindings[CameraLeft].name[0],
+          "Factory reset saves");
+  require(std::stoul(ini(selection, L"aircraft", L"profile")) == profiles::A359.id, "Resets of another aircraft keep the selection");
+
+  // A door camera on another display, or none, starts off after a reset.
+  auto moved = loaded;
+  moved.door_side = 0;
+  moved.door_on = 1;
+  require(reset_settings(moved, SettingsReset::displays) && moved.door_side == 2 && moved.door_on == 0,
+          "A door camera moved by a reset starts off");
+  // Every built-in aircraft's Reset displays keeps its shipped lower display
+  // (Use default displays uses it), and a set-up aircraft has no reset.
+  for (const auto* profile : profiles::Catalog) {
+    Settings value;
+    require(load_settings(value, L"missing-installation", profile->id), "Load a built-in aircraft");
+    value.display_override = {};
+    value.door_side = DoorSideNone;
+    require(reset_settings(value, SettingsReset::displays) && value.door_side == 2 && valid_settings(value),
+            "Every built-in aircraft's Reset displays puts its door camera back on a lower display");
+    require(!profile->door_lower_texture[0] || std::strcmp(value.display_override.textures[2], profile->door_lower_texture) == 0,
+            "Reset displays places the lower display the aircraft ships with");
+  }
+  Settings set_up;
+  set_up.profile = profiles::DiscoveredProfileId;
+  require(!reset_settings(set_up, SettingsReset::factory) && !reset_settings(set_up, SettingsReset::displays),
+          "A set-up aircraft ships no settings to reset to");
+  // A saved file that fails validation cannot be loaded, but the shipped load
+  // Factory reset starts from never reads it.
+  const auto ini_path = settings_override + L"\\profiles\\ini-a380.ini";
+  patch(ini_path, L"guides", L"nose_dot_x", L"0.9");
+  require(!load_settings(loaded, L"missing-installation", profiles::IniA380.id), "An invalid saved file is refused");
+  require(load_settings(loaded, L"missing-installation", profiles::IniA380.id, {}, nullptr, true) &&
+              reset_settings(loaded, SettingsReset::factory) && save_settings(loaded, false) &&
+              load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.nose_dot == shipped.nose_dot,
+          "Factory reset repairs a saved file that cannot be loaded");
+}
+
 void rejected_preferences_are_left_unchanged() {
   select_fixture(L"invalid-preferences");
   const auto expected = customized(profiles::A359);
@@ -492,6 +589,7 @@ int main() {
     lvar_bindings_persist();
     camera_looks_persist();
     door_camera_persists();
+    built_in_resets();
     rejected_preferences_are_left_unchanged();
     legacy_import_preserves_original();
     settings_override.clear();

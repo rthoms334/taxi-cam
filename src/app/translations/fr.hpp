@@ -325,8 +325,25 @@ inline constexpr Translation FrenchTranslations[]{
     {L"Refresh pictures", L"Actualiser"},
     {L"Remove", L"Supprimer"},
     {L"Remove saved aircraft", L"Supprimer un avion enregistré"},
-    {L"Included with Taxi Cam, so it cannot be removed. Change it in Setup while it is loaded.",
-     L"Fourni avec Taxi Cam, il ne peut donc pas être supprimé. Modifiez-le dans Configuration pendant qu'il est chargé."},
+    {L"Included with Taxi Cam, so it cannot be removed. Reset displays brings back its displays and door camera as they come; Factory "
+     L"reset brings back all of its settings.",
+     L"Fourni avec Taxi Cam, il ne peut donc pas être supprimé. Réinitialiser les écrans rétablit ses écrans et sa caméra de porte "
+     L"d'origine ; Réinitialisation d'usine rétablit tous ses paramètres."},
+    {L"Reset displays", L"Réinitialiser les écrans"},
+    {L"Factory reset", L"Réinitialisation d'usine"},
+    {L"Factory reset {0}? All of its settings go back to how they come with Taxi Cam, camera positions and guides included.",
+     L"Réinitialiser {0} aux réglages d'usine ? Tous ses paramètres reviennent à ceux fournis avec Taxi Cam, positions de caméra et "
+     L"repères compris."},
+    {L"Reset {0}'s displays and door camera to how they come with Taxi Cam? Camera positions, guides and your other settings are kept.",
+     L"Rétablir les écrans et la caméra de porte de {0} tels que fournis avec Taxi Cam ? Les positions de caméra, les repères et vos "
+     L"autres paramètres sont conservés."},
+    {L"{0} is back to how it comes with Taxi Cam.", L"{0} est revenu aux réglages fournis avec Taxi Cam."},
+    {L"{0}'s displays and door camera are back to how they come with Taxi Cam.",
+     L"Les écrans et la caméra de porte de {0} sont revenus à ceux fournis avec Taxi Cam."},
+    {L"{0}'s saved settings cannot be read, so only Factory reset can bring it back.",
+     L"Les paramètres enregistrés de {0} sont illisibles : seule la réinitialisation d'usine peut le rétablir."},
+    {L"Could not reset it. Check access to your local settings folder.",
+     L"Réinitialisation impossible. Vérifiez l'accès à votre dossier de paramètres local."},
     {L"Remove {0}? Its displays and camera positions are deleted. You can set it up again.",
      L"Supprimer {0} ? Ses écrans et ses positions de caméra seront effacés. Vous pourrez le configurer de nouveau."},
     {L"Report a bug", L"Signaler un bug"},
