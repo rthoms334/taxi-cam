@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 #include "../graphics/pfd_observation.hpp"
+#include "../graphics/pfd_submission_pool.hpp"
 #include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/render_target_sequence.hpp"
 #include "../graphics/render_target_shapes.hpp"
@@ -91,6 +92,20 @@ inline constexpr const char* display_submission_outcome_name(DisplaySubmissionOu
   return static_cast<unsigned>(value) < static_cast<unsigned>(DisplaySubmissionOutcome::count) ? names[static_cast<unsigned>(value)]
                                                                                                : "invalid_outcome";
 }
+// Why an instrument write landed on the camera instead of the display shadow
+// (the first unmet condition): a planned shadow copy did not run or may not
+// have; the first save is not confirmed yet; the shadow was saved on another
+// queue; the first writing list finds the display in a state a copy cannot
+// return to (COMMON); a draw earlier in that list may sample the display; no
+// camera copy follows and the display is not left a render target, with this
+// generation's patches not ready or with no copy planned for the side; or the
+// side was stamped in this Execute before the copy.
+enum class ShadowLostWrite : unsigned { dropped, unconfirmed, other_queue, not_insertable, sampled, unready, no_copy, stamped, count };
+inline constexpr const char* shadow_lost_write_name(ShadowLostWrite value) noexcept {
+  constexpr const char* names[]{"dropped", "unconfirmed", "other_queue", "not_insertable", "sampled", "unready", "no_copy", "stamped"};
+  return static_cast<unsigned>(value) < static_cast<unsigned>(ShadowLostWrite::count) ? names[static_cast<unsigned>(value)]
+                                                                                      : "invalid_cause";
+}
 // Simulator-thread bounded waits that expired and skipped their work. Each
 // site names the lock and the caller: the registry from per-command recording
 // hooks, from Close-time PFD delivery, from device creation hooks and from the
@@ -137,6 +152,10 @@ struct GraphicsStatus {
   char shadow_modes[MaxDisplaySides + 1]{};
   std::uint64_t shadow_saves{}, shadow_entry_restores{}, shadow_restores{}, shadow_lost_writes{}, shadow_held{}, shadow_fallbacks{},
       shadow_baselines{};
+  // shadow_lost_writes by cause; the causes sum to it.
+  std::array<std::uint64_t, static_cast<unsigned>(ShadowLostWrite::count)> shadow_lost_by{};
+  // Shadow-carrying copies that did not run, by pfd_submission::DropSource.
+  std::array<std::uint64_t, static_cast<unsigned>(pfd_submission::DropSource::count)> shadow_drop_sources{};
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
   bool observing{};

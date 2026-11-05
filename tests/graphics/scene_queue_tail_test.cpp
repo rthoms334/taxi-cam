@@ -240,6 +240,14 @@ void cross_queue_escape() {
   require(!submit(other_queue) && !other_queue.waits && !other_queue.signals && owner.last_signal == 2 &&
               manager->statistics().cross_queue_escapes == 1 && manager->statistics().unordered_submissions == 1 && !owner.failed,
           "A receipt waited on another queue's unfinished receipt");
+  {
+    // queue named first (id 0), other_queue next (id 1): other_queue's batch
+    // escaped behind queue's consumer receipt, two values ahead of the GPU.
+    const auto stats = manager->statistics();
+    require(stats.queue_receipts[0] == 2 && stats.escape_pairs[1][0] == 1 && stats.escape_unfinished_kind[3] == 1 &&
+                stats.escape_batch_display[1] == 1 && stats.escape_lag[1] == 1,
+            "The first cross-queue escape was not attributed to its queues, receipt kind and lag");
+  }
   timeline.completed.store(2);
   require(submit(other_queue) && other_queue.waits == 1 && other_queue.last_wait == 2 && owner.last_simulator_signal == 3,
           "A receipt behind another queue's finished receipt was not ordered");
@@ -251,6 +259,14 @@ void cross_queue_escape() {
               owner.last_simulator_signal == 3,
           "Private work changed the last simulator receipt");
   require(!submit(queue) && manager->statistics().cross_queue_escapes == 2, "A receipt waited on private work behind another queue");
+  {
+    // Private work is no simulator receipt: the unfinished one is
+    // other_queue's, one value ahead of the GPU.
+    const auto stats = manager->statistics();
+    require(stats.escape_pairs[0][1] == 1 && stats.escape_pairs[1][0] == 1 && stats.queue_receipts[1] == 1 &&
+                stats.escape_unfinished_kind[3] == 2 && stats.escape_lag[0] == 1,
+            "An escape behind private work was not attributed to the other queue's receipt");
+  }
   timeline.completed.store(3);
   require(submit(queue) && queue.last_wait == 4 && owner.last_simulator_signal == 5 && manager->statistics().cross_queue_escapes == 2,
           "A receipt behind private work after a finished receipt was not ordered");
@@ -727,6 +743,7 @@ void run() {
   // Both queues outlive the manager, which may hold a reference to either.
   Queue queue{queue_table.data(), &device}, helper_queue{queue_table.data(), &device};
   auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
+  DisplayPlanFixture display_plan;  // Outlives the manager that calls it.
   taxi_camera::SceneHandoff handoff;
   auto manager = std::make_unique<Manager>(handoff);
   auto& owner = manager->devices_[0];
@@ -802,6 +819,44 @@ void run() {
   };
   held_lock(known, false, false);
   require(!queue.signals && !queue.waits, "Unrelated submission queues no timeline operations");
+  // The same unrelated batch carrying a planned display copy needs ordering to
+  // record it. Behind a held lock it waits within the budget and escapes,
+  // counted; bypassing would lose the copy and show the panel for a frame.
+  require(manager->set_display_submission_planner(plan_unrecordable_copy, &display_plan), "Install the display plan fixture");
+  manager->apply_deferred();  // An empty ring: without the plan this batch bypasses.
+  held_lock(known, false, false);
+  display_plan.active = true;
+  manager->apply_deferred();
+  held_lock(known, false, true);
+  display_plan.active = false;
+  require(!queue.signals && !queue.waits, "An escaped display batch queued a timeline operation");
+  // The same batch while mutex_ is busy, so discovery is skipped too: it is
+  // planned first and still waits and escapes instead of bypassing unplanned.
+  {
+    manager->publish_list(recording);
+    manager->apply_deferred();
+    display_plan.active = true;
+    const auto before = manager->statistics();
+    std::unique_lock held(manager->mutex_);
+    auto completed = std::async(std::launch::async, [&] {
+      ID3D12CommandList* batch[]{known};
+      const auto receipt = manager->before_submission(native_queue, 1, batch);
+      if (receipt)
+        manager->after_submission(native_queue, receipt);
+      else
+        manager->forwarded_unordered(native_queue);
+      return receipt;
+    });
+    const bool returned = completed.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    held.unlock();
+    const auto receipt = completed.get();
+    display_plan.active = false;
+    const auto after = manager->statistics();
+    require(returned && !receipt && after.unordered_submissions == before.unordered_submissions + 1 &&
+                after.contended_submissions == before.contended_submissions + 1,
+            "A display batch behind a busy mutex_ bypassed before its copy was planned");
+    require(!queue.signals && !queue.waits, "An escaped display batch queued a timeline operation");
+  }
   const taxi_camera::source_state::Key source{0x1234, 1};
   require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
   {

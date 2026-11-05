@@ -10,6 +10,49 @@
 #include <cstdint>
 
 namespace taxi_camera::pfd_submission {
+// Why a copy with a drop counter did not run. The plan reports copies the pool
+// never held: no ready packet (pool_full), refused by validation (invalid),
+// recorded without the save its restore was missing (save_stripped), or the
+// submission ended before recording: the lock wait expired or another
+// queue's receipt was unfinished, so the batch escaped (escaped); the plan's
+// patch generation, session or device no longer matched (stale); a list in
+// the batch was unknown (unknown_lists); a device mismatch failed the device
+// (device_failed); no receipt was opened (no_receipt); the queue Wait failed
+// (wait_failed); the insertion point was outside the batch (out_of_batch);
+// or none of these (not_recorded). The pool reports the rest: the queue hook
+// did not accept every insertion (cancelled), the receipt was refused or
+// failed (quarantined), Close failed (close_failed), submission had no
+// covering fence (unsubmitted), or the device was removed (device_lost).
+enum class DropSource : unsigned {
+  pool_full,
+  invalid,
+  save_stripped,
+  escaped,
+  stale,
+  unknown_lists,
+  device_failed,
+  no_receipt,
+  wait_failed,
+  out_of_batch,
+  not_recorded,
+  cancelled,
+  quarantined,
+  close_failed,
+  unsubmitted,
+  device_lost,
+  count
+};
+inline constexpr const char* drop_source_name(DropSource value) noexcept {
+  constexpr const char* names[]{"pool_full",     "invalid",      "save_stripped", "escaped",      "stale",        "unknown_lists",
+                                "device_failed", "no_receipt",   "wait_failed",   "out_of_batch", "not_recorded", "cancelled",
+                                "quarantined",   "close_failed", "unsubmitted",   "device_lost"};
+  static_assert(sizeof(names) / sizeof(names[0]) == static_cast<unsigned>(DropSource::count));
+  return static_cast<unsigned>(value) < static_cast<unsigned>(DropSource::count) ? names[static_cast<unsigned>(value)] : "invalid_source";
+}
+inline void count_drop(std::atomic<std::uint64_t>* sources, DropSource source) noexcept {
+  if (sources && static_cast<unsigned>(source) < static_cast<unsigned>(DropSource::count))
+    sources[static_cast<unsigned>(source)].fetch_add(1, std::memory_order_relaxed);
+}
 
 // The manager's submission mutex serializes all methods. Only service performs GPU allocation or
 // resets. A recording owns its source/target references until cancellation is
@@ -41,6 +84,9 @@ class Pool {
     // cancelled before submission, or quarantined (uncertain work counts as
     // not run). The caller's plan reports copies that were never recorded.
     std::atomic<std::uint64_t>* dropped = nullptr;
+    // DropSource::count counters, one raised for each drop reported through
+    // dropped. Optional; must outlive the packet.
+    std::atomic<std::uint64_t>* drop_sources = nullptr;
     // Display shadow: before writing the source, copy the same target region
     // into this DEFAULT-heap buffer at save_footprint (same size and format
     // family). Not with readback.
@@ -55,6 +101,9 @@ class Pool {
   struct Recording {
     unsigned slot = Capacity;
     ID3D12CommandList* list = nullptr;
+    // A failed recording whose drop the pool already reported (Close failed),
+    // or one refused by validation before any packet was looked at.
+    bool reported = false, invalid = false;
     explicit operator bool() const noexcept { return list != nullptr; }
   };
 
@@ -89,12 +138,13 @@ class Pool {
     ID3D12Resource* save = nullptr;
     std::atomic<std::uint64_t>* completed = nullptr;
     std::atomic<std::uint64_t>* dropped = nullptr;
+    std::atomic<std::uint64_t>* drop_sources = nullptr;
     std::uint64_t completed_value = 0;
     std::uint64_t covering_value = 0;
     State state = State::empty;
   };
   static void release_resources(Packet&) noexcept;
-  static void report_dropped(Packet&) noexcept;
+  static void report_dropped(Packet&, DropSource) noexcept;
   bool valid_copy(const Copy&) const noexcept;
   ID3D12Device* device_ = nullptr;
   std::array<Packet, Capacity> packets_{};

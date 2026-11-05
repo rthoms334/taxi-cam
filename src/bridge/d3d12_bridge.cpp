@@ -439,6 +439,9 @@ struct Registry {
   // saves taken while the area may hold a camera picture (baselines).
   std::atomic<std::uint64_t> shadow_saves{}, shadow_entry_restores{}, shadow_restores{}, shadow_lost_writes{}, shadow_held{},
       shadow_fallbacks{}, shadow_baselines{};
+  std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(ShadowLostWrite::count)> shadow_lost_by{};
+  // Shadow-carrying copies that did not run, by where they were dropped.
+  std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(pfd_submission::DropSource::count)> shadow_drop_sources{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(PfdSubmissionProof::Refusal::count)> queue_proof_refusals{};
   std::atomic<unsigned> queue_last_proof_flags{};
@@ -2347,6 +2350,10 @@ void mark_dirty(Registry::DisplayShadow& shadow, const Resource& target) noexcep
   shadow.dirty = true;
   shadow.dirty_id = target.id;
 }
+void count_lost_write(Registry& r, ShadowLostWrite cause) noexcept {
+  r.shadow_lost_writes.fetch_add(1, std::memory_order_relaxed);
+  r.shadow_lost_by[static_cast<unsigned>(cause)].fetch_add(1, std::memory_order_relaxed);
+}
 // Registry lock held. Moves a side's shadow with its camera: camera on starts
 // it, on queue copies when the worker already has its buffer; camera off
 // restores what was saved. A new target or area, or a lost target, forgets it
@@ -2380,11 +2387,16 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
     } else {
       shadow.clean = false;
       if (shadow.saved)
-        r.shadow_lost_writes.fetch_add(1, std::memory_order_relaxed);
+        count_lost_write(r, ShadowLostWrite::dropped);
     }
   }
-  // Queue copies need the verified Close endpoint and the worker's buffer.
-  const auto queue_ready = [&] { return r.close_forward_verified && shadow_fits(shadow, area, shadow_format(target)); };
+  // Queue copies need the verified Close endpoint and the worker's buffer. Only
+  // a display that repaints partially needs the shadow at all; one that
+  // repaints whole is stamped in the instrument's own list (direct), where no
+  // dropped submission can show its picture through the camera.
+  const auto queue_ready = [&] {
+    return r.profile && r.profile->partial_repaint[side] && r.close_forward_verified && shadow_fits(shadow, area, shadow_format(target));
+  };
   switch (shadow.mode) {
     case Mode::off:
       if (active) {
@@ -3208,7 +3220,13 @@ void plan_display_submission(void*,
       restores[side] = {site(entry.list, true), entry.state};
       ++restore_count;
     } else if (shadow.saved) {
-      r.shadow_lost_writes.fetch_add(1, std::memory_order_relaxed);
+      count_lost_write(r, !shadow.confirmed || !shadow.buffer ? ShadowLostWrite::unconfirmed
+                          : shadow.queue != queue             ? ShadowLostWrite::other_queue
+                          : !entry.insertable                 ? ShadowLostWrite::not_insertable
+                          : !entry.clean                      ? ShadowLostWrite::sampled
+                          : !copied && !(left.known && left.state == D3D12_RESOURCE_STATE_RENDER_TARGET)
+                              ? (patches_ready ? ShadowLostWrite::no_copy : ShadowLostWrite::unready)
+                              : ShadowLostWrite::stamped);
       if (shadow.queue != queue) {
         if (shadow.retake_queue != queue) {
           shadow.retake_queue = queue;
@@ -3273,6 +3291,7 @@ void plan_display_submission(void*,
       item.copy.shadow_source = true;
       item.copy.completed = &r.shadow_completed[side];
       item.copy.dropped = &r.shadow_dropped[side];
+      item.copy.drop_sources = r.shadow_drop_sources.data();
       item.copy.completed_value = ++shadow.serial;
       if (modes[side] == ShadowMode::restoring) {
         shadow.restore_serial = shadow.serial;
@@ -3361,6 +3380,7 @@ void plan_display_submission(void*,
       item.copy.save->AddRef();
       item.copy.completed = &r.shadow_completed[side];
       item.copy.dropped = &r.shadow_dropped[side];
+      item.copy.drop_sources = r.shadow_drop_sources.data();
       item.copy.completed_value = ++shadow.serial;
       item.save_after = restore_items[side];
       if (!shadow.saved || retake) {
@@ -4889,6 +4909,10 @@ GraphicsStatus graphics_status() noexcept {
   result.shadow_entry_restores = r.shadow_entry_restores.load(std::memory_order_relaxed);
   result.shadow_restores = r.shadow_restores.load(std::memory_order_relaxed);
   result.shadow_lost_writes = r.shadow_lost_writes.load(std::memory_order_relaxed);
+  for (unsigned i = 0; i < result.shadow_lost_by.size(); ++i)
+    result.shadow_lost_by[i] = r.shadow_lost_by[i].load(std::memory_order_relaxed);
+  for (unsigned i = 0; i < result.shadow_drop_sources.size(); ++i)
+    result.shadow_drop_sources[i] = r.shadow_drop_sources[i].load(std::memory_order_relaxed);
   result.shadow_held = r.shadow_held.load(std::memory_order_relaxed);
   result.shadow_fallbacks = r.shadow_fallbacks.load(std::memory_order_relaxed);
   result.shadow_baselines = r.shadow_baselines.load(std::memory_order_relaxed);
@@ -5060,7 +5084,9 @@ void service_display_shadows(Registry& r, const runtime::QueuePatchConfig& confi
       auto& shadow = r.shadows[side];
       const auto mode = update_shadow(r, side, now);
       const auto& target = r.selected_resources[side];
-      if (target && target->alive && display_item(r, *target) && config.formats[side] != DXGI_FORMAT_UNKNOWN) {
+      // Only a display that repaints partially keeps a shadow buffer.
+      if (target && target->alive && display_item(r, *target) && config.formats[side] != DXGI_FORMAT_UNKNOWN && r.profile &&
+          r.profile->partial_repaint[side]) {
         area = shadow_area(r, side, *target);
         format = config.formats[side];
         const auto bytes = std::uint64_t(area.right - area.left) * std::uint64_t(area.bottom - area.top) * 4;

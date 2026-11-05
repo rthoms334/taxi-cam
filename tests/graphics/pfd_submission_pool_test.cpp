@@ -848,26 +848,36 @@ float4 ps(float4 position : SV_Position) : SV_Target { return Image.Load(int3(po
     // planner learns before its next plan: cancelled before submission, or
     // quarantined. A completed copy never raises it.
     std::atomic<std::uint64_t> dropped{0};
+    std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(taxi_camera::pfd_submission::DropSource::count)> sources{};
+    const auto source = [&](taxi_camera::pfd_submission::DropSource value) { return sources[static_cast<unsigned>(value)].load(); };
     auto doomed = restore;
     doomed.dropped = &dropped;
+    doomed.drop_sources = sources.data();
     doomed.completed_value = 0;
-    require(!context->pool.record(doomed), "A drop counter without a serial was recorded");
+    const auto refused = context->pool.record(doomed);
+    require(!refused && refused.invalid && !refused.reported, "A drop counter without a serial was recorded, or not reported as invalid");
     doomed.completed_value = 4;
     const auto cancelled = context->pool.record(doomed);
     require(static_cast<bool>(cancelled), "Record a shadow copy that is cancelled");
     context->pool.cancel(cancelled.slot);
     context->pool.service(device.p, fence->GetCompletedValue());
     require(dropped.load() == 4 && restored.load() == 3, "A cancelled shadow copy did not report its drop, or reported completion");
+    require(source(taxi_camera::pfd_submission::DropSource::cancelled) == 1, "A cancelled shadow copy was not counted as cancelled");
     doomed.completed_value = 5;
     const auto uncertain_copy = context->pool.record(doomed);
     require(static_cast<bool>(uncertain_copy), "Record a shadow copy that is quarantined");
     context->pool.quarantine(uncertain_copy.slot);
     require(dropped.load() == 5, "A quarantined shadow copy did not report its drop");
+    require(source(taxi_camera::pfd_submission::DropSource::quarantined) == 1, "A quarantined shadow copy was not counted as quarantined");
     doomed.completed_value = 6;
     const auto ran = context->pool.record(doomed);
     require(static_cast<bool>(ran), "Record a shadow copy that runs");
     execute({ran}, nullptr, {});
     require(restored.load() == 6 && dropped.load() == 5, "A completed shadow copy reported a drop");
+    std::uint64_t counted = 0;
+    for (const auto& value : sources)
+      counted += value.load();
+    require(counted == 2, "Each dropped shadow copy is counted once, under one source");
     // Panel marks. With marks listed, a camera copy leaves each of them on the
     // panel and writes every other pixel of its area.
     auto plain = stamp;
