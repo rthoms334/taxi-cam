@@ -886,10 +886,10 @@ int main() {
             "Our wrapper back did not end the wait");
     obs::successful_reset(list, 1);
 
-    // An accepted hook must keep passing calls on. A method simply not called
-    // for a while (here: Draws only) keeps its acceptance; one that carried
-    // calls three intervals running and then none for three with list work
-    // elsewhere loses it.
+    // An accepted hook on an every-frame method must keep passing calls on:
+    // calls through it while other frame work happens keep its acceptance; it
+    // is dropped in the first interval with frame work through our own Draw
+    // slot and none through it, even straight after acceptance.
     table[26] = reinterpret_cast<void*>(&other_tool_barrier);
     require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Registration under the hook again");
     for (int round = 0; round < 3; ++round) {
@@ -897,26 +897,32 @@ int main() {
       chain = obs::service_chained_slots();
     }
     require(chain.accepted == 1 && obs::operational(), "The hook was not accepted again");
-    for (int round = 0; round < 5; ++round) {
-      list->DrawInstanced(3, 1, 0, 0);
-      chain = obs::service_chained_slots();
-      require(chain.chained == 1 && !chain.dropped && obs::operational(), "A quiet accepted slot was dropped");
-    }
     for (int round = 0; round < 3; ++round) {
       list->ResourceBarrier(1, &transition);
       list->DrawInstanced(3, 1, 0, 0);
       chain = obs::service_chained_slots();
+      require(chain.chained == 1 && !chain.dropped && obs::operational(), "A hook passing calls on was dropped");
     }
-    require(chain.chained == 1 && obs::operational(), "A busy accepted slot was dropped");
+    // An interval without any frame work gives no evidence either way.
+    chain = obs::service_chained_slots();
+    require(chain.chained == 1 && !chain.dropped, "An idle interval dropped the hook");
     other_tool_calls_through = false;
-    for (int round = 0; round < 3; ++round) {
-      list->ResourceBarrier(1, &transition);
-      list->DrawInstanced(3, 1, 0, 0);
-      chain = obs::service_chained_slots();
-      require(round == 2 || (chain.chained == 1 && !chain.dropped), "A busy slot was dropped before three silent intervals");
-    }
+    list->ResourceBarrier(1, &transition);
+    list->DrawInstanced(3, 1, 0, 0);
+    chain = obs::service_chained_slots();
     require(chain.dropped == 1 && chain.pending == 1 && !chain.chained && !obs::operational(),
             "A hook that stopped passing calls on kept its acceptance");
+    // Straight after a new acceptance, one silent interval is enough too.
+    other_tool_calls_through = true;
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The hook was not accepted after passing calls on again");
+    other_tool_calls_through = false;
+    list->DrawInstanced(3, 1, 0, 0);
+    chain = obs::service_chained_slots();
+    require(chain.dropped == 1 && !obs::operational(), "A hook bypassing ours right after acceptance kept it");
     // A new hook written over an accepted one replaces it and is probed.
     other_tool_calls_through = true;
     for (int round = 0; round < 3; ++round) {
@@ -993,6 +999,14 @@ int main() {
     extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     extended->EndRenderPass();
     require(obs::operational(), "BeginRenderPass refused the accepted End hook");
+    // EndRenderPass is not called every frame: intervals of Draws alone, or a
+    // burst of passes then a pause, keep its acceptance.
+    for (int round = 0; round < 5; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+      require(chain.chained == 4 && !chain.dropped && obs::operational(), "A quiet End hook was dropped");
+    }
     table[69] = end_wrapper;
     require(obs::register_list(list, 1, callbacks).ready && obs::operational() && !obs::service_chained_slots().chained,
             "Our End wrapper back did not clear the slot");

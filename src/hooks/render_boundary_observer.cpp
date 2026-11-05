@@ -42,11 +42,6 @@ struct Slot {
   void* pending = nullptr;
   void* chained = nullptr;
   unsigned probe_phase = 0;
-  // While accepted: consecutive intervals with calls through it, and with
-  // list work elsewhere but none through it; `established` once it has
-  // carried calls three intervals running.
-  unsigned streak = 0, silent = 0;
-  bool established = false;
 };
 struct Identity {
   std::uint64_t generation = 0;
@@ -1207,10 +1202,16 @@ ChainStatus service_chained_slots() noexcept {
   // Calls since the last service. A slot still holding our wrapper that ran
   // shows list work happened in this interval.
   const auto hits = hit_mask.exchange(0, std::memory_order_acq_rel);
-  bool work = false;
+  // ResourceBarrier, DrawInstanced and DrawIndexedInstanced run in every
+  // frame the simulator draws; the other methods run in bursts or not at all
+  // (MSFS issues no render passes). Calls through one of our own every-frame
+  // slots in an interval show that frame work happened in it.
+  constexpr std::uint32_t every_frame = (1u << 0) | (1u << 4) | (1u << 5);
+  std::uint32_t own = 0;
   for (std::size_t n = 0; n < slots.size(); ++n)
-    if (!slots[n].pending && !slots[n].chained && (hits & (1u << n)))
-      work = true;
+    if (!slots[n].pending && !slots[n].chained)
+      own |= 1u << n;
+  const auto frame_work = hits & own & every_frame;
   bool changed = false;
   for (UINT n = 0; n < slots.size(); ++n) {
     auto& slot = slots[n];
@@ -1218,28 +1219,15 @@ ChainStatus service_chained_slots() noexcept {
     void* current = nullptr;
     const bool read = pointer(slot.address, current);
     if (slot.chained && !slot.pending) {
-      // An accepted hook must keep passing calls on. Some methods go uncalled
-      // for long stretches (copies, enhanced barriers, End inside a pass), so
-      // only a slot that carried calls three intervals running and then none
-      // for three intervals with list work elsewhere loses its acceptance,
-      // which holds capture until it is proven again.
-      bool drop = false;
-      if (read && current == slot.chained) {
-        if (hits & bit) {
-          slot.silent = 0;
-          if (++slot.streak >= 3)
-            slot.established = true;
-        } else {
-          slot.streak = 0;
-          drop = work && slot.established && ++slot.silent >= 3;
-        }
-      }
-      if (drop) {
+      // An accepted hook on an every-frame method must keep passing calls on:
+      // an interval with frame work through our own every-frame slots and no
+      // call through it drops the acceptance, holding capture until it is
+      // proven again. Burst or unused methods give no such evidence (a quiet
+      // interval is normal), so their acceptance is kept.
+      if ((every_frame & bit) && read && current == slot.chained && !(hits & bit) && frame_work) {
         slot.pending = slot.chained;
         slot.chained = nullptr;
         slot.probe_phase = 0;
-        slot.streak = slot.silent = 0;
-        slot.established = false;
         changed = true;
         disable_capture();
         status.pending |= bit;
@@ -1268,9 +1256,6 @@ ChainStatus service_chained_slots() noexcept {
     slot.chained = slot.pending;
     slot.pending = nullptr;
     slot.probe_phase = 0;
-    slot.streak = 1;
-    slot.silent = 0;
-    slot.established = false;
     changed = true;
     status.chained |= bit;
     status.accepted |= bit;
