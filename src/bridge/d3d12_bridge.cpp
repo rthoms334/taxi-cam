@@ -2390,8 +2390,13 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
         count_lost_write(r, ShadowLostWrite::dropped);
     }
   }
-  // Queue copies need the verified Close endpoint and the worker's buffer.
-  const auto queue_ready = [&] { return r.close_forward_verified && shadow_fits(shadow, area, shadow_format(target)); };
+  // Queue copies need the verified Close endpoint and the worker's buffer. Only
+  // a display that repaints partially needs the shadow at all; one that
+  // repaints whole is stamped in the instrument's own list (direct), where no
+  // dropped submission can show its picture through the camera.
+  const auto queue_ready = [&] {
+    return r.profile && r.profile->partial_repaint[side] && r.close_forward_verified && shadow_fits(shadow, area, shadow_format(target));
+  };
   switch (shadow.mode) {
     case Mode::off:
       if (active) {
@@ -5079,7 +5084,9 @@ void service_display_shadows(Registry& r, const runtime::QueuePatchConfig& confi
       auto& shadow = r.shadows[side];
       const auto mode = update_shadow(r, side, now);
       const auto& target = r.selected_resources[side];
-      if (target && target->alive && display_item(r, *target) && config.formats[side] != DXGI_FORMAT_UNKNOWN) {
+      // Only a display that repaints partially keeps a shadow buffer.
+      if (target && target->alive && display_item(r, *target) && config.formats[side] != DXGI_FORMAT_UNKNOWN && r.profile &&
+          r.profile->partial_repaint[side]) {
         area = shadow_area(r, side, *target);
         format = config.formats[side];
         const auto bytes = std::uint64_t(area.right - area.left) * std::uint64_t(area.bottom - area.top) * 4;

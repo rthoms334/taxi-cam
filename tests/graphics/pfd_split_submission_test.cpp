@@ -364,11 +364,6 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   runtime::service();
   execute();
   pixels(false, false);
-  // Held Close-time stamps. Through views created after Connect the bridge
-  // sees the instrument draw the selected displays, so Close could stamp the
-  // camera inside the instrument's own list, where nothing can be saved first.
-  // These sides run on queue copies: Close holds its stamp, and the queue copy
-  // still shows the camera to the original consumer.
   Reference<ID3D12DescriptorHeap> late_heap;
   const D3D12_DESCRIPTOR_HEAP_DESC late_hd{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, count, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
   check(device->CreateDescriptorHeap(&late_hd, IID_PPV_ARGS(late_heap.put())), "RTV heap after Connect");
@@ -381,249 +376,280 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
     view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     device->CreateRenderTargetView(targets[i].get(), &view, late_rtvs[i]);
   }
-  const auto held_before = win::graphics_status();
-  record_frame(false, false, nullptr, nullptr, &late_rtvs);
-  execute();
-  pixels(false, false);
-  const auto held = win::graphics_status();
-  if (held.shadow_held <= held_before.shadow_held)
-    std::fprintf(
-        stderr, "Held stamps: held=%llu->%llu end_draws=%llu->%llu copies=%llu->%llu\n",
-        static_cast<unsigned long long>(held_before.shadow_held), static_cast<unsigned long long>(held.shadow_held),
-        static_cast<unsigned long long>(held_before.recording_end_draws), static_cast<unsigned long long>(held.recording_end_draws),
-        static_cast<unsigned long long>(held_before.preferred_copy_stamps), static_cast<unsigned long long>(held.preferred_copy_stamps));
-  require(held.shadow_held > held_before.shadow_held && held.recording_end_draws == held_before.recording_end_draws &&
-              held.preferred_copy_stamps == held_before.preferred_copy_stamps,
-          "Close held its stamp on queue-copy sides, and the queue copy still showed the camera");
-  // Display shadow. Under the camera the instrument repaints one rectangle
-  // only; the shadow goes back under that repaint and is saved again before
-  // the camera copy. When the camera stops, the shadow goes back before the
-  // instrument's next partial repaint: the display shows the instrument with
-  // both repaints and no camera pixel. A COMMON display has no state to copy
-  // in before the instrument's first write, so both repaints land on the
-  // camera and the shadow they miss comes back over them.
-  const D3D12_RECT under{40, 40, 80, 80}, after{600, 600, 640, 640};
-  const float under_colour[]{.1f, .8f, .3f, 1}, after_colour[]{.9f, .5f, .2f, 1};
-  record_frame(false, false, &under, under_colour);
-  execute();
-  pixels(false, false);
-  runtime::service();
-  const auto shadow = win::graphics_status();
-  if (shadow.shadow_modes[0] != 'q' || shadow.shadow_modes[1] != 'q' || shadow.shadow_fallbacks)
-    std::fprintf(stderr, "Shadow: modes=%s saves=%llu entry_restores=%llu lost_writes=%llu held=%llu fallbacks=%llu\n", shadow.shadow_modes,
-                 static_cast<unsigned long long>(shadow.shadow_saves), static_cast<unsigned long long>(shadow.shadow_entry_restores),
-                 static_cast<unsigned long long>(shadow.shadow_lost_writes), static_cast<unsigned long long>(shadow.shadow_held),
-                 static_cast<unsigned long long>(shadow.shadow_fallbacks));
-  require(shadow.shadow_saves && shadow.shadow_modes[0] == 'q' && shadow.shadow_modes[1] == 'q' && !shadow.shadow_fallbacks,
-          "Camera sides ran on queue copies and saved their shadows");
-  require(common || shadow.shadow_entry_restores, "The shadow went back under the instrument's writes");
-  std::uint64_t lost_by_total = 0;
-  for (const auto lost : shadow.shadow_lost_by)
-    lost_by_total += lost;
-  if (lost_by_total != shadow.shadow_lost_writes || (common && !shadow.shadow_lost_writes))
-    for (unsigned i = 0; i < shadow.shadow_lost_by.size(); ++i)
-      std::fprintf(stderr, "Shadow lost_by %s=%llu of %llu\n", win::shadow_lost_write_name(static_cast<win::ShadowLostWrite>(i)),
-                   static_cast<unsigned long long>(shadow.shadow_lost_by[i]), static_cast<unsigned long long>(shadow.shadow_lost_writes));
-  require(lost_by_total == shadow.shadow_lost_writes, "Every missed instrument write has one cause");
-  require(!common || (shadow.shadow_lost_writes &&
-                      shadow.shadow_lost_by[static_cast<unsigned>(win::ShadowLostWrite::not_insertable)] == shadow.shadow_lost_writes),
-          "Writes to a display found in COMMON are missed because nothing can go in before them");
-  win::set_target_mask(0);
-  win::service_display_patches();
-  record_frame(false, false, &after, after_colour);
-  execute();
-  require(win::graphics_status().shadow_restores >= 2, "Both sides restored their shadows when the camera stopped");
-  // The selected displays as the original consumer read them: the native
-  // gradient, with the instrument's repaints of `under` and `after` where
-  // those were kept, and no camera pixel anywhere.
-  const auto restored = [&](bool under_kept, bool after_kept, const char* message) {
-    for (unsigned i = 0; i < count; ++i) {
-      if (!selected[i])
-        continue;
-      void* mapped = nullptr;
-      const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes[i])};
-      check(readbacks[i]->Map(0, &range, &mapped), "Read restored display");
-      bool correct = true;
-      for (unsigned y = 0; y < 1024; ++y)
-        for (unsigned x = 0; x < 768; ++x) {
-          const auto* pixel = static_cast<unsigned char*>(mapped) + SIZE_T{footprints[i].Footprint.RowPitch} * y + x * 4;
-          const auto inside = [&](const D3D12_RECT& rect) {
-            return LONG(x) >= rect.left && LONG(x) < rect.right && LONG(y) >= rect.top && LONG(y) < rect.bottom;
-          };
-          if (under_kept && inside(under))
-            correct &= matches_pixel(pixel, {26, 204, 77, 255});
-          else if (after_kept && inside(after))
-            correct &= matches_pixel(pixel, {230, 128, 51, 255});
-          else
-            correct &= matches_pixel(pixel, {static_cast<unsigned char>(std::lround(255.f * x / 767)),
-                                             static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
-          ++checked;
-        }
-      const D3D12_RANGE none{0, 0};
-      readbacks[i]->Unmap(0, &none);
-      require(correct, message);
-    }
-  };
-  restored(!common, !common, "The display came back as the instrument left it, without the camera");
-  // A camera period whose first save never completes puts nothing back: the
-  // pool is not serviced before the camera stops, and a second later the
-  // shadow is forgotten with the camera possibly still on the display. The
-  // next period there saves the area as it is (a baseline) and restores it
-  // again when it stops, instead of never saving on that display again.
-  runtime::service();
-  win::service_display_patches();  // The completed restore ends that shadow.
-  const auto before_dirty = win::graphics_status();
-  win::set_target_mask(3);
-  win::service_display_patches();
-  runtime::service();  // Publishes this generation's camera patches.
-  record_frame(false, false);
-  execute();
-  win::set_target_mask(0);
-  win::service_display_patches();
-  Sleep(1100);
-  record_frame(false, false);
-  execute();
-  const auto forgotten = win::graphics_status();
-  if (forgotten.shadow_restores != before_dirty.shadow_restores || forgotten.shadow_modes[0] != '-')
-    std::fprintf(stderr, "Forgotten shadow: modes=%s saves=%llu->%llu restores=%llu->%llu baselines=%llu\n", forgotten.shadow_modes,
-                 static_cast<unsigned long long>(before_dirty.shadow_saves), static_cast<unsigned long long>(forgotten.shadow_saves),
-                 static_cast<unsigned long long>(before_dirty.shadow_restores), static_cast<unsigned long long>(forgotten.shadow_restores),
-                 static_cast<unsigned long long>(forgotten.shadow_baselines));
-  require(forgotten.shadow_saves > before_dirty.shadow_saves && forgotten.shadow_restores == before_dirty.shadow_restores &&
-              forgotten.shadow_modes[0] == '-' && forgotten.shadow_modes[1] == '-',
-          "A shadow whose first save never completed was put back");
-  win::set_target_mask(3);
-  win::service_display_patches();
-  runtime::service();
-  record_frame(false, false);
-  execute();
-  pixels(false, false);
-  runtime::service();  // The baseline save completes.
-  const auto baseline = win::graphics_status();
-  require(baseline.shadow_baselines >= forgotten.shadow_baselines + 2 && baseline.shadow_modes[0] == 'q' && baseline.shadow_modes[1] == 'q',
-          "A camera on a display that may hold the camera took a baseline");
-  win::set_target_mask(0);
-  win::service_display_patches();
-  record_frame(false, false, &after, after_colour);
-  execute();
-  require(win::graphics_status().shadow_restores >= baseline.shadow_restores + 2, "The baseline went back when the camera stopped");
-  restored(false, !common, "The baseline came back with the instrument's repaint, without the camera");
-  // A dropped first save proves nothing about the display: a packet
-  // quarantined after it was forwarded may have run. Another queue's
-  // unfinished receipt (a snapshot copy held behind a fence) makes the next
-  // display batch escape like issue 97, so the first saves of a clean camera
-  // period are planned and dropped. The save after them must be a baseline,
-  // not a clean save, and the restore must still bring back no camera pixel.
-  runtime::service();
-  win::service_display_patches();  // The completed restore ends that shadow.
-  Reference<ID3D12CommandQueue> other_queue;
-  check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(other_queue.put())), "Second application queue");
-  Reference<ID3D12Fence> queue_hold;
-  check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(queue_hold.put())), "Second queue blocker");
-  Recording exit_list;
-  exit_list.create(device.get());
-  exit_list.close();
-  exit_list.reset();
-  const auto first_selected = static_cast<unsigned>(std::find(selected.begin(), selected.end(), true) - selected.begin());
-  transition(exit_list.list.get(), targets[first_selected].get(), display_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-  transition(exit_list.list.get(), targets[first_selected].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, display_state);
-  exit_list.close();
-  require(win::request_display_snapshot(inventory[first_selected].id, GetTickCount64()) == win::DisplaySnapshotResult::pending,
-          "Snapshot for the second queue accepted");
-  check(other_queue->Wait(queue_hold.get(), 1), "Hold the second queue");
-  ID3D12CommandList* held_batch[]{exit_list.list.get()};
-  other_queue->ExecuteCommandLists(1, held_batch);
-  win::set_target_mask(3);
-  win::service_display_patches();
-  runtime::service();
-  const auto escapes = runtime::snapshot(key).capture.cross_queue_escapes;
-  const auto before_drop = win::graphics_status();
-  record_frame(false, false);
-  execute();
-  require(runtime::snapshot(key).capture.cross_queue_escapes > escapes && win::graphics_status().shadow_saves > before_drop.shadow_saves,
-          "The first saves were planned in a batch that escaped");
-  check(queue_hold->Signal(1), "Release the second queue");
-  require(drain_copy_queue(other_queue.get(), device.get()), "Second queue completed");
-  runtime::service();
-  record_frame(false, false);
-  execute();
-  const auto after_drop = win::graphics_status();
-  {
-    const auto escaped = static_cast<unsigned>(taxi_camera::pfd_submission::DropSource::escaped);
-    if (after_drop.shadow_drop_sources[escaped] < before_drop.shadow_drop_sources[escaped] + 2)
-      for (unsigned i = 0; i < after_drop.shadow_drop_sources.size(); ++i)
-        std::fprintf(stderr, "Shadow drops %s=%llu->%llu\n",
-                     taxi_camera::pfd_submission::drop_source_name(static_cast<taxi_camera::pfd_submission::DropSource>(i)),
-                     static_cast<unsigned long long>(before_drop.shadow_drop_sources[i]),
-                     static_cast<unsigned long long>(after_drop.shadow_drop_sources[i]));
-    require(after_drop.shadow_drop_sources[escaped] >= before_drop.shadow_drop_sources[escaped] + 2,
-            "The first saves of an escaped batch were counted as escaped");
-  }
-  require(after_drop.shadow_baselines >= before_drop.shadow_baselines + 2 && after_drop.shadow_modes[0] == 'q' &&
-              after_drop.shadow_modes[1] == 'q',
-          "After a dropped first save the next save was not a baseline");
-  pixels(false, false);
-  runtime::service();
-  win::poll_display_snapshot(GetTickCount64());
-  win::set_target_mask(0);
-  win::service_display_patches();
-  record_frame(false, false, &after, after_colour);
-  execute();
-  require(win::graphics_status().shadow_restores >= after_drop.shadow_restores + 2, "The shadow went back after a dropped first save");
-  restored(false, !common, "After a dropped first save the display came back without the camera");
-  runtime::service();
-  win::service_display_patches();
-  // A camera period whose first copy runs on another queue: an Execute there
-  // that leaves the display alone carries the camera over the instrument's
-  // last frame, and its save is on that queue. The instrument's writes on the
-  // application queue must still get the shadow back under them (it is taken
-  // again there), and the stop must restore it there, not wait for the other
-  // queue. A copy is carried only over a state a display list's exit left: a
-  // COMMON display, or the separate placement's last list (the consumer's
-  // copy round trip), leaves none.
-  if (!common && mixed_exit) {
-    Recording idle_list;
-    idle_list.create(device.get());
-    idle_list.close();
-    idle_list.reset();
-    idle_list.close();
-    record_frame(false, false);  // The instrument's frame the camera covers first.
-    execute();
-    win::set_target_mask(3);
-    win::service_display_patches();
-    runtime::service();
-    const auto before_other = win::graphics_status();
-    ID3D12CommandList* idle_batch[]{idle_list.list.get()};
-    other_queue->ExecuteCommandLists(1, idle_batch);
-    require(drain_copy_queue(other_queue.get(), device.get()), "Second queue camera copy completed");
-    require(win::graphics_status().shadow_saves >= before_other.shadow_saves + 2, "The camera's first copies saved on the second queue");
-    runtime::service();
-    record_frame(false, false);
+  if (!profile.partial_repaint[0]) {
+    // A display that repaints whole keeps no shadow: Close stamps the camera
+    // inside the instrument's own list, so a submission that loses its queue
+    // copy still shows the camera.
+    const auto before = win::graphics_status();
+    record_frame(false, false, nullptr, nullptr, &late_rtvs);
     execute();
     pixels(false, false);
     runtime::service();
+    const auto stamped = win::graphics_status();
+    if (stamped.shadow_modes[0] != 'd' || stamped.shadow_modes[1] != 'd' || stamped.shadow_held != before.shadow_held ||
+        stamped.recording_end_draws + stamped.preferred_copy_stamps <= before.recording_end_draws + before.preferred_copy_stamps)
+      std::fprintf(stderr, "Whole-repaint stamps: modes=%s held=%llu->%llu end_draws=%llu->%llu copies=%llu->%llu saves=%llu\n",
+                   stamped.shadow_modes, static_cast<unsigned long long>(before.shadow_held),
+                   static_cast<unsigned long long>(stamped.shadow_held), static_cast<unsigned long long>(before.recording_end_draws),
+                   static_cast<unsigned long long>(stamped.recording_end_draws),
+                   static_cast<unsigned long long>(before.preferred_copy_stamps),
+                   static_cast<unsigned long long>(stamped.preferred_copy_stamps), static_cast<unsigned long long>(stamped.shadow_saves));
+    require(stamped.shadow_modes[0] == 'd' && stamped.shadow_modes[1] == 'd' && stamped.shadow_held == before.shadow_held &&
+                !stamped.shadow_saves &&
+                stamped.recording_end_draws + stamped.preferred_copy_stamps > before.recording_end_draws + before.preferred_copy_stamps,
+            "A display that repaints whole was stamped in the instrument's list, with no shadow");
+  } else {
+    // Held Close-time stamps. Through views created after Connect the bridge
+    // sees the instrument draw the selected displays, so Close could stamp the
+    // camera inside the instrument's own list, where nothing can be saved first.
+    // These sides run on queue copies: Close holds its stamp, and the queue copy
+    // still shows the camera to the original consumer.
+    const auto held_before = win::graphics_status();
+    record_frame(false, false, nullptr, nullptr, &late_rtvs);
+    execute();
+    pixels(false, false);
+    const auto held = win::graphics_status();
+    if (held.shadow_held <= held_before.shadow_held)
+      std::fprintf(
+          stderr, "Held stamps: held=%llu->%llu end_draws=%llu->%llu copies=%llu->%llu\n",
+          static_cast<unsigned long long>(held_before.shadow_held), static_cast<unsigned long long>(held.shadow_held),
+          static_cast<unsigned long long>(held_before.recording_end_draws), static_cast<unsigned long long>(held.recording_end_draws),
+          static_cast<unsigned long long>(held_before.preferred_copy_stamps), static_cast<unsigned long long>(held.preferred_copy_stamps));
+    require(held.shadow_held > held_before.shadow_held && held.recording_end_draws == held_before.recording_end_draws &&
+                held.preferred_copy_stamps == held_before.preferred_copy_stamps,
+            "Close held its stamp on queue-copy sides, and the queue copy still showed the camera");
+    // Display shadow. Under the camera the instrument repaints one rectangle
+    // only; the shadow goes back under that repaint and is saved again before
+    // the camera copy. When the camera stops, the shadow goes back before the
+    // instrument's next partial repaint: the display shows the instrument with
+    // both repaints and no camera pixel. A COMMON display has no state to copy
+    // in before the instrument's first write, so both repaints land on the
+    // camera and the shadow they miss comes back over them.
+    const D3D12_RECT under{40, 40, 80, 80}, after{600, 600, 640, 640};
+    const float under_colour[]{.1f, .8f, .3f, 1}, after_colour[]{.9f, .5f, .2f, 1};
     record_frame(false, false, &under, under_colour);
     execute();
+    pixels(false, false);
     runtime::service();
-    const auto rebound = win::graphics_status();
-    if (rebound.shadow_entry_restores < before_other.shadow_entry_restores + 2)
-      std::fprintf(stderr, "Other-queue shadow: saves=%llu->%llu entry_restores=%llu->%llu lost_writes=%llu->%llu\n",
-                   static_cast<unsigned long long>(before_other.shadow_saves), static_cast<unsigned long long>(rebound.shadow_saves),
-                   static_cast<unsigned long long>(before_other.shadow_entry_restores),
-                   static_cast<unsigned long long>(rebound.shadow_entry_restores),
-                   static_cast<unsigned long long>(before_other.shadow_lost_writes),
-                   static_cast<unsigned long long>(rebound.shadow_lost_writes));
-    require(rebound.shadow_entry_restores >= before_other.shadow_entry_restores + 2,
-            "A shadow saved on another queue went back under the application queue's writes");
+    const auto shadow = win::graphics_status();
+    if (shadow.shadow_modes[0] != 'q' || shadow.shadow_modes[1] != 'q' || shadow.shadow_fallbacks)
+      std::fprintf(stderr, "Shadow: modes=%s saves=%llu entry_restores=%llu lost_writes=%llu held=%llu fallbacks=%llu\n",
+                   shadow.shadow_modes, static_cast<unsigned long long>(shadow.shadow_saves),
+                   static_cast<unsigned long long>(shadow.shadow_entry_restores),
+                   static_cast<unsigned long long>(shadow.shadow_lost_writes), static_cast<unsigned long long>(shadow.shadow_held),
+                   static_cast<unsigned long long>(shadow.shadow_fallbacks));
+    require(shadow.shadow_saves && shadow.shadow_modes[0] == 'q' && shadow.shadow_modes[1] == 'q' && !shadow.shadow_fallbacks,
+            "Camera sides ran on queue copies and saved their shadows");
+    require(common || shadow.shadow_entry_restores, "The shadow went back under the instrument's writes");
+    std::uint64_t lost_by_total = 0;
+    for (const auto lost : shadow.shadow_lost_by)
+      lost_by_total += lost;
+    if (lost_by_total != shadow.shadow_lost_writes || (common && !shadow.shadow_lost_writes))
+      for (unsigned i = 0; i < shadow.shadow_lost_by.size(); ++i)
+        std::fprintf(stderr, "Shadow lost_by %s=%llu of %llu\n", win::shadow_lost_write_name(static_cast<win::ShadowLostWrite>(i)),
+                     static_cast<unsigned long long>(shadow.shadow_lost_by[i]), static_cast<unsigned long long>(shadow.shadow_lost_writes));
+    require(lost_by_total == shadow.shadow_lost_writes, "Every missed instrument write has one cause");
+    require(!common || (shadow.shadow_lost_writes &&
+                        shadow.shadow_lost_by[static_cast<unsigned>(win::ShadowLostWrite::not_insertable)] == shadow.shadow_lost_writes),
+            "Writes to a display found in COMMON are missed because nothing can go in before them");
     win::set_target_mask(0);
     win::service_display_patches();
     record_frame(false, false, &after, after_colour);
     execute();
-    require(win::graphics_status().shadow_restores >= rebound.shadow_restores + 2,
-            "The camera's stop restored the shadow on the application queue");
-    restored(true, true, "After a first copy on another queue the display came back without the camera");
+    require(win::graphics_status().shadow_restores >= 2, "Both sides restored their shadows when the camera stopped");
+    // The selected displays as the original consumer read them: the native
+    // gradient, with the instrument's repaints of `under` and `after` where
+    // those were kept, and no camera pixel anywhere.
+    const auto restored = [&](bool under_kept, bool after_kept, const char* message) {
+      for (unsigned i = 0; i < count; ++i) {
+        if (!selected[i])
+          continue;
+        void* mapped = nullptr;
+        const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes[i])};
+        check(readbacks[i]->Map(0, &range, &mapped), "Read restored display");
+        bool correct = true;
+        for (unsigned y = 0; y < 1024; ++y)
+          for (unsigned x = 0; x < 768; ++x) {
+            const auto* pixel = static_cast<unsigned char*>(mapped) + SIZE_T{footprints[i].Footprint.RowPitch} * y + x * 4;
+            const auto inside = [&](const D3D12_RECT& rect) {
+              return LONG(x) >= rect.left && LONG(x) < rect.right && LONG(y) >= rect.top && LONG(y) < rect.bottom;
+            };
+            if (under_kept && inside(under))
+              correct &= matches_pixel(pixel, {26, 204, 77, 255});
+            else if (after_kept && inside(after))
+              correct &= matches_pixel(pixel, {230, 128, 51, 255});
+            else
+              correct &= matches_pixel(pixel, {static_cast<unsigned char>(std::lround(255.f * x / 767)),
+                                               static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
+            ++checked;
+          }
+        const D3D12_RANGE none{0, 0};
+        readbacks[i]->Unmap(0, &none);
+        require(correct, message);
+      }
+    };
+    restored(!common, !common, "The display came back as the instrument left it, without the camera");
+    // A camera period whose first save never completes puts nothing back: the
+    // pool is not serviced before the camera stops, and a second later the
+    // shadow is forgotten with the camera possibly still on the display. The
+    // next period there saves the area as it is (a baseline) and restores it
+    // again when it stops, instead of never saving on that display again.
+    runtime::service();
+    win::service_display_patches();  // The completed restore ends that shadow.
+    const auto before_dirty = win::graphics_status();
+    win::set_target_mask(3);
+    win::service_display_patches();
+    runtime::service();  // Publishes this generation's camera patches.
+    record_frame(false, false);
+    execute();
+    win::set_target_mask(0);
+    win::service_display_patches();
+    Sleep(1100);
+    record_frame(false, false);
+    execute();
+    const auto forgotten = win::graphics_status();
+    if (forgotten.shadow_restores != before_dirty.shadow_restores || forgotten.shadow_modes[0] != '-')
+      std::fprintf(stderr, "Forgotten shadow: modes=%s saves=%llu->%llu restores=%llu->%llu baselines=%llu\n", forgotten.shadow_modes,
+                   static_cast<unsigned long long>(before_dirty.shadow_saves), static_cast<unsigned long long>(forgotten.shadow_saves),
+                   static_cast<unsigned long long>(before_dirty.shadow_restores),
+                   static_cast<unsigned long long>(forgotten.shadow_restores), static_cast<unsigned long long>(forgotten.shadow_baselines));
+    require(forgotten.shadow_saves > before_dirty.shadow_saves && forgotten.shadow_restores == before_dirty.shadow_restores &&
+                forgotten.shadow_modes[0] == '-' && forgotten.shadow_modes[1] == '-',
+            "A shadow whose first save never completed was put back");
+    win::set_target_mask(3);
+    win::service_display_patches();
+    runtime::service();
+    record_frame(false, false);
+    execute();
+    pixels(false, false);
+    runtime::service();  // The baseline save completes.
+    const auto baseline = win::graphics_status();
+    require(
+        baseline.shadow_baselines >= forgotten.shadow_baselines + 2 && baseline.shadow_modes[0] == 'q' && baseline.shadow_modes[1] == 'q',
+        "A camera on a display that may hold the camera took a baseline");
+    win::set_target_mask(0);
+    win::service_display_patches();
+    record_frame(false, false, &after, after_colour);
+    execute();
+    require(win::graphics_status().shadow_restores >= baseline.shadow_restores + 2, "The baseline went back when the camera stopped");
+    restored(false, !common, "The baseline came back with the instrument's repaint, without the camera");
+    // A dropped first save proves nothing about the display: a packet
+    // quarantined after it was forwarded may have run. Another queue's
+    // unfinished receipt (a snapshot copy held behind a fence) makes the next
+    // display batch escape like issue 97, so the first saves of a clean camera
+    // period are planned and dropped. The save after them must be a baseline,
+    // not a clean save, and the restore must still bring back no camera pixel.
+    runtime::service();
+    win::service_display_patches();  // The completed restore ends that shadow.
+    Reference<ID3D12CommandQueue> other_queue;
+    check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(other_queue.put())), "Second application queue");
+    Reference<ID3D12Fence> queue_hold;
+    check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(queue_hold.put())), "Second queue blocker");
+    Recording exit_list;
+    exit_list.create(device.get());
+    exit_list.close();
+    exit_list.reset();
+    const auto first_selected = static_cast<unsigned>(std::find(selected.begin(), selected.end(), true) - selected.begin());
+    transition(exit_list.list.get(), targets[first_selected].get(), display_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    transition(exit_list.list.get(), targets[first_selected].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, display_state);
+    exit_list.close();
+    require(win::request_display_snapshot(inventory[first_selected].id, GetTickCount64()) == win::DisplaySnapshotResult::pending,
+            "Snapshot for the second queue accepted");
+    check(other_queue->Wait(queue_hold.get(), 1), "Hold the second queue");
+    ID3D12CommandList* held_batch[]{exit_list.list.get()};
+    other_queue->ExecuteCommandLists(1, held_batch);
+    win::set_target_mask(3);
+    win::service_display_patches();
+    runtime::service();
+    const auto escapes = runtime::snapshot(key).capture.cross_queue_escapes;
+    const auto before_drop = win::graphics_status();
+    record_frame(false, false);
+    execute();
+    require(runtime::snapshot(key).capture.cross_queue_escapes > escapes && win::graphics_status().shadow_saves > before_drop.shadow_saves,
+            "The first saves were planned in a batch that escaped");
+    check(queue_hold->Signal(1), "Release the second queue");
+    require(drain_copy_queue(other_queue.get(), device.get()), "Second queue completed");
+    runtime::service();
+    record_frame(false, false);
+    execute();
+    const auto after_drop = win::graphics_status();
+    {
+      const auto escaped = static_cast<unsigned>(taxi_camera::pfd_submission::DropSource::escaped);
+      if (after_drop.shadow_drop_sources[escaped] < before_drop.shadow_drop_sources[escaped] + 2)
+        for (unsigned i = 0; i < after_drop.shadow_drop_sources.size(); ++i)
+          std::fprintf(stderr, "Shadow drops %s=%llu->%llu\n",
+                       taxi_camera::pfd_submission::drop_source_name(static_cast<taxi_camera::pfd_submission::DropSource>(i)),
+                       static_cast<unsigned long long>(before_drop.shadow_drop_sources[i]),
+                       static_cast<unsigned long long>(after_drop.shadow_drop_sources[i]));
+      require(after_drop.shadow_drop_sources[escaped] >= before_drop.shadow_drop_sources[escaped] + 2,
+              "The first saves of an escaped batch were counted as escaped");
+    }
+    require(after_drop.shadow_baselines >= before_drop.shadow_baselines + 2 && after_drop.shadow_modes[0] == 'q' &&
+                after_drop.shadow_modes[1] == 'q',
+            "After a dropped first save the next save was not a baseline");
+    pixels(false, false);
+    runtime::service();
+    win::poll_display_snapshot(GetTickCount64());
+    win::set_target_mask(0);
+    win::service_display_patches();
+    record_frame(false, false, &after, after_colour);
+    execute();
+    require(win::graphics_status().shadow_restores >= after_drop.shadow_restores + 2, "The shadow went back after a dropped first save");
+    restored(false, !common, "After a dropped first save the display came back without the camera");
     runtime::service();
     win::service_display_patches();
+    // A camera period whose first copy runs on another queue: an Execute there
+    // that leaves the display alone carries the camera over the instrument's
+    // last frame, and its save is on that queue. The instrument's writes on the
+    // application queue must still get the shadow back under them (it is taken
+    // again there), and the stop must restore it there, not wait for the other
+    // queue. A copy is carried only over a state a display list's exit left: a
+    // COMMON display, or the separate placement's last list (the consumer's
+    // copy round trip), leaves none.
+    if (!common && mixed_exit) {
+      Recording idle_list;
+      idle_list.create(device.get());
+      idle_list.close();
+      idle_list.reset();
+      idle_list.close();
+      record_frame(false, false);  // The instrument's frame the camera covers first.
+      execute();
+      win::set_target_mask(3);
+      win::service_display_patches();
+      runtime::service();
+      const auto before_other = win::graphics_status();
+      ID3D12CommandList* idle_batch[]{idle_list.list.get()};
+      other_queue->ExecuteCommandLists(1, idle_batch);
+      require(drain_copy_queue(other_queue.get(), device.get()), "Second queue camera copy completed");
+      require(win::graphics_status().shadow_saves >= before_other.shadow_saves + 2, "The camera's first copies saved on the second queue");
+      runtime::service();
+      record_frame(false, false);
+      execute();
+      pixels(false, false);
+      runtime::service();
+      record_frame(false, false, &under, under_colour);
+      execute();
+      runtime::service();
+      const auto rebound = win::graphics_status();
+      if (rebound.shadow_entry_restores < before_other.shadow_entry_restores + 2)
+        std::fprintf(stderr, "Other-queue shadow: saves=%llu->%llu entry_restores=%llu->%llu lost_writes=%llu->%llu\n",
+                     static_cast<unsigned long long>(before_other.shadow_saves), static_cast<unsigned long long>(rebound.shadow_saves),
+                     static_cast<unsigned long long>(before_other.shadow_entry_restores),
+                     static_cast<unsigned long long>(rebound.shadow_entry_restores),
+                     static_cast<unsigned long long>(before_other.shadow_lost_writes),
+                     static_cast<unsigned long long>(rebound.shadow_lost_writes));
+      require(rebound.shadow_entry_restores >= before_other.shadow_entry_restores + 2,
+              "A shadow saved on another queue went back under the application queue's writes");
+      win::set_target_mask(0);
+      win::service_display_patches();
+      record_frame(false, false, &after, after_colour);
+      execute();
+      require(win::graphics_status().shadow_restores >= rebound.shadow_restores + 2,
+              "The camera's stop restored the shadow on the application queue");
+      restored(true, true, "After a first copy on another queue the display came back without the camera");
+      runtime::service();
+      win::service_display_patches();
+    }
   }
   handoff.stop_scene();
   runtime::reset_feed(key);
