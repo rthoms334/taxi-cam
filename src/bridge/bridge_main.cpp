@@ -902,8 +902,7 @@ DWORD run_impl() {
   win::WaitingPageTimer waiting_page;
   // Diagnostic: how long a door camera turn-on takes, stage by stage.
   struct DoorTrace {
-    float value{};
-    std::uint32_t generation{};
+    std::uint32_t rises{}, generation{};
     std::uint64_t lvar_ms{}, cause_ms{}, on_ms{}, waiting_end_ms{}, page_ms{}, base_pages{};
     bool seen{}, on{}, logged{}, waiting{};
   } door_trace;
@@ -1852,8 +1851,9 @@ DWORD run_impl() {
     win::set_waiting_mask(waiting_mask);
     win::set_door_mask(door & active);
     {
-      // Door turn-on stages. The cause is a change of the door camera's own
-      // bound L:var since it last turned on or off (the companion turns it on
+      // Door turn-on stages. The cause is a rise of the door camera's own
+      // bound L:var (a press, or reaching an equals value; never a release)
+      // since it last turned on or off (the companion turns it on
       // from that change, through the settings it writes back); -1 without one.
       auto& t = door_trace;
       const auto tick = GetTickCount64();
@@ -1864,9 +1864,9 @@ DWORD run_impl() {
         t.seen = false;
       }
       if (const auto& read = lvars.states[win::CameraDoor]; lvars.generation && read.read) {
-        if (t.seen && read.value != t.value)
+        if (t.seen && read.rises != t.rises)
           t.lvar_ms = tick;
-        t.value = read.value;
+        t.rises = read.rises;
         t.seen = true;
       }
       const unsigned door_bit = door & active;
