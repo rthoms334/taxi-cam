@@ -901,6 +901,7 @@ DWORD run_impl() {
   WindowPauseLatch window_pause;
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
+  win::DoorWaitRelease door_wait;
   // Diagnostic: how long a door camera turn-on takes, stage by stage.
   struct DoorTrace {
     std::uint32_t rises{}, generation{};
@@ -1852,7 +1853,8 @@ DWORD run_impl() {
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending || (door & active) != 0);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
-    const auto waiting_mask = waiting_page.observe(GetTickCount64(), active, mask);
+    const auto waiting_mask =
+        waiting_page.observe(GetTickCount64(), active, mask) & ~door_wait.observe(door & active, door_page.pages, door_page.ready);
     win::set_waiting_mask(waiting_mask);
     win::set_door_mask(door & active);
     {

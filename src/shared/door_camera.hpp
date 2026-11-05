@@ -32,6 +32,26 @@ class DoorSnapshot {
   bool on_ = false;
   std::uint64_t base_ = 0;
 };
+// The door camera's display leaves its PLEASE WAIT page as soon as a door
+// page composed since this turn-on is ready (pages past the count at turn-on),
+// not after the taxi cameras' WaitingPageMinimumMs: its first picture takes
+// about 0.1-0.2 s, and the minimum held it back to 0.75 s (A350, 2026-11-05).
+// An older page is never shown in its place. Returns the door side bits whose
+// waiting page may end.
+class DoorWaitRelease {
+ public:
+  unsigned observe(unsigned door_mask, std::uint64_t pages, bool ready) noexcept {
+    // A restarted page count (a feed or session reset) counts from there.
+    if ((door_mask && !on_) || pages < base_)
+      base_ = pages;
+    on_ = door_mask != 0;
+    return door_mask && ready && pages > base_ ? door_mask : 0u;
+  }
+
+ private:
+  bool on_ = false;
+  std::uint64_t base_ = 0;
+};
 inline DoorState door_state(bool on, bool live, bool page) noexcept {
   return !on ? DoorState::off : !page ? DoorState::waiting : live ? DoorState::live : DoorState::snapshot;
 }

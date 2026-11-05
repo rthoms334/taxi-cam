@@ -47,7 +47,7 @@ using namespace taxi_camera;
 namespace win = standalone;
 using win::decimal, win::tr, win::tr_format;
 constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3, WhatsNewImageMessage = WM_APP + 4,
-               ExitWithSimulatorMessage = WM_APP + 5, AreaPickerMessage = WM_APP + 6;
+               ExitWithSimulatorMessage = WM_APP + 5, AreaPickerMessage = WM_APP + 6, LvarMessage = WM_APP + 7;
 constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CAM_VERSION_MINOR, TAXI_CAM_VERSION_PATCH};
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
@@ -7381,7 +7381,28 @@ DWORD WINAPI connection_worker(void*) {
       }
       PostMessageW(window, StatusMessage, 0, 0);
     }
-    Sleep(200);
+    // Bound cockpit L:vars act within a 50 ms step of this 200 ms status
+    // cadence: each step writes the settings and reads the L:vars, and only a
+    // changed reading wakes the window (service_lvar_bindings). The door
+    // camera's VIDEO key otherwise waited 230-410 ms to turn on (2026-11-05).
+    for (int step = 0; step < 4 && running.load(); ++step) {
+      Sleep(50);
+      win::Status quick;
+      if (connection_disconnected.load(std::memory_order_acquire) || !exchange_control(mailbox, &quick))
+        continue;
+      bool changed = false;
+      {
+        const std::lock_guard lock(app_mutex);
+        if (status.heartbeat && !connection_disconnected.load(std::memory_order_acquire) &&
+            (quick.lvar_generation != status.lvar_generation || std::memcmp(&quick.lvars, &status.lvars, sizeof(status.lvars)) != 0)) {
+          status.lvar_generation = quick.lvar_generation;
+          status.lvars = quick.lvars;
+          changed = true;
+        }
+      }
+      if (changed)
+        PostMessageW(window, LvarMessage, 0, 0);
+    }
   }
   if (mailbox.data() && mailbox.lock(100)) {
     mailbox.data()->settings.enabled = 0;
@@ -7834,6 +7855,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case AreaPickerMessage:
       if (page == SetupPage)
         show_area_picker(static_cast<unsigned>(w));
+      return 0;
+    case LvarMessage:
+      service_lvar_bindings();
       return 0;
     case StatusMessage:
       refresh_connection_button();
