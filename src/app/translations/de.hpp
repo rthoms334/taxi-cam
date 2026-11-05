@@ -344,6 +344,8 @@ inline constexpr Translation GermanTranslations[]{
     {L"{0} is back to how it comes with Taxi Cam.", L"{0} ist wieder wie bei Taxi Cam ausgeliefert."},
     {L"{0}'s displays and door camera are back to how they come with Taxi Cam.",
      L"Anzeigen und Türkamera von {0} sind wieder wie bei Taxi Cam ausgeliefert."},
+    {L"{0}'s saved settings cannot be read, so only Factory reset can bring it back.",
+     L"Die gespeicherten Einstellungen von {0} können nicht gelesen werden, daher stellen nur die Werkseinstellungen es wieder her."},
     {L"Could not reset it. Check access to your local settings folder.",
      L"Zurücksetzen nicht möglich. Prüfen Sie den Zugriff auf Ihren lokalen Einstellungsordner."},
     {L"Remove {0}? Its displays and camera positions are deleted. You can set it up again.",

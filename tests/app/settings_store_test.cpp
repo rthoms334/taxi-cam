@@ -501,6 +501,15 @@ void built_in_resets() {
   set_up.profile = profiles::DiscoveredProfileId;
   require(!reset_settings(set_up, SettingsReset::factory) && !reset_settings(set_up, SettingsReset::displays),
           "A set-up aircraft ships no settings to reset to");
+  // A saved file that fails validation cannot be loaded, but the shipped load
+  // Factory reset starts from never reads it.
+  const auto ini_path = settings_override + L"\\profiles\\ini-a380.ini";
+  patch(ini_path, L"guides", L"nose_dot_x", L"0.9");
+  require(!load_settings(loaded, L"missing-installation", profiles::IniA380.id), "An invalid saved file is refused");
+  require(load_settings(loaded, L"missing-installation", profiles::IniA380.id, {}, nullptr, true) &&
+              reset_settings(loaded, SettingsReset::factory) && save_settings(loaded, false) &&
+              load_settings(loaded, L"missing-installation", profiles::IniA380.id) && loaded.nose_dot == shipped.nose_dot,
+          "Factory reset repairs a saved file that cannot be loaded");
 }
 
 void rejected_preferences_are_left_unchanged() {

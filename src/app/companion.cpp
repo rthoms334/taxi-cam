@@ -5599,8 +5599,17 @@ void reset_saved_aircraft(HWND hwnd, win::SettingsReset kind) {
     if (!apply())
       return;
     next = draft();
-  } else if (!win::load_settings(next, installation, selected->profile)) {
-    SetDlgItemTextW(hwnd, 803, tr(L"Could not reset it. Check access to your local settings folder."));
+    // The displays placed this flight (Setup → Displays, Texture routing) are
+    // routes of their own: back to automatic, as Use default displays does,
+    // so the cameras do not go back to them when the bridge routes again.
+    win::update_target_assignment(next.left_id, next.right_id, next.route_request, 0, 0, next.lower_id, 0);
+  } else if (!win::load_settings(next, installation, selected->profile) &&
+             !(factory && win::load_settings(next, installation, selected->profile, {}, nullptr, true))) {
+    // A saved file that cannot be read still takes a factory reset, which
+    // needs nothing from it; Reset displays keeps the rest of it, so refuses.
+    SetDlgItemTextW(hwnd, 803,
+                    factory ? tr(L"Could not reset it. Check access to your local settings folder.")
+                            : tr_format(L"{0}'s saved settings cannot be read, so only Factory reset can bring it back.", {name}).c_str());
     return;
   }
   if (!win::reset_settings(next, kind) || !win::save_settings(next, in_use)) {

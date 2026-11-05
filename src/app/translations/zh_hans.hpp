@@ -301,6 +301,8 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
      L"将 {0} 的显示屏与舱门摄像头恢复为 Taxi Cam 随附的状态？摄像头位置、标线及你的其他设置将保留。"},
     {L"{0} is back to how it comes with Taxi Cam.", L"{0} 已恢复为 Taxi Cam 随附的状态。"},
     {L"{0}'s displays and door camera are back to how they come with Taxi Cam.", L"{0} 的显示屏与舱门摄像头已恢复为 Taxi Cam 随附的状态。"},
+    {L"{0}'s saved settings cannot be read, so only Factory reset can bring it back.",
+     L"无法读取 {0} 已保存的设置，因此只能通过「恢复出厂设置」恢复。"},
     {L"Could not reset it. Check access to your local settings folder.", L"无法重置。请检查本地设置文件夹的访问权限。"},
     {L"Remove {0}? Its displays and camera positions are deleted. You can set it up again.",
      L"移除 {0}？其显示屏与摄像头位置将被删除。你可以重新设置它。"},
