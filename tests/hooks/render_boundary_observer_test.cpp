@@ -1043,6 +1043,34 @@ int main() {
     require(obs::register_list(list, 1, callbacks).ready && obs::operational() && !obs::service_chained_slots().pending,
             "Our every-frame wrappers back did not end the wait");
     obs::successful_reset(list, 1);
+    // The service follows the slot without any new registration: the simulator
+    // reuses its lists, so registration may not run again.
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The hook was not waited on");
+    table[26] = legacy_wrapper;
+    chain = obs::service_chained_slots();
+    require(!chain.pending && !chain.chained && obs::operational(), "A hook removed before acceptance kept the slot waiting");
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The hook was not waited on again");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The hook was not accepted before being replaced");
+    table[26] = reinterpret_cast<void*>(&other_tool_draw);  // another tool's entry over the accepted hook
+    chain = obs::service_chained_slots();
+    require(chain.pending == 1 && !chain.chained && !obs::operational() && obs::last_slot_change().index == 26,
+            "A replaced accepted hook kept capture on until a list registered");
+    table[26] = legacy_wrapper;
+    chain = obs::service_chained_slots();
+    require(!chain.pending && !chain.chained && obs::operational(), "Our wrapper back did not end the wait without a registration");
+    obs::successful_reset(list, 1);
+    // A null entry is no hook: refused as a changed slot, as before.
+    table[26] = nullptr;
+    require(!obs::register_list(list, 1, callbacks).ready && !obs::operational(), "A null slot entry was accepted");
+    table[26] = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational(), "Our wrapper back after a null entry");
+    obs::successful_reset(list, 1);
 
     // Real D3D12 swaps the same object's vtable during BeginRenderPass. Each
     // observed active table needs its own original End and bounded trampoline.

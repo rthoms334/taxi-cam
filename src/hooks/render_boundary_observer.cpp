@@ -1,9 +1,10 @@
 #include "render_boundary_observer.hpp"
-#include "../graphics/native_device_identity.hpp"
-#include "../shared/hook_timing.hpp"
 #include <array>
 #include <atomic>
 #include <unordered_map>
+#include "../graphics/native_device_identity.hpp"
+#include "../shared/hook_timing.hpp"
+#include "../shared/lock_holder_priority.hpp"
 #ifdef TAXI_RENDER_BOUNDARY_VALIDATION
 extern "C" BOOL taxi_boundary_test_virtual_protect(void*, SIZE_T, DWORD, PDWORD) noexcept;
 extern "C" SIZE_T taxi_boundary_test_virtual_query(const void*, MEMORY_BASIC_INFORMATION*, SIZE_T) noexcept;
@@ -1091,8 +1092,8 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     // Another hook written over our installed one. Lists keep registering
     // (refusing them would refuse every new list from now on), but capture
     // stays off until service() sees our wrapper called through that hook.
-    if (read && slot.installed && current != slot.wrapper && current != slot.forward) {
-      if (current == slot.chained) {
+    if (read && current && slot.installed && current != slot.wrapper && current != slot.forward) {
+      if (slot.chained && current == slot.chained) {
         // The accepted hook is back over another one that came and went:
         // nothing waits on that other hook any more.
         if (slot.pending) {
@@ -1187,15 +1188,24 @@ ChainStatus service_chained_slots() noexcept {
   ChainStatus status;
   // Nothing watched: no lock at all. Otherwise the worker never waits for the
   // control lock the render threads take: a busy lock skips this interval.
-  if (inside || !watched_mask.load(std::memory_order_acquire))
+  if (inside || !watched_mask.load(std::memory_order_acquire)) {
+    last_chained.store(0, std::memory_order_relaxed);
+    last_pending.store(0, std::memory_order_relaxed);
     return status;
+  }
   if (!TryAcquireSRWLockExclusive(&control_lock)) {
     status.chained = last_chained.load(std::memory_order_relaxed);
     status.pending = last_pending.load(std::memory_order_relaxed);
     return status;
   }
+  // Held above normal priority, as the bridge's registry lock is: render
+  // threads wait on this lock and on the identity shards disable_capture takes.
+  taxi_camera::lock_holder_priority::enter();
   struct Release {
-    ~Release() { ReleaseSRWLockExclusive(&control_lock); }
+    ~Release() {
+      ReleaseSRWLockExclusive(&control_lock);
+      taxi_camera::lock_holder_priority::leave();
+    }
   } release;
   if (!configured || removed)
     return status;
@@ -1212,12 +1222,36 @@ ChainStatus service_chained_slots() noexcept {
     if (!slots[n].pending && !slots[n].chained)
       own |= 1u << n;
   const auto frame_work = hits & own & every_frame;
-  bool changed = false;
+  bool changed = false, cleared = false;
   for (UINT n = 0; n < slots.size(); ++n) {
     auto& slot = slots[n];
     const auto bit = 1u << n;
     void* current = nullptr;
     const bool read = pointer(slot.address, current);
+    if ((slot.chained || slot.pending) && read && current == slot.wrapper) {
+      // The other hook was taken off and our wrapper is back: nothing to wait
+      // on, whether or not a list registers again.
+      slot.chained = slot.pending = nullptr;
+      slot.probe_phase = 0;
+      changed = cleared = true;
+      continue;
+    }
+    if (slot.chained && !slot.pending && (!read || current != slot.chained)) {
+      // Something else replaced the accepted hook (or the slot can't be read):
+      // capture is held and that entry is probed, whether or not a list
+      // registers again.
+      if (read && current != slot.forward) {
+        changed_slot_target.store(current, std::memory_order_relaxed);
+        changed_slot_index.store(slot.index, std::memory_order_release);
+      }
+      slot.pending = read ? current : slot.chained;
+      slot.chained = nullptr;
+      slot.probe_phase = 0;
+      changed = true;
+      disable_capture();
+      status.pending |= bit;
+      continue;
+    }
     if (slot.chained && !slot.pending) {
       // An accepted hook on an every-frame method must keep passing calls on:
       // an interval with frame work through our own every-frame slots and no
@@ -1267,7 +1301,7 @@ ChainStatus service_chained_slots() noexcept {
   if (changed)
     update_watch();
   // Recordings stay invalid from the change: only a fresh Reset proves one.
-  if (status.accepted && !status.pending && slots_intact())
+  if ((status.accepted || cleared) && !status.pending && slots_intact())
     enabled.store(true, std::memory_order_release);
   last_chained.store(status.chained, std::memory_order_relaxed);
   last_pending.store(status.pending, std::memory_order_relaxed);
