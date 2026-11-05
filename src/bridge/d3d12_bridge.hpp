@@ -179,6 +179,13 @@ struct GraphicsStatus {
   // classified pointers its fixed seen set had no slot for.
   bool backfill_open{};
   std::uint64_t backfill_classifications{}, backfill_unclassified{}, backfill_unremembered{};
+  // The latest refused command-list registration (step and reason), and the
+  // command-list vtable slot the render-boundary hook last found written over
+  // with the entry it held then (0: none).
+  const char* list_refused_by = "none";
+  const char* list_refusal_reason = "none";
+  unsigned changed_slot{};
+  std::uintptr_t changed_slot_target{};
 };
 bool initialize_graphics() noexcept;
 // Resolve a reported device's optional COM proxy chain before native hooks or

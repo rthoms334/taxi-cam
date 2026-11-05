@@ -656,6 +656,48 @@ DWORD WINAPI watchdog_run(void*) noexcept {
     log_contention(status, graphics, output);
   }
 }
+// The ID3D12GraphicsCommandList method in a vtable slot the render-boundary
+// hook patches (render_boundary_observer.hpp).
+const char* command_list_slot_name(unsigned index) noexcept {
+  switch (index) {
+    case 12:
+      return "DrawInstanced";
+    case 13:
+      return "DrawIndexedInstanced";
+    case 16:
+      return "CopyTextureRegion";
+    case 17:
+      return "CopyResource";
+    case 26:
+      return "ResourceBarrier";
+    case 68:
+      return "BeginRenderPass";
+    case 69:
+      return "EndRenderPass";
+    case 80:
+      return "Barrier";
+  }
+  return "unknown";
+}
+// The module holding `address`, by file name only (no folder, so no account
+// name reaches the log), and the offset into it: "capture.dll+0x1a2b0".
+void describe_code_address(std::uintptr_t address, char* out, std::size_t size) noexcept {
+  HMODULE module{};
+  wchar_t path[MAX_PATH]{};
+  if (!address ||
+      !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(address), &module) ||
+      !GetModuleFileNameW(module, path, MAX_PATH)) {
+    std::snprintf(out, size, address ? "no_module" : "none");
+    return;
+  }
+  const wchar_t* name = std::wcsrchr(path, L'\\');
+  name = name ? name + 1 : path;
+  char narrow[MAX_PATH]{};
+  if (!WideCharToMultiByte(CP_UTF8, 0, name, -1, narrow, sizeof(narrow), nullptr, nullptr))
+    std::snprintf(narrow, sizeof(narrow), "unnamed");
+  std::snprintf(out, size, "%s+0x%llx", narrow, static_cast<unsigned long long>(address - reinterpret_cast<std::uintptr_t>(module)));
+}
 // Panel marks: camera writes leave two pixels at each routed display's gauge
 // corner alone, which panel streaming tools sample to tell panels apart
 // (display_keep.hpp, display_marks.hpp). Always on: two pixels cannot be seen,
@@ -2230,10 +2272,17 @@ DWORD run_impl() {
     if (graphics.hook_failures > logged_hook_failures && (!hook_failures_logged_ms || now - hook_failures_logged_ms >= 5000)) {
       logged_hook_failures = graphics.hook_failures;
       hook_failures_logged_ms = now;
-      char failure_detail[256];
-      std::snprintf(failure_detail, sizeof(failure_detail), "Hook failures: total=%llu last_error=%s peak_per_second=%llu",
+      // A refused command list names the step and reason; a hook found written
+      // over ours names its slot and the module whose code is there now.
+      char slot_owner[MAX_PATH + 32]{};
+      describe_code_address(graphics.changed_slot_target, slot_owner, sizeof(slot_owner));
+      char failure_detail[640];
+      std::snprintf(failure_detail, sizeof(failure_detail),
+                    "Hook failures: total=%llu last_error=%s peak_per_second=%llu list_refusal=%s:%s changed_slot=%u/%s "
+                    "slot_owner=%s",
                     static_cast<unsigned long long>(graphics.hook_failures), graphics.error ? graphics.error : "unknown",
-                    static_cast<unsigned long long>(graphics.failure_rate_peak));
+                    static_cast<unsigned long long>(graphics.failure_rate_peak), graphics.list_refused_by, graphics.list_refusal_reason,
+                    graphics.changed_slot, graphics.changed_slot ? command_list_slot_name(graphics.changed_slot) : "none", slot_owner);
       log_status(status, failure_detail);
     }
     if (graphics.admission_halted && !halted_logged) {

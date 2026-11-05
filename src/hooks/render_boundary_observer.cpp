@@ -99,6 +99,9 @@ auto& copy_texture_calls = counters.copy_texture_calls;
 auto& metadata_truncated_calls = counters.metadata_truncated_calls;
 auto& maximum_legacy_batch = counters.maximum_legacy_batch;
 std::array<Slot, 8> slots{{{26}, {68}, {69}, {80}, {12}, {13}, {16}, {17}}};
+// The latest slot a registration found changed, and the entry it held then.
+std::atomic<UINT> changed_slot_index{0};
+std::atomic<void*> changed_slot_target{nullptr};
 struct ActiveEndSlot {
   void* table = nullptr;
   Slot slot{69};
@@ -1037,6 +1040,8 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
   for (auto& slot : slots) {
     void* current = nullptr;
     if (!pointer(slot.address, current) || current != (slot.installed ? slot.wrapper : slot.forward)) {
+      changed_slot_target.store(current, std::memory_order_relaxed);
+      changed_slot_index.store(slot.index, std::memory_order_release);
       disable_capture();
       return result("slot_changed");
     }
@@ -1050,6 +1055,8 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     void* current = nullptr;
     if (!pointer(slot.address, current) || current != (slot.installed ? slot.wrapper : slot.forward) ||
         (!slot.installed && !exchange(slot, true, error))) {
+      changed_slot_target.store(current, std::memory_order_relaxed);
+      changed_slot_index.store(slot.index, std::memory_order_release);
       disable_capture();
       return result("active_end_repair_failed", error);
     }
@@ -1206,6 +1213,10 @@ Statistics statistics() noexcept {
           enhanced_candidates.load(), pass_refusals.load(),      batch_refusals.load(),
           copy_resource_calls.load(), copy_texture_calls.load(), metadata_truncated_calls.load(),
           maximum_legacy_batch.load()};
+}
+SlotChange last_slot_change() noexcept {
+  const auto index = changed_slot_index.load(std::memory_order_acquire);
+  return {index, index ? changed_slot_target.load(std::memory_order_relaxed) : nullptr};
 }
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 std::uint32_t validation_state(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {

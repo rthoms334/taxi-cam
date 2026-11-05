@@ -789,7 +789,10 @@ int main() {
     // prior no-pass proof, even when a Reset occurred while disabled.
     void* begin_wrapper = table[68];
     table[68] = reinterpret_cast<void*>(&original_begin);
+    require(obs::last_slot_change().index == 0 && !obs::last_slot_change().target, "A slot change reported before any was seen");
     require(!obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Changed slot did not disable capture");
+    require(obs::last_slot_change().index == 68 && obs::last_slot_change().target == reinterpret_cast<void*>(&original_begin),
+            "The changed slot and the entry written over it are reported");
     extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     obs::successful_reset(list, 1);
     table[68] = begin_wrapper;
