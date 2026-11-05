@@ -206,10 +206,13 @@ SlotChange last_slot_change() noexcept;
 // the other hook a whole call interval after the change. The slot then
 // accepts that entry and capture resumes (old recordings still need a fresh
 // Reset). A hook that never calls ours stays pending: capture stays off.
-// An accepted slot is rechecked every interval: when our own slots saw list
-// work and it saw none, the acceptance is dropped (`dropped`) and capture held
-// until it is proven again. A hook passing on only some calls can still pass
-// that check: per-call proof needs a second path to the same calls.
+// An accepted slot is rechecked every interval: one that carried calls three
+// intervals running and then none for three intervals while our own slots saw
+// list work loses its acceptance (`dropped`), holding capture until it is
+// proven again; a method that is simply called rarely is never dropped. A
+// hook passing on only some calls can still pass: per-call proof needs a
+// second path to the same calls. A new hook written over an accepted one
+// replaces it and is probed afresh.
 // Masks are bits of the 8 main slots in the order 26, 68, 69, 80, 12, 13,
 // 16, 17. Call from one worker thread about once a second; it takes no lock
 // while no slot is watched, and skips an interval when the lock is busy.

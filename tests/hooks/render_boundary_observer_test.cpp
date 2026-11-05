@@ -886,8 +886,10 @@ int main() {
             "Our wrapper back did not end the wait");
     obs::successful_reset(list, 1);
 
-    // An accepted hook must keep passing calls on: an interval with list work
-    // through our own slots and none through it drops the acceptance.
+    // An accepted hook must keep passing calls on. A method simply not called
+    // for a while (here: Draws only) keeps its acceptance; one that carried
+    // calls three intervals running and then none for three with list work
+    // elsewhere loses it.
     table[26] = reinterpret_cast<void*>(&other_tool_barrier);
     require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Registration under the hook again");
     for (int round = 0; round < 3; ++round) {
@@ -895,12 +897,53 @@ int main() {
       chain = obs::service_chained_slots();
     }
     require(chain.accepted == 1 && obs::operational(), "The hook was not accepted again");
+    for (int round = 0; round < 5; ++round) {
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+      require(chain.chained == 1 && !chain.dropped && obs::operational(), "A quiet accepted slot was dropped");
+    }
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.chained == 1 && obs::operational(), "A busy accepted slot was dropped");
     other_tool_calls_through = false;
-    list->ResourceBarrier(1, &transition);
-    list->DrawInstanced(3, 1, 0, 0);
-    chain = obs::service_chained_slots();
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+      require(round == 2 || (chain.chained == 1 && !chain.dropped), "A busy slot was dropped before three silent intervals");
+    }
     require(chain.dropped == 1 && chain.pending == 1 && !chain.chained && !obs::operational(),
             "A hook that stopped passing calls on kept its acceptance");
+    // A new hook written over an accepted one replaces it and is probed.
+    other_tool_calls_through = true;
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The hook was not accepted after it passed calls on again");
+    void* first_hook = table[26];
+    other_tool_replaced = first_hook;
+    table[26] = reinterpret_cast<void*>(&other_tool_draw);  // any other entry stands for the second hook
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational() && obs::last_slot_change().index == 26,
+            "A second hook over the accepted one did not hold capture");
+    chain = obs::service_chained_slots();
+    require(chain.pending == 1 && !chain.chained, "The second hook was reported as accepted rather than waiting");
+    table[26] = first_hook;
+    other_tool_replaced = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The first hook back was trusted without a new probe");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The first hook back was not accepted again");
+    // Start the next cases with that hook freshly written, so still waiting.
+    table[26] = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational(), "Our wrapper back after the second hook");
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The hook written again was not waited on");
     // Accepting one slot while another still waits keeps capture held; a slot
     // changed again before the service restarts its probe; Draw is probed too.
     other_tool_calls_through = true;

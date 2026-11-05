@@ -42,6 +42,11 @@ struct Slot {
   void* pending = nullptr;
   void* chained = nullptr;
   unsigned probe_phase = 0;
+  // While accepted: consecutive intervals with calls through it, and with
+  // list work elsewhere but none through it; `established` once it has
+  // carried calls three intervals running.
+  unsigned streak = 0, silent = 0;
+  bool established = false;
 };
 struct Identity {
   std::uint64_t generation = 0;
@@ -1104,6 +1109,8 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
       }
       if (current != slot.pending) {
         note_foreign(slot, read, current);
+        // A new hook over an accepted one replaces it: the new one is probed.
+        slot.chained = nullptr;
         slot.pending = current;
         slot.probe_phase = 0;
         update_watch();
@@ -1210,14 +1217,29 @@ ChainStatus service_chained_slots() noexcept {
     const auto bit = 1u << n;
     void* current = nullptr;
     const bool read = pointer(slot.address, current);
-    if (slot.chained) {
-      // An accepted hook must keep passing calls on: in an interval with list
-      // work through our own slots, none through it drops the acceptance and
-      // holds capture until it is proven again.
-      if (read && current == slot.chained && !(hits & bit) && work) {
+    if (slot.chained && !slot.pending) {
+      // An accepted hook must keep passing calls on. Some methods go uncalled
+      // for long stretches (copies, enhanced barriers, End inside a pass), so
+      // only a slot that carried calls three intervals running and then none
+      // for three intervals with list work elsewhere loses its acceptance,
+      // which holds capture until it is proven again.
+      bool drop = false;
+      if (read && current == slot.chained) {
+        if (hits & bit) {
+          slot.silent = 0;
+          if (++slot.streak >= 3)
+            slot.established = true;
+        } else {
+          slot.streak = 0;
+          drop = work && slot.established && ++slot.silent >= 3;
+        }
+      }
+      if (drop) {
         slot.pending = slot.chained;
         slot.chained = nullptr;
         slot.probe_phase = 0;
+        slot.streak = slot.silent = 0;
+        slot.established = false;
         changed = true;
         disable_capture();
         status.pending |= bit;
@@ -1246,6 +1268,9 @@ ChainStatus service_chained_slots() noexcept {
     slot.chained = slot.pending;
     slot.pending = nullptr;
     slot.probe_phase = 0;
+    slot.streak = 1;
+    slot.silent = 0;
+    slot.established = false;
     changed = true;
     status.chained |= bit;
     status.accepted |= bit;
