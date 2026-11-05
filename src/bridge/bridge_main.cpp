@@ -1119,6 +1119,10 @@ DWORD run_impl() {
         mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = mark_scan.empty_textures = 0;
         mark_scan.last_reshow_ms = mark_scan.shown_ms = 0;
         mark_scan.shown_again = mark_scan.session_shown = mark_scan.setup_shown = false;
+        // The last flight's pictures without marks do not count for this one:
+        // its listed textures are counted again below, before they are pruned.
+        for (auto& entry : mark_scan.entries)
+          entry.empty = false;
       }
       const bool companion = snapshot.result == win::DisplaySnapshotResult::pending;
       if (mark_scan.pending_id && companion) {
