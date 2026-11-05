@@ -789,10 +789,17 @@ int main() {
     // prior no-pass proof, even when a Reset occurred while disabled.
     void* begin_wrapper = table[68];
     table[68] = reinterpret_cast<void*>(&original_begin);
+    // Earlier refusals (failed protection, so installation_incomplete) report
+    // no slot change; nor does a slot put back to the original entry.
     require(obs::last_slot_change().index == 0 && !obs::last_slot_change().target, "A slot change reported before any was seen");
     require(!obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Changed slot did not disable capture");
-    require(obs::last_slot_change().index == 68 && obs::last_slot_change().target == reinterpret_cast<void*>(&original_begin),
+    require(obs::last_slot_change().index == 0, "A slot holding the original entry was reported as another hook");
+    // Another entry written over ours is reported with its slot.
+    table[68] = reinterpret_cast<void*>(&original_active_end);
+    require(!obs::register_list(list, 1, callbacks).ready && obs::last_slot_change().index == 68 &&
+                obs::last_slot_change().target == reinterpret_cast<void*>(&original_active_end),
             "The changed slot and the entry written over it are reported");
+    table[68] = reinterpret_cast<void*>(&original_begin);
     extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     obs::successful_reset(list, 1);
     table[68] = begin_wrapper;
@@ -870,6 +877,14 @@ int main() {
     extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     require(!obs::operational(), "Known-slot mismatch did not refuse capture");
     extended->EndRenderPass();
+    // Registration with the active End slot still changed: holding the
+    // original is no foreign hook; another entry is reported with its slot.
+    require(!obs::register_list(list, 1, callbacks).ready && obs::last_slot_change().index == 68,
+            "An active End slot holding the original was reported as another hook");
+    active_tables[0][69] = reinterpret_cast<void*>(&original_begin);
+    require(!obs::register_list(list, 1, callbacks).ready && obs::last_slot_change().index == 69 &&
+                obs::last_slot_change().target == reinterpret_cast<void*>(&original_begin),
+            "A foreign entry in the active End slot was not reported");
     active_tables[0][69] = saved_end;
     require(obs::register_list(list, 1, callbacks).ready, "Exact restored known slot could not register");
     obs::successful_reset(list, 1);

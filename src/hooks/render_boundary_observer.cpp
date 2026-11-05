@@ -1037,11 +1037,19 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     original_copy_resource.store(reinterpret_cast<CopyResource>(slots[7].forward), std::memory_order_release);
     configured = true;
   }
+  // Only an entry that is read and is neither our wrapper nor the original is
+  // another hook written over ours; a failed read or exchange is not.
+  const auto note_foreign = [](const Slot& slot, bool read, void* current) noexcept {
+    if (!read || current == slot.wrapper || current == slot.forward)
+      return;
+    changed_slot_target.store(current, std::memory_order_relaxed);
+    changed_slot_index.store(slot.index, std::memory_order_release);
+  };
   for (auto& slot : slots) {
     void* current = nullptr;
-    if (!pointer(slot.address, current) || current != (slot.installed ? slot.wrapper : slot.forward)) {
-      changed_slot_target.store(current, std::memory_order_relaxed);
-      changed_slot_index.store(slot.index, std::memory_order_release);
+    const bool read = pointer(slot.address, current);
+    if (!read || current != (slot.installed ? slot.wrapper : slot.forward)) {
+      note_foreign(slot, read, current);
       disable_capture();
       return result("slot_changed");
     }
@@ -1053,10 +1061,11 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
   for (std::size_t n = 0; n < active_end_count; ++n) {
     auto& slot = active_end_slots[n].slot;
     void* current = nullptr;
-    if (!pointer(slot.address, current) || current != (slot.installed ? slot.wrapper : slot.forward) ||
-        (!slot.installed && !exchange(slot, true, error))) {
-      changed_slot_target.store(current, std::memory_order_relaxed);
-      changed_slot_index.store(slot.index, std::memory_order_release);
+    const bool read = pointer(slot.address, current);
+    const bool changed = !read || current != (slot.installed ? slot.wrapper : slot.forward);
+    if (changed || (!slot.installed && !exchange(slot, true, error))) {
+      if (changed)
+        note_foreign(slot, read, current);
       disable_capture();
       return result("active_end_repair_failed", error);
     }
