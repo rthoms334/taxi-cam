@@ -200,6 +200,18 @@ struct SlotChange {
   void* target = nullptr;
 };
 SlotChange last_slot_change() noexcept;
+// Another hook written over one of our installed slots no longer refuses
+// registration: lists keep registering with capture held off while that slot
+// is pending, until service_chained_slots() sees our wrapper called through
+// the other hook a whole call interval after the change. The slot then
+// accepts that entry and capture resumes (old recordings still need a fresh
+// Reset). A hook that never calls ours stays pending: capture stays off.
+// Masks are bits of the 8 main slots in the order 26, 68, 69, 80, 12, 13,
+// 16, 17. Call from one worker thread about once a second.
+struct ChainStatus {
+  std::uint32_t chained = 0, pending = 0, accepted = 0;
+};
+ChainStatus service_chained_slots() noexcept;
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 // Test-only scalar state; never part of the production add-on interface.
 std::uint32_t validation_state(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;

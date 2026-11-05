@@ -36,6 +36,12 @@ struct Slot {
   void* forward = nullptr;
   void* wrapper = nullptr;
   bool installed = false;
+  // Another hook written over our installed one (render-boundary chaining):
+  // `pending` until our wrapper is seen called through it, then `chained`,
+  // accepted in place of our wrapper. probe_phase counts service() calls.
+  void* pending = nullptr;
+  void* chained = nullptr;
+  unsigned probe_phase = 0;
 };
 struct Identity {
   std::uint64_t generation = 0;
@@ -102,6 +108,16 @@ std::array<Slot, 8> slots{{{26}, {68}, {69}, {80}, {12}, {13}, {16}, {17}}};
 // The latest slot a registration found changed, and the entry it held then.
 std::atomic<UINT> changed_slot_index{0};
 std::atomic<void*> changed_slot_target{nullptr};
+// Bit n: slots[n] is pending another hook and being probed / its wrapper ran
+// since the probe was last reset. Wrappers only read probe_mask (one relaxed
+// load per call) and write a hit once per reset, so probing costs nothing
+// while no slot is pending.
+std::atomic<std::uint32_t> probe_mask{0}, hit_mask{0};
+inline void note_call(unsigned n) noexcept {
+  const auto bit = 1u << n;
+  if ((probe_mask.load(std::memory_order_relaxed) & bit) && !(hit_mask.load(std::memory_order_relaxed) & bit))
+    hit_mask.fetch_or(bit, std::memory_order_relaxed);
+}
 struct ActiveEndSlot {
   void* table = nullptr;
   Slot slot{69};
@@ -352,6 +368,7 @@ void after_draw_work(ID3D12GraphicsCommandList* list, const Identity& before, st
 }
 void STDMETHODCALLTYPE
 draw(ID3D12GraphicsCommandList* list, UINT vertices, UINT instances, UINT first_vertex, UINT first_instance) noexcept {
+  note_call(4);
   const auto original = original_draw.load(std::memory_order_acquire);
   if (inside) {
     original(list, vertices, instances, first_vertex, first_instance);
@@ -371,6 +388,7 @@ void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
                                     UINT first_index,
                                     INT vertex_offset,
                                     UINT first_instance) noexcept {
+  note_call(5);
   const auto original = original_draw_indexed.load(std::memory_order_acquire);
   if (inside) {
     original(list, indices, instances, first_index, vertex_offset, first_instance);
@@ -394,6 +412,7 @@ bool previous_legacy_change(UINT index, const D3D12_RESOURCE_BARRIER* barriers, 
   return false;
 }
 void STDMETHODCALLTYPE copy_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* destination, ID3D12Resource* source) noexcept {
+  note_call(7);
   const auto original = original_copy_resource.load(std::memory_order_acquire);
   if (inside) {
     original(list, destination, source);
@@ -418,6 +437,7 @@ void STDMETHODCALLTYPE copy_texture(ID3D12GraphicsCommandList* list,
                                     UINT z,
                                     const D3D12_TEXTURE_COPY_LOCATION* source,
                                     const D3D12_BOX* box) noexcept {
+  note_call(6);
   const auto original = original_copy_texture.load(std::memory_order_acquire);
   if (inside) {
     original(list, destination, x, y, z, source, box);
@@ -484,6 +504,7 @@ void selected_legacy(ID3D12GraphicsCommandList* list,
   }
 }
 void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const D3D12_RESOURCE_BARRIER* barriers) noexcept {
+  note_call(0);
   const auto original = original_legacy.load(std::memory_order_acquire);
   if (inside) {
     original(list, count, barriers);
@@ -578,6 +599,7 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
                              const D3D12_RENDER_PASS_RENDER_TARGET_DESC* targets,
                              const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth,
                              D3D12_RENDER_PASS_FLAGS flags) noexcept {
+  note_call(1);
   const auto original = original_begin.load(std::memory_order_acquire);
   if (inside) {
     original(list, count, targets, depth, flags);
@@ -678,6 +700,7 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
   }
 }
 void STDMETHODCALLTYPE end(ID3D12GraphicsCommandList4* list) noexcept {
+  note_call(2);
   end_impl(list, original_end.load(std::memory_order_acquire));
 }
 template <std::size_t Index>
@@ -734,6 +757,7 @@ bool sole_subresource(const D3D12_BARRIER_SUBRESOURCE_RANGE& range) noexcept {
          range.FirstPlane == 0 && range.NumPlanes == 1;
 }
 void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, const D3D12_BARRIER_GROUP* groups) noexcept {
+  note_call(3);
   const auto original = original_enhanced.load(std::memory_order_acquire);
   if (inside) {
     original(list, count, groups);
@@ -1045,9 +1069,32 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     changed_slot_target.store(current, std::memory_order_relaxed);
     changed_slot_index.store(slot.index, std::memory_order_release);
   };
-  for (auto& slot : slots) {
+  bool held = false;
+  for (UINT n = 0; n < slots.size(); ++n) {
+    auto& slot = slots[n];
     void* current = nullptr;
     const bool read = pointer(slot.address, current);
+    // Another hook written over our installed one. Lists keep registering
+    // (refusing them would refuse every new list from now on), but capture
+    // stays off until service() sees our wrapper called through that hook.
+    if (read && slot.installed && current != slot.wrapper && current != slot.forward) {
+      if (current == slot.chained)
+        continue;
+      if (current != slot.pending) {
+        note_foreign(slot, read, current);
+        slot.pending = current;
+        slot.probe_phase = 0;
+        probe_mask.fetch_and(~(1u << n), std::memory_order_relaxed);
+        disable_capture();
+      }
+      held = true;
+      continue;
+    }
+    if (read && slot.installed && current == slot.wrapper && (slot.pending || slot.chained)) {
+      // The other hook was taken off again: our wrapper is back in the slot.
+      slot.pending = slot.chained = nullptr;
+      probe_mask.fetch_and(~(1u << n), std::memory_order_relaxed);
+    }
     if (!read || current != (slot.installed ? slot.wrapper : slot.forward)) {
       note_foreign(slot, read, current);
       disable_capture();
@@ -1091,8 +1138,73 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
       }
     }
   }
-  enabled.store(true, std::memory_order_release);
-  return result("registered", 0, true);
+  enabled.store(!held, std::memory_order_release);
+  return result(held ? "registered_capture_held" : "registered", 0, true);
+}
+// Every main slot holds what it should (our wrapper, or a hook accepted over
+// it) and every active End slot its trampoline. Control lock held.
+bool slots_intact() noexcept {
+  for (const auto& slot : slots) {
+    void* current = nullptr;
+    if (!slot.installed || slot.pending || !pointer(slot.address, current) ||
+        (current != slot.wrapper && (!slot.chained || current != slot.chained)))
+      return false;
+  }
+  for (std::size_t n = 0; n < active_end_count; ++n) {
+    const auto& slot = active_end_slots[n].slot;
+    void* current = nullptr;
+    if (!slot.installed || !pointer(slot.address, current) || current != slot.wrapper)
+      return false;
+  }
+  return true;
+}
+ChainStatus service_chained_slots() noexcept {
+  ChainStatus status;
+  if (inside)
+    return status;
+  const Lock control(control_lock, true);
+  if (!configured || removed)
+    return status;
+  for (UINT n = 0; n < slots.size(); ++n) {
+    auto& slot = slots[n];
+    const auto bit = 1u << n;
+    if (slot.chained)
+      status.chained |= bit;
+    if (!slot.pending)
+      continue;
+    void* current = nullptr;
+    if (!pointer(slot.address, current) || current != slot.pending) {
+      // Changed again since registration saw it; the next registration decides.
+      probe_mask.fetch_and(~bit, std::memory_order_relaxed);
+      slot.probe_phase = 0;
+      status.pending |= bit;
+      continue;
+    }
+    // Phase 1 arms the probe, phase 2 forgets hits from calls that may have
+    // read the slot before it changed, phase 3 on accepts a hit: our wrapper
+    // ran through the other hook a whole service interval after the change.
+    ++slot.probe_phase;
+    if (slot.probe_phase <= 2) {
+      hit_mask.fetch_and(~bit, std::memory_order_relaxed);
+      probe_mask.fetch_or(bit, std::memory_order_relaxed);
+      status.pending |= bit;
+      continue;
+    }
+    if (!(hit_mask.load(std::memory_order_relaxed) & bit)) {
+      status.pending |= bit;
+      continue;
+    }
+    probe_mask.fetch_and(~bit, std::memory_order_relaxed);
+    slot.chained = slot.pending;
+    slot.pending = nullptr;
+    slot.probe_phase = 0;
+    status.chained |= bit;
+    status.accepted |= bit;
+  }
+  // Recordings stay invalid from the change: only a fresh Reset proves one.
+  if (status.accepted && !status.pending && slots_intact())
+    enabled.store(true, std::memory_order_release);
+  return status;
 }
 bool erase_identity(ID3D12GraphicsCommandList* key, std::uint64_t generation) noexcept {
   auto& shard = shard_for(key);
@@ -1183,8 +1295,11 @@ Result remove() noexcept {
   DWORD error = 0;
   if (!repair(error))
     return result("protection_restore_failed", error);
+  // A slot another hook is chained over keeps our wrapper in that hook's
+  // chain: taking it out would cut the other hook off from the original.
+  probe_mask.store(0, std::memory_order_relaxed);
   for (auto& slot : slots)
-    if (slot.installed && !exchange(slot, false, error))
+    if (slot.installed && !slot.pending && !slot.chained && !exchange(slot, false, error))
       return result("removal_incomplete", error);
   for (std::size_t n = 0; n < active_end_count; ++n) {
     auto& slot = active_end_slots[n].slot;

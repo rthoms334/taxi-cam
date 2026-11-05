@@ -910,6 +910,7 @@ DWORD run_impl() {
   win::Status last_logged{};
   bool logged = false, last_connected = false, last_requested = false, last_degraded = false, halted_logged = false;
   std::uint64_t logged_hook_failures{}, hook_failures_logged_ms{};
+  std::uint32_t logged_boundary_chained{}, logged_boundary_pending{};
   StallHoldRelease hold_release;
   const auto request_hold_release = [&](bool known_off, const win::Status& at) {
     if (!hold_release.observe(watchdog_held.load(std::memory_order_acquire), known_off))
@@ -1676,6 +1677,7 @@ DWORD run_impl() {
     if (now >= next_discovery) {
       const auto begin = GetTickCount64();
       win::discover_pfds(settings.auto_detect != 0 ? now : 0);
+      win::service_render_boundary();
       discovery_max_ms = std::max(discovery_max_ms, GetTickCount64() - begin);
       next_discovery = now + 1000;
     }
@@ -2266,6 +2268,29 @@ DWORD run_impl() {
     if (mailbox.lock()) {
       mailbox.data()->status = status;
       mailbox.unlock();
+    }
+    // Another tool's hook over one of the render-boundary slots: capture is
+    // held while calls are checked to reach ours through it, then accepted.
+    if (graphics.boundary_chained != logged_boundary_chained || graphics.boundary_pending != logged_boundary_pending) {
+      logged_boundary_chained = graphics.boundary_chained;
+      logged_boundary_pending = graphics.boundary_pending;
+      constexpr unsigned slot_indices[8]{26, 68, 69, 80, 12, 13, 16, 17};
+      std::string chained, pending;
+      for (unsigned n = 0; n < 8; ++n) {
+        const auto name = std::to_string(slot_indices[n]) + "/" + command_list_slot_name(slot_indices[n]);
+        if (graphics.boundary_chained & (1u << n))
+          chained += (chained.empty() ? "" : ",") + name;
+        if (graphics.boundary_pending & (1u << n))
+          pending += (pending.empty() ? "" : ",") + name;
+      }
+      char slot_owner[MAX_PATH + 32]{};
+      describe_code_address(graphics.changed_slot_target, slot_owner, sizeof(slot_owner));
+      char chain_detail[512];
+      std::snprintf(chain_detail, sizeof(chain_detail),
+                    "Render boundary: another hook over our slots; accepted=%s waiting=%s accepted_total=%llu last_owner=%s",
+                    chained.empty() ? "none" : chained.c_str(), pending.empty() ? "none" : pending.c_str(),
+                    static_cast<unsigned long long>(graphics.boundary_accepted), slot_owner);
+      log_status(status, chain_detail);
     }
     // A rising failure count names its latest code, at most every 5 s, so a
     // log shows what failed even when the count never reaches the halt.
