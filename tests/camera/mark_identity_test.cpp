@@ -146,6 +146,23 @@ int main() {
   require(!package_inactive(false, MissingMarkPictures - 1, 20), "too few pictures yet");
   require(!package_inactive(true, 50, 20), "one texture read means the package is loaded");
 
+  // The iniBuilds A350 loading (2026-11-05): within 1.0 s of asking for the
+  // marks, 8 pictures without one of 3 textures; the first mark 0.45 s later.
+  PackageVerdict load;
+  require(!load.observe(false, MissingMarkPictures, MissingMarkTextures, false), "pictures before the marks are painted");
+  require(!load.observe(false, 23, 26, false) && !load.observe(true, 23, 26, true), "the marks read: no verdict");
+  // Without the package the scan settles with nothing read.
+  PackageVerdict missing;
+  require(missing.observe(false, MissingMarkPictures, MissingMarkTextures, true), "a settled scan without marks");
+  require(missing.observe(false, MissingMarkPictures + 1, MissingMarkTextures, false), "a texture created later keeps the verdict");
+  require(!missing.observe(true, 30, 5, false), "a later read takes it back");
+  missing.observe(false, 40, 5, true);
+  missing.reset();
+  require(!missing.inactive() && !missing.observe(false, 0, 0, false), "a new aircraft session starts without it");
+  // The main menu settles too, but its one texture is still no verdict.
+  PackageVerdict menu;
+  require(!menu.observe(false, 10, 1, true), "the main menu's settled scan");
+
   std::printf("mark-identity: %u checks passed\n", checks);
   return 0;
 }

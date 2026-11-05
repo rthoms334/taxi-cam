@@ -85,10 +85,34 @@ inline unsigned panel_number(const char* section) noexcept {
 // one display-shaped texture at a time, recreating it, and its 10 pictures
 // without marks gave the verdict while the package was loaded (2026-11-05).
 // empty_textures is the most textures listed at once with such a picture.
+//
+// The pages paint their marks only after the bridge asks for them, so the
+// first pictures of a load carry none: the iniBuilds A350 gave 8 pictures
+// without marks of 3 textures within 1.0 s of the request and its first mark
+// 0.45 s later (2026-11-05). The verdict therefore also waits for the scan to
+// settle (scan_settled): textures listed, each read or pictured MarkTries
+// times a second apart, or 10 s since the marks were last asked for.
+// Once given, it holds until a texture is read or the aircraft session
+// changes (reset), so a texture created later does not take it back.
 inline constexpr unsigned MissingMarkPictures = 8, MissingMarkTextures = 3;
 inline bool package_inactive(bool any_read, unsigned empty_pictures, unsigned empty_textures) noexcept {
   return !any_read && empty_pictures >= MissingMarkPictures && empty_textures >= MissingMarkTextures;
 }
+class PackageVerdict {
+ public:
+  bool observe(bool any_read, unsigned empty_pictures, unsigned empty_textures, bool scan_settled) noexcept {
+    if (any_read)
+      inactive_ = false;
+    else if (scan_settled && package_inactive(any_read, empty_pictures, empty_textures))
+      inactive_ = true;
+    return inactive_;
+  }
+  void reset() noexcept { inactive_ = false; }
+  bool inactive() const noexcept { return inactive_; }
+
+ private:
+  bool inactive_ = false;
+};
 
 struct Gauge {
   std::array<char, 48> section{}, name{};
