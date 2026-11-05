@@ -76,6 +76,19 @@ inline unsigned panel_number(const char* section) noexcept {
     ++section;
   return section ? static_cast<unsigned>(std::strtoul(section, nullptr, 10)) : 0;
 }
+// Whether Taxi Cam's display package is not loaded: no panel texture has
+// carried a mark, MissingMarkPictures pictures came back without one, and
+// they were of a cockpit, MissingMarkTextures panel textures listed at the
+// same time each pictured without a mark. A cockpit draws many panel pages
+// at once (the Fenix A320 in a flight: 20 listed, 14 read, 2026-11-05). The
+// MSFS 2024 main menu shows the aircraft without its cockpit pages: it drew
+// one display-shaped texture at a time, recreating it, and its 10 pictures
+// without marks gave the verdict while the package was loaded (2026-11-05).
+// empty_textures is the most textures listed at once with such a picture.
+inline constexpr unsigned MissingMarkPictures = 8, MissingMarkTextures = 3;
+inline bool package_inactive(bool any_read, unsigned empty_pictures, unsigned empty_textures) noexcept {
+  return !any_read && empty_pictures >= MissingMarkPictures && empty_textures >= MissingMarkTextures;
+}
 
 struct Gauge {
   std::array<char, 48> section{}, name{};

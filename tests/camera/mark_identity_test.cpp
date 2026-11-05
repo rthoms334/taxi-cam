@@ -136,6 +136,16 @@ int main() {
   require(cut.size() == KeySize - 1 && html.resolve(cut.c_str(), nullptr, 0) == 5, "a cut key names its gauge");
   require(std::string(make_key("PFD", 0, 1).data()) == "@PFD" && html.resolve("@a-very-long", nullptr, 0) == 0, "a prefix is no match");
 
+  // Package-inactive verdict. The MSFS 2024 main menu (2026-11-05): one
+  // display-shaped texture listed at a time, 10 pictures without a mark.
+  require(!package_inactive(false, 10, 1), "the main menu's one texture is no verdict");
+  require(!package_inactive(false, 400, MissingMarkTextures - 1), "however many pictures of too few textures");
+  require(!package_inactive(false, 0, 0), "no pictures, no verdict");
+  // A cockpit drawn without the package: many textures, none with a mark.
+  require(package_inactive(false, MissingMarkPictures, MissingMarkTextures), "a cockpit's pictures without marks");
+  require(!package_inactive(false, MissingMarkPictures - 1, 20), "too few pictures yet");
+  require(!package_inactive(true, 50, 20), "one texture read means the package is loaded");
+
   std::printf("mark-identity: %u checks passed\n", checks);
   return 0;
 }

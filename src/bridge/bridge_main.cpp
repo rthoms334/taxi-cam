@@ -826,9 +826,10 @@ DWORD run_impl() {
   // to ~20 s after the flight loads): MarkReshows times a flight, then once
   // a minute at most while a display the profile names has no texture (one
   // recreated without a copy).
-  // MarkMissingPictures pictures without a mark and none with one: the pages
-  // carry no marks, so the package is not loaded.
-  constexpr unsigned MarkTries = 5, MarkReshows = 2, MarkMissingPictures = 8;
+  // Pictures without a mark, of several panel textures at once, and none with
+  // one: the pages carry no marks, so the package is not loaded
+  // (mark_identity::package_inactive).
+  constexpr unsigned MarkTries = 5, MarkReshows = 2;
   // A picture not taken within MarkPictureMs is given up (the texture is not
   // being drawn): the next texture's request replaces it, so undrawn panels
   // cannot use up the pages' marks window (the A350, 2026-11-04). A drawn
@@ -843,6 +844,7 @@ DWORD run_impl() {
       std::uint64_t id{}, next_ms{};
       unsigned tries{};
       bool read{};
+      bool empty{};             // A picture of it came back without a mark.
       std::uint64_t seen_ms{};  // When the scan first listed the texture.
       // Its draws and submissions now, and when its last picture was asked:
       // a texture drawn since is pictured first.
@@ -853,8 +855,9 @@ DWORD run_impl() {
     std::vector<Entry> entries;
     unsigned unsignalled{}, read{}, reshows{};
     // Pictures the scan took: with marks, without, and not taken (timeout,
-    // lost, unavailable), logged every 10 s while it scans.
-    unsigned pictures{}, empty{}, failed{};
+    // lost, unavailable), logged every 10 s while it scans. empty_textures:
+    // the most textures listed at once with a picture without a mark.
+    unsigned pictures{}, empty{}, failed{}, empty_textures{};
     // DXGI formats of the pictures without marks (a curve on the way into
     // some formats can hide a level), and of those with.
     std::array<unsigned, 6> empty_formats{}, read_formats{};
@@ -1113,7 +1116,7 @@ DWORD run_impl() {
       // session starts its re-show allowance and counts again.
       if (epoch != mark_scan.epoch) {
         mark_scan.epoch = epoch;
-        mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = 0;
+        mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = mark_scan.empty_textures = 0;
         mark_scan.last_reshow_ms = mark_scan.shown_ms = 0;
         mark_scan.shown_again = mark_scan.session_shown = mark_scan.setup_shown = false;
       }
@@ -1141,21 +1144,29 @@ DWORD run_impl() {
               *free = poll.format;
         }
         mark_scan.failed += !ready;
+        if (ready && !poll.mark_count)
+          if (auto* entry = mark_entry(id))
+            entry->empty = true;
         mark_result(id, ready ? &poll : nullptr);
       }
+      mark_scan.empty_textures = std::max(mark_scan.empty_textures,
+                                          static_cast<unsigned>(std::count_if(mark_scan.entries.begin(), mark_scan.entries.end(),
+                                                                              [](const MarkScan::Entry& entry) { return entry.empty; })));
       if ((allowed || !mark_scan.entries.empty()) && now >= mark_scan.next_log_ms) {
         mark_scan.next_log_ms = now + 10000;
-        char detail[256];
+        char detail[320];
         const auto& e = mark_scan.empty_formats;
         const auto& r = mark_scan.read_formats;
         std::snprintf(detail, sizeof(detail),
-                      "Display mark scan: textures=%zu read=%u pictures=%u empty=%u failed=%u reshows=%u allowed=%u companion=%u "
-                      "formats_read=%u,%u,%u formats_empty=%u,%u,%u,%u",
-                      mark_scan.entries.size(), mark_scan.read, mark_scan.pictures, mark_scan.empty, mark_scan.failed, mark_scan.reshows,
-                      allowed ? 1u : 0u, companion ? 1u : 0u, r[0], r[1], r[2], e[0], e[1], e[2], e[3]);
+                      "Display mark scan: textures=%zu read=%u pictures=%u empty=%u empty_textures=%u failed=%u reshows=%u allowed=%u "
+                      "companion=%u formats_read=%u,%u,%u formats_empty=%u,%u,%u,%u",
+                      mark_scan.entries.size(), mark_scan.read, mark_scan.pictures, mark_scan.empty, mark_scan.empty_textures,
+                      mark_scan.failed, mark_scan.reshows, allowed ? 1u : 0u, companion ? 1u : 0u, r[0], r[1], r[2], e[0], e[1], e[2],
+                      e[3]);
         log_status(log_to, detail);
       }
-      panel_identity.inactive = panel_identity.store.textures().empty() && mark_scan.empty >= MarkMissingPictures;
+      panel_identity.inactive =
+          mark_identity::package_inactive(!panel_identity.store.textures().empty(), mark_scan.empty, mark_scan.empty_textures);
       // A texture drawn is pictured within a second or two; one the
       // simulator keeps recreating could otherwise hold the list back.
       panel_identity.settled = std::none_of(mark_scan.entries.begin(), mark_scan.entries.end(),
