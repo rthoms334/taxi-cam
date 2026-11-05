@@ -90,7 +90,7 @@ inline unsigned panel_number(const char* section) noexcept {
 // first pictures of a load carry none: the iniBuilds A350 gave 8 pictures
 // without marks of 3 textures within 1.0 s of the request and its first mark
 // 0.45 s later (2026-11-05). The verdict therefore also waits for the scan to
-// settle (scan_settled): textures listed, each read or pictured MarkTries
+// settle (scan_settled): textures listed, each read or tried MarkTries
 // times a second apart, or 10 s since the marks were last asked for.
 // Once given, it holds until a texture is read or the aircraft session
 // changes (reset), so a texture created later does not take it back.
