@@ -327,8 +327,23 @@ inline constexpr Translation SpanishTranslations[]{
     {L"Refresh pictures", L"Actualizar imágenes"},
     {L"Remove", L"Quitar"},
     {L"Remove saved aircraft", L"Quitar aeronave guardada"},
-    {L"Included with Taxi Cam, so it cannot be removed. Change it in Setup while it is loaded.",
-     L"Viene con Taxi Cam, así que no se puede quitar. Cámbiala en Configuración mientras esté cargada."},
+    {L"Included with Taxi Cam, so it cannot be removed. Reset displays brings back its displays and door camera as they come; Factory "
+     L"reset brings back all of its settings.",
+     L"Viene con Taxi Cam, así que no se puede quitar. Restablecer pantallas recupera sus pantallas y la cámara de la puerta tal como "
+     L"vienen; Restablecer de fábrica recupera toda su configuración."},
+    {L"Reset displays", L"Restablecer pantallas"},
+    {L"Factory reset", L"Restablecer de fábrica"},
+    {L"Factory reset {0}? All of its settings go back to how they come with Taxi Cam, camera positions and guides included.",
+     L"¿Restablecer {0} de fábrica? Toda su configuración vuelve a como viene con Taxi Cam, incluidas las posiciones de cámara y las "
+     L"guías."},
+    {L"Reset {0}'s displays and door camera to how they come with Taxi Cam? Camera positions, guides and your other settings are kept.",
+     L"¿Restablecer las pantallas y la cámara de la puerta de {0} a como vienen con Taxi Cam? Se mantienen las posiciones de cámara, las "
+     L"guías y el resto de tu configuración."},
+    {L"{0} is back to how it comes with Taxi Cam.", L"{0} vuelve a estar como viene con Taxi Cam."},
+    {L"{0}'s displays and door camera are back to how they come with Taxi Cam.",
+     L"Las pantallas y la cámara de la puerta de {0} vuelven a estar como vienen con Taxi Cam."},
+    {L"Could not reset it. Check access to your local settings folder.",
+     L"No se pudo restablecer. Revisa el acceso a tu carpeta de configuración local."},
     {L"Remove {0}? Its displays and camera positions are deleted. You can set it up again.",
      L"¿Quitar {0}? Se eliminarán sus pantallas y posiciones de cámara. Puedes volver a configurarla."},
     {L"Report a bug", L"Notificar un error"},
