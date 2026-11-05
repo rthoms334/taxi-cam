@@ -29,8 +29,9 @@
 namespace taxi_camera::standalone::marks_package {
 inline constexpr wchar_t PackageName[] = L"taxi-cam-panel-marks";
 // The folder name used instead when the package whose page ours is built on
-// sorts after PackageName: MSFS mounts packages of one order hint in
-// alphabetical order, and the one mounted later wins.
+// sorts after PackageName: per the MSFS 2024 SDK (Virtual File System
+// Information), packages of one order hint mount in alphabetical order and the
+// one mounted later wins. Not yet observed against a conflicting package.
 inline constexpr wchar_t LatePackageName[] = L"zzzz-taxi-cam-panel-marks";
 inline constexpr char HelperName[] = "taxi-cam-marks.js";
 inline constexpr wchar_t MarkerName[] = L"taxi-cam-marks.stock.txt";
@@ -346,11 +347,15 @@ inline PageOverrides other_page_overrides(const std::filesystem::path& community
 }
 // The other package whose copy of the cockpit page MSFS would load instead
 // of the stock one: among those listing it as a globally overridden file, the
-// last in mount order. Order hint groups have no documented order, so within
-// them the folder name decides, as MSFS does within one group.
+// last in mount order. The MSFS 2024 SDK documents mounting by order hint
+// group, then by folder name within a group, the later mount winning; the
+// order between groups is not documented. Packages with no hint are taken as
+// mounted last (community reports), so they rank after hinted ones; listing
+// packages with different hints otherwise cannot be ordered: `ambiguous`.
 struct PageSource {
   std::wstring package;  // empty: the stock page
   std::string hint;      // its package_order_hint, or empty when it sets none
+  bool ambiguous = false;
 };
 inline std::wstring lower(std::wstring text) {
   for (auto& c : text)
@@ -358,13 +363,22 @@ inline std::wstring lower(std::wstring text) {
   return text;
 }
 inline PageSource page_source(const std::filesystem::path& community) {
-  PageSource out;
+  std::vector<PageSource> listing;
   for (const auto& name : other_page_overrides(community).page) {
     std::string manifest;
-    if (!detail::read_file(community / name / L"manifest.json", manifest) || !lists_page(manifest))
+    if (detail::read_file(community / name / L"manifest.json", manifest) && lists_page(manifest))
+      listing.push_back({name, order_hint(manifest)});
+  }
+  // Unhinted packages, when any, mount after every hinted one.
+  const bool unhinted = std::any_of(listing.begin(), listing.end(), [](const PageSource& p) { return p.hint.empty(); });
+  PageSource out;
+  for (const auto& candidate : listing) {
+    if (unhinted && !candidate.hint.empty())
       continue;
-    if (out.package.empty() || lower(name) > lower(out.package))
-      out = {name, order_hint(manifest)};
+    if (!out.package.empty() && candidate.hint != out.hint)
+      out.ambiguous = true;
+    if (out.package.empty() || lower(candidate.package) > lower(out.package))
+      out = {candidate.package, candidate.hint, out.ambiguous};
   }
   return out;
 }
@@ -444,6 +458,10 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   }
   const wchar_t* name = !source.package.empty() && lower(source.package) >= lower(PackageName) ? LatePackageName : PackageName;
   const wchar_t* other_name = name == PackageName ? LatePackageName : PackageName;
+  // A source that cannot be placed before ours (listing packages whose order
+  // cannot be told apart, or one named after even the late name) would still
+  // load instead of ours: left to work alone, as an unusable page is below.
+  const bool unplaceable = source.ambiguous || (!source.package.empty() && lower(source.package) >= lower(LatePackageName));
   const auto package = community / name;
   const auto marker = package / MarkerName;
   const bool ours = detail::exists(marker);
@@ -452,11 +470,12 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   // Keep the page's UTF-8 byte order mark, if it has one.
   const bool bom = page.size() >= 3 && page.compare(0, 3, "\xEF\xBB\xBF") == 0;
   auto patched = patch_page(std::string_view(page).substr(bom ? 3 : 0));
-  if (patched.empty()) {
+  if (patched.empty() || unplaceable) {
     // Another package's page Taxi Cam cannot add to is left to work alone:
     // a package of ours mounted after it would replace that add-on's page.
     const bool had = ours || detail::exists(community / other_name / MarkerName);
-    marks_package::remove(community);
+    if (!marks_package::remove(community))
+      return Outcome::failed;
     if (!source.package.empty())
       return Outcome::conflict;
     return had ? Outcome::removed : Outcome::page_changed;

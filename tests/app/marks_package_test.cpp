@@ -182,7 +182,7 @@ int main() {
               "an unset hint is left unset");
       // Not listed: in MSFS 2024 that copy replaces nothing, so it is ignored.
       write(other / "manifest.json", "{ \"package_order_hint\": \"PANEL_PATCH\" }");
-      require(marks_package::page_source(community).package.empty(), "an unlisted copy counts as a source");
+      require(marks_package::page_source(community).package.empty(), "an unlisted copy is not a source");
       require(marks_package::ensure(simulator, community, "helper") == Outcome::written &&
                   read(package / marks_package::PageRelative).find("raas.js") == std::string::npos &&
                   read(package / "manifest.json").find("\"package_order_hint\": \"PANEL_PATCH\"") != std::string::npos,
@@ -208,6 +208,34 @@ int main() {
               "an unusable source page removes ours");
       fs::remove_all(other);
       require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "without it ours comes back");
+      // Sources that cannot be placed before ours leave ours out too.
+      const auto add_source = [&](const char* name, std::string_view hint) {
+        const auto folder = community / name;
+        fs::create_directories((folder / marks_package::PageRelative).parent_path());
+        write(folder / marks_package::PageRelative, other_page);
+        write(folder / "manifest.json",
+              "{ " + (hint.empty() ? std::string() : "\"package_order_hint\": \"" + std::string(hint) + "\", ") + listed + " }");
+      };
+      add_source("zzzzz-panel-raas", "PANEL_PATCH");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::conflict && !fs::exists(package) && !fs::exists(late),
+              "a source named after even the late name removes ours");
+      fs::remove_all(community / "zzzzz-panel-raas");
+      // An unhinted package mounts after hinted ones, whatever the names.
+      add_source("a-raas", "");
+      add_source("b-tool", "CUSTOM_INSTRUMENT_PATCH");
+      require(marks_package::page_source(community).package == L"a-raas" && marks_package::page_source(community).hint.empty() &&
+                  !marks_package::page_source(community).ambiguous,
+              "an unhinted listing package outranks a hinted one");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "built on the unhinted package");
+      // Listing packages with different hints cannot be ordered.
+      fs::remove_all(community / "a-raas");
+      add_source("c-panel", "PANEL_PATCH");
+      require(marks_package::page_source(community).ambiguous, "different hints are ambiguous");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::conflict && !fs::exists(package) && !fs::exists(late),
+              "ambiguous sources remove ours");
+      fs::remove_all(community / "b-tool");
+      fs::remove_all(community / "c-panel");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "without them ours comes back again");
     }
     // Other packages replacing the page or BaseInstrument.js are named for the
     // logs; ours is not.

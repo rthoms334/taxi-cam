@@ -119,6 +119,21 @@ try {
     $result = Invoke-Setup configure $app @('--simulator', $sim, '--startup', 'manual')
     Assert-That ($result.Code -eq 0 -and $result.Warning -like 'Automatic startup was not changed*' -and (Get-Hash $xml) -eq $configuredHash) 'Manual startup changed exe.xml.'
 
+    # Another add-on's cockpit page Taxi Cam can't add to: the package is left
+    # out and Setup says displays can't be recognised (not "run Setup again").
+    $otherPage = Join-Path $community 'other-panel/html_ui/Pages/VCockpit/Core/VCockpit.html'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $otherPage) | Out-Null
+    [IO.File]::WriteAllText($otherPage, "<html><head></head></html>`r`n")
+    [IO.File]::WriteAllText((Join-Path $community 'other-panel/manifest.json'),
+        '{ "globally_overriden_base_sim_files": [ "\\html_ui\\pages\\VCockpit\\Core\\VCockpit.html" ] }')
+    $result = Invoke-Setup configure $app @('--simulator', $sim, '--startup', 'manual')
+    Assert-That ($result.Code -eq 0 -and $result.Warning -like "*Taxi Cam can't recognise your displays while that add-on is installed.*" -and
+        -not (Test-Path -LiteralPath (Split-Path -Parent $marksMarker)) -and
+        (Get-Content -Raw -LiteralPath (Join-Path $app 'setup-diagnostics.log')) -like '*Panel marks package: conflict*') 'A conflicting cockpit page did not leave the package out with its own warning.'
+    Remove-Item -Recurse -Force -LiteralPath (Join-Path $community 'other-panel')
+    $result = Invoke-Setup configure $app @('--simulator', $sim, '--startup', 'manual')
+    Assert-That ($result.Code -eq 0 -and (Test-Path -LiteralPath $marksMarker)) 'The package did not come back once the conflicting add-on was removed.'
+
     # Steam launch files with a copied SimConnect header are repaired, keeping the original.
     $steamApp = Join-Path $fixture 'steam-app'
     $steamXml = Join-Path $fixture 'steam/exe.xml'
