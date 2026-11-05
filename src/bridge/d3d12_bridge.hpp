@@ -186,6 +186,11 @@ struct GraphicsStatus {
   const char* list_refusal_reason = "none";
   unsigned changed_slot{};
   std::uintptr_t changed_slot_target{};
+  // Render-boundary slots with another hook accepted over ours, and slots
+  // still waiting for calls to reach ours through one (capture held off);
+  // bits in boundary slot order. Accepted counts every acceptance.
+  std::uint32_t boundary_chained{}, boundary_pending{};
+  std::uint64_t boundary_accepted{};
 };
 bool initialize_graphics() noexcept;
 // Resolve a reported device's optional COM proxy chain before native hooks or
@@ -274,6 +279,9 @@ unsigned named_target_mask() noexcept;
 void reset_display_session() noexcept;
 void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;
+// Worker, about once a second: lets the render-boundary hook accept another
+// hook chained over one of its slots once calls are seen reaching ours.
+void service_render_boundary() noexcept;
 // Texture IDs named for each display side by the panel table (0 = none).
 // discover_pfds routes them first; explicit choices and dead textures are
 // never overridden or kept.

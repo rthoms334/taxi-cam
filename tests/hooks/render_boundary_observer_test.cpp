@@ -154,6 +154,37 @@ void STDMETHODCALLTYPE original_legacy(ID3D12GraphicsCommandList* list, UINT cou
   evidence.legacy_pointer = barriers;
   note(2);
 }
+// Another tool's ResourceBarrier hook written over ours: it calls the entry it
+// replaced (our wrapper), or, when calls_through is off, skips it.
+void* other_tool_replaced = nullptr;
+bool other_tool_calls_through = true;
+unsigned other_tool_calls = 0;
+// The same tool's DrawInstanced and EndRenderPass hooks.
+void* other_draw_replaced = nullptr;
+bool other_draw_calls_through = true;
+void STDMETHODCALLTYPE other_tool_draw(ID3D12GraphicsCommandList* list, UINT count, UINT instances, UINT first, UINT first_instance) {
+  if (other_draw_calls_through)
+    reinterpret_cast<decltype(&original_draw)>(other_draw_replaced)(list, count, instances, first, first_instance);
+  else
+    original_draw(list, count, instances, first, first_instance);
+}
+void* other_draw_indexed_replaced = nullptr;
+void STDMETHODCALLTYPE
+other_tool_draw_indexed(ID3D12GraphicsCommandList* list, UINT count, UINT instances, UINT first, INT offset, UINT first_instance) {
+  reinterpret_cast<decltype(&original_draw_indexed)>(other_draw_indexed_replaced)(list, count, instances, first, offset, first_instance);
+}
+void STDMETHODCALLTYPE original_end(ID3D12GraphicsCommandList4* list);
+void* other_end_replaced = nullptr;
+void STDMETHODCALLTYPE other_tool_end(ID3D12GraphicsCommandList4* list) {
+  reinterpret_cast<decltype(&original_end)>(other_end_replaced)(list);
+}
+void STDMETHODCALLTYPE other_tool_barrier(ID3D12GraphicsCommandList* list, UINT count, const D3D12_RESOURCE_BARRIER* barriers) {
+  ++other_tool_calls;
+  if (other_tool_calls_through)
+    reinterpret_cast<decltype(&original_legacy)>(other_tool_replaced)(list, count, barriers);
+  else
+    original_legacy(list, count, barriers);
+}
 void STDMETHODCALLTYPE original_enhanced(ID3D12GraphicsCommandList7* list, UINT count, const D3D12_BARRIER_GROUP* groups) {
   if (metadata_depth)
     ++metadata_errors;
@@ -794,11 +825,14 @@ int main() {
     require(obs::last_slot_change().index == 0 && !obs::last_slot_change().target, "A slot change reported before any was seen");
     require(!obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Changed slot did not disable capture");
     require(obs::last_slot_change().index == 0, "A slot holding the original entry was reported as another hook");
-    // Another entry written over ours is reported with its slot.
+    // Another entry written over ours is reported with its slot. The list still
+    // registers, with capture held until calls are seen reaching ours.
     table[68] = reinterpret_cast<void*>(&original_active_end);
-    require(!obs::register_list(list, 1, callbacks).ready && obs::last_slot_change().index == 68 &&
-                obs::last_slot_change().target == reinterpret_cast<void*>(&original_active_end),
+    const auto held = obs::register_list(list, 1, callbacks);
+    require(held.ready && std::string_view(held.status) == "registered_capture_held" && !obs::operational() &&
+                obs::last_slot_change().index == 68 && obs::last_slot_change().target == reinterpret_cast<void*>(&original_active_end),
             "The changed slot and the entry written over it are reported");
+    require(obs::service_chained_slots().pending == 2, "The slot under another hook waits for proof");
     table[68] = reinterpret_cast<void*>(&original_begin);
     extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     obs::successful_reset(list, 1);
@@ -808,6 +842,235 @@ int main() {
     obs::successful_reset(list, 1);
     list->DrawInstanced(3, 1, 0, 0);
     check_legacy(1, &transition, 1, "Fresh actual reset after repair did not restore proof");
+    require(obs::service_chained_slots().pending == 0 && obs::service_chained_slots().chained == 0,
+            "Our wrapper back in the slot leaves nothing waiting");
+
+    // Another tool hooks ResourceBarrier after us (GlassOut's capture DLL,
+    // issue 184). Lists keep registering with capture held; once calls are seen
+    // reaching our wrapper through its hook a whole interval later, the slot
+    // accepts that hook and capture resumes for freshly Reset recordings.
+    void* legacy_wrapper = table[26];
+    other_tool_replaced = legacy_wrapper;
+    other_tool_calls_through = true;
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational() && obs::last_slot_change().index == 26,
+            "A hook over ours refused the list or left capture on");
+    require(obs::register_list(list, 1, callbacks).ready, "A second registration under the other hook was refused");
+    auto chain = obs::service_chained_slots();
+    require(chain.pending == 1 && !chain.chained && !chain.accepted && !obs::operational(), "Probe armed");
+    list->ResourceBarrier(1, &transition);
+    chain = obs::service_chained_slots();
+    require(chain.pending == 1 && !chain.accepted && !obs::operational(), "A call before the probe interval was trusted");
+    const auto through_before = other_tool_calls;
+    list->ResourceBarrier(1, &transition);
+    require(other_tool_calls == through_before + 1, "The call did not go through the other hook");
+    chain = obs::service_chained_slots();
+    require(chain.accepted == 1 && chain.chained == 1 && !chain.pending && obs::operational(),
+            "Calls reaching ours through the other hook were not accepted");
+    check_legacy(1, &transition, 0, "Acceptance revived a recording from before the change");
+    obs::successful_reset(list, 1);
+    list->DrawInstanced(3, 1, 0, 0);
+    check_legacy(1, &transition, 1, "A fresh Reset under the accepted hook did not restore proof");
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational(), "Registration under the accepted hook");
+    // A hook that does not call ours is never accepted: capture stays off, but
+    // lists still register, so no failure builds up.
+    table[26] = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::service_chained_slots().chained == 0,
+            "Our wrapper back did not drop the accepted hook");
+    other_tool_calls_through = false;
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "A bypassing hook refused the list");
+    for (int round = 0; round < 5; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+      require(chain.pending == 1 && !chain.chained && !obs::operational(), "A hook that skips ours was accepted");
+    }
+    table[26] = legacy_wrapper;
+    other_tool_calls_through = true;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational() && obs::service_chained_slots().pending == 0,
+            "Our wrapper back did not end the wait");
+    obs::successful_reset(list, 1);
+
+    // An accepted hook on an every-frame method must keep passing calls on:
+    // calls through it while other frame work happens keep its acceptance; it
+    // is dropped in the first interval with frame work through our own Draw
+    // slot and none through it, even straight after acceptance.
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Registration under the hook again");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The hook was not accepted again");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+      require(chain.chained == 1 && !chain.dropped && obs::operational(), "A hook passing calls on was dropped");
+    }
+    // An interval without any frame work gives no evidence either way.
+    chain = obs::service_chained_slots();
+    require(chain.chained == 1 && !chain.dropped, "An idle interval dropped the hook");
+    other_tool_calls_through = false;
+    list->ResourceBarrier(1, &transition);
+    list->DrawInstanced(3, 1, 0, 0);
+    chain = obs::service_chained_slots();
+    require(chain.dropped == 1 && chain.pending == 1 && !chain.chained && !obs::operational(),
+            "A hook that stopped passing calls on kept its acceptance");
+    // Straight after a new acceptance, one silent interval is enough too.
+    other_tool_calls_through = true;
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The hook was not accepted after passing calls on again");
+    other_tool_calls_through = false;
+    list->DrawInstanced(3, 1, 0, 0);
+    chain = obs::service_chained_slots();
+    require(chain.dropped == 1 && !obs::operational(), "A hook bypassing ours right after acceptance kept it");
+    // A new hook written over an accepted one replaces it and is probed.
+    other_tool_calls_through = true;
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The hook was not accepted after it passed calls on again");
+    void* first_hook = table[26];
+    other_tool_replaced = first_hook;
+    table[26] = reinterpret_cast<void*>(&other_tool_draw);  // any other entry stands for the second hook
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational() && obs::last_slot_change().index == 26,
+            "A second hook over the accepted one did not hold capture");
+    chain = obs::service_chained_slots();
+    require(chain.pending == 1 && !chain.chained, "The second hook was reported as accepted rather than waiting");
+    table[26] = first_hook;
+    other_tool_replaced = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The first hook back was trusted without a new probe");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The first hook back was not accepted again");
+    // Start the next cases with that hook freshly written, so still waiting.
+    table[26] = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational(), "Our wrapper back after the second hook");
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The hook written again was not waited on");
+    // Accepting one slot while another still waits keeps capture held; a slot
+    // changed again before the service restarts its probe; Draw is probed too.
+    other_tool_calls_through = true;
+    void* draw_wrapper = table[12];
+    other_draw_replaced = draw_wrapper;
+    other_draw_calls_through = false;
+    table[12] = reinterpret_cast<void*>(&other_tool_draw);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "A second hooked slot refused the list");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && chain.chained == 1 && chain.pending == 16 && !obs::operational(),
+            "Capture resumed while another slot was still waiting");
+    table[12] = reinterpret_cast<void*>(&original_copy_resource);
+    chain = obs::service_chained_slots();
+    require(chain.pending == 16 && !obs::operational(), "A slot changed again was not still waiting");
+    other_draw_calls_through = true;
+    table[12] = reinterpret_cast<void*>(&other_tool_draw);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The hook back was not waited on afresh");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 16 && chain.chained == 17 && !chain.pending && obs::operational(),
+            "A Draw hook passing calls on was not accepted");
+    table[12] = draw_wrapper;
+    table[26] = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational() && !obs::service_chained_slots().chained,
+            "Our wrappers back did not clear both slots");
+    obs::successful_reset(list, 1);
+    // An accepted EndRenderPass hook is honoured when BeginRenderPass checks
+    // the End slot, so capture does not switch off again.
+    void* end_wrapper = table[69];
+    other_end_replaced = end_wrapper;
+    table[69] = reinterpret_cast<void*>(&other_tool_end);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "An End hook refused the list");
+    for (int round = 0; round < 3; ++round) {
+      extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+      extended->EndRenderPass();
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 4 && obs::operational(), "An End hook passing calls on was not accepted");
+    obs::successful_reset(list, 1);
+    extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+    extended->EndRenderPass();
+    require(obs::operational(), "BeginRenderPass refused the accepted End hook");
+    // EndRenderPass is not called every frame: intervals of Draws alone, or a
+    // burst of passes then a pause, keep its acceptance.
+    for (int round = 0; round < 5; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      chain = obs::service_chained_slots();
+      require(chain.chained == 4 && !chain.dropped && obs::operational(), "A quiet End hook was dropped");
+    }
+    table[69] = end_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational() && !obs::service_chained_slots().chained,
+            "Our End wrapper back did not clear the slot");
+    obs::successful_reset(list, 1);
+    // A tool hooking ResourceBarrier and both Draws, passing every call on:
+    // no every-frame slot of ours would be left to recheck them against, so
+    // none is accepted and capture stays held.
+    void* indexed_wrapper = table[13];
+    other_tool_replaced = legacy_wrapper;
+    other_tool_calls_through = true;
+    other_draw_replaced = draw_wrapper;
+    other_draw_calls_through = true;
+    other_draw_indexed_replaced = indexed_wrapper;
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    table[12] = reinterpret_cast<void*>(&other_tool_draw);
+    table[13] = reinterpret_cast<void*>(&other_tool_draw_indexed);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Hooks on all every-frame slots refused the list");
+    for (int round = 0; round < 5; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      list->DrawIndexedInstanced(3, 1, 0, 0, 0);
+      chain = obs::service_chained_slots();
+      require(!chain.chained && chain.pending == (1u | 16u | 32u) && !obs::operational(),
+              "All every-frame slots under other hooks were accepted");
+    }
+    table[26] = legacy_wrapper;
+    table[12] = draw_wrapper;
+    table[13] = indexed_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational() && !obs::service_chained_slots().pending,
+            "Our every-frame wrappers back did not end the wait");
+    obs::successful_reset(list, 1);
+    // The service follows the slot without any new registration: the simulator
+    // reuses its lists, so registration may not run again.
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The hook was not waited on");
+    table[26] = legacy_wrapper;
+    chain = obs::service_chained_slots();
+    require(!chain.pending && !chain.chained && obs::operational(), "A hook removed before acceptance kept the slot waiting");
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "The hook was not waited on again");
+    for (int round = 0; round < 3; ++round) {
+      list->ResourceBarrier(1, &transition);
+      chain = obs::service_chained_slots();
+    }
+    require(chain.accepted == 1 && obs::operational(), "The hook was not accepted before being replaced");
+    table[26] = reinterpret_cast<void*>(&other_tool_draw);  // another tool's entry over the accepted hook
+    chain = obs::service_chained_slots();
+    require(chain.pending == 1 && !chain.chained && !obs::operational() && obs::last_slot_change().index == 26,
+            "A replaced accepted hook kept capture on until a list registered");
+    table[26] = legacy_wrapper;
+    chain = obs::service_chained_slots();
+    require(!chain.pending && !chain.chained && obs::operational(), "Our wrapper back did not end the wait without a registration");
+    obs::successful_reset(list, 1);
+    // A null entry is no hook: refused as a changed slot, as before.
+    table[26] = nullptr;
+    require(!obs::register_list(list, 1, callbacks).ready && !obs::operational(), "A null slot entry was accepted");
+    table[26] = legacy_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational(), "Our wrapper back after a null entry");
+    obs::successful_reset(list, 1);
 
     // Real D3D12 swaps the same object's vtable during BeginRenderPass. Each
     // observed active table needs its own original End and bounded trampoline.
@@ -879,7 +1142,9 @@ int main() {
     extended->EndRenderPass();
     // Registration with the active End slot still changed: holding the
     // original is no foreign hook; another entry is reported with its slot.
-    require(!obs::register_list(list, 1, callbacks).ready && obs::last_slot_change().index == 68,
+    const auto change_before = obs::last_slot_change();
+    require(!obs::register_list(list, 1, callbacks).ready && obs::last_slot_change().index == change_before.index &&
+                obs::last_slot_change().target == change_before.target,
             "An active End slot holding the original was reported as another hook");
     active_tables[0][69] = reinterpret_cast<void*>(&original_begin);
     require(!obs::register_list(list, 1, callbacks).ready && obs::last_slot_change().index == 69 &&

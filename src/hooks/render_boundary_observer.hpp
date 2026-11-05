@@ -200,6 +200,29 @@ struct SlotChange {
   void* target = nullptr;
 };
 SlotChange last_slot_change() noexcept;
+// Another hook written over one of our installed slots no longer refuses
+// registration: lists keep registering with capture held off while that slot
+// is pending, until service_chained_slots() sees our wrapper called through
+// the other hook a whole call interval after the change. The slot then
+// accepts that entry and capture resumes (old recordings still need a fresh
+// Reset). A hook that never calls ours stays pending: capture stays off.
+// An accepted slot on an every-frame method (ResourceBarrier, DrawInstanced,
+// DrawIndexedInstanced) is rechecked every interval: no call through it while
+// our own every-frame slots saw calls drops the acceptance (`dropped`),
+// holding capture until it is proven again. The last of those three slots
+// still ours is never accepted, so one is always left to recheck the others
+// against: a tool hooking all three keeps capture held. Burst or unused methods (copies,
+// enhanced barriers, render passes) give no such evidence and keep it. A hook
+// passing on only some calls can still pass: per-call proof needs a second
+// path to the same calls. A new hook written over an accepted one replaces it
+// and is probed afresh.
+// Masks are bits of the 8 main slots in the order 26, 68, 69, 80, 12, 13,
+// 16, 17. Call from one worker thread about once a second; it takes no lock
+// while no slot is watched, and skips an interval when the lock is busy.
+struct ChainStatus {
+  std::uint32_t chained = 0, pending = 0, accepted = 0, dropped = 0;
+};
+ChainStatus service_chained_slots() noexcept;
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 // Test-only scalar state; never part of the production add-on interface.
 std::uint32_t validation_state(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;

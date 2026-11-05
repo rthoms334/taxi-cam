@@ -1,9 +1,10 @@
 #include "render_boundary_observer.hpp"
-#include "../graphics/native_device_identity.hpp"
-#include "../shared/hook_timing.hpp"
 #include <array>
 #include <atomic>
 #include <unordered_map>
+#include "../graphics/native_device_identity.hpp"
+#include "../shared/hook_timing.hpp"
+#include "../shared/lock_holder_priority.hpp"
 #ifdef TAXI_RENDER_BOUNDARY_VALIDATION
 extern "C" BOOL taxi_boundary_test_virtual_protect(void*, SIZE_T, DWORD, PDWORD) noexcept;
 extern "C" SIZE_T taxi_boundary_test_virtual_query(const void*, MEMORY_BASIC_INFORMATION*, SIZE_T) noexcept;
@@ -36,6 +37,12 @@ struct Slot {
   void* forward = nullptr;
   void* wrapper = nullptr;
   bool installed = false;
+  // Another hook written over our installed one (render-boundary chaining):
+  // `pending` until our wrapper is seen called through it, then `chained`,
+  // accepted in place of our wrapper. probe_phase counts service() calls.
+  void* pending = nullptr;
+  void* chained = nullptr;
+  unsigned probe_phase = 0;
 };
 struct Identity {
   std::uint64_t generation = 0;
@@ -102,6 +109,29 @@ std::array<Slot, 8> slots{{{26}, {68}, {69}, {80}, {12}, {13}, {16}, {17}}};
 // The latest slot a registration found changed, and the entry it held then.
 std::atomic<UINT> changed_slot_index{0};
 std::atomic<void*> changed_slot_target{nullptr};
+// Bit n: slots[n] is probed / its wrapper ran since the worker last took the
+// hits. While any slot has another hook over it (watched_mask), every slot is
+// probed: the slots still holding our wrapper show the list work that the
+// slots under another hook must also see. Wrappers only read probe_mask (one
+// relaxed load per call) and write a hit once per interval, so probing costs
+// nothing while no slot is watched.
+std::atomic<std::uint32_t> probe_mask{0}, hit_mask{0}, watched_mask{0};
+// The last service result, returned while the control lock is busy.
+std::atomic<std::uint32_t> last_chained{0}, last_pending{0};
+inline void note_call(unsigned n) noexcept {
+  const auto bit = 1u << n;
+  if ((probe_mask.load(std::memory_order_relaxed) & bit) && !(hit_mask.load(std::memory_order_relaxed) & bit))
+    hit_mask.fetch_or(bit, std::memory_order_relaxed);
+}
+// Control lock held: watched_mask and probing follow the slots' state.
+void update_watch() noexcept {
+  std::uint32_t watched = 0;
+  for (std::size_t n = 0; n < slots.size(); ++n)
+    if (slots[n].pending || slots[n].chained)
+      watched |= 1u << n;
+  watched_mask.store(watched, std::memory_order_release);
+  probe_mask.store(watched ? (1u << slots.size()) - 1 : 0, std::memory_order_relaxed);
+}
 struct ActiveEndSlot {
   void* table = nullptr;
   Slot slot{69};
@@ -352,6 +382,7 @@ void after_draw_work(ID3D12GraphicsCommandList* list, const Identity& before, st
 }
 void STDMETHODCALLTYPE
 draw(ID3D12GraphicsCommandList* list, UINT vertices, UINT instances, UINT first_vertex, UINT first_instance) noexcept {
+  note_call(4);
   const auto original = original_draw.load(std::memory_order_acquire);
   if (inside) {
     original(list, vertices, instances, first_vertex, first_instance);
@@ -371,6 +402,7 @@ void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
                                     UINT first_index,
                                     INT vertex_offset,
                                     UINT first_instance) noexcept {
+  note_call(5);
   const auto original = original_draw_indexed.load(std::memory_order_acquire);
   if (inside) {
     original(list, indices, instances, first_index, vertex_offset, first_instance);
@@ -394,6 +426,7 @@ bool previous_legacy_change(UINT index, const D3D12_RESOURCE_BARRIER* barriers, 
   return false;
 }
 void STDMETHODCALLTYPE copy_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* destination, ID3D12Resource* source) noexcept {
+  note_call(7);
   const auto original = original_copy_resource.load(std::memory_order_acquire);
   if (inside) {
     original(list, destination, source);
@@ -418,6 +451,7 @@ void STDMETHODCALLTYPE copy_texture(ID3D12GraphicsCommandList* list,
                                     UINT z,
                                     const D3D12_TEXTURE_COPY_LOCATION* source,
                                     const D3D12_BOX* box) noexcept {
+  note_call(6);
   const auto original = original_copy_texture.load(std::memory_order_acquire);
   if (inside) {
     original(list, destination, x, y, z, source, box);
@@ -484,6 +518,7 @@ void selected_legacy(ID3D12GraphicsCommandList* list,
   }
 }
 void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const D3D12_RESOURCE_BARRIER* barriers) noexcept {
+  note_call(0);
   const auto original = original_legacy.load(std::memory_order_acquire);
   if (inside) {
     original(list, count, barriers);
@@ -578,6 +613,7 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
                              const D3D12_RENDER_PASS_RENDER_TARGET_DESC* targets,
                              const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth,
                              D3D12_RENDER_PASS_FLAGS flags) noexcept {
+  note_call(1);
   const auto original = original_begin.load(std::memory_order_acquire);
   if (inside) {
     original(list, count, targets, depth, flags);
@@ -678,6 +714,7 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
   }
 }
 void STDMETHODCALLTYPE end(ID3D12GraphicsCommandList4* list) noexcept {
+  note_call(2);
   end_impl(list, original_end.load(std::memory_order_acquire));
 }
 template <std::size_t Index>
@@ -734,6 +771,7 @@ bool sole_subresource(const D3D12_BARRIER_SUBRESOURCE_RANGE& range) noexcept {
          range.FirstPlane == 0 && range.NumPlanes == 1;
 }
 void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, const D3D12_BARRIER_GROUP* groups) noexcept {
+  note_call(3);
   const auto original = original_enhanced.load(std::memory_order_acquire);
   if (inside) {
     original(list, count, groups);
@@ -935,7 +973,8 @@ bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
         return false;
       if (table == saved_table && slots[2].installed) {
         void* current = nullptr;
-        return pointer_exact(slots[2].address, current) && current == slots[2].wrapper;
+        return pointer_exact(slots[2].address, current) &&
+               (current == slots[2].wrapper || (slots[2].chained && current == slots[2].chained));
       }
       for (std::size_t n = 0; n < active_end_count; ++n) {
         const auto& known = active_end_slots[n];
@@ -957,7 +996,7 @@ bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
     return false;
   if (table == saved_table) {
     void* current = nullptr;
-    return pointer(slots[2].address, current) && current == slots[2].wrapper;
+    return pointer(slots[2].address, current) && (current == slots[2].wrapper || (slots[2].chained && current == slots[2].chained));
   }
   for (std::size_t n = 0; n < active_end_count; ++n) {
     auto& known = active_end_slots[n];
@@ -1045,9 +1084,43 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     changed_slot_target.store(current, std::memory_order_relaxed);
     changed_slot_index.store(slot.index, std::memory_order_release);
   };
-  for (auto& slot : slots) {
+  bool held = false;
+  for (UINT n = 0; n < slots.size(); ++n) {
+    auto& slot = slots[n];
     void* current = nullptr;
     const bool read = pointer(slot.address, current);
+    // Another hook written over our installed one. Lists keep registering
+    // (refusing them would refuse every new list from now on), but capture
+    // stays off until service() sees our wrapper called through that hook.
+    if (read && current && slot.installed && current != slot.wrapper && current != slot.forward) {
+      if (slot.chained && current == slot.chained) {
+        // The accepted hook is back over another one that came and went:
+        // nothing waits on that other hook any more.
+        if (slot.pending) {
+          slot.pending = nullptr;
+          slot.probe_phase = 0;
+          update_watch();
+        }
+        continue;
+      }
+      if (current != slot.pending) {
+        note_foreign(slot, read, current);
+        // A new hook over an accepted one replaces it: the new one is probed.
+        slot.chained = nullptr;
+        slot.pending = current;
+        slot.probe_phase = 0;
+        update_watch();
+        disable_capture();
+      }
+      held = true;
+      continue;
+    }
+    if (read && slot.installed && current == slot.wrapper && (slot.pending || slot.chained)) {
+      // The other hook was taken off again: our wrapper is back in the slot.
+      slot.pending = slot.chained = nullptr;
+      slot.probe_phase = 0;
+      update_watch();
+    }
     if (!read || current != (slot.installed ? slot.wrapper : slot.forward)) {
       note_foreign(slot, read, current);
       disable_capture();
@@ -1091,8 +1164,148 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
       }
     }
   }
-  enabled.store(true, std::memory_order_release);
-  return result("registered", 0, true);
+  enabled.store(!held, std::memory_order_release);
+  return result(held ? "registered_capture_held" : "registered", 0, true);
+}
+// Every main slot holds what it should (our wrapper, or a hook accepted over
+// it) and every active End slot its trampoline. Control lock held.
+bool slots_intact() noexcept {
+  for (const auto& slot : slots) {
+    void* current = nullptr;
+    if (!slot.installed || slot.pending || !pointer(slot.address, current) ||
+        (current != slot.wrapper && (!slot.chained || current != slot.chained)))
+      return false;
+  }
+  for (std::size_t n = 0; n < active_end_count; ++n) {
+    const auto& slot = active_end_slots[n].slot;
+    void* current = nullptr;
+    if (!slot.installed || !pointer(slot.address, current) || current != slot.wrapper)
+      return false;
+  }
+  return true;
+}
+ChainStatus service_chained_slots() noexcept {
+  ChainStatus status;
+  // Nothing watched: no lock at all. Otherwise the worker never waits for the
+  // control lock the render threads take: a busy lock skips this interval.
+  if (inside || !watched_mask.load(std::memory_order_acquire)) {
+    last_chained.store(0, std::memory_order_relaxed);
+    last_pending.store(0, std::memory_order_relaxed);
+    return status;
+  }
+  if (!TryAcquireSRWLockExclusive(&control_lock)) {
+    status.chained = last_chained.load(std::memory_order_relaxed);
+    status.pending = last_pending.load(std::memory_order_relaxed);
+    return status;
+  }
+  // Held above normal priority, as the bridge's registry lock is: render
+  // threads wait on this lock and on the identity shards disable_capture takes.
+  taxi_camera::lock_holder_priority::enter();
+  struct Release {
+    ~Release() {
+      ReleaseSRWLockExclusive(&control_lock);
+      taxi_camera::lock_holder_priority::leave();
+    }
+  } release;
+  if (!configured || removed)
+    return status;
+  // Calls since the last service. A slot still holding our wrapper that ran
+  // shows list work happened in this interval.
+  const auto hits = hit_mask.exchange(0, std::memory_order_acq_rel);
+  // ResourceBarrier, DrawInstanced and DrawIndexedInstanced run in every
+  // frame the simulator draws; the other methods run in bursts or not at all
+  // (MSFS issues no render passes). Calls through one of our own every-frame
+  // slots in an interval show that frame work happened in it.
+  constexpr std::uint32_t every_frame = (1u << 0) | (1u << 4) | (1u << 5);
+  std::uint32_t own = 0;
+  for (std::size_t n = 0; n < slots.size(); ++n)
+    if (!slots[n].pending && !slots[n].chained)
+      own |= 1u << n;
+  const auto frame_work = hits & own & every_frame;
+  bool changed = false, cleared = false;
+  for (UINT n = 0; n < slots.size(); ++n) {
+    auto& slot = slots[n];
+    const auto bit = 1u << n;
+    void* current = nullptr;
+    const bool read = pointer(slot.address, current);
+    if ((slot.chained || slot.pending) && read && current == slot.wrapper) {
+      // The other hook was taken off and our wrapper is back: nothing to wait
+      // on, whether or not a list registers again.
+      slot.chained = slot.pending = nullptr;
+      slot.probe_phase = 0;
+      changed = cleared = true;
+      continue;
+    }
+    if (slot.chained && !slot.pending && (!read || current != slot.chained)) {
+      // Something else replaced the accepted hook (or the slot can't be read):
+      // capture is held and that entry is probed, whether or not a list
+      // registers again.
+      if (read && current != slot.forward) {
+        changed_slot_target.store(current, std::memory_order_relaxed);
+        changed_slot_index.store(slot.index, std::memory_order_release);
+      }
+      slot.pending = read ? current : slot.chained;
+      slot.chained = nullptr;
+      slot.probe_phase = 0;
+      changed = true;
+      disable_capture();
+      status.pending |= bit;
+      continue;
+    }
+    if (slot.chained && !slot.pending) {
+      // An accepted hook on an every-frame method must keep passing calls on:
+      // an interval with frame work through our own every-frame slots and no
+      // call through it drops the acceptance, holding capture until it is
+      // proven again. Burst or unused methods give no such evidence (a quiet
+      // interval is normal), so their acceptance is kept.
+      if ((every_frame & bit) && read && current == slot.chained && !(hits & bit) && frame_work) {
+        slot.pending = slot.chained;
+        slot.chained = nullptr;
+        slot.probe_phase = 0;
+        changed = true;
+        disable_capture();
+        status.pending |= bit;
+        status.dropped |= bit;
+      } else {
+        status.chained |= bit;
+      }
+      continue;
+    }
+    if (!slot.pending)
+      continue;
+    if (!read || current != slot.pending) {
+      // Changed again since registration saw it; the next registration decides.
+      slot.probe_phase = 0;
+      status.pending |= bit;
+      continue;
+    }
+    // Phases 1 and 2 discard hits (calls that may have read the slot before it
+    // changed); from phase 3 a hit accepts: our wrapper ran through the other
+    // hook a whole service interval after the change.
+    ++slot.probe_phase;
+    // The last every-frame slot of ours is never given up: with all three
+    // under other hooks nothing would show frame work to recheck them against,
+    // so that slot stays waiting and capture stays held.
+    const bool last_every_frame = (every_frame & bit) && !(own & every_frame & ~bit);
+    if (slot.probe_phase <= 2 || !(hits & bit) || last_every_frame) {
+      status.pending |= bit;
+      continue;
+    }
+    slot.chained = slot.pending;
+    slot.pending = nullptr;
+    slot.probe_phase = 0;
+    changed = true;
+    status.chained |= bit;
+    status.accepted |= bit;
+  }
+  if (changed)
+    update_watch();
+  // Recordings stay invalid from the change: only a fresh Reset proves one.
+  if ((status.accepted || cleared) && !status.pending && slots_intact())
+    enabled.store(true, std::memory_order_release);
+  last_chained.store(status.chained, std::memory_order_relaxed);
+  last_pending.store(status.pending, std::memory_order_relaxed);
+  return status;
 }
 bool erase_identity(ID3D12GraphicsCommandList* key, std::uint64_t generation) noexcept {
   auto& shard = shard_for(key);
@@ -1183,8 +1396,12 @@ Result remove() noexcept {
   DWORD error = 0;
   if (!repair(error))
     return result("protection_restore_failed", error);
+  // A slot another hook is chained over keeps our wrapper in that hook's
+  // chain: taking it out would cut the other hook off from the original.
+  probe_mask.store(0, std::memory_order_relaxed);
+  watched_mask.store(0, std::memory_order_release);
   for (auto& slot : slots)
-    if (slot.installed && !exchange(slot, false, error))
+    if (slot.installed && !slot.pending && !slot.chained && !exchange(slot, false, error))
       return result("removal_incomplete", error);
   for (std::size_t n = 0; n < active_end_count; ++n) {
     auto& slot = active_end_slots[n].slot;

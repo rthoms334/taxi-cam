@@ -325,6 +325,8 @@ struct Registry {
   std::atomic<const char*> error{"not_started"};
   // The latest refused command-list registration: the step and its reason.
   std::atomic<const char*> list_refused_by{"none"}, list_refusal_reason{"none"};
+  std::atomic<std::uint32_t> boundary_chained{}, boundary_pending{};
+  std::atomic<std::uint64_t> boundary_accepted{};
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
   std::unordered_map<ID3D12GraphicsCommandList*, std::shared_ptr<List>> lists;
@@ -4939,6 +4941,9 @@ GraphicsStatus graphics_status() noexcept {
   const auto changed = boundary::last_slot_change();
   result.changed_slot = changed.index;
   result.changed_slot_target = reinterpret_cast<std::uintptr_t>(changed.target);
+  result.boundary_chained = r.boundary_chained.load(std::memory_order_relaxed);
+  result.boundary_pending = r.boundary_pending.load(std::memory_order_relaxed);
+  result.boundary_accepted = r.boundary_accepted.load(std::memory_order_relaxed);
   return result;
 }
 static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
@@ -5532,6 +5537,18 @@ void drain_deferred_lifecycle(Registry& r) {
       item->settled_state.store(Resource::kSettledStateUnknown, std::memory_order_release);
     }
   }
+}
+// Outside the registry lock: the boundary takes its own control lock, as a
+// registration does after ensure_list has released the registry.
+void service_render_boundary() noexcept {
+  auto& r = registry();
+  if (!r.ready)
+    return;
+  const auto chain = boundary::service_chained_slots();
+  r.boundary_chained.store(chain.chained, std::memory_order_relaxed);
+  r.boundary_pending.store(chain.pending, std::memory_order_relaxed);
+  if (chain.accepted)
+    r.boundary_accepted.fetch_add(static_cast<std::uint64_t>(__builtin_popcount(chain.accepted)), std::memory_order_relaxed);
 }
 void discover_pfds(std::uint64_t now) noexcept {
   observe_safely([&] {

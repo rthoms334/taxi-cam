@@ -4,6 +4,7 @@
       "version": "1.3.3",
       "date": "2026-11-05",
       "fixes": [
+        "Starting another tool that hooks the simulator's graphics after Taxi Cam, such as GlassOut, no longer turns the cameras off with a native hook warning. Taxi Cam pauses its cameras until it sees that tool passing the simulator's work on to it, then carries on.",
         "When another add-on, such as panel-raas, changes the cockpit page Taxi Cam uses to recognise your displays, Taxi Cam now adds its part to that add-on's version of the page, and goes back to its own if you remove that add-on.",
         "When Taxi Cam turns its cameras off to keep the simulator safe, or can't recognise your cockpit displays, its log now says why, so a bug report is enough to find the cause."
       ]
