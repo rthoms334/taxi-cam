@@ -829,7 +829,7 @@ DWORD run_impl() {
   // recreated without a copy).
   // Pictures without a mark, of several panel textures at once, and none with
   // one: the pages carry no marks, so the package is not loaded
-  // (mark_identity::package_inactive).
+  // (mark_identity::PackageVerdict), once the scan has settled.
   constexpr unsigned MarkTries = 5, MarkReshows = 2;
   // A picture not taken within MarkPictureMs is given up (the texture is not
   // being drawn): the next texture's request replaces it, so undrawn panels
@@ -859,6 +859,7 @@ DWORD run_impl() {
     // lost, unavailable), logged every 10 s while it scans. empty_textures:
     // the most textures listed at once with a picture without a mark.
     unsigned pictures{}, empty{}, failed{}, empty_textures{};
+    mark_identity::PackageVerdict verdict;  // This aircraft session's package-inactive verdict.
     // DXGI formats of the pictures without marks (a curve on the way into
     // some formats can hide a level), and of those with.
     std::array<unsigned, 6> empty_formats{}, read_formats{};
@@ -1126,6 +1127,7 @@ DWORD run_impl() {
         mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = mark_scan.empty_textures = 0;
         mark_scan.last_reshow_ms = mark_scan.shown_ms = 0;
         mark_scan.shown_again = mark_scan.session_shown = mark_scan.setup_shown = false;
+        mark_scan.verdict.reset();
         // The last flight's pictures without marks do not count for this one:
         // its listed textures are counted again below, before they are pruned.
         for (auto& entry : mark_scan.entries)
@@ -1176,13 +1178,16 @@ DWORD run_impl() {
                       e[3]);
         log_status(log_to, detail);
       }
-      panel_identity.inactive =
-          mark_identity::package_inactive(!panel_identity.store.textures().empty(), mark_scan.empty, mark_scan.empty_textures);
       // A texture drawn is pictured within a second or two; one the
       // simulator keeps recreating could otherwise hold the list back.
-      panel_identity.settled = std::none_of(mark_scan.entries.begin(), mark_scan.entries.end(),
-                                            [](const MarkScan::Entry& entry) { return !entry.read && entry.tries < MarkTries; }) ||
-                               (mark_scan.shown_ms && now - mark_scan.shown_ms >= MarkSettleMs);
+      const bool tried = std::none_of(mark_scan.entries.begin(), mark_scan.entries.end(),
+                                      [](const MarkScan::Entry& entry) { return !entry.read && entry.tries < MarkTries; });
+      const bool shown_long = mark_scan.shown_ms && now - mark_scan.shown_ms >= MarkSettleMs;
+      panel_identity.settled = tried || shown_long;
+      // Pictures taken before the pages painted their marks give no verdict,
+      // nor does an empty list (textures pictured, then recreated mid-load).
+      panel_identity.inactive = mark_scan.verdict.observe(!panel_identity.store.textures().empty(), mark_scan.empty,
+                                                          mark_scan.empty_textures, (tried && !mark_scan.entries.empty()) || shown_long);
       if (!allowed || companion)
         return;
       if (now >= mark_scan.next_refresh) {

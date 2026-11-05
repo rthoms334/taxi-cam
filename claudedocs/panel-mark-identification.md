@@ -129,6 +129,41 @@ Not built yet: the companion could scan Community `layout.json` files for
 the path and say why no marks are found. It never fights for the file: we
 don't rename the package to load later.
 
+### When another package takes the page (issue 184, 2026-11-05)
+
+The collision above happened: vRAAS (LAND3 Simulations, payware) ships
+`panel-raas`, its own copy of `VCockpit.html` (an older stock page plus
+`/RAAS/signalr-3.1.31.js` and a deferred `/RAAS/RaasMain.js`), listed in
+`globally_overriden_base_sim_files` with `package_order_hint` `PANEL_PATCH`.
+1.3.3 test builds put our line into a copy of that page, took its hint and
+relied on our folder name sorting later. On the reporter's PC (Store
+1.9.21–1.9.24) vRAAS's page still loaded and no marks appeared; with
+`panel-raas` moved out, ours loaded and the displays were found. The SDK
+(Virtual File System Information) says packages of one hint mount in
+alphabetical order, the later one winning, but not which name is sorted
+(folder, title, package name) or whether case counts; our title "Taxi Cam
+panel marks" sorts before "panel-raas" if it is the title, case-sensitively.
+Which page loads therefore can't be predicted.
+
+**Choice: while another package takes the page, ours replaces
+`Core/VCockpit.js` instead**, the stock script with the helper appended.
+Every copy of the page loads `VCockpit.js` (vRAAS's does, by the stock
+line), so our helper runs whichever page loads. The trade-off weighed in
+"Other load points" stands, so the script is used only in this case: a
+simulator update to `VCockpit.js` runs our older copy for one session until
+the next check rewrites it. The package is left out (`conflict`) when the
+other page doesn't load `VCockpit.js` by the stock line, or another package
+replaces `VCockpit.js` too.
+
+Live (dev box, Store, A350, 2026-11-05) with a stand-in `panel-raas` made
+of the reporter's vRAAS `manifest.json` and `VCockpit.html` (vRAAS's own
+`/RAAS/` scripts absent): the earlier merged page read 0 of 24 textures and
+reported the package inactive; script mode read the marks and routed both
+PFDs and the door display (`ids=271,272,255`). Not run with vRAAS itself,
+so its PFD/ND text beside our helper is unverified. While the simulator
+runs, a mode switch keeps the old mode's files (they are mounted); they go
+at the first check of a later session.
+
 **Manifest.** The package declares the file in
 `globally_overriden_base_sim_files`, as Community packages that override
 base files do.

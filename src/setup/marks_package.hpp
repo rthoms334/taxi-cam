@@ -1,18 +1,29 @@
 #pragma once
 // The Community package that loads the panel-mark helper into every cockpit
 // panel page (claudedocs/panel-mark-identification.md). It overrides one
-// stock file, html_ui/Pages/VCockpit/Core/VCockpit.html, with the simulator's
-// own copy plus one script line after VCockpit.js, made from the installed
-// stock page every time it changes. Taxi Cam never ships a copy of the page:
-// a copy left behind by a simulator update could break every cockpit display,
-// so a stock page whose VCockpit.js line is not exactly as expected removes
-// the package instead.
+// stock file, made from the installed one every time it changes; Taxi Cam
+// never ships a copy, as one left behind by a simulator update could break
+// every cockpit display:
+// - page mode: html_ui/Pages/VCockpit/Core/VCockpit.html, the stock page plus
+//   one script line after VCockpit.js. A stock page whose VCockpit.js line is
+//   not exactly as expected removes the package instead.
+// - script mode, when another Community package replaces that page (issue
+//   184: vRAAS's panel-raas, the same order hint as ours and sorting before
+//   us, still won in MSFS 2024, so which copy of the page loads cannot be
+//   predicted): html_ui/Pages/VCockpit/Core/VCockpit.js, the stock script
+//   with the helper added at its end. Every copy of the page loads it, so
+//   our helper loads whichever page loads (seen with a stand-in made of
+//   vRAAS's page and manifest, 2026-11-05; not with vRAAS itself). The
+//   script is 23.5 KB of the simulator's logic, so this is used only when
+//   the page is taken: a simulator update to it runs our copy for one
+//   session until the next check rewrites it.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 // bcrypt.h needs windows.h first; this line keeps the two apart.
 #include <bcrypt.h>
+#include <tlhelp32.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -21,6 +32,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -28,17 +40,20 @@
 
 namespace taxi_camera::standalone::marks_package {
 inline constexpr wchar_t PackageName[] = L"taxi-cam-panel-marks";
-// The folder name used instead when the package whose page ours is built on
-// sorts after PackageName: per the MSFS 2024 SDK (Virtual File System
-// Information), packages of one order hint mount in alphabetical order and the
-// one mounted later wins. Not yet observed against a conflicting package.
+// A folder name 1.3.3 test builds used to mount after another package's page
+// (never shipped in a release); only removed now.
 inline constexpr wchar_t LatePackageName[] = L"zzzz-taxi-cam-panel-marks";
 inline constexpr char HelperName[] = "taxi-cam-marks.js";
 inline constexpr wchar_t MarkerName[] = L"taxi-cam-marks.stock.txt";
 inline constexpr char PageRelative[] = "html_ui/Pages/VCockpit/Core/VCockpit.html";
 inline constexpr char HelperRelative[] = "html_ui/Pages/VCockpit/Core/taxi-cam-marks.js";
+inline constexpr char ScriptRelative[] = "html_ui/Pages/VCockpit/Core/VCockpit.js";
 // Bumped when the files this writes change shape.
-inline constexpr char FormatVersion[] = "2";
+inline constexpr char FormatVersion[] = "3";
+enum class Mode { page, script };
+inline const char* mode_name(Mode mode) noexcept {
+  return mode == Mode::script ? "script" : "page";
+}
 // taxi-cam-marks.js, built into taxi-cam.exe (app.rc).
 inline constexpr int HelperResource = 201;
 inline std::string_view helper_text() noexcept {
@@ -48,13 +63,14 @@ inline std::string_view helper_text() noexcept {
   return data ? std::string_view(static_cast<const char*>(data), SizeofResource(nullptr, found)) : std::string_view{};
 }
 
-// The stock page with the helper's script line after the VCockpit.js line,
-// keeping that line's indent and line ending. Empty when the page has no or
-// several such lines, or already names the helper.
-inline std::string patch_page(std::string_view stock) {
+// A page's `<script ... src="VCockpit.js">` lines: how many, and for the last
+// one where the next line starts, its indent and its line ending.
+struct ScriptLine {
+  std::size_t count = 0, next = std::string_view::npos;
+  std::string_view indent, ending;
+};
+inline ScriptLine script_lines(std::string_view stock) {
   constexpr std::string_view script = R"(<script type="text/javascript" src="VCockpit.js"></script>)";
-  if (stock.find(HelperName) != std::string_view::npos)
-    return {};
   std::size_t found = std::string_view::npos, count = 0, start = 0;
   std::string_view indent, ending;
   while (start < stock.size()) {
@@ -78,17 +94,47 @@ inline std::string patch_page(std::string_view stock) {
     }
     start = last ? stock.size() : end + 1;
   }
-  if (count != 1)
+  return {count, found, indent, ending};
+}
+// Whether a page loads VCockpit.js exactly once, by the stock line.
+inline bool loads_script(std::string_view page) {
+  return script_lines(page).count == 1;
+}
+// The stock page with the helper's script line after the VCockpit.js line,
+// keeping that line's indent and line ending. Empty when the page has no or
+// several such lines, or already names the helper.
+inline std::string patch_page(std::string_view stock) {
+  if (stock.find(HelperName) != std::string_view::npos)
     return {};
+  const auto line = script_lines(stock);
+  if (line.count != 1)
+    return {};
+  const auto found = line.next;
   std::string out(stock.substr(0, found));
   if (found == stock.size() && !out.empty() && out.back() != '\n')
-    out += ending;
-  out += indent;
+    out += line.ending;
+  out += line.indent;
   out += R"(<script type="text/javascript" src="/Pages/VCockpit/Core/)";
   out += HelperName;
   out += R"("></script>)";
-  out += ending;
+  out += line.ending;
   out += stock.substr(found);
+  return out;
+}
+// The stock VCockpit.js with the helper added at its end, on lines of its
+// own. Empty when the script is empty or already carries the helper.
+inline constexpr std::string_view ScriptBanner = "// Taxi Cam panel marks (taxi-cam-marks.js), added by Taxi Cam.";
+inline std::string patch_script(std::string_view stock, std::string_view helper) {
+  if (stock.empty() || helper.empty() || stock.find(ScriptBanner) != std::string_view::npos)
+    return {};
+  std::string out(stock);
+  if (out.back() != '\n')
+    out += "\r\n";
+  out += ScriptBanner;
+  out += "\r\n";
+  out += helper;
+  if (out.back() != '\n')
+    out += "\r\n";
   return out;
 }
 // "minimum_game_version" from a package manifest, or empty.
@@ -106,45 +152,33 @@ inline std::string minimum_game_version(std::string_view manifest) {
       return {};
   return std::string(value);
 }
-// Our own hint, used when the page is the stock one.
+// Our order hint, the SDK's for third-party packages that override panel
+// files.
 inline constexpr char OwnOrderHint[] = "PANEL_PATCH";
-// "package_order_hint" from a package manifest: letters, digits and '_' only,
-// else empty (also when the manifest sets none, which MSFS mounts last).
-inline std::string order_hint(std::string_view manifest) {
-  const auto key = manifest.find("\"package_order_hint\"");
-  if (key == std::string_view::npos)
-    return {};
-  const auto colon = manifest.find(':', key);
-  const auto open = colon == std::string_view::npos ? colon : manifest.find('"', colon + 1);
-  const auto close = open == std::string_view::npos ? open : manifest.find('"', open + 1);
-  if (close == std::string_view::npos)
-    return {};
-  const auto value = manifest.substr(open + 1, close - open - 1);
-  if (value.empty() || value.size() > 64)
-    return {};
-  for (const char c : value)
-    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
-      return {};
-  return std::string(value);
-}
-// Whether a manifest lists the cockpit page among its globally overridden
-// files: in MSFS 2024 a package's copy of an html_ui file overrides the
-// stock one only when it is listed there.
-inline bool lists_page(std::string_view manifest) {
+// Whether a manifest lists `relative` (an html_ui path) among its globally
+// overridden files: in MSFS 2024 a package's copy of an html_ui file
+// overrides the stock one only when it is listed there. Case and slashes
+// are ignored.
+inline bool lists_file(std::string_view manifest, std::string_view relative) {
   const auto key = manifest.find("\"globally_overriden_base_sim_files\"");
   const auto open = key == std::string_view::npos ? key : manifest.find('[', key);
   const auto close = open == std::string_view::npos ? open : manifest.find(']', open);
   if (close == std::string_view::npos)
     return false;
-  std::string list;
-  for (const char c : manifest.substr(open, close - open))
-    if (c != '\\' && c != '/')
-      list += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-  return list.find("html_uipagesvcockpitcorevcockpit.html") != std::string::npos;
+  const auto fold = [](std::string_view text) {
+    std::string out;
+    for (const char c : text)
+      if (c != '\\' && c != '/')
+        out += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    return out;
+  };
+  return fold(manifest.substr(open, close - open)).find(fold(relative)) != std::string::npos;
 }
-// The package's manifest; `hint` empty leaves package_order_hint out, as the
-// package our page is built on may (MSFS then mounts both last).
-inline std::string manifest_json(std::string_view minimum_version, std::string_view hint = OwnOrderHint) {
+inline bool lists_page(std::string_view manifest) {
+  return lists_file(manifest, PageRelative);
+}
+// The package's manifest, overriding the page or the script.
+inline std::string manifest_json(std::string_view minimum_version, Mode mode = Mode::page) {
   std::string out =
       "{\r\n  \"dependencies\": [],\r\n  \"content_type\": \"MISC\",\r\n  \"title\": \"Taxi Cam panel marks\",\r\n"
       "  \"manufacturer\": \"\",\r\n  \"creator\": \"Taxi Cam\",\r\n  \"package_version\": \"1.0.0\",\r\n"
@@ -152,13 +186,11 @@ inline std::string manifest_json(std::string_view minimum_version, std::string_v
   out += minimum_version.empty() ? std::string_view{"1.0.0"} : minimum_version;
   out +=
       "\",\r\n  \"release_notes\": { \"neutral\": { \"LastUpdate\": \"\", \"OlderHistory\": \"\" } },\r\n"
-      "  \"export_type\": \"Community\",\r\n";
-  if (!hint.empty()) {
-    out += "  \"package_order_hint\": \"";
-    out += hint;
-    out += "\",\r\n";
-  }
-  out += "  \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.html\" ]\r\n}\r\n";
+      "  \"export_type\": \"Community\",\r\n  \"package_order_hint\": \"";
+  out += OwnOrderHint;
+  out += "\",\r\n  \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\";
+  out += mode == Mode::script ? "VCockpit.js" : "VCockpit.html";
+  out += "\" ]\r\n}\r\n";
   return out;
 }
 struct LayoutEntry {
@@ -177,22 +209,17 @@ inline std::string layout_json(const std::vector<LayoutEntry>& entries) {
   out += "\r\n  ]\r\n}\r\n";
   return out;
 }
-// What the marker file records: the page the package was made from (the
-// stock page, or another package's copy of it, with that package's order
-// hint) and the helper. A difference in any of them rewrites it, so another
-// package added, changed or removed later is followed at the next check.
-inline std::string marker_text(std::string_view page_hash,
-                               std::string_view helper_hash,
-                               std::string_view source = "stock",
-                               std::string_view hint = OwnOrderHint) {
+// What the marker file records: the mode, the stock file the package was
+// made from and the helper. A difference in any of them rewrites it, so
+// another package taking the page or giving it back, or a simulator update,
+// is followed at the next check.
+inline std::string marker_text(std::string_view stock_hash, std::string_view helper_hash, Mode mode = Mode::page) {
   std::string out = "format=";
   out += FormatVersion;
-  out += "\r\nsource=";
-  out += source;
-  out += "\r\nhint=";
-  out += hint;
-  out += "\r\npage=";
-  out += page_hash;
+  out += "\r\nmode=";
+  out += mode_name(mode);
+  out += "\r\nstock=";
+  out += stock_hash;
   out += "\r\nhelper=";
   out += helper_hash;
   out += "\r\n";
@@ -318,12 +345,12 @@ inline std::filesystem::path stock_package(const std::filesystem::path& simulato
   return {};
 }
 // Other Community packages that ship their own copy of a stock file every
-// cockpit page loads: the page itself or BaseInstrument.js (which runs in
-// every page). Names only, sorted; packages directly in the Community
-// folder; Taxi Cam's own package (the one with its marker) left out.
+// cockpit page loads: the page, its VCockpit.js, or BaseInstrument.js (which
+// runs in every page). Names only, sorted; packages directly in the
+// Community folder; Taxi Cam's own package (the one with its marker) left out.
 inline constexpr char BaseInstrumentRelative[] = "html_ui/Pages/VCockpit/Instruments/Shared/BaseInstrument.js";
 struct PageOverrides {
-  std::vector<std::wstring> page, base_instrument;
+  std::vector<std::wstring> page, script, base_instrument;
 };
 inline PageOverrides other_page_overrides(const std::filesystem::path& community) {
   PageOverrides out;
@@ -338,56 +365,39 @@ inline PageOverrides other_page_overrides(const std::filesystem::path& community
     const auto name = folder.filename().wstring();
     if (detail::exists(folder / PageRelative))
       out.page.push_back(name);
+    if (detail::exists(folder / ScriptRelative))
+      out.script.push_back(name);
     if (detail::exists(folder / BaseInstrumentRelative))
       out.base_instrument.push_back(name);
   }
-  std::sort(out.page.begin(), out.page.end());
-  std::sort(out.base_instrument.begin(), out.base_instrument.end());
+  for (auto* list : {&out.page, &out.script, &out.base_instrument})
+    std::sort(list->begin(), list->end());
   return out;
 }
-// The other package whose copy of the cockpit page MSFS would load instead
-// of the stock one: among those listing it as a globally overridden file, the
-// last in mount order. The MSFS 2024 SDK documents mounting by order hint
-// group, then by folder name within a group, the later mount winning; the
-// order between groups is not documented. Packages with no hint are taken as
-// mounted last (community reports), so they rank after hinted ones; listing
-// packages with different hints otherwise cannot be ordered: `ambiguous`.
-struct PageSource {
-  std::wstring package;  // empty: the stock page
-  std::string hint;      // its package_order_hint, or empty when it sets none
-  bool ambiguous = false;
+// The other packages that replace the stock page or its script: those of
+// other_page_overrides whose manifest lists the file as globally overridden
+// (in MSFS 2024 an unlisted copy replaces nothing).
+struct Takers {
+  std::vector<std::wstring> page, script;
 };
-inline std::wstring lower(std::wstring text) {
-  for (auto& c : text)
-    c = static_cast<wchar_t>(towlower(c));
-  return text;
-}
-inline PageSource page_source(const std::filesystem::path& community) {
-  std::vector<PageSource> listing;
-  for (const auto& name : other_page_overrides(community).page) {
+inline std::vector<std::wstring> listing(const std::filesystem::path& community,
+                                         const std::vector<std::wstring>& names,
+                                         std::string_view relative) {
+  std::vector<std::wstring> out;
+  for (const auto& name : names) {
     std::string manifest;
-    if (detail::read_file(community / name / L"manifest.json", manifest) && lists_page(manifest))
-      listing.push_back({name, order_hint(manifest)});
-  }
-  // Unhinted packages, when any, mount after every hinted one.
-  const bool unhinted = std::any_of(listing.begin(), listing.end(), [](const PageSource& p) { return p.hint.empty(); });
-  PageSource out;
-  for (const auto& candidate : listing) {
-    if (unhinted && !candidate.hint.empty())
-      continue;
-    if (!out.package.empty() && candidate.hint != out.hint)
-      out.ambiguous = true;
-    if (out.package.empty() || lower(candidate.package) > lower(out.package))
-      out = {candidate.package, candidate.hint, out.ambiguous};
+    if (detail::read_file(community / name / L"manifest.json", manifest) && lists_file(manifest, relative))
+      out.push_back(name);
   }
   return out;
 }
-inline std::string narrow(const std::wstring& text) {
-  const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-  std::string out(static_cast<std::size_t>(size > 0 ? size : 0), '\0');
-  if (size > 0)
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
-  return out;
+inline Takers takers(const std::filesystem::path& community) {
+  const auto overrides = other_page_overrides(community);
+  return {listing(community, overrides.page, PageRelative), listing(community, overrides.script, ScriptRelative)};
+}
+// Ours replaces the page while no other package does, else the script.
+inline Mode mode_for(const Takers& taken) noexcept {
+  return taken.page.empty() ? Mode::page : Mode::script;
 }
 
 enum class Outcome { current, written, removed, no_community, no_simulator, page_changed, failed, conflict };
@@ -430,14 +440,53 @@ inline bool remove(const std::filesystem::path& community) {
   const bool first = remove_named(community, PackageName);
   return remove_named(community, LatePackageName) && first;
 }
-// Makes the package current for the cockpit page MSFS would otherwise load
-// (the stock page, or another package's copy of it; page_source) and the
-// helper: that page plus the helper's script line, with the other package's
-// order hint and a folder name after it, so ours mounts after it and both
-// add-ons' scripts load. Re-run at every check, it follows that package
-// being added, changed or removed. A package folder without the marker file
-// is never touched: it is not one Taxi Cam made.
-inline Outcome ensure(const std::filesystem::path& simulator, const std::filesystem::path& community, std::string_view helper) {
+// A simulator may be running but when it started is unknown: its mounted
+// files are kept, as no check can tell they are no longer mounted.
+inline constexpr std::uint64_t StartUnknown = ~std::uint64_t{0};
+// When the running simulator started, as a FILETIME; 0 while none runs. The
+// earliest of several; StartUnknown when the process list or one's start
+// can't be read.
+inline std::uint64_t simulator_started() noexcept {
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE)
+    return StartUnknown;
+  std::uint64_t earliest = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry)) {
+    if (_wcsicmp(entry.szExeFile, L"FlightSimulator2024.exe") != 0)
+      continue;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    std::uint64_t started = 0;
+    if (const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID)) {
+      if (GetProcessTimes(process, &created, &exited, &kernel, &user))
+        started = std::uint64_t{created.dwHighDateTime} << 32 | created.dwLowDateTime;
+      CloseHandle(process);
+    }
+    if (!started) {
+      earliest = StartUnknown;
+      break;
+    }
+    earliest = earliest ? std::min(earliest, started) : started;
+  }
+  CloseHandle(snapshot);
+  return earliest;
+}
+inline std::string_view strip_bom(std::string_view text) noexcept {
+  return text.size() >= 3 && text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? text.substr(3) : text;
+}
+// Makes the package current: the stock page plus the helper's script line
+// while no other package replaces the page, else the stock VCockpit.js plus
+// the helper (mode_for). Re-run at every check, it follows another package
+// taking the page or giving it back, and simulator updates. A package
+// folder without the marker file is never touched: it is not one Taxi Cam
+// made. `running_since`: when the running simulator started (FILETIME, 0
+// when none runs, StartUnknown when one may run from an unknown time);
+// found by itself when not given.
+inline Outcome ensure(const std::filesystem::path& simulator,
+                      const std::filesystem::path& community,
+                      std::string_view helper,
+                      std::optional<std::uint64_t> running_since = std::nullopt) {
   if (helper.empty())
     return Outcome::failed;
   if (community.empty())
@@ -449,46 +498,76 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   if (!detail::read_file(stock / PageRelative, page))
     return Outcome::failed;
   detail::read_file(stock / L"manifest.json", manifest);
-  const auto source = page_source(community);
-  std::string hint = OwnOrderHint;
-  if (!source.package.empty()) {
-    if (!detail::read_file(community / source.package / PageRelative, page))
-      return Outcome::failed;
-    hint = source.hint;
-  }
-  const wchar_t* name = !source.package.empty() && lower(source.package) >= lower(PackageName) ? LatePackageName : PackageName;
-  const wchar_t* other_name = name == PackageName ? LatePackageName : PackageName;
-  // A source that cannot be placed before ours (listing packages whose order
-  // cannot be told apart, or one named after even the late name) would still
-  // load instead of ours: left to work alone, as an unusable page is below.
-  const bool unplaceable = source.ambiguous || (!source.package.empty() && lower(source.package) >= lower(LatePackageName));
-  const auto package = community / name;
+  const auto package = community / PackageName;
   const auto marker = package / MarkerName;
   const bool ours = detail::exists(marker);
   if (detail::exists(package) && !ours)
     return Outcome::failed;
-  // Keep the page's UTF-8 byte order mark, if it has one.
-  const bool bom = page.size() >= 3 && page.compare(0, 3, "\xEF\xBB\xBF") == 0;
-  auto patched = patch_page(std::string_view(page).substr(bom ? 3 : 0));
-  if (patched.empty() || unplaceable) {
-    // Another package's page Taxi Cam cannot add to is left to work alone:
-    // a package of ours mounted after it would replace that add-on's page.
-    const bool had = ours || detail::exists(community / other_name / MarkerName);
+  const bool had = ours || detail::exists(community / LatePackageName / MarkerName);
+  // A file Taxi Cam cannot add to leaves the package out.
+  const auto leave_out = [&](Outcome why) {
     if (!marks_package::remove(community))
       return Outcome::failed;
-    if (!source.package.empty())
-      return Outcome::conflict;
-    return had ? Outcome::removed : Outcome::page_changed;
+    return why == Outcome::page_changed && had ? Outcome::removed : why;
+  };
+  const auto taken = takers(community);
+  const auto mode = mode_for(taken);
+  std::string source, patched;
+  if (mode == Mode::page) {
+    source = page;
+    patched = patch_page(strip_bom(page));
+    if (patched.empty())
+      return leave_out(Outcome::page_changed);
+    // Keep the page's UTF-8 byte order mark, if it has one.
+    if (strip_bom(page).size() != page.size())
+      patched.insert(0, "\xEF\xBB\xBF");
+  } else {
+    // Whichever package's page loads has to load the script, and no other
+    // package may replace the script: else that add-on is left to work
+    // alone.
+    bool loaded = taken.script.empty();
+    for (const auto& name : taken.page) {
+      std::string other;
+      loaded = loaded && detail::read_file(community / name / PageRelative, other) && loads_script(strip_bom(other));
+    }
+    if (!loaded)
+      return leave_out(Outcome::conflict);
+    if (!detail::read_file(stock / ScriptRelative, source))
+      return leave_out(Outcome::page_changed);
+    patched = patch_script(source, helper);
+    if (patched.empty())
+      return leave_out(Outcome::page_changed);
   }
-  if (bom)
-    patched.insert(0, "\xEF\xBB\xBF");
-  const auto source_name = source.package.empty() ? std::string("stock") : narrow(source.package);
-  const auto expected = marker_text(detail::sha256(page), detail::sha256(helper), source_name, hint);
-  // The package under the other name is out of date wherever this one goes.
-  if (!remove_named(community, other_name))
+  // The 1.3.3 test builds' later-named folder is out of date wherever ours is.
+  if (!remove_named(community, LatePackageName))
     return Outcome::failed;
-  if (ours && detail::read_file(marker, recorded) && recorded == expected)
+  std::vector<std::pair<const char*, std::string_view>> files;
+  if (mode == Mode::page)
+    files = {{PageRelative, patched}, {HelperRelative, helper}};
+  else
+    files = {{ScriptRelative, patched}};
+  // Our files this mode doesn't use (the other mode's, or an older format's)
+  // go, best effort, only where no running simulator has them mounted: with
+  // none running, or once the package was written before the running one
+  // started (it mounted this mode then). A running simulator mounted the
+  // package as it was when it started, so a rewrite now keeps the old
+  // mode's files for the rest of that session. A file another program holds
+  // open (a virus scanner) is tried again at the next check. One left
+  // behind replaces nothing: our manifest and layout.json don't list it.
+  const auto started = running_since ? *running_since : simulator_started();
+  const auto clear_unused = [&] {
+    for (const char* relative : {PageRelative, HelperRelative, ScriptRelative})
+      if (std::none_of(files.begin(), files.end(), [&](const auto& file) { return std::string_view(file.first) == relative; })) {
+        std::error_code ignored;
+        std::filesystem::remove(package / relative, ignored);
+      }
+  };
+  const auto expected = marker_text(detail::sha256(source), detail::sha256(helper), mode);
+  if (ours && detail::read_file(marker, recorded) && recorded == expected) {
+    if (!started || (started != StartUnknown && detail::file_time(marker) < started))
+      clear_unused();
     return Outcome::current;
+  }
   std::error_code error;
   const bool fresh = !detail::exists(package);
   const auto core = package / L"html_ui\\Pages\\VCockpit\\Core";
@@ -506,11 +585,15 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   // it and the uninstaller removes it.
   if (!detail::write_file(marker, "incomplete\n"))
     return give_up();
-  if (!detail::write_file(package / PageRelative, patched) || !detail::write_file(package / HelperRelative, helper) ||
-      !detail::write_file(package / L"manifest.json", manifest_json(minimum_game_version(manifest), hint)))
+  if (!started)
+    clear_unused();
+  for (const auto& [relative, text] : files)
+    if (!detail::write_file(package / relative, text))
+      return Outcome::failed;
+  if (!detail::write_file(package / L"manifest.json", manifest_json(minimum_game_version(manifest), mode)))
     return Outcome::failed;
   std::vector<LayoutEntry> entries;
-  for (const char* relative : {PageRelative, HelperRelative}) {
+  for (const auto& [relative, text] : files) {
     const auto path = package / relative;
     std::error_code size_error;
     const auto size = std::filesystem::file_size(path, size_error);
