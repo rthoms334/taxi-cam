@@ -285,10 +285,13 @@ inline bool remove_discovered_variant(std::string_view key) {
 }
 inline bool load_settings(Settings& s,
                           const std::wstring& installation,
-                          std::uint32_t profile_id,
-                          std::string_view variant,
-                          const profiles::DiscoveredLayout* layout);
-inline bool save_settings(const Settings& s);
+                          std::uint32_t profile_id = 0,
+                          std::string_view variant = {},
+                          const profiles::DiscoveredLayout* layout = nullptr,
+                          bool shipped = false);
+// select also makes these the selected aircraft's settings (settings.ini);
+// false saves an aircraft's own file only (a reset from Saved aircraft).
+inline bool save_settings(const Settings& s, bool select = true);
 // Saves a set-up aircraft's displays, cameras and guides as another variant's
 // (a preset of the same aircraft starts from one already set up). `out` is
 // the copy, saved and ready to select.
@@ -310,12 +313,15 @@ inline constexpr unsigned kCamButtonRevision = 1;
 // profile_id 0 loads the saved selection, falling back to the A380 profile.
 // An explicit set-up aircraft (DiscoveredProfileId) needs its variant key and
 // a saved layout for it, or a new layout (setup) that replaces the saved one
-// while the variant keeps its saved calibration.
+// while the variant keeps its saved calibration. shipped loads a built-in
+// profile as Taxi Cam ships it, as if nothing had been saved for it, and
+// reads or imports no file of the profile.
 inline bool load_settings(Settings& s,
                           const std::wstring& installation,
-                          std::uint32_t profile_id = 0,
-                          std::string_view variant = {},
-                          const profiles::DiscoveredLayout* layout = nullptr) {
+                          std::uint32_t profile_id,
+                          std::string_view variant,
+                          const profiles::DiscoveredLayout* layout,
+                          bool shipped) {
   const auto selection = settings_directory() + L"\\settings.ini";
   const bool saved_selection = !profile_id;
   char saved_variant[profiles::MaxVariantKey]{};
@@ -423,7 +429,7 @@ inline bool load_settings(Settings& s,
   const auto destination = settings_path(value);
   auto path = destination;
   // Set-up aircraft are newer than the former settings folder.
-  if (profile->id != profiles::DiscoveredProfileId && GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+  if (!shipped && profile->id != profiles::DiscoveredProfileId && GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
     const auto legacy = legacy_settings_path(path);
     if (!legacy.empty() && GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
       // Import without replacing a newer profile or deleting the original.
@@ -432,11 +438,11 @@ inline bool load_settings(Settings& s,
         path = legacy;
     }
   }
-  if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES ||
+  if (shipped || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES ||
       (profile->id == profiles::DiscoveredProfileId && !settings_path_without_links(path))) {
     // Import the user's existing camera calibration once. The companion becomes
     // the settings owner; stale installer defaults never override later UI edits.
-    if (profile->id != profiles::A380.id) {
+    if (shipped || profile->id != profiles::A380.id) {
       apply_door_template(false);
       place_door_lower();
       default_door_display();
@@ -609,7 +615,57 @@ inline bool load_settings(Settings& s,
   s = value;
   return true;
 }
-inline bool save_settings(const Settings& s) {
+// What Saved aircraft resets a built-in aircraft to. displays: its displays
+// and its door camera's display, picture and cockpit switch as shipped; camera
+// positions, guides, looks and every other choice stay. factory: everything
+// saved for the aircraft, as if it had never been saved.
+enum class SettingsReset { displays, factory };
+// Resets the saved part of a built-in aircraft's settings; the session state
+// (connection, cameras on, routes) stays. False for a set-up aircraft, which
+// ships no settings.
+inline bool reset_settings(Settings& s, SettingsReset kind) {
+  if (s.profile == profiles::DiscoveredProfileId || !profiles::find(s.profile))
+    return false;
+  Settings shipped;
+  if (!load_settings(shipped, {}, s.profile, {}, nullptr, true))
+    return false;
+  auto next = s;
+  next.display_override = shipped.display_override;
+  next.door_side = shipped.door_side;
+  next.door_live = shipped.door_live;
+  next.lvar_bindings[CameraDoor] = shipped.lvar_bindings[CameraDoor];
+  if (kind == SettingsReset::factory) {
+    next.follow_taxi = shipped.follow_taxi;
+    next.auto_detect = shipped.auto_detect;
+    next.camera_mode = shipped.camera_mode;
+    next.camera_rate = shipped.camera_rate;
+    next.calibration_budget = shipped.calibration_budget;
+    next.day_brightness = shipped.day_brightness;
+    next.night_brightness = shipped.night_brightness;
+    next.speed_color = shipped.speed_color;
+    next.guide_color = shipped.guide_color;
+    next.nose_dot = shipped.nose_dot;
+    next.tail_upper = shipped.tail_upper;
+    next.tail_corner = shipped.tail_corner;
+    next.tail_inner = shipped.tail_inner;
+    next.tail_upper_right = shipped.tail_upper_right;
+    next.tail_corner_right = shipped.tail_corner_right;
+    next.tail_inner_right = shipped.tail_inner_right;
+    next.mounts = shipped.mounts;
+    next.film_grain = shipped.film_grain;
+    next.black_and_white = shipped.black_and_white;
+    next.lvar_bindings = shipped.lvar_bindings;
+  }
+  // A door camera moved to another display, or to none, starts off.
+  if (next.door_side != s.door_side)
+    next.door_on = 0;
+  fit_door_camera(next);
+  if (!valid_settings(next))
+    return false;
+  s = next;
+  return true;
+}
+inline bool save_settings(const Settings& s, bool select) {
   if (!valid_settings(s))
     return false;
   const bool discovered = s.profile == profiles::DiscoveredProfileId;
@@ -707,6 +763,8 @@ inline bool save_settings(const Settings& s) {
   const auto family = discovered ? discovered_layout_path(s.discovered.key) : std::wstring{};
   if (discovered && (family.empty() || !prepare_settings_file(family) || !write(family, layout)))
     return false;
+  if (!select)
+    return true;
   wchar_t profile_text[16];
   std::swprintf(profile_text, 16, L"%u", s.profile);
   const auto selection = settings_directory() + L"\\settings.ini";
