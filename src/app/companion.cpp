@@ -3826,12 +3826,15 @@ void log_marks_package(win::marks_package::Outcome outcome, const std::filesyste
         out += (out.empty() ? L"" : L",") + name;
       return out.empty() ? std::wstring(L"none") : out;
     };
+    // mode: the file ours replaces (page, or VCockpit.js while another
+    // package takes the page); *_takers: packages whose manifest lists it.
     const auto overrides = win::marks_package::other_page_overrides(community);
-    const auto source = win::marks_package::page_source(community);
+    const auto taken = win::marks_package::takers(community);
     const auto line = std::wstring(L"Display package: outcome=") + widen(win::marks_package::outcome_name(outcome)) + L" community=" +
-                      (community.empty() ? std::wstring(L"none") : community.wstring()) + L" other_page_packages=" + names(overrides.page) +
-                      L" page_from=" + (source.package.empty() ? std::wstring(L"stock") : source.package) + L" base_instrument_packages=" +
-                      names(overrides.base_instrument);
+                      (community.empty() ? std::wstring(L"none") : community.wstring()) + L" mode=" +
+                      widen(win::marks_package::mode_name(win::marks_package::mode_for(taken))) + L" other_page_packages=" +
+                      names(overrides.page) + L" page_takers=" + names(taken.page) + L" script_packages=" + names(overrides.script) +
+                      L" script_takers=" + names(taken.script) + L" base_instrument_packages=" + names(overrides.base_instrument);
     const auto text = win::redact(win::report_utf8(line), win::report_redactions());
     const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
     std::wstring redacted(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
