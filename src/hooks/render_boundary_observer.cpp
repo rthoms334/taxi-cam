@@ -1249,7 +1249,11 @@ ChainStatus service_chained_slots() noexcept {
     // changed); from phase 3 a hit accepts: our wrapper ran through the other
     // hook a whole service interval after the change.
     ++slot.probe_phase;
-    if (slot.probe_phase <= 2 || !(hits & bit)) {
+    // The last every-frame slot of ours is never given up: with all three
+    // under other hooks nothing would show frame work to recheck them against,
+    // so that slot stays waiting and capture stays held.
+    const bool last_every_frame = (every_frame & bit) && !(own & every_frame & ~bit);
+    if (slot.probe_phase <= 2 || !(hits & bit) || last_every_frame) {
       status.pending |= bit;
       continue;
     }

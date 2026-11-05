@@ -209,7 +209,9 @@ SlotChange last_slot_change() noexcept;
 // An accepted slot on an every-frame method (ResourceBarrier, DrawInstanced,
 // DrawIndexedInstanced) is rechecked every interval: no call through it while
 // our own every-frame slots saw calls drops the acceptance (`dropped`),
-// holding capture until it is proven again. Burst or unused methods (copies,
+// holding capture until it is proven again. The last of those three slots
+// still ours is never accepted, so one is always left to recheck the others
+// against: a tool hooking all three keeps capture held. Burst or unused methods (copies,
 // enhanced barriers, render passes) give no such evidence and keep it. A hook
 // passing on only some calls can still pass: per-call proof needs a second
 // path to the same calls. A new hook written over an accepted one replaces it

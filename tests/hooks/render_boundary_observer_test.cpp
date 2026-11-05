@@ -168,6 +168,11 @@ void STDMETHODCALLTYPE other_tool_draw(ID3D12GraphicsCommandList* list, UINT cou
   else
     original_draw(list, count, instances, first, first_instance);
 }
+void* other_draw_indexed_replaced = nullptr;
+void STDMETHODCALLTYPE
+other_tool_draw_indexed(ID3D12GraphicsCommandList* list, UINT count, UINT instances, UINT first, INT offset, UINT first_instance) {
+  reinterpret_cast<decltype(&original_draw_indexed)>(other_draw_indexed_replaced)(list, count, instances, first, offset, first_instance);
+}
 void STDMETHODCALLTYPE original_end(ID3D12GraphicsCommandList4* list);
 void* other_end_replaced = nullptr;
 void STDMETHODCALLTYPE other_tool_end(ID3D12GraphicsCommandList4* list) {
@@ -1010,6 +1015,33 @@ int main() {
     table[69] = end_wrapper;
     require(obs::register_list(list, 1, callbacks).ready && obs::operational() && !obs::service_chained_slots().chained,
             "Our End wrapper back did not clear the slot");
+    obs::successful_reset(list, 1);
+    // A tool hooking ResourceBarrier and both Draws, passing every call on:
+    // no every-frame slot of ours would be left to recheck them against, so
+    // none is accepted and capture stays held.
+    void* indexed_wrapper = table[13];
+    other_tool_replaced = legacy_wrapper;
+    other_tool_calls_through = true;
+    other_draw_replaced = draw_wrapper;
+    other_draw_calls_through = true;
+    other_draw_indexed_replaced = indexed_wrapper;
+    table[26] = reinterpret_cast<void*>(&other_tool_barrier);
+    table[12] = reinterpret_cast<void*>(&other_tool_draw);
+    table[13] = reinterpret_cast<void*>(&other_tool_draw_indexed);
+    require(obs::register_list(list, 1, callbacks).ready && !obs::operational(), "Hooks on all every-frame slots refused the list");
+    for (int round = 0; round < 5; ++round) {
+      list->ResourceBarrier(1, &transition);
+      list->DrawInstanced(3, 1, 0, 0);
+      list->DrawIndexedInstanced(3, 1, 0, 0, 0);
+      chain = obs::service_chained_slots();
+      require(!chain.chained && chain.pending == (1u | 16u | 32u) && !obs::operational(),
+              "All every-frame slots under other hooks were accepted");
+    }
+    table[26] = legacy_wrapper;
+    table[12] = draw_wrapper;
+    table[13] = indexed_wrapper;
+    require(obs::register_list(list, 1, callbacks).ready && obs::operational() && !obs::service_chained_slots().pending,
+            "Our every-frame wrappers back did not end the wait");
     obs::successful_reset(list, 1);
 
     // Real D3D12 swaps the same object's vtable during BeginRenderPass. Each
