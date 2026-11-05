@@ -3797,13 +3797,52 @@ void convert_legacy_displays() {
 // builds on one PC have one each (Steam test, 2026-11-04: the Store package
 // was checked while Steam ran without one).
 std::atomic<int> marks_package_outcome{-1};
+// The check's result and any other package that replaces the files every
+// cockpit page loads, in launcher.log and bridge.log: bridge.log is the file
+// reporters attach, and a package that is not active leaves no other trace.
+// The profile folder and account names are replaced as in report files.
+void log_marks_package(win::marks_package::Outcome outcome, const std::filesystem::path& community) noexcept {
+  try {
+    // Without a settings folder there are no logs to write, as for the bridge.
+    const auto directory = win::settings_directory();
+    if (directory.empty())
+      return;
+    const auto names = [](const std::vector<std::wstring>& list) {
+      std::wstring out;
+      for (const auto& name : list)
+        out += (out.empty() ? L"" : L",") + name;
+      return out.empty() ? std::wstring(L"none") : out;
+    };
+    const auto overrides = win::marks_package::other_page_overrides(community);
+    const auto line = std::wstring(L"Display package: outcome=") + widen(win::marks_package::outcome_name(outcome)) + L" community=" +
+                      (community.empty() ? std::wstring(L"none") : community.wstring()) + L" other_page_packages=" + names(overrides.page) +
+                      L" base_instrument_packages=" + names(overrides.base_instrument);
+    const auto text = win::redact(win::report_utf8(line), win::report_redactions());
+    const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring redacted(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
+    if (wide > 0)
+      MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), redacted.data(), wide);
+    SYSTEMTIME utc{};
+    GetSystemTime(&utc);
+    wchar_t stamp[32]{};
+    std::swprintf(stamp, 32, L"%04u-%02u-%02uT%02u:%02u:%02uZ ", utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond);
+    win::append_launcher_log(directory, stamp + redacted + L"\r\n");
+    char prefix[96];
+    std::snprintf(prefix, sizeof(prefix), "%llu pid=%lu tid=%lu companion=1 |  | ", static_cast<unsigned long long>(GetTickCount64()),
+                  GetCurrentProcessId(), GetCurrentThreadId());
+    win::append_rotating_log(directory + L"\\bridge.log", prefix + text + "\r\n", win::BridgeLogBytes);
+  } catch (...) {
+    // Diagnostics never change the check's result.
+  }
+}
 void check_marks_package(const std::wstring& simulator_exe) {
   if (marks_package_outcome.load(std::memory_order_acquire) >= 0 || simulator_exe.empty())
     return;
   auto outcome = win::marks_package::Outcome::failed;
+  std::filesystem::path community;
   try {
     const auto simulator = std::filesystem::path(simulator_exe).parent_path();
-    const auto community = win::marks_package::community_folder(simulator);
+    community = win::marks_package::community_folder(simulator);
     {
       const std::lock_guard lock(marks_community_mutex);
       marks_community = community;
@@ -3811,6 +3850,7 @@ void check_marks_package(const std::wstring& simulator_exe) {
     outcome = win::marks_package::ensure(simulator, community, win::marks_package::helper_text());
   } catch (...) {
   }
+  log_marks_package(outcome, community);
   marks_package_outcome.store(static_cast<int>(outcome), std::memory_order_release);
 }
 void show_alert(std::wstring title, std::wstring body, std::wstring primary, std::wstring secondary, std::function<void()> act);

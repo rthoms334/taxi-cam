@@ -17,6 +17,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cwchar>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -258,6 +259,34 @@ inline std::filesystem::path stock_package(const std::filesystem::path& simulato
     if (detail::exists(candidate / PageRelative))
       return candidate;
   return {};
+}
+// Other Community packages that ship their own copy of a stock file every
+// cockpit page loads: the page itself (which then replaces ours when it loads
+// later) or BaseInstrument.js (which runs in every page). Names only, sorted;
+// packages directly in the Community folder.
+inline constexpr char BaseInstrumentRelative[] = "html_ui/Pages/VCockpit/Instruments/Shared/BaseInstrument.js";
+struct PageOverrides {
+  std::vector<std::wstring> page, base_instrument;
+};
+inline PageOverrides other_page_overrides(const std::filesystem::path& community) {
+  PageOverrides out;
+  if (community.empty())
+    return out;
+  std::error_code error;
+  std::filesystem::directory_iterator entries(community, std::filesystem::directory_options::skip_permission_denied, error);
+  for (; !error && entries != std::filesystem::directory_iterator(); entries.increment(error)) {
+    const auto& folder = entries->path();
+    const auto name = folder.filename().wstring();
+    if (!_wcsicmp(name.c_str(), PackageName))
+      continue;
+    if (detail::exists(folder / PageRelative))
+      out.page.push_back(name);
+    if (detail::exists(folder / BaseInstrumentRelative))
+      out.base_instrument.push_back(name);
+  }
+  std::sort(out.page.begin(), out.page.end());
+  std::sort(out.base_instrument.begin(), out.base_instrument.end());
+  return out;
 }
 
 enum class Outcome { current, written, removed, no_community, no_simulator, page_changed, failed };
