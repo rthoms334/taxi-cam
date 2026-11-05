@@ -2711,6 +2711,34 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.shadow_restores), static_cast<unsigned long long>(graphics.shadow_lost_writes),
                     static_cast<unsigned long long>(graphics.shadow_held), static_cast<unsigned long long>(graphics.shadow_fallbacks),
                     static_cast<unsigned long long>(graphics.shadow_baselines));
+      // The causes of lost_writes, and where the shadow-carrying copies
+      // behind "dropped" were dropped; "-" while there are none.
+      {
+        auto used = std::strlen(copy_detail);
+        const auto append = [&](const char* text) {
+          if (used < sizeof(copy_detail))
+            if (const auto written = std::snprintf(copy_detail + used, sizeof(copy_detail) - used, "%s", text); written > 0)
+              used = std::min(sizeof(copy_detail) - 1, used + static_cast<std::size_t>(written));
+        };
+        const auto append_counts = [&](const char* label, const auto& counts, const auto& name) {
+          append(label);
+          bool any = false;
+          for (unsigned i = 0; i < counts.size(); ++i) {
+            if (!counts[i])
+              continue;
+            char item[48];
+            std::snprintf(item, sizeof(item), "%s%s:%llu", any ? "," : "", name(i), static_cast<unsigned long long>(counts[i]));
+            append(item);
+            any = true;
+          }
+          if (!any)
+            append("-");
+        };
+        append_counts(" lost_by=", graphics.shadow_lost_by,
+                      [](unsigned i) { return win::shadow_lost_write_name(static_cast<win::ShadowLostWrite>(i)); });
+        append_counts(" drops=", graphics.shadow_drop_sources,
+                      [](unsigned i) { return pfd_submission::drop_source_name(static_cast<pfd_submission::DropSource>(i)); });
+      }
       log_status(status, copy_detail);
       log_contention(status, graphics, output);
       log_hook_timing(status);

@@ -341,12 +341,18 @@ class SceneCaptureManager {
       // Set once the pool holds this item's packet; the pool then reports a
       // drop. An item never recorded reports copy.dropped when the plan ends.
       bool recorded = false;
+      // Why an item never recorded did not run, counted in copy.drop_sources
+      // when the plan ends.
+      pfd_submission::DropSource unrecorded = pfd_submission::DropSource::not_recorded;
     };
     static constexpr UINT NoItem = ~UINT{0};
     std::uint64_t device_key = 0, generation = 0;
     const std::atomic<std::uint64_t>* current_generation = nullptr;
     std::array<Item, engine_hook::queue_submit::kMaximumInsertions> items{};
     UINT count = 0;
+    // Why the submission ended before its items were recorded; counted for
+    // items still marked not_recorded when the plan ends.
+    pfd_submission::DropSource ended = pfd_submission::DropSource::not_recorded;
     // Planner transfers one reference per nonnull source/target/save. Releases
     // happen after manager locks; the pool takes independent GPU leases.
     ~DisplaySubmissionPlan();

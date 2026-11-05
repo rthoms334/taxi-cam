@@ -54,19 +54,20 @@ void Pool::release_resources(Packet& packet) noexcept {
   if (packet.save)
     packet.save->Release();
   packet.target = packet.source = packet.save = nullptr;
-  packet.completed = packet.dropped = nullptr;
+  packet.completed = packet.dropped = packet.drop_sources = nullptr;
   packet.completed_value = 0;
   packet.covering_value = 0;
 }
 
-void Pool::report_dropped(Packet& packet) noexcept {
+void Pool::report_dropped(Packet& packet, DropSource source) noexcept {
   if (!packet.dropped)
     return;
+  count_drop(packet.drop_sources, source);
   auto seen = packet.dropped->load(std::memory_order_relaxed);
   while (seen < packet.completed_value &&
          !packet.dropped->compare_exchange_weak(seen, packet.completed_value, std::memory_order_release, std::memory_order_relaxed)) {
   }
-  packet.dropped = nullptr;
+  packet.dropped = packet.drop_sources = nullptr;
 }
 
 bool Pool::service(ID3D12Device* device, std::uint64_t completed) noexcept {
@@ -76,7 +77,7 @@ bool Pool::service(ID3D12Device* device, std::uint64_t completed) noexcept {
   if (completed == std::numeric_limits<std::uint64_t>::max()) {
     for (auto& packet : packets_) {
       if (packet.state == State::recorded || packet.state == State::submitted)
-        report_dropped(packet);
+        report_dropped(packet, DropSource::device_lost);
       packet.state = State::quarantined;
     }
     return false;
@@ -185,6 +186,7 @@ Pool::Recording Pool::record(const Copy& copy) noexcept {
     packet.save = copy.save;
     packet.completed = copy.completed;
     packet.dropped = copy.dropped;
+    packet.drop_sources = copy.drop_sources;
     packet.completed_value = copy.completed_value;
     packet.state = State::recorded;
     const auto transition = [](ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept {
@@ -237,8 +239,10 @@ Pool::Recording Pool::record(const Copy& copy) noexcept {
     }
     if (FAILED(packet.list->Close())) {
       packet.state = State::quarantined;
-      report_dropped(packet);
-      return {};
+      report_dropped(packet, DropSource::close_failed);
+      Recording failed;
+      failed.reported = true;
+      return failed;
     }
     return {i, packet.list};
   }
@@ -251,7 +255,7 @@ void Pool::submit(unsigned slot, std::uint64_t covering_value) noexcept {
   auto& packet = packets_[slot];
   if (packet.state != State::recorded || !covering_value || covering_value == std::numeric_limits<std::uint64_t>::max()) {
     if (packet.state == State::recorded || packet.state == State::submitted)
-      report_dropped(packet);
+      report_dropped(packet, DropSource::unsubmitted);
     packet.state = State::quarantined;
     return;
   }
@@ -263,7 +267,7 @@ void Pool::cancel(unsigned slot) noexcept {
   if (slot < packets_.size()) {
     auto& packet = packets_[slot];
     if (packet.state == State::recorded || packet.state == State::submitted)
-      report_dropped(packet);
+      report_dropped(packet, DropSource::cancelled);
     if (packet.state == State::recorded)
       packet.state = State::retired;
     else if (packet.state == State::submitted)
@@ -275,7 +279,7 @@ void Pool::quarantine(unsigned slot) noexcept {
   if (slot < packets_.size()) {
     auto& packet = packets_[slot];
     if (packet.state == State::recorded || packet.state == State::submitted)
-      report_dropped(packet);
+      report_dropped(packet, DropSource::quarantined);
     packet.state = State::quarantined;
   }
 }

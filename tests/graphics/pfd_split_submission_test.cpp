@@ -417,6 +417,17 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   require(shadow.shadow_saves && shadow.shadow_modes[0] == 'q' && shadow.shadow_modes[1] == 'q' && !shadow.shadow_fallbacks,
           "Camera sides ran on queue copies and saved their shadows");
   require(common || shadow.shadow_entry_restores, "The shadow went back under the instrument's writes");
+  std::uint64_t lost_by_total = 0;
+  for (const auto lost : shadow.shadow_lost_by)
+    lost_by_total += lost;
+  if (lost_by_total != shadow.shadow_lost_writes || (common && !shadow.shadow_lost_writes))
+    for (unsigned i = 0; i < shadow.shadow_lost_by.size(); ++i)
+      std::fprintf(stderr, "Shadow lost_by %s=%llu of %llu\n", win::shadow_lost_write_name(static_cast<win::ShadowLostWrite>(i)),
+                   static_cast<unsigned long long>(shadow.shadow_lost_by[i]), static_cast<unsigned long long>(shadow.shadow_lost_writes));
+  require(lost_by_total == shadow.shadow_lost_writes, "Every missed instrument write has one cause");
+  require(!common || (shadow.shadow_lost_writes &&
+                      shadow.shadow_lost_by[static_cast<unsigned>(win::ShadowLostWrite::not_insertable)] == shadow.shadow_lost_writes),
+          "Writes to a display found in COMMON are missed because nothing can go in before them");
   win::set_target_mask(0);
   win::service_display_patches();
   record_frame(false, false, &after, after_colour);
@@ -537,6 +548,17 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   record_frame(false, false);
   execute();
   const auto after_drop = win::graphics_status();
+  {
+    const auto escaped = static_cast<unsigned>(taxi_camera::pfd_submission::DropSource::escaped);
+    if (after_drop.shadow_drop_sources[escaped] < before_drop.shadow_drop_sources[escaped] + 2)
+      for (unsigned i = 0; i < after_drop.shadow_drop_sources.size(); ++i)
+        std::fprintf(stderr, "Shadow drops %s=%llu->%llu\n",
+                     taxi_camera::pfd_submission::drop_source_name(static_cast<taxi_camera::pfd_submission::DropSource>(i)),
+                     static_cast<unsigned long long>(before_drop.shadow_drop_sources[i]),
+                     static_cast<unsigned long long>(after_drop.shadow_drop_sources[i]));
+    require(after_drop.shadow_drop_sources[escaped] >= before_drop.shadow_drop_sources[escaped] + 2,
+            "The first saves of an escaped batch were counted as escaped");
+  }
   require(after_drop.shadow_baselines >= before_drop.shadow_baselines + 2 && after_drop.shadow_modes[0] == 'q' &&
               after_drop.shadow_modes[1] == 'q',
           "After a dropped first save the next save was not a baseline");

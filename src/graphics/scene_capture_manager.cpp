@@ -342,6 +342,8 @@ SceneCaptureManager::DisplaySubmissionPlan::~DisplaySubmissionPlan() {
              !item.copy.dropped->compare_exchange_weak(seen, item.copy.completed_value, std::memory_order_release,
                                                        std::memory_order_relaxed)) {
       }
+      pfd_submission::count_drop(item.copy.drop_sources,
+                                 item.unrecorded == pfd_submission::DropSource::not_recorded ? ended : item.unrecorded);
     }
     if (item.copy.target)
       item.copy.target->Release();
@@ -2042,12 +2044,25 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   // Genuine recorded GPU ownership still requires ordering, but this is the
   // application's submit or Present thread: wait only within the budget, then
   // escape like a contended batch. Never park it on the bridge worker.
+  // Each return below ends the plan: its unrecorded copies are counted under
+  // the reason set here.
+  using pfd_submission::DropSource;
+  // A batch that carries a display copy has nothing to bypass for: forwarded
+  // as unrelated, its copy is lost and the panel shows for that frame. It
+  // waits within the submit budget like owned work, and escapes after it.
+  const bool display_work = display_plan.current();
+  const auto bypass_without_display = [&]() noexcept { return !display_work && bypass_unrelated(); };
+  const auto end_plan = [&](DropSource reason) noexcept {
+    display_plan.ended = reason;
+    return std::uint64_t{0};
+  };
   const auto ordered_lock = [&](auto& mutex, auto& lock) noexcept {
     // Its waits are reported as mutex_ or submission_mutex_ ones.
     constexpr auto waited_lock =
         std::is_same_v<std::remove_reference_t<decltype(mutex)>, ManagerMutex> ? hook_timing::manager_lock : hook_timing::submission_lock;
     BoundedLock bounded(mutex, wait_budget::submit_us, &contended_submissions_, waited_lock);
     if (!bounded) {
+      display_plan.ended = DropSource::escaped;
       escape_unordered(queue, count, native_lists);
       return false;
     }
@@ -2058,8 +2073,8 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   {
     std::unique_lock lock(mutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
-      if (bypass_unrelated())
-        return 0;
+      if (bypass_without_display())
+        return end_plan(DropSource::bypassed);
       if (!ordered_lock(mutex_, lock))
         return 0;
     }
@@ -2075,21 +2090,21 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     // Only fully observed recordings with no owned work or source-state effects
     // can bypass ordering. Unknown recordings keep conservative invalidation.
     if (known_unrelated && !display_plan.current())
-      return 0;
+      return end_plan(DropSource::stale);
   }
   // Ordering is needed: do the queue identity COM calls before either lock.
   const auto compatible = compatible_devices(queue);
   std::unique_lock submission_lock(submission_mutex_, std::try_to_lock);
   if (!submission_lock.owns_lock()) {
-    if (bypass_unrelated())
-      return 0;
+    if (bypass_without_display())
+      return end_plan(DropSource::bypassed);
     if (!ordered_lock(submission_mutex_, submission_lock))
       return 0;
   }
   std::unique_lock lock(mutex_, std::try_to_lock);
   if (!lock.owns_lock()) {
-    if (bypass_unrelated())
-      return 0;
+    if (bypass_without_display())
+      return end_plan(DropSource::bypassed);
     if (!ordered_lock(mutex_, lock))
       return 0;
   }
@@ -2115,7 +2130,7 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
         fail_device(*owner);
       if (current)
         fail_device(*current);
-      return 0;
+      return end_plan(DropSource::device_failed);
     }
     owner = current;
     // A stale source recording may still own capture packets or read stable
@@ -2133,7 +2148,7 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
         break;
       }
   if (!owner || (!mask && !consumer && !source_work))
-    return 0;
+    return end_plan(DropSource::stale);
   // Issue 97: a Wait on another simulator queue's unfinished receipt can close
   // a cycle with the simulator's own cross-queue waits, freezing it until the
   // watchdog releases the Wait (every trip in the reports released one). Escape
@@ -2152,7 +2167,7 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     submission_lock.unlock();
     cross_queue_escapes_.fetch_add(1, std::memory_order_relaxed);
     escape_unordered(queue, count, native_lists);
-    return 0;
+    return end_plan(DropSource::escaped);
   }
   const auto result = begin_transaction(*owner, queue, mask, false, compatible);
   if (result.receipt) {
@@ -2200,13 +2215,19 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     // calls under mutex_ stalled every recording thread behind them.
     lock.unlock();
     if (!queue_transaction_wait(*owner, queue))
-      return 0;
+      return end_plan(DropSource::wait_failed);
+    if (!record_display)
+      display_plan.ended = !display_plan.current() || display_plan.device_key != owner->key || !owner->session_active
+                               ? DropSource::stale
+                               : DropSource::unknown_lists;
     if (record_display) {
       std::array<bool, engine_hook::queue_submit::kMaximumInsertions> recorded_items{};
       for (UINT i = 0; i < display_plan.count; ++i) {
         auto& planned = display_plan.items[i];
-        if (planned.after_list >= count)
+        if (planned.after_list >= count) {
+          planned.unrecorded = DropSource::out_of_batch;
           continue;
+        }
         // Without the restore before the instrument's draws, the display holds
         // the camera under them: saving it would put the camera back later.
         // The copy then confirms nothing about the shadow, and its save is
@@ -2215,12 +2236,19 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
         if (copy.save && planned.save_after != DisplaySubmissionPlan::NoItem &&
             (planned.save_after >= i || !recorded_items[planned.save_after])) {
           copy.save = nullptr;
-          copy.completed = copy.dropped = nullptr;
+          copy.completed = copy.dropped = copy.drop_sources = nullptr;
           copy.completed_value = 0;
+          planned.unrecorded = pfd_submission::DropSource::save_stripped;
         }
         const auto recorded = owner->display_copies.record(copy);
         if (!recorded) {
           ++transaction_.display_unrecorded;  // Counted by finish_transaction under mutex_.
+          if (recorded.reported && copy.dropped)
+            planned.recorded = true;  // The pool already reported the drop.
+          else
+            planned.unrecorded = recorded.reported                     ? pfd_submission::DropSource::close_failed
+                                 : owner->display_copies.ready_count() ? pfd_submission::DropSource::invalid
+                                                                       : pfd_submission::DropSource::pool_full;
           continue;
         }
         recorded_items[i] = true;
@@ -2231,6 +2259,8 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
       }
     }
     submission_lock.release();  // Same native wrapper thread must complete it.
+  } else {
+    display_plan.ended = DropSource::no_receipt;
   }
   return result.receipt;
 }

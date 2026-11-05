@@ -727,6 +727,7 @@ void run() {
   // Both queues outlive the manager, which may hold a reference to either.
   Queue queue{queue_table.data(), &device}, helper_queue{queue_table.data(), &device};
   auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
+  DisplayPlanFixture display_plan;  // Outlives the manager that calls it.
   taxi_camera::SceneHandoff handoff;
   auto manager = std::make_unique<Manager>(handoff);
   auto& owner = manager->devices_[0];
@@ -802,6 +803,17 @@ void run() {
   };
   held_lock(known, false, false);
   require(!queue.signals && !queue.waits, "Unrelated submission queues no timeline operations");
+  // The same unrelated batch carrying a planned display copy needs ordering to
+  // record it. Behind a held lock it waits within the budget and escapes,
+  // counted; bypassing would lose the copy and show the panel for a frame.
+  require(manager->set_display_submission_planner(plan_unrecordable_copy, &display_plan), "Install the display plan fixture");
+  manager->apply_deferred();  // An empty ring: without the plan this batch bypasses.
+  held_lock(known, false, false);
+  display_plan.active = true;
+  manager->apply_deferred();
+  held_lock(known, false, true);
+  display_plan.active = false;
+  require(!queue.signals && !queue.waits, "An escaped display batch queued a timeline operation");
   const taxi_camera::source_state::Key source{0x1234, 1};
   require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
   {
