@@ -192,6 +192,14 @@ bool recording_allows_injection(ID3D12GraphicsCommandList*, std::uint64_t object
 // resuming pass, so no first RESUMING pass can follow it in this recording.
 void observe_gpu_work(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;
 Statistics statistics() noexcept;
+// The vtable slot a registration last found holding neither our wrapper nor
+// the original (slot_changed, active_end_repair_failed), and the entry it held
+// then: another hook written over ours. Index 0: none seen.
+struct SlotChange {
+  UINT index = 0;
+  void* target = nullptr;
+};
+SlotChange last_slot_change() noexcept;
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
 // Test-only scalar state; never part of the production add-on interface.
 std::uint32_t validation_state(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;

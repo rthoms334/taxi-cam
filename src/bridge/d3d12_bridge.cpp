@@ -323,6 +323,8 @@ struct Registry {
   // and lists admitted mid-recording (unobserved, awaiting their Reset).
   std::atomic<std::uint64_t> contended_invalidations{}, unobserved_admissions{};
   std::atomic<const char*> error{"not_started"};
+  // The latest refused command-list registration: the step and its reason.
+  std::atomic<const char*> list_refused_by{"none"}, list_refusal_reason{"none"};
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
   std::unordered_map<ID3D12GraphicsCommandList*, std::shared_ptr<List>> lists;
@@ -2903,7 +2905,13 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
   const auto hooked = boundary::register_list(native, item->id, Boundaries);
   const bool registered = observed ? runtime::manager().register_command_list(native, r.key, item->id)
                                    : runtime::manager().register_unobserved_command_list(native, r.key, item->id);
-  if (!hooked.ready || !hooked.protection_restored || !registered || !attach(native, item)) {
+  // Which step refused the list, for the log: the boundary's own reason, the
+  // capture manager, or the lifetime notification. Attach runs only when the
+  // others accepted it, as before.
+  const char* refused_by = !hooked.ready || !hooked.protection_restored ? "boundary" : !registered ? "capture_manager" : nullptr;
+  if (!refused_by && !attach(native, item))
+    refused_by = "lifetime";
+  if (refused_by) {
     item->retire();
     if (!registered && SceneCaptureManager::last_call_contended()) {
       // Not a hook fault: the manager lock was busy. The list is retried on its
@@ -2911,6 +2919,12 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
       count_contention(ContentionSite::registry_lifecycle);
       return {};
     }
+    const char* reason = !hooked.ready                 ? hooked.status
+                         : !hooked.protection_restored ? "protection_not_restored"
+                         : !registered                 ? "refused"
+                                                       : "attach_failed";
+    r.list_refusal_reason.store(reason, std::memory_order_relaxed);
+    r.list_refused_by.store(refused_by, std::memory_order_release);
     error("native_list_registration_failed");
     return {};
   }
@@ -4920,6 +4934,11 @@ GraphicsStatus graphics_status() noexcept {
   const auto queues = queue_hook::total_statistics();
   result.queue_calls = queues.calls;
   result.queue_contended = queues.contended;
+  result.list_refused_by = r.list_refused_by.load(std::memory_order_acquire);
+  result.list_refusal_reason = r.list_refusal_reason.load(std::memory_order_relaxed);
+  const auto changed = boundary::last_slot_change();
+  result.changed_slot = changed.index;
+  result.changed_slot_target = reinterpret_cast<std::uintptr_t>(changed.target);
   return result;
 }
 static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
