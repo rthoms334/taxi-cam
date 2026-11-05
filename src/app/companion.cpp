@@ -5067,21 +5067,25 @@ bool save_built_in_displays(bool built_in_only, bool stay = false) {
   s.display_override = built_in_choices(*base, s.display_override);
   apply_setup_areas(s);
   if (built_in_only) {
-    for (auto& texture : s.display_override.textures)
-      std::fill(std::begin(texture), std::end(texture), '\0');
-    for (auto& area : s.display_override.areas)
-      area = {};
+    // The displays as shipped, with the lower display the aircraft comes
+    // with (the iniBuilds A380's system display, say) and its area.
+    auto shipped = s;
+    if (!win::reset_settings(shipped, win::SettingsReset::displays)) {
+      notice = tr(L"Could not save these displays. Check access to your local settings folder.");
+      InvalidateRect(window, nullptr, FALSE);
+      return false;
+    }
+    s.display_override = shipped.display_override;
     setup.areas = {};
     win::update_target_assignment(s.left_id, s.right_id, s.route_request, 0, 0);
   } else {
     route_picks(s, setup_items(sample));
-    // A newly placed lower display is where the door camera goes. None with
-    // the lower display already placed is the user's choice and stays (a
-    // drop or swap saves too).
-    if (s.door_side == win::DoorSideNone && profiles::override_sides(*base, s.display_override) > base->sides &&
-        sides_before <= base->sides)
-      s.door_side = MaxDisplaySides - 1;
   }
+  // A newly placed lower display is where the door camera goes. None with the
+  // lower display already placed is the user's choice and stays (a drop or
+  // swap saves too).
+  if (s.door_side == win::DoorSideNone && profiles::override_sides(*base, s.display_override) > base->sides && sides_before <= base->sides)
+    s.door_side = MaxDisplaySides - 1;
   // Without its placed lower display the door camera has none.
   win::fit_door_camera(s);
   s.panel_setup = stay ? 1 : 0;
@@ -5409,7 +5413,8 @@ const std::string* selected_setup(HWND hwnd) {
   const auto* selected = selected_saved(hwnd);
   return selected && !selected->profile ? &selected->key : nullptr;
 }
-// Remove and Copy to this aircraft follow the selection.
+// Remove and Copy to this aircraft follow the selection, and so do the
+// resets of an aircraft that comes with Taxi Cam.
 void update_saved_buttons(HWND hwnd) {
   win::Status sample;
   {
@@ -5417,9 +5422,9 @@ void update_saved_buttons(HWND hwnd) {
     sample = status;
   }
   const auto* selected = selected_saved(hwnd);
-  const bool set_up = selected && !selected->profile;
-  const bool enable[]{set_up, set_up && loaded_variant(sample)[0] != 0};
-  const int buttons[]{802, 804};
+  const bool set_up = selected && !selected->profile, built_in = selected && selected->profile;
+  const bool enable[]{set_up, set_up && loaded_variant(sample)[0] != 0, built_in, built_in};
+  const int buttons[]{802, 804, 806, 807};
   // A button about to be disabled gives the keyboard focus to the list first
   // (after a Remove, say), so the dialog keeps answering Tab, Enter and Esc.
   for (std::size_t i = 0; i < std::size(buttons); ++i)
@@ -5429,7 +5434,9 @@ void update_saved_buttons(HWND hwnd) {
     EnableWindow(GetDlgItem(hwnd, buttons[i]), enable[i]);
   SetDlgItemTextW(
       hwnd, 803,
-      selected && selected->profile ? tr(L"Included with Taxi Cam, so it cannot be removed. Change it in Setup while it is loaded.") : L"");
+      built_in ? tr(L"Included with Taxi Cam, so it cannot be removed. Reset displays brings back its displays and door camera as they "
+                    L"come; Factory reset brings back all of its settings.")
+               : L"");
 }
 void fill_saved_list(HWND hwnd) {
   const auto s = draft();
@@ -5561,6 +5568,69 @@ void copy_setup_variant(HWND hwnd) {
   fill_saved_list(hwnd);
   SetDlgItemTextW(hwnd, 803, tr_format(L"{0} now starts from {1}'s setup and is selected.", {to, from}).c_str());
 }
+// Resets the selected aircraft that comes with Taxi Cam (win::SettingsReset):
+// Reset displays brings back its displays and door camera as shipped, Factory
+// reset all of its settings. One not in use is reset in its own file and stays
+// unselected.
+void reset_saved_aircraft(HWND hwnd, win::SettingsReset kind) {
+  const auto* selected = selected_saved(hwnd);
+  if (!selected || !selected->profile)
+    return;
+  const auto* profile = profiles::find(selected->profile);
+  if (!profile)
+    return;
+  const bool factory = kind == win::SettingsReset::factory;
+  const std::wstring name = profile->name;
+  const auto question =
+      factory ? tr_format(
+                    L"Factory reset {0}? All of its settings go back to how they come with Taxi Cam, camera positions and guides "
+                    L"included.",
+                    {name})
+              : tr_format(
+                    L"Reset {0}'s displays and door camera to how they come with Taxi Cam? Camera positions, guides and your other "
+                    L"settings are kept.",
+                    {name});
+  if (MessageBoxW(hwnd, question.c_str(), factory ? tr(L"Factory reset") : tr(L"Reset displays"), MB_OKCANCEL | MB_ICONWARNING) != IDOK)
+    return;
+  const bool in_use = draft().profile == selected->profile;
+  win::Settings next;
+  if (in_use) {
+    // An adjustment window gives its cameras back first, and pending edits
+    // save, so the reset starts from what is in use.
+    if (live_view.window)
+      DestroyWindow(live_view.window);
+    if (!apply())
+      return;
+    next = draft();
+    // The displays placed this flight (Setup → Displays, Texture routing) are
+    // routes of their own: back to automatic, as Use default displays does,
+    // so the cameras do not go back to them when the bridge routes again.
+    win::update_target_assignment(next.left_id, next.right_id, next.route_request, 0, 0, next.lower_id, 0);
+  } else if (!win::load_settings(next, installation, selected->profile) &&
+             !(factory && win::load_settings(next, installation, selected->profile, {}, nullptr, true))) {
+    // A saved file that cannot be read still takes a factory reset, which
+    // needs nothing from it; Reset displays keeps the rest of it, so refuses.
+    SetDlgItemTextW(hwnd, 803,
+                    factory ? tr(L"Could not reset it. Check access to your local settings folder.")
+                            : tr_format(L"{0}'s saved settings cannot be read, so only Factory reset can bring it back.", {name}).c_str());
+    return;
+  }
+  if (!win::reset_settings(next, kind) || !win::save_settings(next, in_use)) {
+    SetDlgItemTextW(hwnd, 803, tr(L"Could not reset it. Check access to your local settings folder."));
+    return;
+  }
+  if (in_use) {
+    // The reset is this aircraft's setup now: a live view's door hold on it
+    // ends without giving back the old values.
+    live_view.door_taken = false;
+    publish(next);
+  }
+  // The list is unchanged, so the reset aircraft stays selected.
+  SetDlgItemTextW(hwnd, 803,
+                  (factory ? tr_format(L"{0} is back to how it comes with Taxi Cam.", {name})
+                           : tr_format(L"{0}'s displays and door camera are back to how they come with Taxi Cam.", {name}))
+                      .c_str());
+}
 // The list's buttons draw like the main window's, so a disabled Remove stays
 // dark instead of the native light grey.
 void draw_dialog_button(const DRAWITEMSTRUCT& item) {
@@ -5587,7 +5657,7 @@ void draw_dialog_button(const DRAWITEMSTRUCT& item) {
 }
 INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_INITDIALOG) {
-    place_dialog(hwnd, tr(L"Taxi Cam — Saved aircraft"), 640, 460);
+    place_dialog(hwnd, tr(L"Taxi Cam — Saved aircraft"), 640, 504);
     dialog_control(hwnd, L"STATIC", tr(L"Saved aircraft"), -1, 20, 17, 600, 28, 0, heading);
     dialog_control(hwnd, L"STATIC",
                    tr(L"Every aircraft Taxi Cam has a setup for. Change one in Setup while it is loaded. Copy to this aircraft "
@@ -5596,9 +5666,12 @@ INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
     dialog_control(hwnd, L"LISTBOX", L"", 801, 20, 118, 600, 192, WS_BORDER | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP);
     dialog_control(hwnd, L"STATIC", L"", 805, 20, 318, 600, 24);
     dialog_control(hwnd, L"STATIC", L"", 803, 20, 346, 600, 44, 0, small);
+    // A set-up aircraft's Copy and Remove, then an included aircraft's resets.
     dialog_control(hwnd, L"BUTTON", tr(L"Copy to this aircraft"), 804, 20, 406, 220, 34, WS_TABSTOP | BS_OWNERDRAW);
-    dialog_control(hwnd, L"BUTTON", tr(L"Remove"), 802, 400, 406, 110, 34, WS_TABSTOP | BS_OWNERDRAW);
-    const auto close = dialog_control(hwnd, L"BUTTON", tr(L"Close"), IDCANCEL, 520, 406, 100, 34, WS_TABSTOP | BS_OWNERDRAW);
+    dialog_control(hwnd, L"BUTTON", tr(L"Remove"), 802, 250, 406, 220, 34, WS_TABSTOP | BS_OWNERDRAW);
+    dialog_control(hwnd, L"BUTTON", tr(L"Reset displays"), 806, 20, 450, 220, 34, WS_TABSTOP | BS_OWNERDRAW);
+    dialog_control(hwnd, L"BUTTON", tr(L"Factory reset"), 807, 250, 450, 220, 34, WS_TABSTOP | BS_OWNERDRAW);
+    const auto close = dialog_control(hwnd, L"BUTTON", tr(L"Close"), IDCANCEL, 520, 450, 100, 34, WS_TABSTOP | BS_OWNERDRAW);
     fill_saved_list(hwnd);
     SetFocus(close);
     hide_focus_cues(hwnd);
@@ -5627,12 +5700,20 @@ INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
     copy_setup_variant(hwnd);
     return TRUE;
   }
+  if (message == WM_COMMAND && (LOWORD(w) == 806 || LOWORD(w) == 807)) {
+    reset_saved_aircraft(hwnd, LOWORD(w) == 807 ? win::SettingsReset::factory : win::SettingsReset::displays);
+    return TRUE;
+  }
   // Owner-drawn buttons never become the default button, so Enter (IDOK)
-  // presses the focused Remove or Copy here; anywhere else it closes.
+  // presses the focused Remove, Copy or reset here; anywhere else it closes.
   if (message == WM_COMMAND && LOWORD(w) == IDOK) {
     const int focused = GetDlgCtrlID(GetFocus());
     if (focused == 802 || focused == 804) {
       focused == 802 ? remove_setup_variant(hwnd) : copy_setup_variant(hwnd);
+      return TRUE;
+    }
+    if (focused == 806 || focused == 807) {
+      reset_saved_aircraft(hwnd, focused == 807 ? win::SettingsReset::factory : win::SettingsReset::displays);
       return TRUE;
     }
   }
