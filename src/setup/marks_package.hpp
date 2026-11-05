@@ -501,16 +501,28 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   // The 1.3.3 test builds' later-named folder is out of date wherever ours is.
   if (!remove_named(community, LatePackageName))
     return Outcome::failed;
+  std::vector<std::pair<const char*, std::string_view>> files;
+  if (mode == Mode::page)
+    files = {{PageRelative, patched}, {HelperRelative, helper}};
+  else
+    files = {{ScriptRelative, patched}};
+  // Our files this mode doesn't use (the other mode's, or an older format's)
+  // go at every check, best effort: a file another program holds open (the
+  // simulator, a virus scanner) is tried again at the next one. One left
+  // behind replaces nothing: our manifest and layout.json don't list it.
+  const auto clear_unused = [&] {
+    for (const char* relative : {PageRelative, HelperRelative, ScriptRelative})
+      if (std::none_of(files.begin(), files.end(), [&](const auto& file) { return std::string_view(file.first) == relative; })) {
+        std::error_code ignored;
+        std::filesystem::remove(package / relative, ignored);
+      }
+  };
   const auto expected = marker_text(detail::sha256(source), detail::sha256(helper), mode);
-  if (ours && detail::read_file(marker, recorded) && recorded == expected)
+  if (ours && detail::read_file(marker, recorded) && recorded == expected) {
+    clear_unused();
     return Outcome::current;
-  std::error_code error;
-  // Written afresh: the other mode's file must not stay behind.
-  if (ours) {
-    std::filesystem::remove_all(package / L"html_ui", error);
-    if (error)
-      return Outcome::failed;
   }
+  std::error_code error;
   const bool fresh = !detail::exists(package);
   const auto core = package / L"html_ui\\Pages\\VCockpit\\Core";
   const auto give_up = [&] {
@@ -527,11 +539,7 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   // it and the uninstaller removes it.
   if (!detail::write_file(marker, "incomplete\n"))
     return give_up();
-  std::vector<std::pair<const char*, std::string_view>> files;
-  if (mode == Mode::page)
-    files = {{PageRelative, patched}, {HelperRelative, helper}};
-  else
-    files = {{ScriptRelative, patched}};
+  clear_unused();
   for (const auto& [relative, text] : files)
     if (!detail::write_file(package / relative, text))
       return Outcome::failed;

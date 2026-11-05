@@ -191,7 +191,18 @@ int main() {
       require(taken.page == std::vector<std::wstring>{L"panel-raas"} && taken.script.empty() &&
                   marks_package::mode_for(taken) == marks_package::Mode::script,
               "another package taking the page is found");
+      // Our old page held open by another program (the simulator, a virus
+      // scanner): the switch still succeeds, and the page goes at the next
+      // check once it is let go.
+      const HANDLE held = CreateFileW((package / marks_package::PageRelative).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      require(held != INVALID_HANDLE_VALUE, "our page can be held open");
       require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a page taken by another package rewrites ours");
+      require(fs::exists(package / marks_package::PageRelative), "a held page stays for now");
+      CloseHandle(held);
+      require(
+          marks_package::ensure(simulator, community, "helper") == Outcome::current && !fs::exists(package / marks_package::PageRelative),
+          "a page let go is removed at the next check");
       const auto script_file = package / marks_package::ScriptRelative;
       require(fs::exists(script_file) && !fs::exists(package / marks_package::PageRelative) &&
                   !fs::exists(package / marks_package::HelperRelative),
