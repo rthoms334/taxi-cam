@@ -867,6 +867,7 @@ DWORD run_impl() {
   std::uint64_t applied_connection{}, pending_connection{};
   win::Status last_logged{};
   bool logged = false, last_connected = false, last_requested = false, last_degraded = false, halted_logged = false;
+  std::uint64_t logged_hook_failures{}, hook_failures_logged_ms{};
   StallHoldRelease hold_release;
   const auto request_hold_release = [&](bool known_off, const win::Status& at) {
     if (!hold_release.observe(watchdog_held.load(std::memory_order_acquire), known_off))
@@ -2224,13 +2225,25 @@ DWORD run_impl() {
       mailbox.data()->status = status;
       mailbox.unlock();
     }
+    // A rising failure count names its latest code, at most every 5 s, so a
+    // log shows what failed even when the count never reaches the halt.
+    if (graphics.hook_failures > logged_hook_failures && (!hook_failures_logged_ms || now - hook_failures_logged_ms >= 5000)) {
+      logged_hook_failures = graphics.hook_failures;
+      hook_failures_logged_ms = now;
+      char failure_detail[256];
+      std::snprintf(failure_detail, sizeof(failure_detail), "Hook failures: total=%llu last_error=%s peak_per_second=%llu",
+                    static_cast<unsigned long long>(graphics.hook_failures), graphics.error ? graphics.error : "unknown",
+                    static_cast<unsigned long long>(graphics.failure_rate_peak));
+      log_status(status, failure_detail);
+    }
     if (graphics.admission_halted && !halted_logged) {
       halted_logged = true;
       char halt_detail[384];
       std::snprintf(halt_detail, sizeof(halt_detail),
-                    "Hook admission halted: registration failures reached %llu in one second (total %llu). Cameras disarmed and "
-                    "admission stopped for this simulator process.",
-                    static_cast<unsigned long long>(graphics.failure_rate_peak), static_cast<unsigned long long>(graphics.hook_failures));
+                    "Hook admission halted: registration failures reached %llu in one second (total %llu, last_error=%s). Cameras "
+                    "disarmed and admission stopped for this simulator process.",
+                    static_cast<unsigned long long>(graphics.failure_rate_peak), static_cast<unsigned long long>(graphics.hook_failures),
+                    graphics.error ? graphics.error : "unknown");
       log_status(status, halt_detail);
       log_contention(status, graphics, output);
     }

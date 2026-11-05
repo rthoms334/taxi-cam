@@ -150,6 +150,21 @@ int main() {
     require(marks_package::ensure(simulator, community, "helper 2") == Outcome::page_changed, "and keeps saying so");
     write(stock_page, Stock);
     require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a usable page writes it again");
+    // Other packages replacing the page or BaseInstrument.js are named for the
+    // logs; ours is not.
+    fs::create_directories(community / "zzz-page" / "html_ui" / "Pages" / "VCockpit" / "Core");
+    write(community / "zzz-page" / marks_package::PageRelative, "page");
+    fs::create_directories(community / "base-tool" / "html_ui" / "Pages" / "VCockpit" / "Instruments" / "Shared");
+    write(community / "base-tool" / marks_package::BaseInstrumentRelative, "base");
+    fs::create_directories(community / "livery-only");
+    const auto overrides = marks_package::other_page_overrides(community);
+    require(
+        overrides.page == std::vector<std::wstring>{L"zzz-page"} && overrides.base_instrument == std::vector<std::wstring>{L"base-tool"},
+        "other page and BaseInstrument packages are listed, ours and unrelated ones are not");
+    require(marks_package::other_page_overrides({}).page.empty(), "no Community folder: nothing listed");
+    fs::remove_all(community / "zzz-page", ignored);
+    fs::remove_all(community / "base-tool", ignored);
+    fs::remove_all(community / "livery-only", ignored);
     require(marks_package::remove(community) && !fs::exists(package), "the uninstaller removes our package");
     require(marks_package::remove(community), "nothing left to remove");
 
