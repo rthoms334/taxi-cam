@@ -440,13 +440,16 @@ inline bool remove(const std::filesystem::path& community) {
   const bool first = remove_named(community, PackageName);
   return remove_named(community, LatePackageName) && first;
 }
+// A simulator may be running but when it started is unknown: its mounted
+// files are kept, as no check can tell they are no longer mounted.
+inline constexpr std::uint64_t StartUnknown = ~std::uint64_t{0};
 // When the running simulator started, as a FILETIME; 0 while none runs. The
-// earliest of several, and "now" for one whose start can't be read, so its
-// mounted files are never taken for unmounted ones.
+// earliest of several; StartUnknown when the process list or one's start
+// can't be read.
 inline std::uint64_t simulator_started() noexcept {
   const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE)
-    return 0;
+    return StartUnknown;
   std::uint64_t earliest = 0;
   PROCESSENTRY32W entry{};
   entry.dwSize = sizeof(entry);
@@ -461,8 +464,8 @@ inline std::uint64_t simulator_started() noexcept {
       CloseHandle(process);
     }
     if (!started) {
-      GetSystemTimeAsFileTime(&created);
-      started = std::uint64_t{created.dwHighDateTime} << 32 | created.dwLowDateTime;
+      earliest = StartUnknown;
+      break;
     }
     earliest = earliest ? std::min(earliest, started) : started;
   }
@@ -478,7 +481,8 @@ inline std::string_view strip_bom(std::string_view text) noexcept {
 // taking the page or giving it back, and simulator updates. A package
 // folder without the marker file is never touched: it is not one Taxi Cam
 // made. `running_since`: when the running simulator started (FILETIME, 0
-// when none runs); found by itself when not given.
+// when none runs, StartUnknown when one may run from an unknown time);
+// found by itself when not given.
 inline Outcome ensure(const std::filesystem::path& simulator,
                       const std::filesystem::path& community,
                       std::string_view helper,
@@ -560,7 +564,7 @@ inline Outcome ensure(const std::filesystem::path& simulator,
   };
   const auto expected = marker_text(detail::sha256(source), detail::sha256(helper), mode);
   if (ours && detail::read_file(marker, recorded) && recorded == expected) {
-    if (!started || detail::file_time(marker) < started)
+    if (!started || (started != StartUnknown && detail::file_time(marker) < started))
       clear_unused();
     return Outcome::current;
   }

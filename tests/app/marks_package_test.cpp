@@ -286,6 +286,9 @@ int main() {
               "a switch while the simulator runs keeps its mounted script");
       require(marks_package::ensure(simulator, community, "helper", 1) == Outcome::current && fs::exists(script_file),
               "and keeps it for the rest of that session");
+      require(
+          marks_package::ensure(simulator, community, "helper", marks_package::StartUnknown) == Outcome::current && fs::exists(script_file),
+          "a simulator whose start can't be read keeps it too");
       require(marks_package::ensure(simulator, community, "helper", marks_package::detail::file_time(marker) + 1) == Outcome::current &&
                   !fs::exists(script_file),
               "a session started after the switch lets it go");
@@ -295,6 +298,9 @@ int main() {
       require(marks_package::ensure(simulator, community, "helper", 1) == Outcome::written && fs::exists(script_file) &&
                   fs::exists(package / marks_package::PageRelative) && fs::exists(package / marks_package::HelperRelative),
               "the other way round too: the mounted page and helper stay");
+      require(marks_package::ensure(simulator, community, "helper", marks_package::StartUnknown) == Outcome::current &&
+                  fs::exists(package / marks_package::PageRelative) && fs::exists(package / marks_package::HelperRelative),
+              "an unknown start keeps the mounted page and helper too");
       fs::remove_all(other);
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && !fs::exists(script_file) &&
                   fs::exists(package / marks_package::PageRelative),
