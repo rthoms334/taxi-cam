@@ -3814,9 +3814,11 @@ void log_marks_package(win::marks_package::Outcome outcome, const std::filesyste
       return out.empty() ? std::wstring(L"none") : out;
     };
     const auto overrides = win::marks_package::other_page_overrides(community);
+    const auto source = win::marks_package::page_source(community);
     const auto line = std::wstring(L"Display package: outcome=") + widen(win::marks_package::outcome_name(outcome)) + L" community=" +
                       (community.empty() ? std::wstring(L"none") : community.wstring()) + L" other_page_packages=" + names(overrides.page) +
-                      L" base_instrument_packages=" + names(overrides.base_instrument);
+                      L" page_from=" + (source.package.empty() ? std::wstring(L"stock") : source.package) + L" base_instrument_packages=" +
+                      names(overrides.base_instrument);
     const auto text = win::redact(win::report_utf8(line), win::report_redactions());
     const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
     std::wstring redacted(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
@@ -3884,6 +3886,11 @@ void service_marks_package_notice() {
       break;
     case Outcome::no_community:
       notice = tr(L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.");
+      break;
+    case Outcome::conflict:
+      notice =
+          tr(L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a "
+             L"way Taxi Cam can't add to. Choose your displays in Setup > Displays.");
       break;
     default:
       notice = tr(L"Taxi Cam could not add its display package to the simulator's Community folder. Run the Taxi Cam installer again.");

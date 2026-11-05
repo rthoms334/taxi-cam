@@ -28,12 +28,16 @@
 
 namespace taxi_camera::standalone::marks_package {
 inline constexpr wchar_t PackageName[] = L"taxi-cam-panel-marks";
+// The folder name used instead when the package whose page ours is built on
+// sorts after PackageName: MSFS mounts packages of one order hint in
+// alphabetical order, and the one mounted later wins.
+inline constexpr wchar_t LatePackageName[] = L"zzzz-taxi-cam-panel-marks";
 inline constexpr char HelperName[] = "taxi-cam-marks.js";
 inline constexpr wchar_t MarkerName[] = L"taxi-cam-marks.stock.txt";
 inline constexpr char PageRelative[] = "html_ui/Pages/VCockpit/Core/VCockpit.html";
 inline constexpr char HelperRelative[] = "html_ui/Pages/VCockpit/Core/taxi-cam-marks.js";
 // Bumped when the files this writes change shape.
-inline constexpr char FormatVersion[] = "1";
+inline constexpr char FormatVersion[] = "2";
 // taxi-cam-marks.js, built into taxi-cam.exe (app.rc).
 inline constexpr int HelperResource = 201;
 inline std::string_view helper_text() noexcept {
@@ -101,7 +105,45 @@ inline std::string minimum_game_version(std::string_view manifest) {
       return {};
   return std::string(value);
 }
-inline std::string manifest_json(std::string_view minimum_version) {
+// Our own hint, used when the page is the stock one.
+inline constexpr char OwnOrderHint[] = "PANEL_PATCH";
+// "package_order_hint" from a package manifest: letters, digits and '_' only,
+// else empty (also when the manifest sets none, which MSFS mounts last).
+inline std::string order_hint(std::string_view manifest) {
+  const auto key = manifest.find("\"package_order_hint\"");
+  if (key == std::string_view::npos)
+    return {};
+  const auto colon = manifest.find(':', key);
+  const auto open = colon == std::string_view::npos ? colon : manifest.find('"', colon + 1);
+  const auto close = open == std::string_view::npos ? open : manifest.find('"', open + 1);
+  if (close == std::string_view::npos)
+    return {};
+  const auto value = manifest.substr(open + 1, close - open - 1);
+  if (value.empty() || value.size() > 64)
+    return {};
+  for (const char c : value)
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+      return {};
+  return std::string(value);
+}
+// Whether a manifest lists the cockpit page among its globally overridden
+// files: in MSFS 2024 a package's copy of an html_ui file overrides the
+// stock one only when it is listed there.
+inline bool lists_page(std::string_view manifest) {
+  const auto key = manifest.find("\"globally_overriden_base_sim_files\"");
+  const auto open = key == std::string_view::npos ? key : manifest.find('[', key);
+  const auto close = open == std::string_view::npos ? open : manifest.find(']', open);
+  if (close == std::string_view::npos)
+    return false;
+  std::string list;
+  for (const char c : manifest.substr(open, close - open))
+    if (c != '\\' && c != '/')
+      list += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+  return list.find("html_uipagesvcockpitcorevcockpit.html") != std::string::npos;
+}
+// The package's manifest; `hint` empty leaves package_order_hint out, as the
+// package our page is built on may (MSFS then mounts both last).
+inline std::string manifest_json(std::string_view minimum_version, std::string_view hint = OwnOrderHint) {
   std::string out =
       "{\r\n  \"dependencies\": [],\r\n  \"content_type\": \"MISC\",\r\n  \"title\": \"Taxi Cam panel marks\",\r\n"
       "  \"manufacturer\": \"\",\r\n  \"creator\": \"Taxi Cam\",\r\n  \"package_version\": \"1.0.0\",\r\n"
@@ -109,8 +151,13 @@ inline std::string manifest_json(std::string_view minimum_version) {
   out += minimum_version.empty() ? std::string_view{"1.0.0"} : minimum_version;
   out +=
       "\",\r\n  \"release_notes\": { \"neutral\": { \"LastUpdate\": \"\", \"OlderHistory\": \"\" } },\r\n"
-      "  \"export_type\": \"Community\",\r\n  \"package_order_hint\": \"PANEL_PATCH\",\r\n"
-      "  \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.html\" ]\r\n}\r\n";
+      "  \"export_type\": \"Community\",\r\n";
+  if (!hint.empty()) {
+    out += "  \"package_order_hint\": \"";
+    out += hint;
+    out += "\",\r\n";
+  }
+  out += "  \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.html\" ]\r\n}\r\n";
   return out;
 }
 struct LayoutEntry {
@@ -129,13 +176,22 @@ inline std::string layout_json(const std::vector<LayoutEntry>& entries) {
   out += "\r\n  ]\r\n}\r\n";
   return out;
 }
-// What the marker file records: the stock page and helper the package was
-// made from. A difference in either rewrites it.
-inline std::string marker_text(std::string_view stock_hash, std::string_view helper_hash) {
+// What the marker file records: the page the package was made from (the
+// stock page, or another package's copy of it, with that package's order
+// hint) and the helper. A difference in any of them rewrites it, so another
+// package added, changed or removed later is followed at the next check.
+inline std::string marker_text(std::string_view page_hash,
+                               std::string_view helper_hash,
+                               std::string_view source = "stock",
+                               std::string_view hint = OwnOrderHint) {
   std::string out = "format=";
   out += FormatVersion;
-  out += "\r\nstock=";
-  out += stock_hash;
+  out += "\r\nsource=";
+  out += source;
+  out += "\r\nhint=";
+  out += hint;
+  out += "\r\npage=";
+  out += page_hash;
   out += "\r\nhelper=";
   out += helper_hash;
   out += "\r\n";
@@ -261,9 +317,9 @@ inline std::filesystem::path stock_package(const std::filesystem::path& simulato
   return {};
 }
 // Other Community packages that ship their own copy of a stock file every
-// cockpit page loads: the page itself (which then replaces ours when it loads
-// later) or BaseInstrument.js (which runs in every page). Names only, sorted;
-// packages directly in the Community folder.
+// cockpit page loads: the page itself or BaseInstrument.js (which runs in
+// every page). Names only, sorted; packages directly in the Community
+// folder; Taxi Cam's own package (the one with its marker) left out.
 inline constexpr char BaseInstrumentRelative[] = "html_ui/Pages/VCockpit/Instruments/Shared/BaseInstrument.js";
 struct PageOverrides {
   std::vector<std::wstring> page, base_instrument;
@@ -276,9 +332,9 @@ inline PageOverrides other_page_overrides(const std::filesystem::path& community
   std::filesystem::directory_iterator entries(community, std::filesystem::directory_options::skip_permission_denied, error);
   for (; !error && entries != std::filesystem::directory_iterator(); entries.increment(error)) {
     const auto& folder = entries->path();
-    const auto name = folder.filename().wstring();
-    if (!_wcsicmp(name.c_str(), PackageName))
+    if (detail::exists(folder / MarkerName))
       continue;
+    const auto name = folder.filename().wstring();
     if (detail::exists(folder / PageRelative))
       out.page.push_back(name);
     if (detail::exists(folder / BaseInstrumentRelative))
@@ -288,8 +344,39 @@ inline PageOverrides other_page_overrides(const std::filesystem::path& community
   std::sort(out.base_instrument.begin(), out.base_instrument.end());
   return out;
 }
+// The other package whose copy of the cockpit page MSFS would load instead
+// of the stock one: among those listing it as a globally overridden file, the
+// last in mount order. Order hint groups have no documented order, so within
+// them the folder name decides, as MSFS does within one group.
+struct PageSource {
+  std::wstring package;  // empty: the stock page
+  std::string hint;      // its package_order_hint, or empty when it sets none
+};
+inline std::wstring lower(std::wstring text) {
+  for (auto& c : text)
+    c = static_cast<wchar_t>(towlower(c));
+  return text;
+}
+inline PageSource page_source(const std::filesystem::path& community) {
+  PageSource out;
+  for (const auto& name : other_page_overrides(community).page) {
+    std::string manifest;
+    if (!detail::read_file(community / name / L"manifest.json", manifest) || !lists_page(manifest))
+      continue;
+    if (out.package.empty() || lower(name) > lower(out.package))
+      out = {name, order_hint(manifest)};
+  }
+  return out;
+}
+inline std::string narrow(const std::wstring& text) {
+  const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+  std::string out(static_cast<std::size_t>(size > 0 ? size : 0), '\0');
+  if (size > 0)
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
+  return out;
+}
 
-enum class Outcome { current, written, removed, no_community, no_simulator, page_changed, failed };
+enum class Outcome { current, written, removed, no_community, no_simulator, page_changed, failed, conflict };
 inline const char* outcome_name(Outcome outcome) noexcept {
   switch (outcome) {
     case Outcome::current:
@@ -306,23 +393,36 @@ inline const char* outcome_name(Outcome outcome) noexcept {
       return "page_changed";
     case Outcome::failed:
       return "failed";
+    case Outcome::conflict:
+      return "conflict";
   }
   return "failed";
 }
-// Removes the package Taxi Cam made (the uninstaller). True when none is left.
-inline bool remove(const std::filesystem::path& community) {
-  if (community.empty())
-    return true;
-  const auto package = community / PackageName;
+// Removes the package Taxi Cam made under one of its names. True when no
+// folder of that name is left, or the folder there is not Taxi Cam's.
+inline bool remove_named(const std::filesystem::path& community, const wchar_t* name) {
+  const auto package = community / name;
   if (!detail::exists(package / MarkerName))
     return !detail::exists(package);
   std::error_code error;
   std::filesystem::remove_all(package, error);
   return !error;
 }
-// Makes the package current for this simulator's stock page and helper.
-// A package folder without the marker file is never touched: it is not one
-// Taxi Cam made.
+// Removes the package Taxi Cam made, under either name (the uninstaller).
+// True when none is left.
+inline bool remove(const std::filesystem::path& community) {
+  if (community.empty())
+    return true;
+  const bool first = remove_named(community, PackageName);
+  return remove_named(community, LatePackageName) && first;
+}
+// Makes the package current for the cockpit page MSFS would otherwise load
+// (the stock page, or another package's copy of it; page_source) and the
+// helper: that page plus the helper's script line, with the other package's
+// order hint and a folder name after it, so ours mounts after it and both
+// add-ons' scripts load. Re-run at every check, it follows that package
+// being added, changed or removed. A package folder without the marker file
+// is never touched: it is not one Taxi Cam made.
 inline Outcome ensure(const std::filesystem::path& simulator, const std::filesystem::path& community, std::string_view helper) {
   if (helper.empty())
     return Outcome::failed;
@@ -331,12 +431,21 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   const auto stock = simulator.empty() ? std::filesystem::path{} : stock_package(simulator);
   if (stock.empty())
     return Outcome::no_simulator;
-  const auto package = community / PackageName;
-  const auto marker = package / MarkerName;
   std::string page, manifest, recorded;
   if (!detail::read_file(stock / PageRelative, page))
     return Outcome::failed;
   detail::read_file(stock / L"manifest.json", manifest);
+  const auto source = page_source(community);
+  std::string hint = OwnOrderHint;
+  if (!source.package.empty()) {
+    if (!detail::read_file(community / source.package / PageRelative, page))
+      return Outcome::failed;
+    hint = source.hint;
+  }
+  const wchar_t* name = !source.package.empty() && lower(source.package) >= lower(PackageName) ? LatePackageName : PackageName;
+  const wchar_t* other_name = name == PackageName ? LatePackageName : PackageName;
+  const auto package = community / name;
+  const auto marker = package / MarkerName;
   const bool ours = detail::exists(marker);
   if (detail::exists(package) && !ours)
     return Outcome::failed;
@@ -344,14 +453,21 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   const bool bom = page.size() >= 3 && page.compare(0, 3, "\xEF\xBB\xBF") == 0;
   auto patched = patch_page(std::string_view(page).substr(bom ? 3 : 0));
   if (patched.empty()) {
-    std::error_code ignored;
-    if (ours && std::filesystem::remove_all(package, ignored) > 0)
-      return Outcome::removed;
-    return Outcome::page_changed;
+    // Another package's page Taxi Cam cannot add to is left to work alone:
+    // a package of ours mounted after it would replace that add-on's page.
+    const bool had = ours || detail::exists(community / other_name / MarkerName);
+    marks_package::remove(community);
+    if (!source.package.empty())
+      return Outcome::conflict;
+    return had ? Outcome::removed : Outcome::page_changed;
   }
   if (bom)
     patched.insert(0, "\xEF\xBB\xBF");
-  const auto expected = marker_text(detail::sha256(page), detail::sha256(helper));
+  const auto source_name = source.package.empty() ? std::string("stock") : narrow(source.package);
+  const auto expected = marker_text(detail::sha256(page), detail::sha256(helper), source_name, hint);
+  // The package under the other name is out of date wherever this one goes.
+  if (!remove_named(community, other_name))
+    return Outcome::failed;
   if (ours && detail::read_file(marker, recorded) && recorded == expected)
     return Outcome::current;
   std::error_code error;
@@ -372,7 +488,7 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   if (!detail::write_file(marker, "incomplete\n"))
     return give_up();
   if (!detail::write_file(package / PageRelative, patched) || !detail::write_file(package / HelperRelative, helper) ||
-      !detail::write_file(package / L"manifest.json", manifest_json(minimum_game_version(manifest))))
+      !detail::write_file(package / L"manifest.json", manifest_json(minimum_game_version(manifest), hint)))
     return Outcome::failed;
   std::vector<LayoutEntry> entries;
   for (const char* relative : {PageRelative, HelperRelative}) {

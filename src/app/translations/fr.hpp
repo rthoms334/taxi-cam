@@ -678,6 +678,10 @@ inline constexpr Translation FrenchTranslations[]{
      L"find them again.",
      L"Cette version du simulateur a modifié la page de cockpit que Taxi Cam utilise pour reconnaître vos écrans : il ne les trouve plus. "
      L"Mettez à jour Taxi Cam pour les retrouver."},
+    {L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a way Taxi Cam can't "
+     L"add to. Choose your displays in Setup > Displays.",
+     L"Un autre module de votre dossier Community modifie la page du cockpit qu'utilise Taxi Cam pour reconnaître vos écrans, d'une façon "
+     L"que Taxi Cam ne peut pas compléter. Choisissez vos écrans dans Configuration > Écrans."},
     {L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.",
      L"Taxi Cam n'a pas trouvé le dossier Community du simulateur pour son paquet d'écrans. Relancez le programme d'installation de Taxi "
      L"Cam."},

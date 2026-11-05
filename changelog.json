@@ -4,6 +4,7 @@
       "version": "1.3.3",
       "date": "2026-11-05",
       "fixes": [
+        "Taxi Cam now recognises your displays alongside other add-ons that change the same cockpit page, such as panel-raas. Both keep working, and Taxi Cam follows along if you remove that add-on later.",
         "When Taxi Cam turns its cameras off to keep the simulator safe, or can't recognise your cockpit displays, its log now says why, so a bug report is enough to find the cause."
       ]
     },
