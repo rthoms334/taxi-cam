@@ -108,15 +108,28 @@ std::array<Slot, 8> slots{{{26}, {68}, {69}, {80}, {12}, {13}, {16}, {17}}};
 // The latest slot a registration found changed, and the entry it held then.
 std::atomic<UINT> changed_slot_index{0};
 std::atomic<void*> changed_slot_target{nullptr};
-// Bit n: slots[n] is pending another hook and being probed / its wrapper ran
-// since the probe was last reset. Wrappers only read probe_mask (one relaxed
-// load per call) and write a hit once per reset, so probing costs nothing
-// while no slot is pending.
-std::atomic<std::uint32_t> probe_mask{0}, hit_mask{0};
+// Bit n: slots[n] is probed / its wrapper ran since the worker last took the
+// hits. While any slot has another hook over it (watched_mask), every slot is
+// probed: the slots still holding our wrapper show the list work that the
+// slots under another hook must also see. Wrappers only read probe_mask (one
+// relaxed load per call) and write a hit once per interval, so probing costs
+// nothing while no slot is watched.
+std::atomic<std::uint32_t> probe_mask{0}, hit_mask{0}, watched_mask{0};
+// The last service result, returned while the control lock is busy.
+std::atomic<std::uint32_t> last_chained{0}, last_pending{0};
 inline void note_call(unsigned n) noexcept {
   const auto bit = 1u << n;
   if ((probe_mask.load(std::memory_order_relaxed) & bit) && !(hit_mask.load(std::memory_order_relaxed) & bit))
     hit_mask.fetch_or(bit, std::memory_order_relaxed);
+}
+// Control lock held: watched_mask and probing follow the slots' state.
+void update_watch() noexcept {
+  std::uint32_t watched = 0;
+  for (std::size_t n = 0; n < slots.size(); ++n)
+    if (slots[n].pending || slots[n].chained)
+      watched |= 1u << n;
+  watched_mask.store(watched, std::memory_order_release);
+  probe_mask.store(watched ? (1u << slots.size()) - 1 : 0, std::memory_order_relaxed);
 }
 struct ActiveEndSlot {
   void* table = nullptr;
@@ -959,7 +972,8 @@ bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
         return false;
       if (table == saved_table && slots[2].installed) {
         void* current = nullptr;
-        return pointer_exact(slots[2].address, current) && current == slots[2].wrapper;
+        return pointer_exact(slots[2].address, current) &&
+               (current == slots[2].wrapper || (slots[2].chained && current == slots[2].chained));
       }
       for (std::size_t n = 0; n < active_end_count; ++n) {
         const auto& known = active_end_slots[n];
@@ -981,7 +995,7 @@ bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
     return false;
   if (table == saved_table) {
     void* current = nullptr;
-    return pointer(slots[2].address, current) && current == slots[2].wrapper;
+    return pointer(slots[2].address, current) && (current == slots[2].wrapper || (slots[2].chained && current == slots[2].chained));
   }
   for (std::size_t n = 0; n < active_end_count; ++n) {
     auto& known = active_end_slots[n];
@@ -1078,13 +1092,21 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     // (refusing them would refuse every new list from now on), but capture
     // stays off until service() sees our wrapper called through that hook.
     if (read && slot.installed && current != slot.wrapper && current != slot.forward) {
-      if (current == slot.chained)
+      if (current == slot.chained) {
+        // The accepted hook is back over another one that came and went:
+        // nothing waits on that other hook any more.
+        if (slot.pending) {
+          slot.pending = nullptr;
+          slot.probe_phase = 0;
+          update_watch();
+        }
         continue;
+      }
       if (current != slot.pending) {
         note_foreign(slot, read, current);
         slot.pending = current;
         slot.probe_phase = 0;
-        probe_mask.fetch_and(~(1u << n), std::memory_order_relaxed);
+        update_watch();
         disable_capture();
       }
       held = true;
@@ -1093,7 +1115,8 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     if (read && slot.installed && current == slot.wrapper && (slot.pending || slot.chained)) {
       // The other hook was taken off again: our wrapper is back in the slot.
       slot.pending = slot.chained = nullptr;
-      probe_mask.fetch_and(~(1u << n), std::memory_order_relaxed);
+      slot.probe_phase = 0;
+      update_watch();
     }
     if (!read || current != (slot.installed ? slot.wrapper : slot.forward)) {
       note_foreign(slot, read, current);
@@ -1160,50 +1183,80 @@ bool slots_intact() noexcept {
 }
 ChainStatus service_chained_slots() noexcept {
   ChainStatus status;
-  if (inside)
+  // Nothing watched: no lock at all. Otherwise the worker never waits for the
+  // control lock the render threads take: a busy lock skips this interval.
+  if (inside || !watched_mask.load(std::memory_order_acquire))
     return status;
-  const Lock control(control_lock, true);
+  if (!TryAcquireSRWLockExclusive(&control_lock)) {
+    status.chained = last_chained.load(std::memory_order_relaxed);
+    status.pending = last_pending.load(std::memory_order_relaxed);
+    return status;
+  }
+  struct Release {
+    ~Release() { ReleaseSRWLockExclusive(&control_lock); }
+  } release;
   if (!configured || removed)
     return status;
+  // Calls since the last service. A slot still holding our wrapper that ran
+  // shows list work happened in this interval.
+  const auto hits = hit_mask.exchange(0, std::memory_order_acq_rel);
+  bool work = false;
+  for (std::size_t n = 0; n < slots.size(); ++n)
+    if (!slots[n].pending && !slots[n].chained && (hits & (1u << n)))
+      work = true;
+  bool changed = false;
   for (UINT n = 0; n < slots.size(); ++n) {
     auto& slot = slots[n];
     const auto bit = 1u << n;
-    if (slot.chained)
-      status.chained |= bit;
+    void* current = nullptr;
+    const bool read = pointer(slot.address, current);
+    if (slot.chained) {
+      // An accepted hook must keep passing calls on: in an interval with list
+      // work through our own slots, none through it drops the acceptance and
+      // holds capture until it is proven again.
+      if (read && current == slot.chained && !(hits & bit) && work) {
+        slot.pending = slot.chained;
+        slot.chained = nullptr;
+        slot.probe_phase = 0;
+        changed = true;
+        disable_capture();
+        status.pending |= bit;
+        status.dropped |= bit;
+      } else {
+        status.chained |= bit;
+      }
+      continue;
+    }
     if (!slot.pending)
       continue;
-    void* current = nullptr;
-    if (!pointer(slot.address, current) || current != slot.pending) {
+    if (!read || current != slot.pending) {
       // Changed again since registration saw it; the next registration decides.
-      probe_mask.fetch_and(~bit, std::memory_order_relaxed);
       slot.probe_phase = 0;
       status.pending |= bit;
       continue;
     }
-    // Phase 1 arms the probe, phase 2 forgets hits from calls that may have
-    // read the slot before it changed, phase 3 on accepts a hit: our wrapper
-    // ran through the other hook a whole service interval after the change.
+    // Phases 1 and 2 discard hits (calls that may have read the slot before it
+    // changed); from phase 3 a hit accepts: our wrapper ran through the other
+    // hook a whole service interval after the change.
     ++slot.probe_phase;
-    if (slot.probe_phase <= 2) {
-      hit_mask.fetch_and(~bit, std::memory_order_relaxed);
-      probe_mask.fetch_or(bit, std::memory_order_relaxed);
+    if (slot.probe_phase <= 2 || !(hits & bit)) {
       status.pending |= bit;
       continue;
     }
-    if (!(hit_mask.load(std::memory_order_relaxed) & bit)) {
-      status.pending |= bit;
-      continue;
-    }
-    probe_mask.fetch_and(~bit, std::memory_order_relaxed);
     slot.chained = slot.pending;
     slot.pending = nullptr;
     slot.probe_phase = 0;
+    changed = true;
     status.chained |= bit;
     status.accepted |= bit;
   }
+  if (changed)
+    update_watch();
   // Recordings stay invalid from the change: only a fresh Reset proves one.
   if (status.accepted && !status.pending && slots_intact())
     enabled.store(true, std::memory_order_release);
+  last_chained.store(status.chained, std::memory_order_relaxed);
+  last_pending.store(status.pending, std::memory_order_relaxed);
   return status;
 }
 bool erase_identity(ID3D12GraphicsCommandList* key, std::uint64_t generation) noexcept {
@@ -1298,6 +1351,7 @@ Result remove() noexcept {
   // A slot another hook is chained over keeps our wrapper in that hook's
   // chain: taking it out would cut the other hook off from the original.
   probe_mask.store(0, std::memory_order_relaxed);
+  watched_mask.store(0, std::memory_order_release);
   for (auto& slot : slots)
     if (slot.installed && !slot.pending && !slot.chained && !exchange(slot, false, error))
       return result("removal_incomplete", error);

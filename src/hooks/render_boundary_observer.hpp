@@ -206,10 +206,15 @@ SlotChange last_slot_change() noexcept;
 // the other hook a whole call interval after the change. The slot then
 // accepts that entry and capture resumes (old recordings still need a fresh
 // Reset). A hook that never calls ours stays pending: capture stays off.
+// An accepted slot is rechecked every interval: when our own slots saw list
+// work and it saw none, the acceptance is dropped (`dropped`) and capture held
+// until it is proven again. A hook passing on only some calls can still pass
+// that check: per-call proof needs a second path to the same calls.
 // Masks are bits of the 8 main slots in the order 26, 68, 69, 80, 12, 13,
-// 16, 17. Call from one worker thread about once a second.
+// 16, 17. Call from one worker thread about once a second; it takes no lock
+// while no slot is watched, and skips an interval when the lock is busy.
 struct ChainStatus {
-  std::uint32_t chained = 0, pending = 0, accepted = 0;
+  std::uint32_t chained = 0, pending = 0, accepted = 0, dropped = 0;
 };
 ChainStatus service_chained_slots() noexcept;
 #ifdef TAXI_RENDER_BOUNDARY_STATE_VALIDATION
