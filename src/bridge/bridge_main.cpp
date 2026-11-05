@@ -899,6 +899,14 @@ DWORD run_impl() {
   WindowPauseLatch window_pause;
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
+  // Diagnostic: how long a door camera turn-on takes, stage by stage.
+  struct DoorTrace {
+    std::array<float, standalone::LvarBindingCount> values{};
+    std::array<bool, standalone::LvarBindingCount> seen{};
+    std::uint64_t lvar_ms{}, on_ms{}, waiting_end_ms{}, page_ms{}, base_pages{};
+    unsigned lvar_index{};
+    bool on{}, logged{}, waiting{};
+  } door_trace;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
@@ -1840,8 +1848,57 @@ DWORD run_impl() {
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending || (door & active) != 0);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
-    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
+    const auto waiting_mask = waiting_page.observe(GetTickCount64(), active, mask);
+    win::set_waiting_mask(waiting_mask);
     win::set_door_mask(door & active);
+    {
+      // Door turn-on stages, from the bound L:var's last change seen here
+      // (the companion turns the door camera on from it, through settings).
+      auto& t = door_trace;
+      const auto tick = GetTickCount64();
+      const auto lvars = native_camera::get_lvar_bindings();
+      for (unsigned i = 0; lvars.generation && i < lvars.states.size(); ++i) {
+        const auto& read = lvars.states[i];
+        if (!read.read)
+          continue;
+        if (t.seen[i] && read.value != t.values[i]) {
+          t.lvar_ms = tick;
+          t.lvar_index = i;
+        }
+        t.values[i] = read.value;
+        t.seen[i] = true;
+      }
+      const unsigned door_bit = door & active;
+      if (door_bit && !t.on) {
+        t.on = t.waiting = true;
+        t.logged = false;
+        t.on_ms = tick;
+        t.page_ms = t.waiting_end_ms = 0;
+        t.base_pages = door_page.pages;
+      } else if (!door_bit) {
+        t.on = false;
+      }
+      if (t.on) {
+        if (!t.page_ms && door_page.ready && door_page.pages > t.base_pages)
+          t.page_ms = tick;
+        if (t.waiting && !(waiting_mask & door_bit)) {
+          t.waiting = false;
+          t.waiting_end_ms = tick;
+        }
+        if (!t.logged && ((t.page_ms && t.waiting_end_ms) || tick - t.on_ms > 5000)) {
+          t.logged = true;
+          const auto since = [&](std::uint64_t at) -> long long { return at ? static_cast<long long>(at - t.on_ms) : -1; };
+          char detail[256];
+          std::snprintf(detail, sizeof(detail),
+                        "Door turn-on: lvar_to_on_ms=%lld (binding %u) on_to_page_ms=%lld on_to_waiting_end_ms=%lld live=%u "
+                        "pages=%llu",
+                        t.lvar_ms && t.lvar_ms <= t.on_ms ? static_cast<long long>(t.on_ms - t.lvar_ms) : -1, t.lvar_index,
+                        since(t.page_ms), since(t.waiting_end_ms), settings.door_live ? 1u : 0u,
+                        static_cast<unsigned long long>(door_page.pages - t.base_pages));
+          log_status(status, detail);
+        }
+      }
+    }
     scene_runtime::set_door(key, door != 0, settings.door_live != 0);
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
