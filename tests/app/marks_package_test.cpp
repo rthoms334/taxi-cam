@@ -150,6 +150,93 @@ int main() {
     require(marks_package::ensure(simulator, community, "helper 2") == Outcome::page_changed, "and keeps saying so");
     write(stock_page, Stock);
     require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a usable page writes it again");
+    // Another package's copy of the page, listed as overridden (issue 184's
+    // panel-raas): ours is built from it, with its order hint, so both add-ons'
+    // scripts load, and ours follows it when it changes or goes.
+    {
+      const auto read = [](const fs::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+      };
+      const auto other = community / "panel-raas";
+      fs::create_directories((other / marks_package::PageRelative).parent_path());
+      std::string other_page(Stock);
+      other_page.insert(other_page.find("</head>"),
+                        "    <script type=\"text/javascript\" src=\"/Pages/VCockpit/Core/raas.js\"></script>\r\n");
+      write(other / marks_package::PageRelative, other_page);
+      const std::string listed = "\"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\Pages\\\\VCockpit\\\\Core\\\\VCockpit.html\" ]";
+      write(other / "manifest.json", "{ \"package_order_hint\": \"CUSTOM_INSTRUMENT_PATCH\", " + listed + " }");
+      const auto source = marks_package::page_source(community);
+      require(source.package == L"panel-raas" && source.hint == "CUSTOM_INSTRUMENT_PATCH", "the other package's page and hint are found");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a new page source rewrites ours");
+      auto page = read(package / marks_package::PageRelative);
+      require(page.find("raas.js") != std::string::npos && page.find("taxi-cam-marks.js") != std::string::npos,
+              "our page is the other package's page plus our script");
+      require(read(package / "manifest.json").find("\"package_order_hint\": \"CUSTOM_INSTRUMENT_PATCH\"") != std::string::npos,
+              "our package takes the other package's order hint");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::current, "an unchanged source leaves ours alone");
+      // No hint there: none here either, so MSFS mounts both in the same group.
+      write(other / "manifest.json", "{ \"globally_overriden_base_sim_files\": [ \"/html_ui/pages/vcockpit/core/vcockpit.html\" ] }");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written &&
+                  read(package / "manifest.json").find("package_order_hint") == std::string::npos,
+              "an unset hint is left unset");
+      // Not listed: in MSFS 2024 that copy replaces nothing, so it is ignored.
+      write(other / "manifest.json", "{ \"package_order_hint\": \"PANEL_PATCH\" }");
+      require(marks_package::page_source(community).package.empty(), "an unlisted copy is not a source");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written &&
+                  read(package / marks_package::PageRelative).find("raas.js") == std::string::npos &&
+                  read(package / "manifest.json").find("\"package_order_hint\": \"PANEL_PATCH\"") != std::string::npos,
+              "back on the stock page with our own hint");
+      // A source sorting after our folder name moves ours to the later name.
+      write(other / "manifest.json", "{ " + listed + " }");
+      fs::rename(other, community / "zz-panel-raas");
+      const auto late = community / marks_package::LatePackageName;
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written && fs::exists(late / marks_package::MarkerName) &&
+                  !fs::exists(package),
+              "ours moves after a later-named source");
+      require(read(late / marks_package::PageRelative).find("raas.js") != std::string::npos, "the moved package keeps both scripts");
+      // The other add-on removed: ours goes back to the stock page and name.
+      fs::remove_all(community / "zz-panel-raas");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written && fs::exists(marker) && !fs::exists(late) &&
+                  read(package / marks_package::PageRelative).find("raas.js") == std::string::npos,
+              "a removed source returns ours to the stock page");
+      // A page Taxi Cam cannot add to: that add-on is left to work alone.
+      fs::create_directories((other / marks_package::PageRelative).parent_path());
+      write(other / marks_package::PageRelative, "<html><head></head></html>");
+      write(other / "manifest.json", "{ " + listed + " }");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::conflict && !fs::exists(package) && !fs::exists(late),
+              "an unusable source page removes ours");
+      fs::remove_all(other);
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "without it ours comes back");
+      // Sources that cannot be placed before ours leave ours out too.
+      const auto add_source = [&](const char* name, std::string_view hint) {
+        const auto folder = community / name;
+        fs::create_directories((folder / marks_package::PageRelative).parent_path());
+        write(folder / marks_package::PageRelative, other_page);
+        write(folder / "manifest.json",
+              "{ " + (hint.empty() ? std::string() : "\"package_order_hint\": \"" + std::string(hint) + "\", ") + listed + " }");
+      };
+      add_source("zzzzz-panel-raas", "PANEL_PATCH");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::conflict && !fs::exists(package) && !fs::exists(late),
+              "a source named after even the late name removes ours");
+      fs::remove_all(community / "zzzzz-panel-raas");
+      // An unhinted package mounts after hinted ones, whatever the names.
+      add_source("a-raas", "");
+      add_source("b-tool", "CUSTOM_INSTRUMENT_PATCH");
+      require(marks_package::page_source(community).package == L"a-raas" && marks_package::page_source(community).hint.empty() &&
+                  !marks_package::page_source(community).ambiguous,
+              "an unhinted listing package outranks a hinted one");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "built on the unhinted package");
+      // Listing packages with different hints cannot be ordered.
+      fs::remove_all(community / "a-raas");
+      add_source("c-panel", "PANEL_PATCH");
+      require(marks_package::page_source(community).ambiguous, "different hints are ambiguous");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::conflict && !fs::exists(package) && !fs::exists(late),
+              "ambiguous sources remove ours");
+      fs::remove_all(community / "b-tool");
+      fs::remove_all(community / "c-panel");
+      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "without them ours comes back again");
+    }
     // Other packages replacing the page or BaseInstrument.js are named for the
     // logs; ours is not.
     fs::create_directories(community / "zzz-page" / "html_ui" / "Pages" / "VCockpit" / "Core");

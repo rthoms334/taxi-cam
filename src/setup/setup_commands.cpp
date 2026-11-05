@@ -320,6 +320,9 @@ void configure(const Options& options) {
                 L"displays yet. Start MSFS once, close it, then run Setup again."
           : marks == "page_changed" || marks == "removed"
               ? L"This simulator version changed the cockpit page Taxi Cam uses to recognise your displays. Update Taxi Cam to find them."
+          : marks == "conflict"
+              ? L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a way "
+                L"Taxi Cam can't add to. Taxi Cam can't recognise your displays while that add-on is installed."
               : L"Taxi Cam could not add its display package to the simulator's Community folder, so it can't recognise cockpit displays "
                 L"yet. Close MSFS, then run Setup again.";
       if (marks_warning[0])

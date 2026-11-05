@@ -680,6 +680,12 @@ inline constexpr Translation GermanTranslations[]{
      L"find them again.",
      L"Diese Simulatorversion hat die Cockpitseite geändert, über die Taxi Cam Ihre Anzeigen erkennt, daher findet es sie nicht. "
      L"Aktualisieren Sie Taxi Cam, damit sie wieder gefunden werden."},
+    {L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a way Taxi Cam can't "
+     L"add to. Taxi Cam can't recognise your displays while that add-on is installed.",
+     L"Ein anderes Add-on in Ihrem Community-Ordner ändert die Cockpitseite, mit der Taxi Cam Ihre Anzeigen erkennt, so dass Taxi Cam "
+     L"nichts ergänzen kann. Solange dieses Add-on installiert ist, kann Taxi Cam Ihre Anzeigen nicht erkennen."},
+    {L"Another add-on's cockpit page stops Taxi Cam recognising your displays.",
+     L"Die Cockpitseite eines anderen Add-ons verhindert, dass Taxi Cam Ihre Anzeigen erkennt."},
     {L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.",
      L"Taxi Cam hat den Community-Ordner des Simulators für sein Anzeigepaket nicht gefunden. Führen Sie das Installationsprogramm von "
      L"Taxi Cam erneut aus."},
