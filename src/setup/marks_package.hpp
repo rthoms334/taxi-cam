@@ -12,16 +12,18 @@
 //   us, still won in MSFS 2024, so which copy of the page loads cannot be
 //   predicted): html_ui/Pages/VCockpit/Core/VCockpit.js, the stock script
 //   with the helper added at its end. Every copy of the page loads it, so
-//   both add-ons work whichever page loads. The script is 23.5 KB of the
-//   simulator's logic, so this is used only when the page is taken: a
-//   simulator update to it runs our copy for one session until the next
-//   check rewrites it.
+//   our helper loads whichever page loads (seen with a stand-in made of
+//   vRAAS's page and manifest, 2026-11-05; not with vRAAS itself). The
+//   script is 23.5 KB of the simulator's logic, so this is used only when
+//   the page is taken: a simulator update to it runs our copy for one
+//   session until the next check rewrites it.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 // bcrypt.h needs windows.h first; this line keeps the two apart.
 #include <bcrypt.h>
+#include <tlhelp32.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -30,6 +32,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -437,6 +440,35 @@ inline bool remove(const std::filesystem::path& community) {
   const bool first = remove_named(community, PackageName);
   return remove_named(community, LatePackageName) && first;
 }
+// When the running simulator started, as a FILETIME; 0 while none runs. The
+// earliest of several, and "now" for one whose start can't be read, so its
+// mounted files are never taken for unmounted ones.
+inline std::uint64_t simulator_started() noexcept {
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE)
+    return 0;
+  std::uint64_t earliest = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry)) {
+    if (_wcsicmp(entry.szExeFile, L"FlightSimulator2024.exe") != 0)
+      continue;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    std::uint64_t started = 0;
+    if (const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID)) {
+      if (GetProcessTimes(process, &created, &exited, &kernel, &user))
+        started = std::uint64_t{created.dwHighDateTime} << 32 | created.dwLowDateTime;
+      CloseHandle(process);
+    }
+    if (!started) {
+      GetSystemTimeAsFileTime(&created);
+      started = std::uint64_t{created.dwHighDateTime} << 32 | created.dwLowDateTime;
+    }
+    earliest = earliest ? std::min(earliest, started) : started;
+  }
+  CloseHandle(snapshot);
+  return earliest;
+}
 inline std::string_view strip_bom(std::string_view text) noexcept {
   return text.size() >= 3 && text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? text.substr(3) : text;
 }
@@ -445,8 +477,12 @@ inline std::string_view strip_bom(std::string_view text) noexcept {
 // the helper (mode_for). Re-run at every check, it follows another package
 // taking the page or giving it back, and simulator updates. A package
 // folder without the marker file is never touched: it is not one Taxi Cam
-// made.
-inline Outcome ensure(const std::filesystem::path& simulator, const std::filesystem::path& community, std::string_view helper) {
+// made. `running_since`: when the running simulator started (FILETIME, 0
+// when none runs); found by itself when not given.
+inline Outcome ensure(const std::filesystem::path& simulator,
+                      const std::filesystem::path& community,
+                      std::string_view helper,
+                      std::optional<std::uint64_t> running_since = std::nullopt) {
   if (helper.empty())
     return Outcome::failed;
   if (community.empty())
@@ -507,9 +543,14 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   else
     files = {{ScriptRelative, patched}};
   // Our files this mode doesn't use (the other mode's, or an older format's)
-  // go at every check, best effort: a file another program holds open (the
-  // simulator, a virus scanner) is tried again at the next one. One left
+  // go, best effort, only where no running simulator has them mounted: with
+  // none running, or once the package was written before the running one
+  // started (it mounted this mode then). A running simulator mounted the
+  // package as it was when it started, so a rewrite now keeps the old
+  // mode's files for the rest of that session. A file another program holds
+  // open (a virus scanner) is tried again at the next check. One left
   // behind replaces nothing: our manifest and layout.json don't list it.
+  const auto started = running_since ? *running_since : simulator_started();
   const auto clear_unused = [&] {
     for (const char* relative : {PageRelative, HelperRelative, ScriptRelative})
       if (std::none_of(files.begin(), files.end(), [&](const auto& file) { return std::string_view(file.first) == relative; })) {
@@ -519,7 +560,8 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   };
   const auto expected = marker_text(detail::sha256(source), detail::sha256(helper), mode);
   if (ours && detail::read_file(marker, recorded) && recorded == expected) {
-    clear_unused();
+    if (!started || detail::file_time(marker) < started)
+      clear_unused();
     return Outcome::current;
   }
   std::error_code error;
@@ -539,7 +581,8 @@ inline Outcome ensure(const std::filesystem::path& simulator, const std::filesys
   // it and the uninstaller removes it.
   if (!detail::write_file(marker, "incomplete\n"))
     return give_up();
-  clear_unused();
+  if (!started)
+    clear_unused();
   for (const auto& [relative, text] : files)
     if (!detail::write_file(package / relative, text))
       return Outcome::failed;

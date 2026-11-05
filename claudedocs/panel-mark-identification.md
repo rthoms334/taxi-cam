@@ -148,12 +148,21 @@ Which page loads therefore can't be predicted.
 **Choice: while another package takes the page, ours replaces
 `Core/VCockpit.js` instead**, the stock script with the helper appended.
 Every copy of the page loads `VCockpit.js` (vRAAS's does, by the stock
-line), so both add-ons work whichever page loads. The trade-off weighed in
+line), so our helper runs whichever page loads. The trade-off weighed in
 "Other load points" stands, so the script is used only in this case: a
 simulator update to `VCockpit.js` runs our older copy for one session until
 the next check rewrites it. The package is left out (`conflict`) when the
 other page doesn't load `VCockpit.js` by the stock line, or another package
-replaces `VCockpit.js` too. Not yet live-tested against vRAAS.
+replaces `VCockpit.js` too.
+
+Live (dev box, Store, A350, 2026-11-05) with a stand-in `panel-raas` made
+of the reporter's vRAAS `manifest.json` and `VCockpit.html` (vRAAS's own
+`/RAAS/` scripts absent): the earlier merged page read 0 of 24 textures and
+reported the package inactive; script mode read the marks and routed both
+PFDs and the door display (`ids=271,272,255`). Not run with vRAAS itself,
+so its PFD/ND text beside our helper is unverified. While the simulator
+runs, a mode switch keeps the old mode's files (they are mounted); they go
+at the first check of a later session.
 
 **Manifest.** The package declares the file in
 `globally_overriden_base_sim_files`, as Community packages that override

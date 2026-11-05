@@ -145,18 +145,18 @@ int main() {
     using marks_package::Outcome;
     const auto package = community / marks_package::PackageName;
     const auto marker = package / marks_package::MarkerName;
-    require(marks_package::ensure({}, community, "helper") == Outcome::no_simulator, "no simulator folder: nothing written");
-    require(marks_package::ensure(simulator, {}, "helper") == Outcome::no_community, "no Community folder: nothing written");
-    require(marks_package::ensure(simulator, community, "helper") == Outcome::written && fs::exists(marker) &&
+    require(marks_package::ensure({}, community, "helper", 0) == Outcome::no_simulator, "no simulator folder: nothing written");
+    require(marks_package::ensure(simulator, {}, "helper", 0) == Outcome::no_community, "no Community folder: nothing written");
+    require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(marker) &&
                 fs::exists(package / marks_package::PageRelative) && fs::exists(package / "layout.json"),
             "a first check writes the package with its marker");
-    require(marks_package::ensure(simulator, community, "helper") == Outcome::current, "an unchanged package is left alone");
-    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::written, "a changed helper rewrites it");
+    require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::current, "an unchanged package is left alone");
+    require(marks_package::ensure(simulator, community, "helper 2", 0) == Outcome::written, "a changed helper rewrites it");
     write(marker, "incomplete\n");
-    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::written,
+    require(marks_package::ensure(simulator, community, "helper 2", 0) == Outcome::written,
             "a package whose write stopped part way is rewritten");
     // Another package's folder of the same name is never touched.
-    require(marks_package::ensure(simulator, other, "helper") == Outcome::failed && fs::exists(other / marks_package::PackageName) &&
+    require(marks_package::ensure(simulator, other, "helper", 0) == Outcome::failed && fs::exists(other / marks_package::PackageName) &&
                 !fs::exists(other / marks_package::PackageName / marks_package::MarkerName),
             "a folder without our marker is refused");
     require(!marks_package::remove(other) && fs::exists(other / marks_package::PackageName), "the uninstaller keeps a foreign folder");
@@ -164,11 +164,11 @@ int main() {
     std::string twice(Stock);
     twice.insert(twice.find("</head>"), "    <script type=\"text/javascript\" src=\"VCockpit.js\"></script>\r\n");
     write(stock_page, twice);
-    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::removed && !fs::exists(package),
+    require(marks_package::ensure(simulator, community, "helper 2", 0) == Outcome::removed && !fs::exists(package),
             "a changed stock page removes the package");
-    require(marks_package::ensure(simulator, community, "helper 2") == Outcome::page_changed, "and keeps saying so");
+    require(marks_package::ensure(simulator, community, "helper 2", 0) == Outcome::page_changed, "and keeps saying so");
     write(stock_page, Stock);
-    require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a usable page writes it again");
+    require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written, "a usable page writes it again");
     // Another package's copy of the page, listed as overridden (issue 184:
     // vRAAS's panel-raas, same order hint, still won): ours replaces the
     // stock VCockpit.js instead, which every copy of the page loads, and
@@ -197,12 +197,13 @@ int main() {
       const HANDLE held = CreateFileW((package / marks_package::PageRelative).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       require(held != INVALID_HANDLE_VALUE, "our page can be held open");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "a page taken by another package rewrites ours");
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written,
+              "a page taken by another package rewrites ours");
       require(fs::exists(package / marks_package::PageRelative), "a held page stays for now");
       CloseHandle(held);
-      require(
-          marks_package::ensure(simulator, community, "helper") == Outcome::current && !fs::exists(package / marks_package::PageRelative),
-          "a page let go is removed at the next check");
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::current &&
+                  !fs::exists(package / marks_package::PageRelative),
+              "a page let go is removed at the next check");
       const auto script_file = package / marks_package::ScriptRelative;
       require(fs::exists(script_file) && !fs::exists(package / marks_package::PageRelative) &&
                   !fs::exists(package / marks_package::HelperRelative),
@@ -215,49 +216,49 @@ int main() {
       require(read(package / "layout.json").find("VCockpit.js") != std::string::npos &&
                   read(package / "layout.json").find("VCockpit.html") == std::string::npos,
               "the layout lists the script only");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::current, "an unchanged script leaves ours alone");
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::current, "an unchanged script leaves ours alone");
       write(other / marks_package::PageRelative, other_page + "<!-- updated -->\r\n");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::current,
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::current,
               "the other package's own page changing needs nothing of ours");
       write(stock_script, "class VCockpitPanel { update() {} }\r\n");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written &&
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
                   read(script_file).find("update()") != std::string::npos,
               "a simulator update to the script rewrites ours");
       // Not listed: in MSFS 2024 that copy replaces nothing, so ours keeps the page.
       write(other / "manifest.json", "{ \"package_order_hint\": \"PANEL_PATCH\" }");
       require(marks_package::takers(community).page.empty(), "an unlisted copy takes nothing");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written &&
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
                   fs::exists(package / marks_package::PageRelative) && fs::exists(package / marks_package::HelperRelative) &&
                   !fs::exists(script_file),
               "back on the page, with no script left behind");
       write(other / "manifest.json", "{ " + listed + " }");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written && fs::exists(script_file) &&
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(script_file) &&
                   !fs::exists(package / marks_package::PageRelative),
               "an unhinted package taking the page moves ours to the script as well");
       // The other add-on removed: ours goes back to the page.
       fs::remove_all(other);
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written &&
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
                   fs::exists(package / marks_package::PageRelative) && !fs::exists(script_file),
               "a removed package returns ours to the page");
       // A taken page that doesn't load VCockpit.js: that add-on works alone.
       fs::create_directories((other / marks_package::PageRelative).parent_path());
       write(other / marks_package::PageRelative, "<html><head></head></html>");
       write(other / "manifest.json", "{ " + listed + " }");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::conflict && !fs::exists(package),
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict && !fs::exists(package),
               "a taken page without the script leaves ours out");
       write(other / marks_package::PageRelative, other_page);
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "with the script line, ours comes back");
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written, "with the script line, ours comes back");
       // Another package replacing the script too: left alone.
       const auto script_tool = community / "script-tool";
       fs::create_directories((script_tool / marks_package::ScriptRelative).parent_path());
       write(script_tool / marks_package::ScriptRelative, "tool");
       write(script_tool / "manifest.json",
             "{ \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.js\" ] }");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::conflict && !fs::exists(package),
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict && !fs::exists(package),
               "a taken script leaves ours out while the page is taken");
       fs::remove_all(other);
       require(
-          marks_package::ensure(simulator, community, "helper") == Outcome::written && fs::exists(package / marks_package::PageRelative),
+          marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(package / marks_package::PageRelative),
           "with the page free, ours replaces the page and loads that package's script");
       fs::remove_all(script_tool);
       // The stock script gone while the page is taken: like a changed page.
@@ -265,18 +266,39 @@ int main() {
       write(other / marks_package::PageRelative, other_page);
       write(other / "manifest.json", "{ " + listed + " }");
       fs::remove(stock_script);
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::removed && !fs::exists(package),
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::removed && !fs::exists(package),
               "no stock script removes ours");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::page_changed, "and keeps saying so");
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::page_changed, "and keeps saying so");
       write(stock_script, "class VCockpitPanel {}\r\n");
       // A 1.3.3 test build's later-named package is replaced by ours.
       const auto late = community / marks_package::LatePackageName;
       fs::create_directories(late);
       write(late / marks_package::MarkerName, "format=2\r\n");
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written && !fs::exists(late) && fs::exists(script_file),
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && !fs::exists(late) && fs::exists(script_file),
               "the later-named package goes");
+      // A running simulator mounted the package as it was when it started
+      // (FILETIME 1: long before this package was written): a switch while
+      // it runs keeps the old mode's file for that session, and the file goes
+      // at the first check of a session started after the switch.
       fs::remove_all(other);
-      require(marks_package::ensure(simulator, community, "helper") == Outcome::written, "without it ours is on the page again");
+      require(marks_package::ensure(simulator, community, "helper", 1) == Outcome::written &&
+                  fs::exists(package / marks_package::PageRelative) && fs::exists(script_file),
+              "a switch while the simulator runs keeps its mounted script");
+      require(marks_package::ensure(simulator, community, "helper", 1) == Outcome::current && fs::exists(script_file),
+              "and keeps it for the rest of that session");
+      require(marks_package::ensure(simulator, community, "helper", marks_package::detail::file_time(marker) + 1) == Outcome::current &&
+                  !fs::exists(script_file),
+              "a session started after the switch lets it go");
+      fs::create_directories((other / marks_package::PageRelative).parent_path());
+      write(other / marks_package::PageRelative, other_page);
+      write(other / "manifest.json", "{ " + listed + " }");
+      require(marks_package::ensure(simulator, community, "helper", 1) == Outcome::written && fs::exists(script_file) &&
+                  fs::exists(package / marks_package::PageRelative) && fs::exists(package / marks_package::HelperRelative),
+              "the other way round too: the mounted page and helper stay");
+      fs::remove_all(other);
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && !fs::exists(script_file) &&
+                  fs::exists(package / marks_package::PageRelative),
+              "without it ours is on the page again, the script gone with no simulator running");
     }
     // Other packages replacing the page, its script or BaseInstrument.js are
     // named for the logs; ours is not.
