@@ -49,6 +49,13 @@ int main() {
           "A page not ready yet while it renders changes nothing");
   require(dropped.observe(true, false, 8, false) && dropped.observe(true, false, 10, false) && !dropped.observe(true, false, 11, true),
           "A taken snapshot whose page a reset dropped is taken again");
+  require(door_side_page(false, true, false, true) == DoorSidePage::none, "No door page buffer, nothing is written");
+  require(
+      door_side_page(true, false, false, true) == DoorSidePage::waiting && door_side_page(true, true, true, true) == DoorSidePage::waiting,
+      "PLEASE WAIT until there is a door page and the waiting time is over");
+  require(door_side_page(true, true, false, true) == DoorSidePage::door, "Then the door page");
+  require(door_side_page(true, true, true, false) == DoorSidePage::door && door_side_page(true, false, true, false) == DoorSidePage::none,
+          "Without a PLEASE WAIT page, a current door page shows at once");
   require(door_state(false, true, true) == DoorState::off && door_state(true, false, false) == DoorState::waiting &&
               door_state(true, true, true) == DoorState::live && door_state(true, false, true) == DoorState::snapshot,
           "Door states");
