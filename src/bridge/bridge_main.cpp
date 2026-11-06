@@ -943,6 +943,7 @@ DWORD run_impl() {
   WindowPauseLatch window_pause;
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
+  unsigned door_requested{};  // The door side last pass, to restart its PLEASE WAIT on a turn-on.
   // Diagnostic: how long a door camera turn-on takes, stage by stage.
   struct DoorTrace {
     std::uint32_t rises{}, generation{};
@@ -1897,6 +1898,9 @@ DWORD run_impl() {
     // The door side counts as requested while the door camera is on, so a side
     // that only briefly lost its display texture returns without PLEASE WAIT,
     // as a taxi side does; a real turn-on shows it for the full minimum.
+    // A turn-on starts the door side's minimum even when a taxi camera was
+    // already showing on that display (it never left active).
+    waiting_page.restart(door & ~std::exchange(door_requested, door), GetTickCount64());
     win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask | door));
     win::set_door_mask(door & active);
     {

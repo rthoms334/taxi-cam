@@ -52,6 +52,16 @@ class WaitingPageTimer {
     }
     return waiting;
   }
+  // Starts these sides' minimum again, as a turn-on does, although they stay
+  // admitted: the door camera taking over a display a taxi camera was showing.
+  void restart(unsigned mask, std::uint64_t now) noexcept {
+    for (unsigned side = 0; side < since_.size(); ++side)
+      if (mask & (1u << side)) {
+        since_[side] = now ? now : 1;
+        resumed_[side] = false;
+        dropped_[side] = 0;
+      }
+  }
 
  private:
   std::array<std::uint64_t, MaxDisplaySides> since_{}, dropped_{};
