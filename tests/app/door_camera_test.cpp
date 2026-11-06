@@ -49,13 +49,6 @@ int main() {
           "A page not ready yet while it renders changes nothing");
   require(dropped.observe(true, false, 8, false) && dropped.observe(true, false, 10, false) && !dropped.observe(true, false, 11, true),
           "A taken snapshot whose page a reset dropped is taken again");
-  DoorWaitRelease wait;
-  require(!wait.observe(0, 20, true), "Off releases nothing");
-  require(!wait.observe(4, 20, true), "The page from an earlier turn-on is not shown in a new one's place");
-  require(!wait.observe(4, 20, false) && wait.observe(4, 21, true) == 4u, "The first page since the turn-on ends the wait");
-  require(wait.observe(4, 23, true) == 4u && !wait.observe(0, 23, true) && !wait.observe(4, 23, true),
-          "It stays ended while on, and a new turn-on waits again");
-  require(!wait.observe(4, 0, true) && wait.observe(4, 1, true) == 4u, "A restarted page count waits for its next page");
   require(door_state(false, true, true) == DoorState::off && door_state(true, false, false) == DoorState::waiting &&
               door_state(true, true, true) == DoorState::live && door_state(true, false, true) == DoorState::snapshot,
           "Door states");

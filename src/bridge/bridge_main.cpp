@@ -901,12 +901,11 @@ DWORD run_impl() {
   WindowPauseLatch window_pause;
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
-  win::DoorWaitRelease door_wait;
   // Diagnostic: how long a door camera turn-on takes, stage by stage.
   struct DoorTrace {
     std::uint32_t rises{}, generation{};
-    std::uint64_t lvar_ms{}, cause_ms{}, on_ms{}, waiting_end_ms{}, page_ms{}, base_pages{};
-    bool seen{}, on{}, logged{}, waiting{};
+    std::uint64_t lvar_ms{}, cause_ms{}, on_ms{}, page_ms{}, base_pages{};
+    bool seen{}, on{}, logged{}, earlier_page{};
   } door_trace;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
@@ -1853,9 +1852,7 @@ DWORD run_impl() {
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending || (door & active) != 0);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
-    const auto waiting_mask =
-        waiting_page.observe(GetTickCount64(), active, mask) & ~door_wait.observe(door & active, door_page.pages, door_page.ready);
-    win::set_waiting_mask(waiting_mask);
+    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
     win::set_door_mask(door & active);
     {
       // Door turn-on stages. The cause is a rise of the door camera's own
@@ -1882,20 +1879,22 @@ DWORD run_impl() {
         const auto since = [&](std::uint64_t at) -> long long { return at ? static_cast<long long>(at - t.on_ms) : -1; };
         char detail[256];
         std::snprintf(detail, sizeof(detail),
-                      "Door turn-on: lvar_to_on_ms=%lld on_to_page_ms=%lld on_to_waiting_end_ms=%lld turned_off_ms=%lld live=%u "
-                      "pages=%llu",
-                      t.cause_ms ? static_cast<long long>(t.on_ms - t.cause_ms) : -1, since(t.page_ms), since(t.waiting_end_ms),
+                      "Door turn-on: lvar_to_on_ms=%lld on_to_page_ms=%lld earlier_page=%u turned_off_ms=%lld live=%u pages=%llu",
+                      t.cause_ms ? static_cast<long long>(t.on_ms - t.cause_ms) : -1, since(t.page_ms), t.earlier_page ? 1u : 0u,
                       turned_off ? static_cast<long long>(tick - t.on_ms) : -1, settings.door_live ? 1u : 0u,
                       static_cast<unsigned long long>(door_page.pages - t.base_pages));
         log_status(status, detail);
       };
       if (door_bit && !t.on) {
-        t.on = t.waiting = true;
+        t.on = true;
         t.logged = false;
         t.on_ms = tick;
         t.cause_ms = std::exchange(t.lvar_ms, 0);
-        t.page_ms = t.waiting_end_ms = 0;
+        t.page_ms = 0;
         t.base_pages = door_page.pages;
+        // A snapshot's door page shows at once while it is current; a fresh
+        // one replaces it on_to_page_ms later.
+        t.earlier_page = door_page.ready;
       } else if (!door_bit && t.on) {
         // Turned off before the line was due: write what was reached.
         if (!t.logged)
@@ -1906,11 +1905,7 @@ DWORD run_impl() {
       if (t.on && !t.logged) {
         if (!t.page_ms && door_page.ready && door_page.pages > t.base_pages)
           t.page_ms = tick;
-        if (t.waiting && !(waiting_mask & door_bit)) {
-          t.waiting = false;
-          t.waiting_end_ms = tick;
-        }
-        if ((t.page_ms && t.waiting_end_ms) || tick - t.on_ms > 5000)
+        if (t.page_ms || tick - t.on_ms > 5000)
           write(false);
       }
     }
