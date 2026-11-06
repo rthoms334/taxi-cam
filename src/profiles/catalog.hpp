@@ -152,6 +152,14 @@ struct AircraftProfile {
   // Cameras that start in black and white (a bit per camera view) until the
   // aircraft's settings save their look.
   std::uint32_t black_and_white = 0;
+  // Displays whose instrument redraws only what changed (the FBW A380X), per
+  // side. Their camera keeps a shadow of the display's own pixels and writes
+  // by queue copies only, so the instrument's whole picture comes back when the
+  // camera stops. Every other display repaints whole and is stamped inside the
+  // instrument's own list: when the stamp lands, no submission can drop it (a
+  // stamp skipped at Close, or without an observed render-target view, leaves
+  // the queue copy alone).
+  std::array<bool, MaxDisplaySides> partial_repaint{};
   // A second accepted mip count (0 = none), for panel textures whose mip
   // count differs from the profile's display shape. Kept narrow: every
   // profile's shape admits display candidates on every aircraft.
@@ -251,6 +259,9 @@ inline constexpr AircraftProfile A380 = [] {
   p.mounts[DoorFeed] = A380XDoorMount;
   p.door_lvar = "A32NX_ECAM_SD_CURRENT_PAGE_INDEX";
   p.door_lvar_trigger = standalone::lvar_equals_trigger(15);
+  // The system display repaints only what changed (seen live 2026-11-02 with
+  // the door camera). The PFDs keep the shadow they were checked with.
+  p.partial_repaint = {true, true, true};
   return p;
 }();
 // Display dimensions and Lvars: iniBuilds A350 1.2.6 panel/behaviour XML.
