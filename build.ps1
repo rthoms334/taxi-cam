@@ -5,9 +5,6 @@ Set-StrictMode -Version Latest
 if ($WarpOnly -and -not $Validate) { throw '-WarpOnly requires -Validate.' }
 if ($Serial -and $Throttle) { throw 'Use -Serial or -Throttle, not both.' }
 if ($Throttle -lt 0) { throw '-Throttle must be positive.' }
-# Independent compiles and test runs use a process pool; -Serial runs one process at a time.
-# Test executables get half the slots: WARP renders on several CPU threads per process, and
-# GPU fixtures wait about one second for frames.
 $throttleLimit = if ($Serial) { 1 } elseif ($Throttle) { $Throttle } else { [Environment]::ProcessorCount }
 $runThrottle = [Math]::Max(1, [int][Math]::Floor($throttleLimit / 2))
 $taskRoot = $PSScriptRoot
@@ -39,13 +36,14 @@ $releaseVersion | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'ver
 $receipt = Join-Path $out 'validation.json'
 if (Test-Path -LiteralPath $receipt) { Remove-Item -LiteralPath $receipt }
 if ($Validate) {
+    & (Join-Path $taskRoot 'tests/repository/comments_test.ps1')
     & (Join-Path $taskRoot 'ci/parallel_test.ps1')
+    & (Join-Path $taskRoot 'tests/installer/installer_script_test.ps1')
 }
 $common = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-fms-extensions','-static',
     '-DNOMINMAX','-DWIN32_LEAN_AND_MEAN','-D_WIN32_WINNT=0x0A00',
     '-mno-avx','-mno-avx2','-mno-avx512f')
 $common += @('-I', $generated)
-# Installer commands run as taxi-cam.exe --setup; see src/setup/setup_commands.hpp.
 $setup = @('src/setup/setup_commands.cpp','src/setup/setup_common.cpp','src/setup/processes.cpp','src/setup/prerequisites.cpp',
     'src/setup/saved_settings.cpp','src/setup/startup_xml.cpp')
 $graphics = @(
@@ -101,7 +99,6 @@ if ($Validate) {
     $metadataObjects = @($graphicsObjects | Select-Object -Skip 1)
     $runtimeContentionObjects = @($graphicsObjects | Where-Object { (Split-Path -Leaf $_) -ne 'src_graphics_scene_runtime.cpp.o' })
     $stampObjects = @('src_graphics_pfd_stamp_state.cpp.o','src_graphics_pfd_stamp_d3d12.cpp.o','src_hooks_pfd_state_observer.cpp.o') | ForEach-Object { Join-Path $out $_ }
-    # The two companion-sized test compiles take longest; start them with the companion link.
     $diagnosticsTest = Add-Compile (Join-Path $out 'companion-diagnostics-test.exe') (@((Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp'), (Join-Path $taskRoot 'src/app/updater.cpp')) + $setupSources + '-lgdi32' + $companionLibs) 'Diagnostic controls compilation failed.'
     $hotkeysTest = Add-Compile (Join-Path $out 'camera-hotkeys-test.exe') (@((Join-Path $taskRoot 'tests/app/camera_hotkeys_test.cpp'), (Join-Path $taskRoot 'src/app/updater.cpp')) + $setupSources + '-lgdi32' + $companionLibs) 'Camera shortcut controls compilation failed.'
     $deviceIdentityTest = Add-Compile (Join-Path $out 'native-device-identity-test.exe') (@((Join-Path $taskRoot 'tests/graphics/native_device_identity_test.cpp')) + $libs) 'Native device identity compilation failed.'
@@ -125,7 +122,6 @@ if ($Validate) {
     $compositor = Add-Compile (Join-Path $out 'compositor-validation.exe') (@('-municode', (Join-Path $taskRoot 'tests/graphics/compositor_main.cpp')) + $libs) 'Compositor validation compilation failed.'
     $smoke = Add-Compile (Join-Path $out 'native-smoke-validation.exe') @('-municode', (Join-Path $taskRoot 'tests/app/smoke_validation.cpp'), '-ladvapi32') 'Native smoke compilation failed.'
     $logTest = Add-Compile (Join-Path $out 'rotating-log-test.exe') @('-municode', (Join-Path $taskRoot 'tests/app/rotating_log_test.cpp')) 'Runtime log rotation compilation failed.'
-    # Wall-clock budgets, lock timing and concurrent-writer tests run one at a time after the pool.
     $timingTests = @('crash-evidence','freeze-guards','hook-timing','lock-hold-stats','lock-holder-priority')
     $nativeTests = @(foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
@@ -204,7 +200,6 @@ if ($Validate) {
     $setupLibs = @('-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lbcrypt')
     $startupXmlTest = Add-Compile (Join-Path $out 'startup-xml-test.exe') (@((Join-Path $taskRoot 'tests/setup/startup_xml_test.cpp'), (Join-Path $taskRoot 'src/setup/startup_xml.cpp'), (Join-Path $taskRoot 'src/setup/setup_common.cpp')) + $setupLibs) 'Startup XML test compilation failed.'
     $prerequisitesTest = Add-Compile (Join-Path $out 'prerequisites-test.exe') (@((Join-Path $taskRoot 'tests/setup/prerequisites_test.cpp'), (Join-Path $taskRoot 'src/setup/prerequisites.cpp'), (Join-Path $taskRoot 'src/setup/setup_common.cpp')) + $setupLibs) 'Prerequisite test compilation failed.'
-    # The companion's resources carry the panel marks helper that configure writes.
     $setupHost = Add-Compile (Join-Path $out 'setup-host-test.exe') (@('-municode', '-DTAXI_SETUP_TEST', (Join-Path $taskRoot 'tests/setup/setup_host.cpp')) + $setupSources + @($resource | Where-Object { $_ }) + $setupLibs) 'Setup command test host compilation failed.'
     $updaterTest = Add-Compile (Join-Path $out 'updater-test.exe') @((Join-Path $taskRoot 'tests/app/updater_test.cpp'), (Join-Path $taskRoot 'src/app/updater.cpp'), '-lbcrypt', '-lshell32', '-lwinhttp') 'Updater test compilation failed.'
     $observerTest = Add-Compile (Join-Path $out 'pfd-state-observer-test.exe') @('-DTAXI_PFD_STATE_OBSERVER_VALIDATION', (Join-Path $taskRoot 'tests/hooks/pfd_state_observer_test.cpp'), (Join-Path $taskRoot 'src/hooks/pfd_state_observer.cpp')) 'PFD state observer test compilation failed.'
@@ -219,7 +214,6 @@ if ($companion) {
 }
 if ($Validate) {
     $adapters = @(if (-not $WarpOnly) { 'hardware' }) + 'warp'
-    # Always wrap calls in @(): a one-element result is returned as a bare string, and string + array concatenates text.
     function Get-AdapterArgs([string]$Adapter) { if ($Adapter -eq 'warp') { @('--warp') } else { @() } }
     [void](Add-Run $deviceIdentityTest @('--warp') 'WARP native device identity regression failed.')
     [void](Add-Run $lateConnect @('--warp') 'WARP active-rendering late Connect failed.' -Timing)
@@ -319,7 +313,6 @@ if ($Validate) {
     $sampleResults = @(foreach ($adapter in $sampleJobs.Keys) {
         [ordered]@{adapter=$adapter; result=$(if ($sampleJobs[$adapter].ExitCode -eq 77) { 'unsupported; skipped' } else { 'passed' })}
     })
-    # These scripts change process-wide state or depend on each other, so they keep their order.
     & (Join-Path $taskRoot 'tests/installer/setup_commands_test.ps1') -SetupHost $setupHost
     & (Join-Path $taskRoot 'tests/hooks/render_boundary_test.ps1') -Compiler $compiler
     & (Join-Path $taskRoot 'tests/hooks/test.ps1')

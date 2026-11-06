@@ -10,7 +10,6 @@ param(
     [ValidateRange(0,30)][int]$DelaySeconds = 5,
     [string]$OutputDirectory,
     [string]$PresentMonCsv,
-    # Unloaded baseline: the bridge must be absent from the simulator for the whole window (mask 0 only).
     [switch]$AllowUnloaded
 )
 if ($AllowUnloaded -and $ExpectedMask -ne 0) { throw '-AllowUnloaded requires -ExpectedMask 0.' }
@@ -45,7 +44,6 @@ if ($DelaySeconds) { Start-Sleep -Seconds $DelaySeconds }
 $result = $LASTEXITCODE
 $external = $null
 if ($PresentMonCsv) {
-    # Attach only an explicitly supplied, completed file. Never launch, stop or download a trace tool.
     $before = (Get-FileHash -LiteralPath $PresentMonCsv -Algorithm SHA256).Hash
     $destination = Join-Path $OutputDirectory 'presentmon.csv'
     Copy-Item -LiteralPath $PresentMonCsv -Destination $destination

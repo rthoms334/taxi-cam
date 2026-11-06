@@ -30,6 +30,8 @@ struct Patch {
 struct SyntheticReader final : ImageReader {
   std::uint32_t image_size = 0x20000;
   std::vector<Patch> patches;
+  std::uint32_t function_read_rva = 0;
+  std::vector<Patch> function_read_patches;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> holes;
   std::uint64_t read_calls = 0;
   std::uint64_t furthest_code_read = 0;
@@ -56,11 +58,15 @@ struct SyntheticReader final : ImageReader {
     }
     auto* output = static_cast<std::uint8_t*>(destination);
     std::fill_n(output, size, 0x90);
-    for (const auto& patch : patches) {
-      const auto first = std::max<std::uint64_t>(rva, patch.rva);
-      const auto last = std::min(end, patch.rva + patch.bytes.size());
-      if (first < last)
-        std::memcpy(output + first - rva, patch.bytes.data() + first - patch.rva, last - first);
+    for (const auto* applied : {&patches, &function_read_patches}) {
+      if (applied == &function_read_patches && rva != function_read_rva)
+        continue;
+      for (const auto& patch : *applied) {
+        const auto first = std::max<std::uint64_t>(rva, patch.rva);
+        const auto last = std::min(end, patch.rva + patch.bytes.size());
+        if (first < last)
+          std::memcpy(output + first - rva, patch.bytes.data() + first - patch.rva, last - first);
+      }
     }
     return true;
   }
@@ -166,6 +172,16 @@ void references_and_boundaries() {
   result = scan(immediate, decoder);
   require(result.candidate_count == 1 && result.failed_boundary_checks == 1 && result.references.empty(),
           "An E8 sequence inside an immediate was accepted as a call instruction");
+
+  Fixture changed_after_scan;
+  changed_after_scan.function(0x1200, 0x1207);
+  changed_after_scan.reader.call(0x1201, kTarget);
+  changed_after_scan.reader.bytes(0x1206, {0xc3});
+  changed_after_scan.reader.function_read_rva = 0x1200;
+  changed_after_scan.reader.function_read_patches = {{0x1202, {0x10}}};
+  result = scan(changed_after_scan, decoder);
+  require(result.candidate_count == 1 && result.failed_boundary_checks == 1 && result.references.empty(),
+          "A call whose bytes changed after the scan read was accepted from the stale scan bytes");
 
   Fixture wrong_size;
   wrong_size.function(0x1200, 0x1210);

@@ -9,6 +9,7 @@
 
 namespace {
 using namespace taxi_camera::discovery;
+static_assert(kMaximumPointerTableReadBytes == 264 && kPrecedingWordIndex == -1);
 
 constexpr std::uint64_t Base = 0x180000000;
 constexpr std::uint32_t Table = 0x2100;

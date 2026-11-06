@@ -1,7 +1,3 @@
-; Textos del programa de instalación de Taxi Cam. El inglés es el original; cada idioma de [Languages]
-; de taxi-cam.iss tiene un archivo con las mismas claves. El programa de instalación rellena %1.
-; Se usa «usted», como en los mensajes del asistente de Inno Setup (Spanish.isl).
-
 [CustomMessages]
 StartupOptionInvalid=La opción /STARTUP debe ser automatic o manual.
 InstallFailed=Error en la instalación. Cierre MSFS y Taxi Cam, y compruebe las rutas seleccionadas.

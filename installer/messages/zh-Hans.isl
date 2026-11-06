@@ -1,6 +1,3 @@
-; Taxi Cam 安装程序文字。英文为源语言；taxi-cam.iss 的 [Languages] 中的每种语言
-; 都有一个键相同的文件。%1 由安装程序填入。
-
 [CustomMessages]
 StartupOptionInvalid=/STARTUP 选项只能是 automatic 或 manual。
 InstallFailed=安装失败。请关闭 MSFS 与 Taxi Cam 伴随程序，并检查所选路径。

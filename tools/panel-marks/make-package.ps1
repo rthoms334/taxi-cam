@@ -1,15 +1,3 @@
-# Builds the panel-marks experiment package in the MSFS 2024 Community folder
-# (claudedocs/panel-mark-identification.md). The package overrides only
-# html_ui/Pages/VCockpit/Core/VCockpit.html: the simulator's own copy with one
-# script tag added after VCockpit.js, made from the installed stock file every
-# time this runs, plus taxi-cam-marks.js. Developer experiments only; the
-# installer does not run PowerShell.
-#
-#   tools/panel-marks/make-package.ps1 [-MaxShowMs 45000]   # cap on how long marks stay up
-#   tools/panel-marks/make-package.ps1 -Check     # stale against the stock file?
-#   tools/panel-marks/make-package.ps1 -Remove
-#
-# A package written while MSFS runs takes effect at the next simulator start.
 param(
     [string]$Content = '',
     [string]$Community = '',
@@ -63,16 +51,14 @@ if ($Check) {
     return
 }
 
-# The stock page with the helper's script tag after VCockpit.js. Anything but
-# exactly one such line means the page changed shape: make nothing.
 $bytes = [IO.File]::ReadAllBytes($stock)
 $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
 $text = [Text.Encoding]::UTF8.GetString($bytes, $(if ($bom) { 3 } else { 0 }), $bytes.Length - $(if ($bom) { 3 } else { 0 }))
-$pattern = '(?m)^([ \t]*)<script type="text/javascript" src="VCockpit\.js"></script>[ \t]*(\r?\n)'
-$found = [regex]::Matches($text, $pattern)
-if ($found.Count -ne 1) { throw "Stock VCockpit.html has $($found.Count) VCockpit.js script lines (expected 1); not overriding it." }
+$vcockpitScriptLine = '(?m)^([ \t]*)<script type="text/javascript" src="VCockpit\.js"></script>[ \t]*(\r?\n)'
+$vcockpitScriptLines = [regex]::Matches($text, $vcockpitScriptLine)
+if ($vcockpitScriptLines.Count -ne 1) { throw "Stock VCockpit.html has $($vcockpitScriptLines.Count) VCockpit.js script lines (expected 1); not overriding it." }
 if ($text -match [regex]::Escape($helperName)) { throw 'Stock VCockpit.html already names the helper.' }
-$m = $found[0]
+$m = $vcockpitScriptLines[0]
 $line = $m.Groups[1].Value + '<script type="text/javascript" src="/Pages/VCockpit/Core/' + $helperName + '"></script>' + $m.Groups[2].Value
 $page = $text.Insert($m.Index + $m.Length, $line)
 

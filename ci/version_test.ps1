@@ -20,8 +20,6 @@ function Reject-Version([string]$Name) {
     if (-not $rejected) { throw "Invalid changelog was accepted: $Name." }
     $script:checks++
 }
-# The release version is the newest changelog entry, independent of Git
-# history, tags or how many commits have landed since it was added.
 Write-Changelog @('0.9.50')
 Assert-Version '0.9.50' 0
 Assert-Version '0.9.50' 99

@@ -12,9 +12,6 @@ constexpr std::uint32_t kReadable = 0x40000000;
 constexpr std::uint32_t kWritable = 0x80000000;
 constexpr std::uint32_t kExecutable = 0x20000000;
 constexpr std::uint32_t kDiscardable = 0x02000000;
-constexpr std::uint32_t kWordSize = 8;
-constexpr std::uint32_t kPrefixBytes = 64;
-constexpr std::size_t kMaximumRequests = 8;
 
 bool valid_sections(const Inventory& image) {
   if (image.sections.empty() || image.sections.size() > 96)
@@ -65,7 +62,7 @@ bool readable_range(ImageReader& reader, std::uint32_t rva, std::uint32_t size) 
 
 std::uint64_t pointer_word(const std::uint8_t* bytes) {
   std::uint64_t value = 0;
-  for (std::uint32_t index = 0; index < kWordSize; ++index)
+  for (std::uint32_t index = 0; index < kSlotWordBytes; ++index)
     value |= std::uint64_t(bytes[index]) << (index * 8);
   return value;
 }
@@ -92,19 +89,19 @@ SlotPrefix inspect_one(ImageReader& reader,
   entry.entry_rva = request.entry_rva;
   entry.stop_reason = "proof_rejected";
   const auto* storage = executable_section(image, request.entry_rva);
-  if (request.slot_rva % kWordSize != 0 || request.entry_rva == 0 || !storage ||
-      !section_for(image, request.slot_rva, kWordSize, kReadable, kWritable | kExecutable | kDiscardable)) {
+  if (request.slot_rva % kSlotWordBytes != 0 || request.entry_rva == 0 || !storage ||
+      !section_for(image, request.slot_rva, kSlotWordBytes, kReadable, kWritable | kExecutable | kDiscardable)) {
     entry.error = "An aligned static data slot and a readable, non-writable executable entry are required.";
     return entry;
   }
-  if (!readable_range(reader, request.slot_rva, kWordSize)) {
+  if (!readable_range(reader, request.slot_rva, kSlotWordBytes)) {
     ++result.read_failures;
     entry.stop_reason = "unreadable";
     entry.error = "The fixed slot word is not in readable query windows.";
     return entry;
   }
-  std::array<std::uint8_t, kWordSize> proof{};
-  result.proof_bytes += kWordSize;
+  std::array<std::uint8_t, kSlotWordBytes> proof{};
+  result.proof_bytes += kSlotWordBytes;
   if (!reader.read(request.slot_rva, proof.data(), proof.size())) {
     ++result.read_failures;
     entry.stop_reason = "unreadable";
@@ -118,15 +115,15 @@ SlotPrefix inspect_one(ImageReader& reader,
     return entry;
   }
 
-  const auto count = std::min(kPrefixBytes, storage->size - (entry.entry_rva - storage->rva));
+  const auto count = std::min(kSlotTargetPrefixBytes, storage->size - (entry.entry_rva - storage->rva));
   if (!readable_range(reader, entry.entry_rva, count)) {
     ++result.read_failures;
     entry.stop_reason = "unreadable";
     entry.error = "The bounded target prefix is not in readable query windows.";
     return entry;
   }
-  std::array<std::uint8_t, kPrefixBytes> prefix{};
-  entry.bytes_read = count;
+  std::array<std::uint8_t, kSlotTargetPrefixBytes> prefix{};
+  entry.attempted_bytes = count;
   result.read_bytes += count;
   if (!reader.read(entry.entry_rva, prefix.data(), count)) {
     ++result.read_failures;
@@ -154,10 +151,10 @@ SlotPrefix inspect_one(ImageReader& reader,
       return entry;
     }
   }
-  entry.stop_reason = count == kPrefixBytes ? "prefix_limit" : "section_end";
+  entry.stop_reason = count == kSlotTargetPrefixBytes ? "prefix_limit" : "section_end";
   return entry;
 }
-}  // namespace
+}
 
 SlotPrefixInventory inspect_slot_prefixes(ImageReader& reader,
                                           const Inventory& image,
@@ -166,11 +163,11 @@ SlotPrefixInventory inspect_slot_prefixes(ImageReader& reader,
                                           const std::vector<SlotPrefixRequest>& requests) {
   SlotPrefixInventory result;
   if (!image.valid_image || image.machine != 0x8664 || image.image_size == 0 || !valid_sections(image) || loaded_image_base == 0 ||
-      loaded_image_base % kWordSize != 0 || image.image_size > std::numeric_limits<std::uint64_t>::max() - loaded_image_base) {
+      loaded_image_base % kSlotWordBytes != 0 || image.image_size > std::numeric_limits<std::uint64_t>::max() - loaded_image_base) {
     result.error = "A validated AMD64 image, valid sections and aligned non-overflowing loaded-image bounds are required.";
     return result;
   }
-  if (requests.empty() || requests.size() > kMaximumRequests) {
+  if (requests.empty() || requests.size() > kMaximumSlotRequests) {
     result.error = "Request one to eight explicit static vtable slots and expected entry RVAs.";
     return result;
   }
@@ -186,4 +183,4 @@ SlotPrefixInventory inspect_slot_prefixes(ImageReader& reader,
   return result;
 }
 
-}  // namespace taxi_camera::discovery
+}

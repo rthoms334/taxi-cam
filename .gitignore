@@ -1,4 +1,3 @@
-# Local toolchains, builds, captures, receipts and historical binary archives.
 build/
 out/
 obj/

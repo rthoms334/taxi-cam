@@ -15,7 +15,6 @@
 #endif
 
 [Setup]
-; Keep the product ID and setup mutex stable across the application rename.
 #ifdef InstallerTest
 AppId=380TaxiCamIsolatedInstallerTest
 #else
@@ -34,8 +33,6 @@ MinVersion=10.0
 DisableDirPage=no
 DisableProgramGroupPage=yes
 WizardStyle=modern
-; Setup follows the Windows display language, as the companion does; /LANG=
-; overrides it. No language page is added to the flow.
 ShowLanguageDialog=no
 CloseApplications=no
 RestartApplications=no
@@ -51,11 +48,6 @@ UsePreviousAppDir=no
 #endif
 
 [Languages]
-; Setup's own wording is in messages\<tag>.isl with the companion's language tags.
-; Inno ships German, Spanish and French; installer/bootstrap.ps1 adds the pinned
-; Simplified Chinese message file to the compiler's Languages folder. English is
-; listed first because it is the fallback: Inno never matches Simplified Chinese
-; to a Traditional Chinese display language, so those get English, as in the companion.
 Name: "english"; MessagesFile: "compiler:Default.isl,messages\en.isl"
 Name: "german"; MessagesFile: "compiler:Languages\German.isl,messages\de.isl"
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl,messages\es.isl"
@@ -63,15 +55,11 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl,messages\fr.isl"
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl,messages\zh-Hans.isl"
 
 [Files]
-; The new companion runs Setup's checks before any installed file changes.
 Source: "{#PayloadDir}\taxi-cam.exe"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\taxi-cam.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\taxi-camera-bridge.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
-; Camera mounts are user calibration: kept on update and uninstall, replaced
-; only by an explicit settings reset. A first installation imports the
-; simulator folder's calibration; a known installation never resurrects it.
 Source: "{#PayloadDir}\taxi-camera-mounts.cfg"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall; Check: ResetMounts
 Source: "{code:SimulatorMounts}"; DestDir: "{app}"; DestName: "taxi-camera-mounts.cfg"; Flags: external onlyifdoesntexist skipifsourcedoesntexist uninsneveruninstall; Check: ImportSimulatorMounts
 Source: "{#PayloadDir}\taxi-camera-mounts.cfg"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall; Check: InstallBundledMounts
@@ -85,11 +73,7 @@ Type: files; Name: "{userprograms}\380 Taxi Cam.lnk"
 Name: "{userprograms}\Taxi Cam"; Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"
 #endif
 [Run]
-; Offered on the finish page, ticked by default; silent installs never start it.
 Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,Taxi Cam}"; Flags: nowait postinstall skipifsilent
-
-; Settings are retained unless the user explicitly chooses removal in the uninstaller.
-; Installation records, logs and historical backups are retained.
 
 [Code]
 var
@@ -157,8 +141,6 @@ end;
 
 procedure ClearStaleInheritedXml;
 begin
-  { A saved startup file belongs to the simulator discovered with it. Never
-    carry that default to another simulator, including a silent override. }
   if not ExplicitXml and not XmlEdited and (InheritedXml <> '') and
     (CompareText(ExpandFileName(XmlPage.Values[0]), ExpandFileName(InheritedXml)) = 0) and
     (CompareText(AddBackslash(ExpandFileName(SimulatorPage.Values[0])),
@@ -173,7 +155,6 @@ begin
   end;
 end;
 
-{ Runs one of the companion's installer commands without showing its window. }
 function RunSetupCommand(Executable, Command, Destination, State, Arguments: String): Boolean;
 var
   ExitCode: Integer;
@@ -224,15 +205,18 @@ begin
   else StartupPage.SelectedValueIndex := 0;
 end;
 
-procedure InitializeWizard;
+procedure UseFormerScriptInstallationDirectoryWhenNoRegisteredInstallation;
 begin
-  { Registered installs retain their directory through the stable AppId.
-    Also discover the former default directory used by script installations. }
   if (CompareText(WizardDirValue, ExpandConstant('{localappdata}\Taxi Cam\app')) = 0) and
     (ExpandConstant('{param:DIR|}') = '') and
     not FileExists(AddBackslash(WizardDirValue) + 'installation.json') and
     FileExists(ExpandConstant('{localappdata}\380 Taxi Cam\app\installation.json')) then
     WizardForm.DirEdit.Text := ExpandConstant('{localappdata}\380 Taxi Cam\app');
+end;
+
+procedure InitializeWizard;
+begin
+  UseFormerScriptInstallationDirectoryWhenNoRegisteredInstallation;
   SimulatorPage := CreateInputDirPage(wpSelectDir, 'Microsoft Flight Simulator 2024',
     CustomMessage('SimulatorPageDescription'), CustomMessage('SimulatorPageSubCaption'), False, '');
   SimulatorPage.Add(CustomMessage('SimulatorFolderLabel'));
@@ -268,8 +252,6 @@ begin
     else MsgBox(CustomMessage('SimulatorFolderInvalid'), mbError, MB_OK);
   end;
   if CurPageID = XmlPage.ID then begin
-    { Silent setup delegates an empty choice to the companion's existing
-      discovery/manual-startup fallback; interactive setup requests a path. }
     if WizardSilent and (XmlPage.Values[0] = '') then exit;
     Result := (CompareText(ExtractFileName(XmlPage.Values[0]), 'exe.xml') = 0) and (ExtractFileDrive(XmlPage.Values[0]) <> '');
     if not Result then MsgBox(CustomMessage('XmlPathInvalid'), mbError, MB_OK);
@@ -292,7 +274,6 @@ begin
   end;
   ClearStaleInheritedXml;
   KnownInstallation := FileExists(AddBackslash(WizardDirValue) + 'installation.json');
-  { MSFS and the companion must be closed before the bridge DLL is replaced. }
   Arguments := InstallArguments + ' --update-from-pid ' + ExpandConstant('{param:UPDATEFROMPID|0}');
   if ResetSettings then Arguments := Arguments + ' --settings-closed';
   if not RunSetupCommand(ExpandConstant('{tmp}\taxi-cam.exe'), 'check', WizardDirValue, ExpandConstant('{tmp}\state'), Arguments) then begin
@@ -307,7 +288,6 @@ var
   Text: AnsiString;
 begin
   if CurStep <> ssPostInstall then exit;
-  { Configure automatic startup and the installation record with the installed companion. }
   State := ExpandConstant('{tmp}\state');
   if not RunSetupCommand(ExpandConstant('{app}\taxi-cam.exe'), 'configure', ExpandConstant('{app}'), State, InstallArguments) then begin
     StartupNotice := FmtMessage(CustomMessage('ConfigureFailed'), [ErrorText(State)]);
@@ -362,7 +342,6 @@ var
 begin
   if (CurUninstallStep <> usUninstall) or not FileExists(UninstallCompanion) then exit;
   if RemoveSavedSettings then Arguments := ' --remove-settings';
-  { Remove this installation's automatic startup entries and, when chosen, saved settings. }
   if not RunSetupCommand(UninstallCompanion, 'uninstall', ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall'), Arguments) then begin
     MsgBox(ErrorText(ExpandConstant('{tmp}\taxi-uninstall')), mbError, MB_OK);
     Abort;

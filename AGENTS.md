@@ -12,6 +12,14 @@ This is an independent Windows native project. Keep project source, builds and d
 - The installed DLL is locked while MSFS runs. Do not stop the simulator or overwrite user calibration without authorization; build and validate first.
 - The default delivery is the native Windows tray companion and in-process graphics bridge.  Local GPU and UI validation does not establish live simulator behaviour.
 
+## No comments
+
+Write no comments in project source, tests, scripts, shaders, build files, installer files or configuration. Code says what it does through its names and structure. A rule that matters (lock order, GPU synchronization, lifetime, memory bounds, compatibility) is enforced by a test. If code seems to need a comment, it is too complex: rename, extract or simplify it until the comment is unnecessary. Do not move comments into `docs/` instead.
+
+- `tests/repository/comments_test.ps1` (run by `build.ps1 -Validate`) fails on any comment outside its exceptions. Comments that predate the rule are counted per file in `tests/repository/comment_baseline.json`. Counts there only go down: after removing comments, run `tests/repository/comments_test.ps1 -LowerBaseline`. Never add a file or raise a count.
+- The rule does not cover: tool directives that are written as comments (`// clang-format off` and `on`, `NOLINT`, `#requires`, a first-line `#!`), with nothing after them; upstream licence and copyright notices on third-party code, which go in the check's third-party list; `.github/`, `REVIEW.md`, `licenses/`, `LICENSE` and `THIRD_PARTY_NOTICES.md`; Markdown documentation; and anything under `build/`.
+- Comment-like text inside strings is data, not a comment, but comments inside embedded shader or assembly source count.
+
 ## Pull requests
 
 The process is in `docs/pull-requests.md`; review severity rules are in `REVIEW.md`.

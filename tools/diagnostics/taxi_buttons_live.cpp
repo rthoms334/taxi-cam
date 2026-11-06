@@ -1,4 +1,3 @@
-// Bounded read-only public SimConnect validation. No camera control or writes.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdio>
@@ -6,14 +5,17 @@
 #include <cstring>
 #include "../../src/camera/body_pose_provider.hpp"
 
+constexpr unsigned long kDefaultDurationSeconds = 30;
+constexpr unsigned long kMaximumDurationSeconds = 120;
+
 int main(int argc, char** argv) {
-  unsigned long duration_seconds = 30;
+  unsigned long duration_seconds = kDefaultDurationSeconds;
   if (argc > 2)
     return 2;
   if (argc == 2) {
     char* end = nullptr;
     duration_seconds = std::strtoul(argv[1], &end, 10);
-    if (!end || *end || duration_seconds < 1 || duration_seconds > 120)
+    if (!end || *end || duration_seconds < 1 || duration_seconds > kMaximumDurationSeconds)
       return 2;
   }
   using namespace taxi_camera::native_camera;

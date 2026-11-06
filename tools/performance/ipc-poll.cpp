@@ -1,8 +1,3 @@
-// Read-only, lock-free poller of the Taxi Cam IPC status block (per-inspection probe timings, one-tick mask dropouts).
-// It never opens the IPC mutex, so it cannot produce a busy/invalid sample in
-// taxi-performance-sampler. Torn reads are rejected by requiring two identical
-// consecutive byte copies of the Status block. Emits one CSV row per changed
-// bridge heartbeat (bridge publishes status once per ~25 ms control tick).
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
@@ -11,6 +6,13 @@
 #include "../../src/shared/protocol.hpp"
 
 namespace ipc = taxi_camera::standalone;
+
+bool copy_status_without_mutex_unless_torn(const ipc::Shared& shared, ipc::Status& status) {
+  ipc::Status second{};
+  std::memcpy(&status, &shared.status, sizeof(status));
+  std::memcpy(&second, &shared.status, sizeof(second));
+  return std::memcmp(&status, &second, sizeof(status)) == 0;
+}
 
 int wmain(int argc, wchar_t** argv) {
   if (argc < 4) {
@@ -45,15 +47,13 @@ int wmain(int argc, wchar_t** argv) {
   std::fprintf(out,
                "utc_ms,tick_ms,heartbeat,taxi_mask,camera_rate,captures,composed,stamps,hook_failures,probe_ms,probe_max_ms,"
                "st_manager,st_pool,st_lifecycle,st_entries,st_view1,st_view2,st_handoff,st_pose,st_activation,st_publication,torn_reads\n");
-  ipc::Status a{}, b{};
+  ipc::Status a{};
   std::uint64_t last_heartbeat = 0, torn = 0, rows = 0;
   const auto end = GetTickCount64() + static_cast<std::uint64_t>(seconds) * 1000;
   while (GetTickCount64() < end) {
-    std::memcpy(&a, &shared->status, sizeof(a));
-    std::memcpy(&b, &shared->status, sizeof(b));
-    if (std::memcmp(&a, &b, sizeof(a)) != 0) {
+    if (!copy_status_without_mutex_unless_torn(*shared, a)) {
       ++torn;
-      continue;  // retry immediately
+      continue;
     }
     if (a.heartbeat != last_heartbeat) {
       last_heartbeat = a.heartbeat;

@@ -97,11 +97,12 @@ Cpu process_cpu(HANDLE process) {
     throw std::runtime_error("Target process exited or CPU counters unavailable");
   return {number(created), number(user), number(kernel), clock_ms()};
 }
-std::string sha256(const std::wstring& path, bool required = true) {
+enum class UnreadableFile { refuse, report };
+std::string sha256(const std::wstring& path, UnreadableFile unreadable = UnreadableFile::refuse) {
   Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                           FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
   if (!file) {
-    if (!required)
+    if (unreadable == UnreadableFile::report)
       return "unreadable";
     throw std::runtime_error("Cannot open verified binary for hashing");
   }
@@ -140,9 +141,8 @@ struct Module {
   std::uintptr_t base{};
   DWORD size{};
 };
-// required=false is the explicit unloaded-baseline mode: an absent bridge is the
-// expected result and a present one is refused, so the window is provably unloaded.
-Module bridge_module(DWORD pid, bool required = true) {
+enum class BridgeExpectation { loaded, unloaded };
+Module bridge_module(DWORD pid, BridgeExpectation expected) {
   Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
   MODULEENTRY32W entry{};
   entry.dwSize = sizeof(entry);
@@ -156,9 +156,9 @@ Module bridge_module(DWORD pid, bool required = true) {
       throw std::runtime_error("Multiple bridge modules found");
     found = {entry.szExePath, reinterpret_cast<std::uintptr_t>(entry.modBaseAddr), entry.modBaseSize};
   } while (Module32NextW(snapshot.value, &entry));
-  if (!required && found.base)
+  if (expected == BridgeExpectation::unloaded && found.base)
     throw std::runtime_error("Taxi Cam bridge is loaded; the unloaded baseline refuses this window");
-  if (required && !found.base)
+  if (expected == BridgeExpectation::loaded && !found.base)
     throw std::runtime_error("Taxi Cam bridge is not loaded in the explicit target PID");
   return found;
 }
@@ -343,6 +343,9 @@ void pump() {
     DispatchMessageW(&message);
   }
 }
+void establish_message_queue_before_event_hook() {
+  pump();
+}
 struct ThreadSample {
   DWORD id{};
   Cpu cpu{};
@@ -385,9 +388,6 @@ struct Options {
   DWORD pid{}, profile{}, mask{};
   unsigned duration_ms = 30000, interval_ms = 250;
   std::wstring output, phase;
-  // Unloaded baseline: the bridge must be absent for the whole window, the
-  // companion is optional, and no IPC readiness/mask/counter validation runs
-  // because no bridge publishes status. Mask must be 0.
   bool allow_unloaded = false;
 };
 unsigned integer(const std::wstring& value) {
@@ -446,8 +446,6 @@ std::string validate_capture(const IpcSnapshot& snapshot, const Options& options
   if (!fresh(s.identity_sample_ms, GetTickCount64()) || s.active_profile != options.profile || s.detected_profile != options.profile ||
       settings.profile != options.profile)
     return "aircraft_identity_unready_or_changed";
-  // A bridge attached into an already loaded flight reports epoch 0 until the
-  // next session event; the companion mirrors it. Only disagreement is a mismatch.
   if (settings.aircraft_session_epoch != s.aircraft_session_epoch)
     return "session_mismatch";
   if (s.taxi_mask != options.mask)
@@ -496,11 +494,10 @@ int capture(const Options& options) {
   const auto path = process_path(process.value);
   if (!named(path, L"FlightSimulator2024.exe"))
     throw std::runtime_error("Explicit PID is not FlightSimulator2024.exe; no capture performed");
-  const auto module = bridge_module(options.pid, !options.allow_unloaded);
+  const auto expected_bridge = options.allow_unloaded ? BridgeExpectation::unloaded : BridgeExpectation::loaded;
+  const auto module = bridge_module(options.pid, expected_bridge);
   ReadOnlyIpc mailbox(options.pid);
   const auto initial = mailbox.read();
-  // Without a bridge nothing publishes readiness, mask or delivery counters:
-  // the unloaded baseline records IPC when present and validates none of it.
   const auto initial_error = options.allow_unloaded ? std::string() : validate_capture(initial, options);
   if (!initial_error.empty())
     throw std::runtime_error("IPC preflight refused: " + initial_error);
@@ -517,10 +514,7 @@ int capture(const Options& options) {
     companion_created = process_cpu(companion.value).created;
     companion_hash = sha256(companion_path);
   }
-  // Hashing happens outside the CPU interval; these are backing files, not in-memory images.
-  // Store/WindowsApps simulator images may deny CreateFile; bridge + companion remain required
-  // whenever they are present.
-  const auto image_hash = sha256(path, false);
+  const auto image_hash = sha256(path, UnreadableFile::report);
   const std::string bridge_hash = module.base ? sha256(module.path) : "absent";
   std::ofstream samples(std::filesystem::path(options.output + L"/samples.jsonl"), std::ios::binary | std::ios::trunc);
   if (!samples)
@@ -538,7 +532,7 @@ int capture(const Options& options) {
            << ",\"duration_ms\":" << options.duration_ms << ",\"interval_ms\":" << options.interval_ms
            << ",\"settings\":" << setting_identity << '}';
   write_line(samples, metadata.str());
-  pump();  // Establish the message queue before registering the out-of-context event hook.
+  establish_message_queue_before_event_hook();
   Focus focus{GetForegroundWindow(), options.pid};
   focus.observe(focus.initial, Focus::pid(focus.initial));
   FocusHook hook(focus);
@@ -643,11 +637,10 @@ int capture(const Options& options) {
       issue("foreground_transition_or_not_foreground");
     if (companion && process_cpu(companion.value).created != companion_created)
       issue("companion_identity_changed");
-    // In the unloaded mode a bridge that appeared during the window throws here and invalidates the capture.
-    const auto final_module = bridge_module(options.pid, !options.allow_unloaded);
+    const auto final_module = bridge_module(options.pid, expected_bridge);
     if (final_module.path != module.path || final_module.base != module.base || final_module.size != module.size)
       issue("bridge_module_changed");
-    if (sha256(path, false) != image_hash || (module.base && sha256(module.path) != bridge_hash) ||
+    if (sha256(path, UnreadableFile::report) != image_hash || (module.base && sha256(module.path) != bridge_hash) ||
         (companion && sha256(companion_path) != companion_hash))
       issue("binary_backing_file_changed");
   } catch (const std::exception& error) {
@@ -694,7 +687,7 @@ int capture(const Options& options) {
                            : "Capture invalid: see summary.json issues; do not use for before/after claims.");
   return issues.empty() ? 0 : 2;
 }
-}  // namespace taxi_performance
+}
 
 #ifndef TAXI_PERFORMANCE_TESTING
 int wmain(int argc, wchar_t** argv) {
