@@ -19,6 +19,7 @@
 #include "../shared/hook_timing.hpp"
 #include "../shared/lock_holder_priority.hpp"
 #include "../shared/main_view_pause.hpp"
+#include "../shared/manual_camera_intent.hpp"
 #include "../shared/mark_identity.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/rotating_log.hpp"
@@ -942,6 +943,13 @@ DWORD run_impl() {
   WindowPauseLatch window_pause;
   std::uint64_t stale_ms{};
   win::WaitingPageTimer waiting_page;
+  unsigned door_requested{};  // The door side last pass, to restart its PLEASE WAIT on a turn-on.
+  // Diagnostic: how long a door camera turn-on takes, stage by stage.
+  struct DoorTrace {
+    std::uint32_t rises{}, generation{};
+    std::uint64_t lvar_ms{}, cause_ms{}, on_ms{}, page_ms{}, base_pages{};
+    bool seen{}, on{}, logged{}, kept_page{};
+  } door_trace;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
@@ -1887,8 +1895,72 @@ DWORD run_impl() {
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending || (door & active) != 0);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
-    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
+    // The door side counts as requested while the door camera is on, so a side
+    // that only briefly lost its display texture returns without PLEASE WAIT,
+    // as a taxi side does; a real turn-on shows it for the full minimum.
+    // A turn-on starts the door side's minimum even when a taxi camera was
+    // already showing on that display (it never left active).
+    waiting_page.restart(door & ~std::exchange(door_requested, door), GetTickCount64());
+    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask | door));
     win::set_door_mask(door & active);
+    {
+      // Door turn-on stages. The cause is a rise of the door camera's own
+      // bound L:var (a press, or reaching an equals value; never a release)
+      // since it last turned on or off (the companion turns it on
+      // from that change, through the settings it writes back); -1 without one.
+      auto& t = door_trace;
+      const auto tick = GetTickCount64();
+      const auto lvars = native_camera::get_lvar_bindings();
+      if (lvars.generation != t.generation) {
+        // A new stream's first readings are not changes.
+        t.generation = lvars.generation;
+        t.seen = false;
+      }
+      if (const auto& read = lvars.states[win::CameraDoor]; lvars.generation && read.read) {
+        if (t.seen && read.rises != t.rises)
+          t.lvar_ms = tick;
+        t.rises = read.rises;
+        t.seen = true;
+      }
+      const unsigned door_bit = door & active;
+      const auto write = [&](bool turned_off) {
+        t.logged = true;
+        const auto since = [&](std::uint64_t at) -> long long { return at ? static_cast<long long>(at - t.on_ms) : -1; };
+        char detail[256];
+        std::snprintf(detail, sizeof(detail),
+                      "Door turn-on: lvar_to_on_ms=%lld on_to_page_ms=%lld kept_page=%u turned_off_ms=%lld live=%u pages=%llu",
+                      t.cause_ms ? static_cast<long long>(t.on_ms - t.cause_ms) : -1, since(t.page_ms), t.kept_page ? 1u : 0u,
+                      turned_off ? static_cast<long long>(tick - t.on_ms) : -1, settings.door_live ? 1u : 0u,
+                      static_cast<unsigned long long>(door_page.pages - t.base_pages));
+        log_status(status, detail);
+      };
+      if (door_bit && !t.on) {
+        t.on = true;
+        t.logged = false;
+        t.on_ms = tick;
+        t.cause_ms = std::exchange(t.lvar_ms, 0);
+        t.page_ms = 0;
+        // Turning off dropped the last door page (set_door), so the display
+        // shows PLEASE WAIT until the first page on_to_page_ms later. A side
+        // that came back while the door camera stayed on (a lost display
+        // texture) keeps its page and shows it at once; a snapshot renders
+        // nothing new then.
+        t.base_pages = door_page.pages;
+        t.kept_page = door_page.ready;
+      } else if (!door_bit && t.on) {
+        // Turned off before the line was due: write what was reached.
+        if (!t.logged)
+          write(true);
+        t.on = false;
+        t.lvar_ms = 0;
+      }
+      if (t.on && !t.logged) {
+        if (!t.page_ms && door_page.ready && door_page.pages > t.base_pages)
+          t.page_ms = tick;
+        if (t.page_ms || tick - t.on_ms > 5000)
+          write(false);
+      }
+    }
     scene_runtime::set_door(key, door != 0, settings.door_live != 0);
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);

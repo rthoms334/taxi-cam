@@ -62,6 +62,15 @@ int main() {
   assert(pilot.observe(2000, 0, 1) == 0);
   assert(pilot.observe(2100, 0, 0) == 0);
   assert(pilot.observe(2200, 1, 1) == 1);
-  std::puts("PASS waiting page timer: per-side minimum, OFF reset, texture-recreation resume, clock guards and side bounds");
+  // A side that stays admitted starts its minimum again when restarted (the
+  // door camera taking over a taxi camera's display), and only that side.
+  WaitingPageTimer handover;
+  assert(handover.observe(1000, 3, 3) == 3);
+  assert(handover.observe(1000 + WaitingPageMinimumMs, 3, 3) == 0);
+  handover.restart(2, 3000);
+  assert(handover.observe(3000, 3, 3) == 2);
+  assert(handover.observe(3000 + WaitingPageMinimumMs - 1, 3, 3) == 2);
+  assert(handover.observe(3000 + WaitingPageMinimumMs, 3, 3) == 0);
+  std::puts("PASS waiting page timer: per-side minimum, OFF reset, texture-recreation resume, restart, clock guards and side bounds");
   return 0;
 }

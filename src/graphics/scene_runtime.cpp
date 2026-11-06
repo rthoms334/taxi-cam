@@ -1,6 +1,7 @@
 #include "scene_runtime.hpp"
 #include "../bridge/native_hooks.hpp"
 #include "../hooks/render_boundary_observer.hpp"
+#include "../shared/door_camera.hpp"
 #include "camera_compositor_d3d12.hpp"
 #include "display_keep.hpp"
 #include "scene_frame_output.hpp"
@@ -136,15 +137,20 @@ bool door_current(const Device& item) {
   return scene_handoff().is_current(item.door_committed) && (!limit || (now >= item.door_ms && now - item.door_ms <= limit));
 }
 enum class Page { none, camera, waiting, door };
-// What a camera side shows. A door side shows the door page once it has an
-// image and the waiting page before that (or while a live image is stale),
-// never the taxi image; without a door page it is not written.
+// What a camera side shows. A door side shows PLEASE WAIT for the same
+// minimum as a taxi camera and until it has a current image (or while a live
+// image is stale), then the door page, never the taxi image
+// (standalone::door_side_page).
 Page side_page(const Device& item, bool waiting, bool door) {
   if (door)
-    return !item.door_available                       ? Page::none
-           : door_current(item)                       ? Page::door
-           : waiting_page(item) && item.waiting_ready ? Page::waiting
-                                                      : Page::none;
+    switch (standalone::door_side_page(item.door_available, door_current(item), waiting, waiting_page(item) && item.waiting_ready)) {
+      case standalone::DoorSidePage::door:
+        return Page::door;
+      case standalone::DoorSidePage::waiting:
+        return Page::waiting;
+      case standalone::DoorSidePage::none:
+        return Page::none;
+    }
   if (show_waiting(item, waiting))
     return item.waiting_ready ? Page::waiting : Page::none;
   return current_output(item) ? Page::camera : Page::none;

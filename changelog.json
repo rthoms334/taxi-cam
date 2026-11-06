@@ -10,7 +10,8 @@
         "Taxi Cam no longer says it can't recognise your displays while you're in the simulator's main menu or while a flight is loading. It waits until your cockpit's displays have had time to show their codes.",
         "The aircraft's own display no longer flickers through the camera picture now and then, in the cockpit or in GlassOut's stream. The FlyByWire A380X, whose displays redraw only what changes, keeps its own way of showing the camera.",
         "Saved aircraft can now reset an aircraft that comes with Taxi Cam: Reset displays brings back its displays and door camera, and Factory reset brings back all of its settings. Use default displays now keeps the lower display the aircraft comes with, so the door camera stays on it.",
-        "The iniBuilds A350 now shows its door camera on its VIDEO key, like the A380s, inside the system page. Already set up? Reset displays in Saved aircraft picks this up."
+        "The iniBuilds A350 now shows its door camera on its VIDEO key, like the A380s, inside the system page. Already set up? Reset displays in Saved aircraft picks this up.",
+        "The door camera now answers its cockpit button sooner: Taxi Cam checks the button every 50 ms instead of every 200 ms, and shows PLEASE WAIT for a moment, like it does for the taxi cameras, before the picture appears."
       ]
     },
     {
