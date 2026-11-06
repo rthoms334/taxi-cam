@@ -947,7 +947,7 @@ DWORD run_impl() {
   struct DoorTrace {
     std::uint32_t rises{}, generation{};
     std::uint64_t lvar_ms{}, cause_ms{}, on_ms{}, page_ms{}, base_pages{};
-    bool seen{}, on{}, logged{};
+    bool seen{}, on{}, logged{}, kept_page{};
   } door_trace;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
@@ -1894,7 +1894,10 @@ DWORD run_impl() {
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0 || snapshot_pending || (door & active) != 0);
     // Before the target mask: a newly admitted side starts on the waiting page,
     // unless it stayed requested (mask) and only briefly lost its recreated texture.
-    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask));
+    // The door side counts as requested while the door camera is on, so a side
+    // that only briefly lost its display texture returns without PLEASE WAIT,
+    // as a taxi side does; a real turn-on shows it for the full minimum.
+    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active, mask | door));
     win::set_door_mask(door & active);
     {
       // Door turn-on stages. The cause is a rise of the door camera's own
@@ -1920,8 +1923,9 @@ DWORD run_impl() {
         t.logged = true;
         const auto since = [&](std::uint64_t at) -> long long { return at ? static_cast<long long>(at - t.on_ms) : -1; };
         char detail[256];
-        std::snprintf(detail, sizeof(detail), "Door turn-on: lvar_to_on_ms=%lld on_to_page_ms=%lld turned_off_ms=%lld live=%u pages=%llu",
-                      t.cause_ms ? static_cast<long long>(t.on_ms - t.cause_ms) : -1, since(t.page_ms),
+        std::snprintf(detail, sizeof(detail),
+                      "Door turn-on: lvar_to_on_ms=%lld on_to_page_ms=%lld kept_page=%u turned_off_ms=%lld live=%u pages=%llu",
+                      t.cause_ms ? static_cast<long long>(t.on_ms - t.cause_ms) : -1, since(t.page_ms), t.kept_page ? 1u : 0u,
                       turned_off ? static_cast<long long>(tick - t.on_ms) : -1, settings.door_live ? 1u : 0u,
                       static_cast<unsigned long long>(door_page.pages - t.base_pages));
         log_status(status, detail);
@@ -1933,8 +1937,12 @@ DWORD run_impl() {
         t.cause_ms = std::exchange(t.lvar_ms, 0);
         t.page_ms = 0;
         // Turning off dropped the last door page (set_door), so the display
-        // shows PLEASE WAIT until the first page on_to_page_ms later.
+        // shows PLEASE WAIT until the first page on_to_page_ms later. A side
+        // that came back while the door camera stayed on (a lost display
+        // texture) keeps its page and shows it at once; a snapshot renders
+        // nothing new then.
         t.base_pages = door_page.pages;
+        t.kept_page = door_page.ready;
       } else if (!door_bit && t.on) {
         // Turned off before the line was due: write what was reached.
         if (!t.logged)
