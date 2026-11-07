@@ -84,7 +84,13 @@ $compileJobs = @()
 $runJobs = @()
 $timingJobs = @()
 if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/bridge/bridge_main.cpp')) {
-    $compileJobs += New-TaxiJob -Name 'taxi-camera-bridge.dll' -File $compiler -Arguments @($common + '-shared' + (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') + $objects + $libs + '-Wl,--no-insert-timestamp' + '-o' + (Join-Path $out 'taxi-camera-bridge.dll')) -Failure 'Native bridge link failed.'
+    # Give the injected DLL proper version metadata (name, version, copyright) so
+    # it is an identifiable, versioned product rather than an anonymous module.
+    $bridgeWindres = Join-Path (Split-Path -Parent $compiler) 'llvm-windres.exe'
+    $bridgeResource = Join-Path $out 'bridge.res.o'
+    & $bridgeWindres '-I' $generated '-I' (Join-Path $taskRoot 'src/bridge') '-i' (Join-Path $taskRoot 'src/bridge/bridge.rc') '-O' 'coff' '-o' $bridgeResource
+    if ($LASTEXITCODE -ne 0) { throw 'Native bridge version resource compilation failed.' }
+    $compileJobs += New-TaxiJob -Name 'taxi-camera-bridge.dll' -File $compiler -Arguments @($common + '-shared' + (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') + $objects + $bridgeResource + $libs + '-Wl,--no-insert-timestamp' + '-o' + (Join-Path $out 'taxi-camera-bridge.dll')) -Failure 'Native bridge link failed.'
 }
 $companion = Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')
 $companionLibs = @('-lbcrypt','-ldxgi','-lversion','-lshell32','-lcomctl32','-lcomdlg32','-ladvapi32','-ldwmapi','-luxtheme','-lwinhttp','-lhid','-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lwindowscodecs')

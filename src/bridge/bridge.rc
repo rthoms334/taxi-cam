@@ -1,0 +1,26 @@
+#include <windows.h>
+#include "../shared/version.hpp"
+1 VERSIONINFO
+FILEVERSION TAXI_CAM_VERSION_MAJOR,TAXI_CAM_VERSION_MINOR,TAXI_CAM_VERSION_PATCH,0
+PRODUCTVERSION TAXI_CAM_VERSION_MAJOR,TAXI_CAM_VERSION_MINOR,TAXI_CAM_VERSION_PATCH,0
+FILETYPE VFT_DLL
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "Taxi Cam\0"
+   VALUE "FileDescription", "Taxi Cam MSFS graphics bridge\0"
+   VALUE "FileVersion", TAXI_CAM_VERSION "\0"
+   VALUE "InternalName", "taxi-camera-bridge\0"
+   VALUE "LegalCopyright", "Copyright (C) 2026 Robert Thomson. GPL-3.0-only.\0"
+   VALUE "ProductName", "Taxi Cam\0"
+   VALUE "ProductVersion", TAXI_CAM_VERSION "\0"
+   VALUE "OriginalFilename", "taxi-camera-bridge.dll\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END

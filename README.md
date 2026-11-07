@@ -51,6 +51,18 @@ For manual launch, start Taxi Cam from the Start menu (or tray) while MSFS is ru
 
 On its first launch, **Settings** opens so you can explore the controls. Close the window or select **Hide to tray** to keep the app running in the system tray. Later automatic starts stay in the tray and close a few seconds after the simulator does, like the simulator's other add-ons, so Steam no longer shows the simulator as running. Opening Taxi Cam from the Windows Start menu shows Settings again, and a Taxi Cam started that way stays in the tray until you quit it. The first-launch choice is remembered across updates.
 
+### If Windows flags Taxi Cam
+
+Windows SmartScreen or Microsoft Defender may warn about the installer or `taxi-cam.exe`, sometimes as a generic threat such as `Trojan:Win32/Wacatac` or `Sabsik`. These are machine-learning verdicts, not a confirmed infection. Taxi Cam is an **unsigned, experimental** tool with a small install base, and it works by loading its graphics bridge into the running simulator — the same technique ReShade and similar mods use. That combination is enough to trip the heuristics even though the code is open and does nothing malicious.
+
+What you can do:
+
+- **Check you have the real file.** Download only from [the latest release](https://github.com/rthoms334/taxi-cam/releases/latest) on this repository, and compare its SHA-256 with the value on the release page: run `Get-FileHash <path-to-file>` in PowerShell. If the hashes match, the file is the one that was published here.
+- **Report the false positive to Microsoft.** The most effective fix is for Microsoft to correct the verdict: submit the file at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission). Corrections usually apply within a day or two and reach everyone through a Defender definition update.
+- **Tell us.** Open a report with the exact detection name (Windows Security → Virus & threat protection → Protection history), the file and its SHA-256, and your Defender security-intelligence version, so the detection can be submitted and tracked.
+
+Please don't disable your antivirus to work around this. Only restore the file from quarantine if you have verified the download against the published hash and you understand the risk.
+
 ## Using Taxi Cam
 
 1. Load an aircraft. Leave **Auto aircraft** enabled in **Overview** to select the matching settings automatically. For an aircraft without a profile, **Overview** says it is not set up yet: open **Setup** and start with **Displays** (see [Supported aircraft](#supported-aircraft)). Once it is set up, it is selected automatically too.
