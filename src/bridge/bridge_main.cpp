@@ -1560,16 +1560,22 @@ DWORD run_impl() {
     // The camera manager retired the cameras this loop already requested (a
     // kept pair it could not resize or revalidate): follow its transition and
     // request them again, or they stay off until the next aircraft change.
+    // The same while this loop still waits on a transition it requested: the
+    // manager refused the kept pair before resuming it and took the full
+    // reset, so the token this loop waits on is never acknowledged.
     bool manager_transition = false;
-    if (connected && settings.enabled && !changing_profile && applied_profile) {
+    if (connected && settings.enabled && (changing_profile ? transition_token != 0 : applied_profile != 0)) {
       const auto manager = native_camera::scene_snapshot();
-      manager_transition =
-          camera_manager_transition(transition_token, manager, session.ready && !session.loading && session_epoch == applied_session_epoch);
+      manager_transition = camera_manager_transition(
+          transition_token, manager,
+          session.ready && !session.loading && session_epoch == (changing_profile ? pending_session_epoch : applied_session_epoch));
       if (manager_transition) {
         char detail[512];
-        std::snprintf(detail, sizeof(detail), "Camera manager transition: token=%llu applied_token=%llu failed=%u message=%.300s",
-                      static_cast<unsigned long long>(manager.profile_transition_token), static_cast<unsigned long long>(transition_token),
-                      manager.profile_transition_failed, manager.message.c_str());
+        std::snprintf(
+            detail, sizeof(detail),
+            "Camera manager transition: token=%llu applied_token=%llu waiting=%u failed=%u kept_refusal=%s feed=%d message=%.300s",
+            static_cast<unsigned long long>(manager.profile_transition_token), static_cast<unsigned long long>(transition_token),
+            changing_profile, manager.profile_transition_failed, manager.kept_refusal, manager.kept_refused_feed, manager.message.c_str());
         log_status(status, detail);
       }
     }
@@ -1711,7 +1717,7 @@ DWORD run_impl() {
                         "Aircraft transition waiting: token=%llu session=%llu profile=%u failed=%u request_pending=%u "
                         "creation_pending=%u telemetry_pending=%u entries=%llu/%llu created_total=%llu "
                         "full_reset=%u gpu_generation=%llu public_ready=%u loading=%u flow_subscribed=%u flow=%u reason=%s "
-                        "flight_loaded=%u discovery=%u",
+                        "flight_loaded=%u discovery=%u refusal=%s refused_feed=%d",
                         static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(session_epoch), pending_profile,
                         transition.profile_transition_failed, transition.pair.request_pending, transition.pair.creation_pending,
                         ready && !telemetry_ready, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
@@ -1719,7 +1725,8 @@ DWORD run_impl() {
                         static_cast<unsigned long long>(transition.created_total), pending_full_reset,
                         static_cast<unsigned long long>(pending_gpu_generation), public_ready, transition_session.loading,
                         transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error,
-                        transition_session.flight_loaded, pending.panel_discovery);
+                        transition_session.flight_loaded, pending.panel_discovery, transition.profile_transition_refusal,
+                        transition.profile_transition_refused_feed);
           log_status(pending, detail);
           // An unsupported aircraft stays here: record what it is and which
           // render targets it creates. Log once per session, then on any type
@@ -2824,13 +2831,14 @@ DWORD run_impl() {
       std::snprintf(
           mount_detail, sizeof(mount_detail),
           "Camera mount: available=%d paused=%d feeds=%u/%u/%u attaches=%llu restores=%llu rehomes=%llu refused=%llu error=%s contract=%s "
-          "kept_pairs=%llu kept_fallbacks=%llu",
+          "kept_pairs=%llu kept_fallbacks=%llu kept_refusal=%s kept_refused_feed=%d",
           scene.mount_available ? 1 : 0, scene.sim_paused ? 1 : 0, scene.mount_state[0], scene.mount_state[1], scene.mount_state[2],
           static_cast<unsigned long long>(scene.mount_attaches), static_cast<unsigned long long>(scene.mount_restores),
           static_cast<unsigned long long>(scene.mount_rehomes), static_cast<unsigned long long>(scene.mount_refused),
           scene.mount_error && *scene.mount_error ? scene.mount_error : "none",
           scene.mount_contract_error.empty() ? "ok" : scene.mount_contract_error.c_str(),
-          static_cast<unsigned long long>(scene.flight_change_holds), static_cast<unsigned long long>(scene.flight_change_fallbacks));
+          static_cast<unsigned long long>(scene.flight_change_holds), static_cast<unsigned long long>(scene.flight_change_fallbacks),
+          scene.kept_refusal, scene.kept_refused_feed);
       log_status(status, mount_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];

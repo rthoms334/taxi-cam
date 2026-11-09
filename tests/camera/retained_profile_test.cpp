@@ -2,6 +2,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <thread>
 #include "../../src/camera/scene_recovery.hpp"
@@ -212,12 +213,60 @@ void cancel_during_creation() {
             "Settled pair could not follow the ordinary retained guards");
     require(engine.initializations == 2 && engine.creates == 2 && engine.erases == 0, "Deferred transition recreated or erased cameras");
     transition.defer_pair(1);
-    transition.refuse();
+    transition.refuse("close_changed");
     require(transition.failed() && !transition.awaiting_pair() && !transition.ready(), "Refusal retained a pending deferral");
     transition.defer_pair(1);
     transition.consume();
     require(!transition.holding() && !transition.awaiting_pair() && !transition.pending(), "Consumed deferral could later acknowledge");
   }
+}
+// bridge.log names the check (and feed) that refused a kept pair: the first
+// refusal stays, and a new transition starts without it.
+void refusal_reasons() {
+  Engine engine;
+  ec::PairController pair;
+  const ec::ManagerToken owner{11, 1};
+  pair.request_independent_pose();
+  require(pair.process_update(owner, engine.callbacks()), "Refusal fixture failed to create");
+  const auto created = pair.snapshot();
+  const auto ready = ready_views();
+  const Transition::Dimensions dimensions{ready[0].dimensions, ready[1].dimensions};
+  const auto refused_by = [&](const Transition::Views& views, const char* reason, int feed, ec::ManagerToken manager) {
+    Transition transition;
+    transition.begin(2, created, dimensions);
+    require(!std::strcmp(transition.refusal(), "none") && transition.refused_feed() == -1, "A fresh transition carried a refusal");
+    return transition.inspect(manager, created, views) == Transition::Decision::refused && transition.failed() &&
+           !std::strcmp(transition.refusal(), reason) && transition.refused_feed() == feed;
+  };
+  auto views = ready;
+  views[1].dimensions[0][0] += 2;
+  require(refused_by(views, "view_dimensions", 1, owner), "Changed view dimensions were not named");
+  views = ready;
+  views[0].output_dimensions[1] += 2;
+  require(refused_by(views, "output_dimensions", 0, owner), "Changed output dimensions were not named");
+  views = ready;
+  views[1].resource_present = false;
+  require(refused_by(views, "output_missing", 1, owner), "A missing output was not named");
+  views = ready;
+  views[0].mode = 1;
+  require(refused_by(views, "view_mode", 0, owner), "A changed view mode was not named");
+  views = ready;
+  views[1].view_address = views[0].view_address;
+  require(refused_by(views, "views_shared", 1, owner), "Shared views were not named");
+  require(refused_by(ready, "manager_changed", -1, ec::ManagerToken{12, 1}), "Another manager was not named");
+  Transition transition;
+  transition.begin(2, created, dimensions);
+  views = ready;
+  views[0].mode = 1;
+  transition.inspect(owner, created, views);
+  transition.refuse("resize_failed");
+  require(!std::strcmp(transition.refusal(), "view_mode") && transition.refused_feed() == 0, "A later refusal replaced the first reason");
+  transition.begin(2, created, dimensions);
+  require(transition.pending() && !std::strcmp(transition.refusal(), "none") && transition.refused_feed() == -1,
+          "A new transition kept the last refusal");
+  pair.request_disable();
+  transition.begin(2, pair.snapshot(), dimensions);
+  require(transition.failed() && !std::strcmp(transition.refusal(), "pair_pending"), "A pending pair request was not named");
 }
 void ownership_before_allocation_publication() {
   Engine engine;
@@ -272,6 +321,7 @@ void run() {
   cancel_empty_requests();
   cancel_during_creation();
   ownership_before_allocation_publication();
+  refusal_reasons();
   Engine engine;
   ec::PairController pair;
   const ec::ManagerToken owner{11, 1};
