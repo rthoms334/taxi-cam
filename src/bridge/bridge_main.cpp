@@ -912,8 +912,15 @@ DWORD run_impl() {
     // can run out during the flight load, before any picture is taken (the
     // A350, 2026-11-04: nothing read until the first re-show, ~45 s later).
     bool session_shown = false;
-    bool setup_open = false;   // The companion's aircraft setup, at the last pass.
-    bool setup_shown = false;  // Marks asked for when the setup opened, this session.
+    bool setup_open = false;  // The companion's aircraft setup, at the last pass.
+    // A texture read this session: the package is loaded, even once that
+    // texture has been destroyed.
+    bool session_read = false;
+    mark_identity::ReplacementWatch replacements;
+    unsigned lost{};  // Read textures destroyed since the marks last went up for them.
+    // Sides a camera is asked for that have no texture, as of the last pass,
+    // and those the marks already went up for.
+    unsigned wanted_unassigned{}, asked_sides{};
   } mark_scan;
   std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
   const auto service_scene = [&] {
@@ -1145,6 +1152,7 @@ DWORD run_impl() {
     const auto mark_result = [&](std::uint64_t id, const win::DisplaySnapshotPoll* poll) {
       const std::size_t marks = poll ? poll->mark_count : 0;
       if (marks) {
+        mark_scan.session_read = true;
         panel_identity.store.read(id, poll->marks.data(), marks);
         // Route by the new marks on this pass, not up to a second later:
         // the marks come down once the profile's displays are found.
@@ -1169,7 +1177,9 @@ DWORD run_impl() {
         mark_scan.epoch = epoch;
         mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = mark_scan.empty_textures = 0;
         mark_scan.last_reshow_ms = mark_scan.shown_ms = 0;
-        mark_scan.shown_again = mark_scan.session_shown = mark_scan.setup_shown = false;
+        mark_scan.shown_again = mark_scan.session_shown = mark_scan.session_read = false;
+        mark_scan.lost = mark_scan.wanted_unassigned = mark_scan.asked_sides = 0;
+        mark_scan.replacements.reset();
         mark_scan.verdict.reset();
         // The last flight's pictures without marks do not count for this one:
         // its listed textures are counted again below, before they are pruned.
@@ -1229,16 +1239,24 @@ DWORD run_impl() {
       panel_identity.settled = tried || shown_long;
       // Pictures taken before the pages painted their marks give no verdict,
       // nor does an empty list (textures pictured, then recreated mid-load).
-      panel_identity.inactive = mark_scan.verdict.observe(!panel_identity.store.textures().empty(), mark_scan.empty,
-                                                          mark_scan.empty_textures, (tried && !mark_scan.entries.empty()) || shown_long);
+      panel_identity.inactive =
+          mark_scan.verdict.observe(mark_scan.session_read || !panel_identity.store.textures().empty(), mark_scan.empty,
+                                    mark_scan.empty_textures, (tried && !mark_scan.entries.empty()) || shown_long);
       if (!allowed || companion)
         return;
       if (now >= mark_scan.next_refresh) {
         mark_scan.next_refresh = now + MarkRefreshMs;
         const auto records = win::display_resource_records();
+        unsigned lost = 0;
         std::erase_if(mark_scan.entries, [&](const MarkScan::Entry& entry) {
-          return std::none_of(records.begin(), records.end(), [&](const auto& record) { return record.id == entry.id; });
+          const bool gone = std::none_of(records.begin(), records.end(), [&](const auto& record) { return record.id == entry.id; });
+          lost += gone && entry.read;
+          return gone;
         });
+        if (lost) {
+          mark_scan.lost += lost;
+          mark_scan.replacements.lost(now, mark_scan.shown_again);
+        }
         for (const auto& record : records) {
           if (!(record.draws || record.activity))
             continue;
@@ -1274,6 +1292,8 @@ DWORD run_impl() {
       const auto ask_show = [&] {
         mark_scan.shown_again = true;
         mark_scan.shown_ms = now;
+        mark_scan.replacements.shown(now);
+        mark_scan.lost = 0;
         native_camera::signal_panel_marks_show();
         for (auto& entry : mark_scan.entries)
           if (!entry.read) {
@@ -1297,19 +1317,28 @@ DWORD run_impl() {
         log_status(log_to, detail);
         mark_scan.unsignalled = 0;
         mark_scan.shown_again = false;
+        mark_scan.replacements.taken_down(now);
       };
-      if (found) {
+      // A camera asked for on a display with no texture: at once for a side
+      // not asked about yet, then at the slow pace while it stays asked for.
+      const unsigned unserved_sides = mark_scan.wanted_unassigned & ~mark_scan.asked_sides;
+      mark_scan.asked_sides &= mark_scan.wanted_unassigned;
+      const bool camera_waits =
+          mark_scan.wanted_unassigned && !mark_scan.shown_again && unread_since(0) &&
+          (!mark_scan.shown_ms || now - mark_scan.shown_ms >= (unserved_sides ? mark_identity::ReplacementWatch::GapMs : MarkReshowGapMs));
+      // Marks stay up for a replaced texture even with every named display found.
+      const bool replacing = mark_scan.replacements.pending(now);
+      if (found && !replacing) {
         if (mark_scan.unsignalled || mark_scan.shown_again)
           take_down("displays found");
-      } else if (setup_opened && !mark_scan.setup_shown && unread_since(0)) {
-        // The setup lists only textures whose marks were read: once a session.
-        mark_scan.setup_shown = true;
+      } else if (setup_opened && unread_since(0)) {
+        // The setup lists only textures whose marks were read: every time it opens.
         ask_show();
         char detail[128];
         std::snprintf(detail, sizeof(detail),
                       "Display marks: aircraft setup opened; cockpit pages asked to show their marks for %u textures.", unread_since(0));
         log_status(log_to, detail);
-      } else if (!mark_scan.session_shown && unread_since(0)) {
+      } else if (!found && !mark_scan.session_shown && unread_since(0)) {
         mark_scan.session_shown = true;
         ask_show();
         char detail[128];
@@ -1318,6 +1347,20 @@ DWORD run_impl() {
         log_status(log_to, detail);
       } else if (mark_scan.shown_again && now - mark_scan.shown_ms >= MarkShowMs) {
         take_down("time limit");
+      } else if (mark_scan.replacements.due(now, mark_scan.shown_again, mark_scan.shown_ms)) {
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "Display marks: %u read panel textures destroyed; cockpit pages asked to show their marks.",
+                      mark_scan.lost);
+        ask_show();
+        log_status(log_to, detail);
+      } else if (camera_waits) {
+        mark_scan.asked_sides |= mark_scan.wanted_unassigned;
+        ask_show();
+        char detail[128];
+        std::snprintf(detail, sizeof(detail),
+                      "Display marks: camera wanted on sides %#x with no display; cockpit pages asked to show their marks.",
+                      mark_scan.wanted_unassigned);
+        log_status(log_to, detail);
       }
       // Textures drawn since their last picture first: their picture is
       // taken at once. Then the others.
@@ -1356,8 +1399,9 @@ DWORD run_impl() {
         log_status(log_to, detail);
         return;
       }
-      // The pages may take their marks down. A later read signals again.
-      if (mark_scan.unsignalled || mark_scan.shown_again)
+      // The pages may take their marks down, once no replacement needs them.
+      // A later read signals again.
+      if (!replacing && (mark_scan.unsignalled || mark_scan.shown_again))
         take_down("scan done");
     };
     // One snapshot per companion serial. It needs graphics observation while
@@ -1805,6 +1849,7 @@ DWORD run_impl() {
     for (unsigned side = 0; side < targets.size(); ++side)
       assigned |= targets[side] ? 1u << side : 0u;
     assigned &= sides;
+    mark_scan.wanted_unassigned = (wanted | door_wanted) & ~assigned;
     const auto speed = native_camera::get_ground_speed();
     const auto setup_current = [&]() {
       const auto epoch = native_camera::get_aircraft_session_epoch();
@@ -2890,7 +2935,11 @@ DWORD run_impl() {
       last_output = output.output;
       last_view_wait_count = scene.view_wait_count;
       logged = true;
-      next_log = now + 5000;
+      // With no camera turned on there is little to time, and a 5 s pace
+      // filled both 8 MiB log files in 1.7 hours of flight (2026-11-08).
+      // requested stays set for cameras kept warm, so it can't tell.
+      // State changes still log at once.
+      next_log = now + (mask || door || test_scene || output.output ? 5000 : 30000);
     }
     display_marks.service(status);
     Sleep(25);

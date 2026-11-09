@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.3.4",
+      "date": "2026-11-09",
+      "fixes": [
+        "Your cockpit displays now stay recognised for the whole flight. When an aircraft replaces a display while you fly, Taxi Cam recognises the new one within moments, so your cameras and the Displays list keep working."
+      ]
+    },
+    {
       "version": "1.3.3",
       "date": "2026-11-05",
       "fixes": [

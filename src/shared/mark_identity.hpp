@@ -115,6 +115,41 @@ class PackageVerdict {
   bool inactive_ = false;
 };
 
+// A panel texture whose marks were read can be destroyed at any time: the
+// simulator and its aircraft recreate them in flight (the Fenix A320: 59
+// times in 86 minutes, 2026-11-08), and the page behind the new texture took
+// its marks down long ago. So the marks go up whenever a read texture goes,
+// and stay up HoldMs past the last one, the time its replacement takes to be
+// listed and read. A loss while the marks are up needs no show of its own,
+// and shows are at least GapMs apart however fast textures go.
+class ReplacementWatch {
+ public:
+  static constexpr std::uint64_t HoldMs = 5000, GapMs = 10000;
+  void lost(std::uint64_t now, bool marks_up) noexcept {
+    owed_ = owed_ || !marks_up;
+    hold_until_ = now + HoldMs;
+  }
+  bool due(std::uint64_t now, bool marks_up, std::uint64_t last_show_ms) const noexcept {
+    return owed_ && !marks_up && (!last_show_ms || now >= last_show_ms + GapMs);
+  }
+  // The marks went up. Only a show that serves a loss holds them up.
+  void shown(std::uint64_t now) noexcept {
+    if (owed_)
+      hold_until_ = std::max(hold_until_, now + HoldMs);
+    owed_ = false;
+  }
+  // The marks came down. Inside the hold (the time limit, in a long burst of
+  // losses) the latest replacements still need them: another show is owed.
+  void taken_down(std::uint64_t now) noexcept { owed_ = owed_ || now < hold_until_; }
+  // Whether the marks must stay up, or go up, for a replacement.
+  bool pending(std::uint64_t now) const noexcept { return owed_ || now < hold_until_; }
+  void reset() noexcept { *this = {}; }
+
+ private:
+  bool owed_ = false;
+  std::uint64_t hold_until_ = 0;
+};
+
 struct Gauge {
   std::array<char, 48> section{}, name{};
   std::uint8_t index{};
