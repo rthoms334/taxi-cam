@@ -1,6 +1,7 @@
 #include "../../src/setup/marks_package.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include "../../src/app/legacy_display_names.hpp"
 
 namespace {
@@ -140,6 +141,18 @@ int main() {
     fs::create_directories(community);
     fs::create_directories(other / marks_package::PackageName);
     const auto write = [](const fs::path& path, std::string_view text) { std::ofstream(path, std::ios::binary) << text; };
+    // A file deleted a moment ago can stay listed for some milliseconds
+    // while another program has it open (marks_package::detail::remove_tree).
+    const auto erase = [](const fs::path& path) { require(marks_package::detail::remove_tree(path), "a test file or folder is deleted"); };
+    // Ours deletes files of the other mode best effort, without waiting.
+    const auto cleared = [](const fs::path& path) {
+      for (unsigned attempt = 0; attempt < 40; ++attempt) {
+        if (marks_package::detail::absent(path))
+          return true;
+        Sleep(25);
+      }
+      return false;
+    };
     write(stock_page, Stock);
     write(simulator / "Packages" / "asobo-vcockpits-core" / "manifest.json", "{ \"minimum_game_version\": \"1.9.21\" }");
     using marks_package::Outcome;
@@ -201,12 +214,11 @@ int main() {
               "a page taken by another package rewrites ours");
       require(fs::exists(package / marks_package::PageRelative), "a held page stays for now");
       CloseHandle(held);
-      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::current &&
-                  !fs::exists(package / marks_package::PageRelative),
-              "a page let go is removed at the next check");
+      require(
+          marks_package::ensure(simulator, community, "helper", 0) == Outcome::current && cleared(package / marks_package::PageRelative),
+          "a page let go is removed at the next check");
       const auto script_file = package / marks_package::ScriptRelative;
-      require(fs::exists(script_file) && !fs::exists(package / marks_package::PageRelative) &&
-                  !fs::exists(package / marks_package::HelperRelative),
+      require(fs::exists(script_file) && cleared(package / marks_package::PageRelative) && cleared(package / marks_package::HelperRelative),
               "ours holds the script only");
       require(read(script_file).rfind("class VCockpitPanel {}", 0) == 0 && read(script_file).find("helper") != std::string::npos,
               "the stock script with the helper after it");
@@ -229,16 +241,16 @@ int main() {
       require(marks_package::takers(community).page.empty(), "an unlisted copy takes nothing");
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
                   fs::exists(package / marks_package::PageRelative) && fs::exists(package / marks_package::HelperRelative) &&
-                  !fs::exists(script_file),
+                  cleared(script_file),
               "back on the page, with no script left behind");
       write(other / "manifest.json", "{ " + listed + " }");
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(script_file) &&
-                  !fs::exists(package / marks_package::PageRelative),
+                  cleared(package / marks_package::PageRelative),
               "an unhinted package taking the page moves ours to the script as well");
       // The other add-on removed: ours goes back to the page.
-      fs::remove_all(other);
+      erase(other);
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
-                  fs::exists(package / marks_package::PageRelative) && !fs::exists(script_file),
+                  fs::exists(package / marks_package::PageRelative) && cleared(script_file),
               "a removed package returns ours to the page");
       // A taken page that doesn't load VCockpit.js: that add-on works alone.
       fs::create_directories((other / marks_package::PageRelative).parent_path());
@@ -256,16 +268,16 @@ int main() {
             "{ \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.js\" ] }");
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict && !fs::exists(package),
               "a taken script leaves ours out while the page is taken");
-      fs::remove_all(other);
+      erase(other);
       require(
           marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(package / marks_package::PageRelative),
           "with the page free, ours replaces the page and loads that package's script");
-      fs::remove_all(script_tool);
+      erase(script_tool);
       // The stock script gone while the page is taken: like a changed page.
       fs::create_directories((other / marks_package::PageRelative).parent_path());
       write(other / marks_package::PageRelative, other_page);
       write(other / "manifest.json", "{ " + listed + " }");
-      fs::remove(stock_script);
+      erase(stock_script);
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::removed && !fs::exists(package),
               "no stock script removes ours");
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::page_changed, "and keeps saying so");
@@ -280,7 +292,7 @@ int main() {
       // (FILETIME 1: long before this package was written): a switch while
       // it runs keeps the old mode's file for that session, and the file goes
       // at the first check of a session started after the switch.
-      fs::remove_all(other);
+      erase(other);
       require(marks_package::ensure(simulator, community, "helper", 1) == Outcome::written &&
                   fs::exists(package / marks_package::PageRelative) && fs::exists(script_file),
               "a switch while the simulator runs keeps its mounted script");
@@ -290,7 +302,7 @@ int main() {
           marks_package::ensure(simulator, community, "helper", marks_package::StartUnknown) == Outcome::current && fs::exists(script_file),
           "a simulator whose start can't be read keeps it too");
       require(marks_package::ensure(simulator, community, "helper", marks_package::detail::file_time(marker) + 1) == Outcome::current &&
-                  !fs::exists(script_file),
+                  cleared(script_file),
               "a session started after the switch lets it go");
       fs::create_directories((other / marks_package::PageRelative).parent_path());
       write(other / marks_package::PageRelative, other_page);
@@ -301,8 +313,8 @@ int main() {
       require(marks_package::ensure(simulator, community, "helper", marks_package::StartUnknown) == Outcome::current &&
                   fs::exists(package / marks_package::PageRelative) && fs::exists(package / marks_package::HelperRelative),
               "an unknown start keeps the mounted page and helper too");
-      fs::remove_all(other);
-      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && !fs::exists(script_file) &&
+      erase(other);
+      require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && cleared(script_file) &&
                   fs::exists(package / marks_package::PageRelative),
               "without it ours is on the page again, the script gone with no simulator running");
     }
@@ -324,6 +336,51 @@ int main() {
     fs::remove_all(community / "livery-only", ignored);
     require(marks_package::remove(community) && !fs::exists(package), "the uninstaller removes our package");
     require(marks_package::remove(community), "nothing left to remove");
+
+    // A file another program has open for a moment (seen as "directory not
+    // empty", 2026-11-09): the delete waits for it, rather than stopping with
+    // the page gone and the marker left.
+    require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written, "written again to be deleted");
+    const auto hold = [&](DWORD share) {
+      return CreateFileW((package / marks_package::PageRelative).c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+    };
+    // Whether it had gone when remove() said so, with the handle let go a
+    // moment after remove() starts.
+    const auto removed_while_held = [&](HANDLE held) {
+      std::thread release([held] {
+        Sleep(40);
+        CloseHandle(held);
+      });
+      const bool removed = marks_package::remove(community) && marks_package::detail::absent(package);
+      release.join();
+      return removed;
+    };
+    constexpr DWORD ShareAll = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    const HANDLE held_page = hold(ShareAll);
+    require(held_page != INVALID_HANDLE_VALUE, "our page can be held open while it is deleted");
+    require(removed_while_held(held_page), "a delete held up for a moment finishes");
+    // The folder itself held open: deleted without an error, yet still listed.
+    require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written, "written again for its folder to be held");
+    const HANDLE held_folder =
+        CreateFileW(package.c_str(), GENERIC_READ, ShareAll, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    require(held_folder != INVALID_HANDLE_VALUE, "our folder can be held open while it is deleted");
+    require(removed_while_held(held_folder), "a folder still listed after its delete is waited for");
+    // Held for longer than the delete waits: it says so.
+    require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written, "written again to be held");
+    {
+      const HANDLE held = hold(FILE_SHARE_READ);
+      require(held != INVALID_HANDLE_VALUE, "our page can be held against deletes");
+      const bool removed = marks_package::remove(community);
+      CloseHandle(held);
+      require(!removed && fs::exists(package), "a delete held up for good reports it");
+    }
+    // What it had already deleted comes back: the marker is not enough.
+    erase(package / marks_package::HelperRelative);
+    require(
+        marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(package / marks_package::HelperRelative),
+        "a package missing one of its files is rewritten");
+    require(marks_package::remove(community) && !fs::exists(package), "and goes once it is let go");
 
     // A PC with both builds: each simulator's own Community folder, never
     // the other's (Steam test, 2026-11-04: the Store's was checked while
@@ -349,12 +406,12 @@ int main() {
     require(marks_package::community_folder("C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content") == store_community,
             "a Store install uses the Store's");
     require(marks_package::community_folders() == std::vector<fs::path>{store_community, steam_community}, "the uninstaller sees both");
-    fs::remove(store_cfg);
+    erase(store_cfg);
     require(marks_package::community_folder("C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content") == steam_community,
             "an install without Store settings falls back to Steam's");
     SetEnvironmentVariableW(L"LOCALAPPDATA", saved_local);
     SetEnvironmentVariableW(L"APPDATA", saved_roaming);
-    fs::remove_all(root, ignored);
+    erase(root);
   }
   std::printf("marks-package: %u checks passed\n", checks);
   return 0;
