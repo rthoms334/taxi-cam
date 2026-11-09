@@ -59,7 +59,7 @@ What you can do:
 
 - **Check you have the real file.** Download only from [the latest release](https://github.com/rthoms334/taxi-cam/releases/latest) on this repository. Each release includes a `SHA256SUMS.txt` asset listing the published setup and ZIP hashes; compare your download against it by running `Get-FileHash <path-to-file>` in PowerShell. If the hashes match, the file is the one that was published here.
 - **Report the false positive to Microsoft.** The most effective fix is for Microsoft to correct the verdict: submit the file at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission). Corrections usually apply within a day or two and reach everyone through a Defender definition update.
-- **Tell us.** Open a report with the exact detection name (Windows Security → Virus & threat protection → Protection history), the file and its SHA-256, and your Defender security-intelligence version, so the detection can be submitted and tracked.
+- **Tell us.** [Open a bug report on GitHub](https://github.com/rthoms334/taxi-cam/issues/new?template=bug_report.yml) with the exact detection name (Windows Security → Virus & threat protection → Protection history), the file and its SHA-256, and your Defender security-intelligence version, so the detection can be submitted and tracked.
 
 Please don't disable your antivirus to work around this. Only restore the file from quarantine if you have verified the download against the published hash and you understand the risk.
 
