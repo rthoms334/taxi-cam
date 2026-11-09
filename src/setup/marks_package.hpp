@@ -278,6 +278,32 @@ inline bool exists(const std::filesystem::path& path) {
   std::error_code ignored;
   return std::filesystem::exists(path, ignored);
 }
+// Whether nothing of that name is left. Something deleted while another
+// program still had it open stays listed until that program lets go.
+inline bool absent(const std::filesystem::path& path) noexcept {
+  if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+    return false;
+  const auto error = GetLastError();
+  return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+// Deletes a folder or file and waits until it has really gone. Windows can
+// refuse a folder's delete (not empty) or keep it listed while something still
+// has a file in it open: 0.1 to 0.4% of deletes here, at any file age, cleared
+// within 18 ms (2026-11-09). A delete that stops there leaves the package
+// without its page, or an empty folder that is no longer recognisably ours.
+inline bool remove_tree(const std::filesystem::path& path) {
+  constexpr unsigned Tries = 20;
+  constexpr DWORD RetryMs = 25;
+  for (unsigned attempt = 1;; ++attempt) {
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+    if (!error && absent(path))
+      return true;
+    if (attempt == Tries)
+      return false;
+    Sleep(RetryMs);
+  }
+}
 }  // namespace detail
 
 // The Community folder named by one simulator's UserCfg.opt, or empty.
@@ -428,9 +454,7 @@ inline bool remove_named(const std::filesystem::path& community, const wchar_t* 
   const auto package = community / name;
   if (!detail::exists(package / MarkerName))
     return !detail::exists(package);
-  std::error_code error;
-  std::filesystem::remove_all(package, error);
-  return !error;
+  return detail::remove_tree(package);
 }
 // Removes the package Taxi Cam made, under either name (the uninstaller).
 // True when none is left.
@@ -563,7 +587,10 @@ inline Outcome ensure(const std::filesystem::path& simulator,
       }
   };
   const auto expected = marker_text(detail::sha256(source), detail::sha256(helper), mode);
-  if (ours && detail::read_file(marker, recorded) && recorded == expected) {
+  // The marker alone doesn't say the files are there: a delete that gave up
+  // part way leaves it behind without them.
+  const bool complete = std::all_of(files.begin(), files.end(), [&](const auto& file) { return detail::exists(package / file.first); });
+  if (ours && complete && detail::read_file(marker, recorded) && recorded == expected) {
     if (!started || (started != StartUnknown && detail::file_time(marker) < started))
       clear_unused();
     return Outcome::current;
@@ -572,9 +599,8 @@ inline Outcome ensure(const std::filesystem::path& simulator,
   const bool fresh = !detail::exists(package);
   const auto core = package / L"html_ui\\Pages\\VCockpit\\Core";
   const auto give_up = [&] {
-    std::error_code ignored;
     if (fresh && !detail::exists(marker))
-      std::filesystem::remove_all(package, ignored);
+      detail::remove_tree(package);
     return Outcome::failed;
   };
   std::filesystem::create_directories(core, error);
