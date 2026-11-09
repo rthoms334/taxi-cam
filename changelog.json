@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.3.5",
+      "date": "2026-11-09",
+      "fixes": [
+        "When the PMDG 777 replaces its lower display during a flight, Taxi Cam now moves the camera to the new display at once, instead of leaving the display without it until its code is read again."
+      ]
+    },
+    {
       "version": "1.3.4",
       "date": "2026-11-09",
       "fixes": [

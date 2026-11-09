@@ -103,9 +103,54 @@ int main() {
   require(key_of(a380, 1540) == "@pfd#0/2", "a copy has its source's key");
   alive = {1540, 1600};
   a380.retain(live);
-  require(a380.resolve("@pfd#0/2", feeds, 2) == 0, "a copy alone has no owner to rank");
-  require(key_of(a380, 1540).empty() && key_of(a380, 1600) == "@pfd",
-          "a copy whose source is gone has no key, so it is never listed as its twin");
+  require(a380.resolve("@pfd#0/2", feeds, 2) == 1540 && a380.resolve("@pfd#1/2", feeds, 2) == 1600,
+          "a copy whose source is gone stands in for it, in its place among the twins");
+  require(key_of(a380, 1540) == "@pfd#0/2" && key_of(a380, 1600) == "@pfd#1/2", "and keeps its source's key, never its twin's");
+  // The replacement's own marks, read later, take over from the copy.
+  alive = {1540, 1600, 1700, 1710};
+  a380.read(1700, pfdl, 1);
+  const std::pair<std::uint64_t, std::uint64_t> refed[] = {{1528, 1540}, {1522, 1528}, {1700, 1710}};
+  require(a380.resolve("@pfd#0/2", refed, 3) == 1700 && a380.inherit(refed, 3, live) == 1 && a380.resolve("@pfd#0/2", refed, 3) == 1710,
+          "a read texture of the panel outranks the copy standing in, and its own copy is followed");
+
+  // PMDG 777 (issue 97, 2026-11-04): the lower display was replaced nine
+  // times in 75 s, each new texture a copy of the one before, the old one
+  // destroyed within the second: 1089 -> 1155 -> 1156 -> 1157 within 0.7 s,
+  // then 1158, and so on. The DUs' texture stayed. Only the last of a chain
+  // is alive by the time the bridge looks.
+  Store triple;
+  const panel_marks::Mark lower[] = {mark("VCockpit03", "EICASCDU", 0)};
+  triple.read(724, four, 4);
+  triple.read(1089, lower, 1);
+  std::vector<std::uint64_t> there{724, 1157};
+  const auto present = [&](std::uint64_t id) { return std::find(there.begin(), there.end(), id) != there.end(); };
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> replaced{{1089, 1155}, {1155, 1156}, {1156, 1157}};
+  require(triple.inherit(replaced.data(), replaced.size(), present) == 1, "the live end of a chain of replaced textures takes the marks");
+  triple.retain(present);
+  require(triple.resolve("@EICASCDU", replaced.data(), replaced.size()) == 1157 && key_of(triple, 1157) == "@EICASCDU",
+          "a display replaced by its copy keeps its name");
+  require(triple.resolve("@DU_LeftInboard", replaced.data(), replaced.size()) == 724, "the other displays stay");
+  there = {724, 1158};
+  replaced.push_back({1157, 1158});
+  require(triple.inherit(replaced.data(), replaced.size(), present) == 1, "the next replacement takes them from the copy");
+  triple.retain(present);
+  require(triple.resolve("@EICASCDU", replaced.data(), replaced.size()) == 1158, "replacement after replacement");
+  // Its marks read again (ReplacementWatch): the same name, now its own.
+  triple.read(1158, lower, 1);
+  require(triple.resolve("@EICASCDU", replaced.data(), replaced.size()) == 1158 && !triple.find(1158)->copied,
+          "confirmed by its own marks");
+  // A texture destroyed without a copy has nothing to stand in.
+  there = {724, 1200};
+  triple.inherit(replaced.data(), replaced.size(), present);
+  triple.retain(present);
+  require(triple.resolve("@EICASCDU", replaced.data(), replaced.size()) == 0, "no copy, no name until the marks are read");
+  // A live texture without marks on the way is not skipped.
+  Store waits;
+  waits.read(10, lower, 1);
+  std::vector<std::uint64_t> held{10, 11, 12};
+  const auto holding = [&](std::uint64_t id) { return std::find(held.begin(), held.end(), id) != held.end(); };
+  const std::pair<std::uint64_t, std::uint64_t> other[] = {{20, 11}, {11, 12}};
+  require(waits.inherit(other, 2, holding) == 0, "a copy of an unread live texture takes nothing");
 
   // A recorded copy into a texture with marks of its own is another display:
   // routing stays. Of two copies, the newest is followed.

@@ -228,15 +228,42 @@ class Store {
   // one (FlyByWire A380X, FSLabs): the copy carries the same picture, so it
   // takes the source's marks. feeds are (source, destination) copies.
   // Returns how many textures took marks.
+  //
+  // Call it before retain(): a display can be replaced by a copy of itself
+  // and destroyed before the next pass (the PMDG 777's lower display, 9
+  // times in 75 s on 2026-11-04, three of them within 0.7 s, each copied
+  // from the one before), so the source of a live copy may be gone already,
+  // and so may the textures the picture passed through on its way.
   template <class Alive>
   std::size_t inherit(const std::pair<std::uint64_t, std::uint64_t>* feeds, std::size_t count, Alive alive) {
+    // The read texture a copy's picture came from, back through textures
+    // that are gone. A live texture without marks on the way ends the walk:
+    // it takes its own marks first, then passes them on.
+    const auto origin = [&](std::uint64_t id) -> const Texture* {
+      for (std::size_t step = 0; step < count; ++step) {
+        std::uint64_t from = 0;
+        for (std::size_t i = 0; i < count && !from; ++i)
+          if (feeds[i].second == id && feeds[i].first != id)
+            from = feeds[i].first;
+        if (!from)
+          return nullptr;
+        if (const auto* source = find(from))
+          return source;
+        if (alive(from))
+          return nullptr;
+        id = from;
+      }
+      return nullptr;
+    };
     std::size_t taken = 0;
     for (bool more = true; more;) {
       more = false;
       for (std::size_t i = 0; i < count; ++i) {
-        const auto [from, to] = feeds[i];
-        const auto* source = find(from);
-        if (!source || find(to) || !alive(to))
+        const auto to = feeds[i].second;
+        if (find(to) || !alive(to))
+          continue;
+        const auto* source = origin(to);
+        if (!source)
           continue;
         Texture copy{to, true, source->gauges};
         textures_.push_back(std::move(copy));
@@ -247,29 +274,34 @@ class Store {
     return taken;
   }
   // The textures carrying a gauge, one per panel (a recreated panel's newest
-  // texture; copies follow their source), in panel number order.
+  // texture; copies follow their source), in panel number order. A panel
+  // whose read texture is gone is stood in for by its newest copy: the
+  // simulator replaced the display with it (the PMDG 777), and it keeps the
+  // panel's place among its twins until the replacement's own marks are read.
   std::vector<const Texture*> owners(const std::string& gauge, bool prefix = false) const {
     std::vector<const Texture*> out;
-    for (const auto& texture : textures_) {
-      const auto* g = texture.copied ? nullptr : texture.gauge(gauge, prefix);
-      if (!g)
-        continue;
-      const auto panel = panel_number(g->section.data());
-      auto same_panel = std::find_if(out.begin(), out.end(),
-                                     [&](const Texture* t) { return panel_number(t->gauge(gauge, prefix)->section.data()) == panel; });
-      if (same_panel == out.end())
-        out.push_back(&texture);
-      else if (texture.id > (*same_panel)->id)
-        *same_panel = &texture;
+    const auto panel_of = [&](const Texture* t) { return panel_number(t->gauge(gauge, prefix)->section.data()); };
+    std::size_t read = 0;  // out[0..read) are textures with marks of their own.
+    for (const bool copies : {false, true}) {
+      for (const auto& texture : textures_) {
+        if (texture.copied != copies || !texture.gauge(gauge, prefix))
+          continue;
+        const auto panel = panel_of(&texture);
+        const auto same_panel = std::find_if(out.begin(), out.end(), [&](const Texture* t) { return panel_of(t) == panel; });
+        if (same_panel == out.end())
+          out.push_back(&texture);
+        else if (static_cast<std::size_t>(same_panel - out.begin()) >= read && texture.id > (*same_panel)->id)
+          *same_panel = &texture;
+      }
+      if (!copies)
+        read = out.size();
     }
-    std::sort(out.begin(), out.end(), [&](const Texture* a, const Texture* b) {
-      return panel_number(a->gauge(gauge, prefix)->section.data()) < panel_number(b->gauge(gauge, prefix)->section.data());
-    });
+    std::sort(out.begin(), out.end(), [&](const Texture* a, const Texture* b) { return panel_of(a) < panel_of(b); });
     return out;
   }
   // A texture's key: its identifying gauge, ranked among the textures that
-  // carry it. A copy has its source's. None when its own panel is not among
-  // them (a copy whose source is gone): any key would name another texture.
+  // carry it. A copy has its source's, also once the source is gone and the
+  // copy stands in for it.
   Key key_of(const Texture& texture) const {
     const auto* first = texture.first();
     if (!first)

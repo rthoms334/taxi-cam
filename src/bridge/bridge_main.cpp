@@ -285,13 +285,16 @@ void service_mark_identity(MarkIdentityState& state,
     const auto alive = [&](std::uint64_t id) {
       return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
     };
-    state.store.retain(alive);
+    // Copies first, then the textures that are gone: a display replaced by a
+    // copy of itself (the PMDG 777) is usually destroyed before this pass,
+    // and its copy can only take the marks while the store still holds them.
     const auto feeds = win::display_feed_pairs();
     if (const auto copied = state.store.inherit(feeds.data(), feeds.size(), alive)) {
       char detail[96];
       std::snprintf(detail, sizeof(detail), "Display marks: %zu display copies took their source's marks.", copied);
       log_status(status, detail);
     }
+    state.store.retain(alive);
     std::array<std::uint64_t, MaxDisplaySides> named{};
     for (unsigned side = 0; profile && side < profile->sides && side < MaxDisplaySides; ++side)
       if (profile->panel_textures[side][0])
@@ -1255,6 +1258,10 @@ DWORD run_impl() {
           lost += gone && entry.read;
           return gone;
         });
+        // Route again on this pass, not up to a second later: a copy that
+        // replaced the texture takes its name over (service_mark_identity).
+        if (lost)
+          next_inventory = 0;
         // Textures already gone at a session's first refresh went with the
         // last flight, while the scan was not allowed: nothing replaces them.
         if (lost && mark_scan.refreshed_epoch == epoch) {
