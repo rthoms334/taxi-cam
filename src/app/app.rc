@@ -12,8 +12,11 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
+   VALUE "CompanyName", "Taxi Cam\0"
    VALUE "FileDescription", "Taxi Cam Windows companion\0"
    VALUE "FileVersion", TAXI_CAM_VERSION "\0"
+   VALUE "InternalName", "taxi-cam\0"
+   VALUE "LegalCopyright", "Copyright (C) 2026 Robert Thomson. GPL-3.0-only.\0"
    VALUE "ProductName", "Taxi Cam\0"
    VALUE "ProductVersion", TAXI_CAM_VERSION "\0"
    VALUE "OriginalFilename", "taxi-cam.exe\0"
