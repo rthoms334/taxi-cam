@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.3.4",
+      "date": "2026-11-09",
+      "fixes": [
+        "Taxi Cam now keeps up when an aircraft replaces a cockpit display during a flight: it reads the new display's code again, so your cameras and the Displays list carry on."
+      ]
+    },
+    {
       "version": "1.3.3",
       "date": "2026-11-05",
       "fixes": [

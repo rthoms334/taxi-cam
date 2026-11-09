@@ -256,11 +256,15 @@ panel size.
   the flight load, and nothing was read until the first re-show ~45 s later.
 - **Take-down policy (bridge).** The bridge signals "read" as soon as every
   display the profile names is found, without waiting for the cockpit's other
-  panel textures, and never asks for the marks again while those stay found.
-  Otherwise they stay up at most 20 s (`MarkShowMs`). Opening the companion's
-  aircraft setup asks for them once an aircraft session (the setup lists only
-  read textures), under the same 20 s limit. Re-shows are only for a texture created since the
-  last show, while a display is still to find or the setup is open. Before
+  panel textures. Otherwise they stay up at most 20 s (`MarkShowMs`). A read
+  texture being destroyed brings them back on any aircraft, found or not, and
+  holds them up 5 s past the last loss (`ReplacementWatch`): on 2026-11-08 the
+  Fenix A320 recreated 59 display textures in 86 minutes of flight, and the
+  list fell to none identified with 20 still present. Opening the companion's
+  aircraft setup asks for them each time (the setup lists only read textures),
+  and so does a camera asked for on a side with no texture. Other re-shows are
+  for a texture created since the last show, while a display is still to find
+  or the setup is open. Before
   this (FBW A380X, 2026-11-04) the scan waited on every texture: about 13 of
   22 are never drawn, entries churned, the scan never finished, so the marks
   stayed until the page cap and came back twice after Ready.

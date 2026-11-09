@@ -163,6 +163,60 @@ int main() {
   PackageVerdict menu;
   require(!menu.observe(false, 10, 1, true), "the main menu's settled scan");
 
+  // A read texture destroyed with the marks down: they go up at once, stay up
+  // for its replacement, then may come down (Fenix A320, 2026-11-08).
+  const auto hold = ReplacementWatch::HoldMs, gap = ReplacementWatch::GapMs;
+  ReplacementWatch watch;
+  require(!watch.pending(1000) && !watch.due(1000, false, 0), "nothing lost, nothing to show");
+  watch.lost(100000, false);
+  require(watch.pending(100000) && watch.due(100000, false, 50000), "a loss asks for the marks");
+  watch.shown(100000);
+  require(!watch.due(100001, true, 100000), "shown once");
+  require(watch.pending(100000 + hold - 1), "held up for the replacement");
+  require(!watch.pending(100000 + hold), "free to come down after the hold");
+  watch.taken_down(100000 + hold);
+  require(!watch.pending(100000 + hold + 1) && !watch.due(200000, false, 100000), "served: no further show");
+
+  // Too soon after the last show: the loss waits for the gap, and stays
+  // pending so "displays found" can't take the marks down meanwhile.
+  ReplacementWatch soon;
+  soon.lost(100000, false);
+  require(!soon.due(100000, false, 95000) && soon.pending(100000 + hold), "waits out the gap");
+  require(soon.due(95000 + gap, false, 95000), "shown once the gap has passed");
+  require(!soon.due(95000 + gap, true, 95000), "not asked for again while they are already up");
+
+  // A burst while the marks are up needs no second show; each loss extends the
+  // hold.
+  ReplacementWatch burst;
+  burst.lost(10000, false);
+  burst.shown(10000);
+  burst.lost(13000, true);
+  require(burst.pending(13000 + hold - 1) && !burst.due(40000, true, 10000), "a loss with the marks up extends the hold");
+  require(!burst.pending(13000 + hold), "the hold ends after the last loss");
+  burst.taken_down(13000 + hold);
+  require(!burst.due(40000, false, 10000), "that burst was served by its one show");
+
+  // The time limit inside the hold: the newest replacement still needs marks.
+  ReplacementWatch limited;
+  limited.lost(10000, false);
+  limited.shown(10000);
+  limited.lost(29000, true);
+  limited.taken_down(30000);
+  require(limited.pending(30000 + hold) && limited.due(30000, false, 10000), "cut off by the time limit: shown again");
+
+  // A show for another reason (session start, setup opened) holds nothing up,
+  // so the marks still come down as soon as the displays are found.
+  ReplacementWatch plain;
+  plain.shown(10000);
+  require(!plain.pending(10000), "no loss, no hold");
+  // But a loss waiting when such a show happens is served by it.
+  ReplacementWatch served;
+  served.lost(10000, false);
+  served.shown(10002);
+  require(!served.due(30000, false, 10002) && served.pending(10002 + hold - 1), "another show serves the loss, and holds for it");
+  served.reset();
+  require(!served.pending(10003), "a new session starts clean");
+
   std::printf("mark-identity: %u checks passed\n", checks);
   return 0;
 }
