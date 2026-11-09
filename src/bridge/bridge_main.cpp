@@ -857,18 +857,19 @@ DWORD run_impl() {
   // the pages are then told to take their marks down. It uses the one
   // snapshot slot only while the companion's own picture is not pending.
   // The marks are on the cockpit's real screens, so they go as soon as every
-  // display the aircraft's profile names is found, and do not come back
-  // while it stays found: the rest of the cockpit's panels are not waited
-  // for (the FBW A380X never draws about half of its 22 panel textures, so
-  // waiting for them kept the marks up and brought them back twice after
-  // Ready, 2026-11-04). Otherwise they stay up at most MarkShowMs; opening
-  // the companion's aircraft setup asks for them once a session, as its list
-  // names only textures whose marks were read. They are shown again only for
-  // a texture created since they were last shown, while a display is still
-  // to find or the setup is open (the A350 creates its display textures up
-  // to ~20 s after the flight loads): MarkReshows times a flight, then once
-  // a minute at most while a display the profile names has no texture (one
-  // recreated without a copy).
+  // display the aircraft's profile names is found: the rest of the cockpit's
+  // panels are not waited for (the FBW A380X never draws about half of its 22
+  // panel textures, so waiting for them kept the marks up and brought them
+  // back twice after Ready, 2026-11-04). Otherwise they stay up at most
+  // MarkShowMs. They come back, found or not, when a read texture is destroyed
+  // (mark_identity::ReplacementWatch); each time the companion's aircraft
+  // setup opens, as its list names only textures whose marks were read; and
+  // for a camera asked for on a side with no texture. Otherwise they are shown
+  // again only for a texture created since they were last shown, while a
+  // display is still to find or the setup is open (the A350 creates its
+  // display textures up to ~20 s after the flight loads): MarkReshows times a
+  // flight, then once a minute at most while a display the profile names has
+  // no texture (one recreated without a copy).
   // Pictures without a mark, of several panel textures at once, and none with
   // one: the pages carry no marks, so the package is not loaded
   // (mark_identity::PackageVerdict), once the scan has settled.
@@ -917,7 +918,8 @@ DWORD run_impl() {
     // texture has been destroyed.
     bool session_read = false;
     mark_identity::ReplacementWatch replacements;
-    unsigned lost{};  // Read textures destroyed since the marks last went up for them.
+    unsigned lost{};                  // Read textures destroyed since the marks last went up for them.
+    std::uint64_t refreshed_epoch{};  // The aircraft session the texture list was last refreshed in.
     // Sides a camera is asked for that have no texture, as of the last pass,
     // and those the marks already went up for.
     unsigned wanted_unassigned{}, asked_sides{};
@@ -1253,10 +1255,13 @@ DWORD run_impl() {
           lost += gone && entry.read;
           return gone;
         });
-        if (lost) {
+        // Textures already gone at a session's first refresh went with the
+        // last flight, while the scan was not allowed: nothing replaces them.
+        if (lost && mark_scan.refreshed_epoch == epoch) {
           mark_scan.lost += lost;
           mark_scan.replacements.lost(now, mark_scan.shown_again);
         }
+        mark_scan.refreshed_epoch = epoch;
         for (const auto& record : records) {
           if (!(record.draws || record.activity))
             continue;
@@ -1319,8 +1324,10 @@ DWORD run_impl() {
         mark_scan.shown_again = false;
         mark_scan.replacements.taken_down(now);
       };
-      // A camera asked for on a display with no texture: at once for a side
-      // not asked about yet, then at the slow pace while it stays asked for.
+      // A camera asked for on a display with no texture, with a texture
+      // unread and the marks down: for a side not asked about yet, as soon as
+      // 10 s have passed since the last show; then at the slow pace while it
+      // stays asked for.
       const unsigned unserved_sides = mark_scan.wanted_unassigned & ~mark_scan.asked_sides;
       mark_scan.asked_sides &= mark_scan.wanted_unassigned;
       const bool camera_waits =
