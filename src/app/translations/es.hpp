@@ -507,7 +507,6 @@ inline constexpr Translation SpanishTranslations[]{
      L"Usa Ctrl o Alt con una letra, un número o una tecla de función (excepto F12), o borra el atajo."},
     {L"Use default displays", L"Usar pantallas predeterminadas"},
     {L"WHAT'S NEW", L"NOVEDADES"},
-    {L"WINDOWS COMPANION", L"APLICACIÓN DE WINDOWS"},
     {L"Waiting", L"Esperando"},
     {L"Waiting for Microsoft Flight Simulator 2024", L"Esperando a Microsoft Flight Simulator 2024"},
     {L"Waiting for a display to be found for this aircraft.", L"Esperando a que se encuentre una pantalla para esta aeronave."},

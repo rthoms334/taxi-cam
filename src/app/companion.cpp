@@ -1,4 +1,12 @@
 #include <windows.h>
+#include <objidl.h>
+#include <algorithm>
+// GDI+ draws the antialiased shapes; its headers use the min/max macros.
+namespace Gdiplus {
+using std::max;
+using std::min;
+}  // namespace Gdiplus
+#include <gdiplus.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include "../camera/aircraft_identity.hpp"
@@ -52,8 +60,13 @@ constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CA
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
 constexpr wchar_t GithubUrl[] = L"https://github.com/rthoms334/taxi-cam";
-constexpr COLORREF Background = RGB(17, 21, 28), Sidebar = RGB(12, 16, 22), Card = RGB(26, 32, 41), Border = RGB(44, 54, 67),
-                   Text = RGB(232, 238, 246), Muted = RGB(154, 170, 188), Accent = RGB(66, 219, 184);
+// The palette: three stacked surfaces (the sidebar and picture wells, the
+// page, its cards), the raised fill of a control, hairlines, and the text,
+// state and accent colours.
+constexpr COLORREF Background = RGB(15, 18, 24), Sidebar = RGB(10, 12, 17), Card = RGB(22, 26, 34), Raised = RGB(33, 39, 50),
+                   RaisedHot = RGB(42, 49, 63), Border = RGB(38, 45, 58), BorderStrong = RGB(58, 68, 86), Text = RGB(236, 240, 247),
+                   Muted = RGB(141, 153, 173), Faint = RGB(92, 103, 122), Accent = RGB(64, 217, 182), AccentHot = RGB(108, 232, 204),
+                   AccentTint = RGB(20, 50, 49), Amber = RGB(240, 184, 92), Blue = RGB(126, 176, 255), NoColor = CLR_INVALID;
 HINSTANCE instance{};
 HWND window{}, sidebar_tooltip{}, shortcut_window{};
 HFONT normal{}, small{}, title_font{}, heading{}, version_font{};
@@ -90,7 +103,7 @@ bool hotkey_editor_focused{}, hotkeys_closing{};
 win::CameraButtons button_draft{}, button_saved{};
 win::CameraButtonInput button_input;
 win::CameraButtonRepeatGuard button_repeat;
-int button_capture = -1;  // Action waiting for a controller button in the editor.
+int button_capture = -1;                             // Action waiting for a controller button in the editor.
 std::vector<win::CameraButton> button_capture_down;  // Went down while waiting; the first to come up is set.
 win::Updater updater;
 ULONGLONG next_update_check{};
@@ -122,21 +135,166 @@ void text(HDC dc,
   SetBkMode(dc, TRANSPARENT);
   DrawTextW(dc, value, -1, &r, flags);
 }
+// Antialiased shapes, in device pixels. GDI+ starts on first use and stays
+// for the life of the process.
+bool shapes_ready() {
+  static const bool ready = [] {
+    Gdiplus::GdiplusStartupInput input;
+    ULONG_PTR token{};
+    return Gdiplus::GdiplusStartup(&token, &input, nullptr) == Gdiplus::Ok;
+  }();
+  return ready;
+}
+Gdiplus::Color shape_color(COLORREF color, BYTE alpha = 255) {
+  return Gdiplus::Color(alpha, GetRValue(color), GetGValue(color), GetBValue(color));
+}
+COLORREF blend(COLORREF from, COLORREF to, int percent) {
+  const auto mix = [&](int a, int b) { return static_cast<BYTE>(a + (b - a) * percent / 100); };
+  return RGB(mix(GetRValue(from), GetRValue(to)), mix(GetGValue(from), GetGValue(to)), mix(GetBValue(from), GetBValue(to)));
+}
+void round_path(Gdiplus::GraphicsPath& path, float left, float top, float right, float bottom, float radius) {
+  const float d = std::max(0.f, std::min({radius * 2, right - left, bottom - top}));
+  if (d <= 0) {
+    path.AddRectangle(Gdiplus::RectF(left, top, right - left, bottom - top));
+    return;
+  }
+  path.AddArc(left, top, d, d, 180, 90);
+  path.AddArc(right - d, top, d, d, 270, 90);
+  path.AddArc(right - d, bottom - d, d, d, 0, 90);
+  path.AddArc(left, bottom - d, d, d, 90, 90);
+  path.CloseFigure();
+}
+// A rounded rectangle: its fill, then an outline of `width` pixels inside
+// its bounds. NoColor leaves either out.
+void round_box(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF outline = NoColor, int width = 1) {
+  if (!shapes_ready() || r.right <= r.left || r.bottom <= r.top)
+    return;
+  Gdiplus::Graphics graphics(dc);
+  graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+  graphics.TranslateTransform(-0.5f, -0.5f);  // GDI+ puts pixel centres on whole coordinates.
+  const float left = static_cast<float>(r.left), top = static_cast<float>(r.top), right = static_cast<float>(r.right),
+              bottom = static_cast<float>(r.bottom);
+  if (fill != NoColor) {
+    Gdiplus::GraphicsPath path;
+    round_path(path, left, top, right, bottom, static_cast<float>(radius));
+    Gdiplus::SolidBrush brush(shape_color(fill));
+    graphics.FillPath(&brush, &path);
+  }
+  if (outline != NoColor && width > 0) {
+    const float half = width / 2.f;
+    Gdiplus::GraphicsPath path;
+    round_path(path, left + half, top + half, right - half, bottom - half, std::max(0.f, radius - half));
+    Gdiplus::Pen pen(shape_color(outline), static_cast<float>(width));
+    graphics.DrawPath(&pen, &path);
+  }
+}
+void disc(HDC dc, int cx, int cy, int radius, COLORREF fill, COLORREF outline = NoColor, int width = 1) {
+  round_box(dc, {cx - radius, cy - radius, cx + radius, cy + radius}, radius, fill, outline, width);
+}
+// Round-capped line strokes for the drawn icons: {x1, y1, x2, y2} each.
+void strokes(HDC dc, std::initializer_list<std::array<float, 4>> lines, float width, COLORREF color) {
+  if (!shapes_ready())
+    return;
+  Gdiplus::Graphics graphics(dc);
+  graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+  graphics.TranslateTransform(-0.5f, -0.5f);  // GDI+ puts pixel centres on whole coordinates.
+  Gdiplus::Pen pen(shape_color(color), width);
+  pen.SetStartCap(Gdiplus::LineCapRound);
+  pen.SetEndCap(Gdiplus::LineCapRound);
+  for (const auto& line : lines)
+    graphics.DrawLine(&pen, line[0], line[1], line[2], line[3]);
+}
+// The cards painted on the settings page this frame, so a control knows the
+// surface it sits on (surface_under).
+struct Surface {
+  RECT bounds{};
+  COLORREF color{};
+};
+std::vector<Surface> surfaces;
 void panel(HDC dc, int x, int y, int w, int h, COLORREF color = Card) {
-  HBRUSH brush = CreateSolidBrush(color);
-  HPEN pen = CreatePen(PS_SOLID, 1, Border);
-  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
-  RoundRect(dc, scale(x), scale(y), scale(x + w), scale(y + h), scale(14), scale(14));
-  SelectObject(dc, oldb);
-  SelectObject(dc, oldp);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  const auto r = rectangle(x, y, w, h);
+  surfaces.push_back({r, color});
+  // A well set into a card has no outline of its own; a card has a hairline.
+  round_box(dc, r, scale(color == Card ? 12 : 10), color, color == Card ? Border : blend(color, Text, 6));
+}
+// The colour behind a child control of the settings window.
+COLORREF surface_under(HWND control) {
+  RECT r{};
+  GetWindowRect(control, &r);
+  MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&r), 2);
+  const POINT centre{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+  for (auto surface = surfaces.rbegin(); surface != surfaces.rend(); ++surface)
+    if (PtInRect(&surface->bounds, centre))
+      return surface->color;
+  return centre.x < scale(210) ? Sidebar : Background;
+}
+// A switch: its track and knob, `height` pixels tall and twice as wide less a little.
+int switch_width(int height) {
+  return height * 9 / 5;
+}
+void draw_switch(HDC dc, int x, int y, int height, bool on, bool disabled, COLORREF surface) {
+  const int width = switch_width(height), knob = height / 2 - std::max(2, height / 7);
+  const COLORREF track = disabled ? blend(surface, Text, 8) : on ? Accent : blend(surface, Text, 18);
+  round_box(dc, {x, y, x + width, y + height}, height / 2, track);
+  disc(dc, on ? x + width - height / 2 : x + height / 2, y + height / 2, knob, disabled ? Faint : on ? Sidebar : Text);
+}
+// The one button look. A primary button carries the accent; a chosen one
+// (the current choice of a set) is tinted; the rest are quiet raised fills
+// that lift under the pointer.
+struct ButtonLook {
+  bool primary{}, chosen{}, hot{}, down{}, disabled{}, focus{};
+};
+void button_box(HDC dc, const RECT& r, const ButtonLook& look, COLORREF surface, int radius = 8) {
+  const COLORREF fill = look.disabled  ? blend(surface, Sidebar, 40)
+                        : look.primary ? (look.down  ? blend(Accent, Sidebar, 18)
+                                          : look.hot ? AccentHot
+                                                     : Accent)
+                        : look.chosen  ? (look.hot ? blend(AccentTint, Accent, 10) : AccentTint)
+                        : look.down    ? blend(Raised, Sidebar, 35)
+                        : look.hot     ? RaisedHot
+                                       : Raised;
+  const COLORREF outline = look.disabled  ? blend(surface, Text, 5)
+                           : look.primary ? NoColor
+                           : look.chosen  ? Accent
+                           : look.focus   ? Accent
+                           : look.hot     ? BorderStrong
+                                          : blend(Raised, Text, 7);
+  round_box(dc, r, scale(radius), fill, outline, scale(1));
+}
+COLORREF button_text(const ButtonLook& look) {
+  return look.disabled ? Faint : look.primary ? Sidebar : look.chosen ? Accent : Text;
+}
+// The button under the pointer, so its painter can lift it.
+HWND hot_button{};
+LRESULT CALLBACK hover_tracking(HWND control, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
+  if (message == WM_MOUSEMOVE && hot_button != control) {
+    const HWND before = hot_button;
+    hot_button = control;
+    if (before && IsWindow(before))
+      InvalidateRect(before, nullptr, FALSE);
+    TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, control, 0};
+    TrackMouseEvent(&track);
+    InvalidateRect(control, nullptr, FALSE);
+  } else if (message == WM_MOUSELEAVE && hot_button == control) {
+    hot_button = nullptr;
+    InvalidateRect(control, nullptr, FALSE);
+  } else if (message == WM_NCDESTROY) {
+    if (hot_button == control)
+      hot_button = nullptr;
+    RemoveWindowSubclass(control, hover_tracking, id);
+  }
+  return DefSubclassProc(control, message, w, l);
+}
+void track_hover(HWND control, const wchar_t* type) {
+  if (control && !lstrcmpiW(type, L"BUTTON"))
+    SetWindowSubclass(control, hover_tracking, 7, 0);
 }
 HWND child(const wchar_t* type, const wchar_t* label, int id, int x, int y, int w, int h, DWORD style = 0) {
   HWND value = CreateWindowExW(0, type, label, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style, scale(x), scale(y), scale(w), scale(h), window,
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
   SendMessageW(value, WM_SETFONT, reinterpret_cast<WPARAM>(normal), TRUE);
   SetWindowTheme(value, L"DarkMode_Explorer", nullptr);
+  track_hover(value, type);
   controls.push_back(value);
   return value;
 }
@@ -153,62 +311,90 @@ void center_combo(HWND combo, int y, int height) {
                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 void draw_bug_icon(HDC dc, const RECT& bounds, COLORREF color) {
-  const int x = (bounds.left + bounds.right) / 2 - scale(20), y = (bounds.top + bounds.bottom) / 2 - scale(20);
-  HPEN pen = CreatePen(PS_SOLID, scale(2), color);
-  const auto old_pen = SelectObject(dc, pen), old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-  const auto line = [&](int x1, int y1, int x2, int y2) {
-    MoveToEx(dc, x + scale(x1), y + scale(y1), nullptr);
-    LineTo(dc, x + scale(x2), y + scale(y2));
+  // On a 16-unit square: head, body, antennae and three legs a side.
+  const float u = scale(16) / 16.f, x = (bounds.left + bounds.right) / 2.f - 8 * u, y = (bounds.top + bounds.bottom) / 2.f - 8 * u,
+              pen = std::max(1.f, scale(16) / 11.f);
+  const auto line = [&](float x1, float y1, float x2, float y2) {
+    strokes(dc, {{x + x1 * u, y + y1 * u, x + x2 * u, y + y2 * u}}, pen, color);
   };
-  line(17, 10, 14, 6);
-  line(23, 10, 26, 6);
-  Ellipse(dc, x + scale(16), y + scale(9), x + scale(24), y + scale(17));
-  Ellipse(dc, x + scale(13), y + scale(14), x + scale(27), y + scale(31));
-  line(20, 15, 20, 30);
-  for (const bool right : {false, true}) {
-    const auto side = [&](int coordinate) { return right ? 40 - coordinate : coordinate; };
-    line(side(13), 18, side(8), 15);
-    line(side(13), 23, side(6), 23);
-    line(side(14), 28, side(8), 32);
+  if (shapes_ready()) {
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::Pen body(shape_color(color), pen);
+    graphics.DrawEllipse(&body, x + 4.5f * u, y + 5 * u, 7 * u, 9.5f * u);
+    graphics.DrawArc(&body, x + 5.5f * u, y + 2.2f * u, 5 * u, 5 * u, 180, 180);
   }
-  SelectObject(dc, old_brush);
-  SelectObject(dc, old_pen);
-  DeleteObject(pen);
+  line(6, 2.6f, 4.6f, 1);
+  line(10, 2.6f, 11.4f, 1);
+  for (const bool right : {false, true}) {
+    const auto side = [&](float coordinate) { return right ? 16 - coordinate : coordinate; };
+    line(side(4.6f), 7.5f, side(1.8f), 6);
+    line(side(4.5f), 10, side(1.2f), 10);
+    line(side(4.9f), 12.4f, side(2), 14.2f);
+  }
+}
+// Sidebar icons, drawn in a box of `size` pixels at (x, y).
+void draw_nav_icon(HDC dc, int which, int x, int y, int size, COLORREF color) {
+  const float u = size / 16.f, pen = std::max(1.f, size / 11.f);
+  const auto fx = [&](float v) { return x + v * u; };
+  const auto fy = [&](float v) { return y + v * u; };
+  if (which == 0) {  // Overview: four tiles.
+    for (const auto& tile : {std::array<float, 2>{1.5f, 1.5f}, {9, 1.5f}, {1.5f, 9}, {9, 9}})
+      round_box(dc,
+                {static_cast<LONG>(fx(tile[0])), static_cast<LONG>(fy(tile[1])), static_cast<LONG>(fx(tile[0] + 5.5f)),
+                 static_cast<LONG>(fy(tile[1] + 5.5f))},
+                std::max(1, size / 10), NoColor, color, std::max(1, static_cast<int>(pen + 0.5f)));
+  } else if (which == 1) {  // Setup: a display on its stand.
+    round_box(dc, {static_cast<LONG>(fx(1)), static_cast<LONG>(fy(2)), static_cast<LONG>(fx(15)), static_cast<LONG>(fy(11.5f))},
+              std::max(1, size / 8), NoColor, color, std::max(1, static_cast<int>(pen + 0.5f)));
+    strokes(dc, {{fx(8), fy(11.5f), fx(8), fy(14)}, {fx(5), fy(14), fx(11), fy(14)}}, pen, color);
+  } else if (which == 2) {  // Options: three sliders.
+    strokes(dc,
+            {{fx(1.5f), fy(3.5f), fx(14.5f), fy(3.5f)}, {fx(1.5f), fy(8), fx(14.5f), fy(8)}, {fx(1.5f), fy(12.5f), fx(14.5f), fy(12.5f)}},
+            pen, color);
+    for (const auto& knob : {std::array<float, 2>{10.5f, 3.5f}, {5, 8}, {9, 12.5f}})
+      disc(dc, static_cast<int>(fx(knob[0])), static_cast<int>(fy(knob[1])), std::max(2, size / 7), color);
+  } else if (which == 3) {  // Diagnostics: a trace.
+    strokes(dc,
+            {{fx(1), fy(9), fx(4.5f), fy(9)},
+             {fx(4.5f), fy(9), fx(6.5f), fy(3)},
+             {fx(6.5f), fy(3), fx(9.5f), fy(13)},
+             {fx(9.5f), fy(13), fx(11.5f), fy(9)},
+             {fx(11.5f), fy(9), fx(15), fy(9)}},
+            pen, color);
+  } else if (which == 4) {  // Donate: a heart.
+    if (shapes_ready()) {
+      Gdiplus::Graphics graphics(dc);
+      graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+      Gdiplus::GraphicsPath path;
+      path.AddBezier(fx(8), fy(14), fx(1), fy(9.5f), fx(0.5f), fy(4), fx(4.5f), fy(2.5f));
+      path.AddBezier(fx(4.5f), fy(2.5f), fx(6.5f), fy(2), fx(8), fy(3.5f), fx(8), fy(5));
+      path.AddBezier(fx(8), fy(5), fx(8), fy(3.5f), fx(9.5f), fy(2), fx(11.5f), fy(2.5f));
+      path.AddBezier(fx(11.5f), fy(2.5f), fx(15.5f), fy(4), fx(15), fy(9.5f), fx(8), fy(14));
+      Gdiplus::Pen outline(shape_color(color), pen);
+      outline.SetLineJoin(Gdiplus::LineJoinRound);
+      graphics.DrawPath(&outline, &path);
+    }
+  }
 }
 // The Displays swap button: a round button on the slot group's card, like the
 // slots it sits between, with two opposed arrows (drawn, not a font glyph).
 void draw_swap_button(const DRAWITEMSTRUCT& item) {
   const auto& r = item.rcItem;
   HDC dc = item.hDC;
-  HBRUSH surround = CreateSolidBrush(Card);
+  HBRUSH surround = CreateSolidBrush(surface_under(item.hwndItem));
   FillRect(dc, &r, surround);
   DeleteObject(surround);
-  const bool down = (item.itemState & ODS_SELECTED) != 0, focus = (item.itemState & ODS_FOCUS) != 0;
-  HBRUSH fill = CreateSolidBrush(down ? RGB(30, 64, 63) : Background);
-  HPEN outline = CreatePen(PS_SOLID, scale(1), down || focus ? Accent : Border);
-  auto old_brush = SelectObject(dc, fill);
-  auto old_pen = SelectObject(dc, outline);
-  Ellipse(dc, r.left, r.top, r.right, r.bottom);
+  const bool down = (item.itemState & ODS_SELECTED) != 0, focus = (item.itemState & ODS_FOCUS) != 0, hot = hot_button == item.hwndItem;
   const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, size = r.right - r.left;
-  const int arm = size * 3 / 10, offset = size / 9, head = size / 8;
-  HPEN arrow = CreatePen(PS_SOLID, scale(2), Accent);
-  SelectObject(dc, arrow);
-  const auto line = [&](int x1, int y1, int x2, int y2) {
-    MoveToEx(dc, x1, y1, nullptr);
-    LineTo(dc, x2, y2);
-  };
+  disc(dc, cx, cy, size / 2, down ? AccentTint : hot ? RaisedHot : Raised, down || focus ? Accent : hot ? BorderStrong : Border, scale(1));
+  const float arm = size * 0.26f, offset = size / 9.f, head = size / 9.f, pen = std::max(1.f, scale(3) / 2.f);
   // To the right above, to the left below.
   for (const int direction : {1, -1}) {
-    const int y = cy - direction * offset, tip = cx + direction * arm;
-    line(cx - direction * arm, y, tip, y);
-    line(tip, y, tip - direction * head, y - head);
-    line(tip, y, tip - direction * head, y + head);
+    const float y = cy - direction * offset, tip = cx + direction * arm;
+    strokes(dc, {{cx - direction * arm, y, tip, y}, {tip, y, tip - direction * head, y - head}, {tip, y, tip - direction * head, y + head}},
+            pen, Accent);
   }
-  SelectObject(dc, old_brush);
-  SelectObject(dc, old_pen);
-  DeleteObject(fill);
-  DeleteObject(outline);
-  DeleteObject(arrow);
 }
 void frame_field(HWND control);
 void edit(double value, int id, int x, int y, int w = 110) {
@@ -521,14 +707,16 @@ void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
   HBRUSH surround = CreateSolidBrush(Card);
   FillRect(dc, &item.rcItem, surround);
   DeleteObject(surround);
-  HBRUSH brush = CreateSolidBrush(chosen ? RGB(30, 64, 63) : down ? Border : Background);
-  HPEN pen = CreatePen(PS_SOLID, scale(chosen ? 2 : 1), chosen ? Accent : Border);
-  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
-  RoundRect(dc, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, scale(12), scale(12));
-  SelectObject(dc, oldb);
-  SelectObject(dc, oldp);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  const bool hot = hot_button == item.hwndItem;
+  round_box(dc, item.rcItem, scale(10),
+            chosen ? AccentTint
+            : down ? Sidebar
+            : hot  ? Raised
+                   : Background,
+            chosen ? Accent
+            : hot  ? BorderStrong
+                   : Border,
+            scale(1));
   SetBkMode(dc, TRANSPARENT);
   const auto line = [&](const wchar_t* value, int top, int height, HFONT font, COLORREF color) {
     RECT r{item.rcItem.left + scale(10), item.rcItem.top + scale(top), item.rcItem.right - scale(4), item.rcItem.top + scale(top + height)};
@@ -553,11 +741,9 @@ void draw_camera_mode_card(const DRAWITEMSTRUCT& item, unsigned mode) {
                    : target <= 20                     ? 2
                                                       : 3;
   for (int i = 0; i < 3; ++i) {
-    RECT bar{item.rcItem.right - scale(12 + (3 - i) * 16) + scale(4), item.rcItem.bottom - scale(15),
-             item.rcItem.right - scale(12 + (2 - i) * 16), item.rcItem.bottom - scale(10)};
-    HBRUSH fill = CreateSolidBrush(i < bars ? (chosen ? Accent : Muted) : Border);
-    FillRect(dc, &bar, fill);
-    DeleteObject(fill);
+    RECT bar{item.rcItem.right - scale(12 + (3 - i) * 16) + scale(4), item.rcItem.bottom - scale(16),
+             item.rcItem.right - scale(12 + (2 - i) * 16), item.rcItem.bottom - scale(11)};
+    round_box(dc, bar, scale(3), i < bars ? (chosen ? Accent : Muted) : (chosen ? blend(AccentTint, Accent, 25) : Border));
   }
   RECT cost{item.rcItem.left + scale(10), item.rcItem.bottom - scale(22), item.rcItem.right - scale(64), item.rcItem.bottom - scale(4)};
   SelectObject(dc, small);
@@ -731,12 +917,7 @@ void camera_button_event(win::CameraButtonEvent event) {
 // well on the card with a rounded edge like the buttons', accented in use.
 void draw_field_frame(HDC dc, const RECT& r, bool active) {
   FillRect(dc, &r, card_brush);
-  HPEN pen = CreatePen(PS_SOLID, scale(1), active ? Accent : Border);
-  const auto oldb = SelectObject(dc, background_brush), oldp = SelectObject(dc, pen);
-  RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(9), scale(9));
-  SelectObject(dc, oldb);
-  SelectObject(dc, oldp);
-  DeleteObject(pen);
+  round_box(dc, r, scale(8), Background, active ? Accent : BorderStrong, scale(1));
 }
 int line_height(HWND control) {
   HDC dc = GetDC(control);
@@ -869,6 +1050,7 @@ HWND dialog_control(HWND hwnd,
                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
   SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font ? font : normal), TRUE);
   SetWindowTheme(control, L"DarkMode_Explorer", nullptr);
+  track_hover(control, type);
   return control;
 }
 // WM_SETCURSOR: the hand over a window's own buttons, as over links.
@@ -992,14 +1174,7 @@ int layout_whats_new(HWND hwnd, HDC dc, bool draw) {
   const auto box = [&](int x, int top, int w, int h, COLORREF fill, COLORREF line, int radius) {
     if (!draw)
       return;
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, scale(1), line);
-    const auto old_brush = SelectObject(dc, brush), old_pen = SelectObject(dc, pen);
-    RoundRect(dc, x, top + shift, x + w, top + shift + h, radius, radius);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    round_box(dc, {x, top + shift, x + w, top + shift + h}, radius / 2, fill, line, scale(1));
   };
   for (const auto& b : v.blocks) {
     using Kind = win::WhatsNewBlock::Kind;
@@ -1144,16 +1319,11 @@ LRESULT CALLBACK whats_new_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
       FillRect(memory, &line, edge);
       DeleteObject(edge);
       v.close = {client.right - scale(WhatsNewPad) - scale(120), bar + scale(16), client.right - scale(WhatsNewPad), bar + scale(52)};
-      HBRUSH accent = CreateSolidBrush(Accent);
-      HPEN pen = CreatePen(PS_SOLID, scale(1), Accent);
-      const auto old_brush = SelectObject(memory, accent), old_pen = SelectObject(memory, pen);
-      RoundRect(memory, v.close.left, v.close.top, v.close.right, v.close.bottom, scale(9), scale(9));
-      SelectObject(memory, old_brush);
-      SelectObject(memory, old_pen);
-      DeleteObject(accent);
-      DeleteObject(pen);
+      ButtonLook close_look;
+      close_look.primary = true;
+      button_box(memory, v.close, close_look, Sidebar);
       SelectObject(memory, normal);
-      SetTextColor(memory, Background);
+      SetTextColor(memory, button_text(close_look));
       SetBkMode(memory, TRANSPARENT);
       auto label = v.close;
       DrawTextW(memory, tr(L"Close"), -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2321,9 +2491,9 @@ void paint_area_picker(HDC dc) {
   SelectObject(dc, small);
   SetBkMode(dc, OPAQUE);
   SetBkColor(dc, Sidebar);
-  HPEN gauge_pen = CreatePen(PS_DOT, 1, RGB(126, 176, 255));
+  HPEN gauge_pen = CreatePen(PS_DOT, 1, Blue);
   SelectObject(dc, gauge_pen);
-  SetTextColor(dc, RGB(126, 176, 255));
+  SetTextColor(dc, Blue);
   for (const auto& [name, rect] : p.gauges) {
     auto box = win::area_edit::to_screen(picture, p.texture_width, p.texture_height, rect);
     Rectangle(dc, box.left, box.top, box.right, box.bottom);
@@ -3134,14 +3304,7 @@ int chip(HDC dc, int x, int y, const wchar_t* label, COLORREF color, int limit =
   RECT r{scale(x), scale(y), scale(x) + size.cx + scale(16), scale(y + 22)};
   if (limit > 0)
     r.right = std::min<LONG>(r.right, scale(x + limit));
-  HBRUSH brush = CreateSolidBrush(Background);
-  HPEN pen = CreatePen(PS_SOLID, 1, color);
-  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
-  RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(10), scale(10));
-  SelectObject(dc, oldb);
-  SelectObject(dc, oldp);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  round_box(dc, r, (r.bottom - r.top) / 2, blend(Sidebar, color, 20));
   SetTextColor(dc, color);
   SetBkMode(dc, TRANSPARENT);
   RECT inner = r;
@@ -3151,10 +3314,7 @@ int chip(HDC dc, int x, int y, const wchar_t* label, COLORREF color, int limit =
 }
 // A route's colour: named, the user's choice, detected, or none found.
 COLORREF route_color(RouteSource source) {
-  return source == RouteSource::named    ? Accent
-         : source == RouteSource::chosen ? RGB(126, 176, 255)
-         : source == RouteSource::none   ? RGB(236, 182, 92)
-                                         : Muted;
+  return source == RouteSource::named ? Accent : source == RouteSource::chosen ? Blue : source == RouteSource::none ? Amber : Muted;
 }
 // How a display was found, in words: the pilot needs that, not the panel's
 // internal name.
@@ -3179,14 +3339,7 @@ int route_chip(HDC dc, int x, int y, RouteSource source) {
 RECT draw_thumbnail(HDC dc, const RECT& well, std::uint64_t id, const wchar_t* missing, const profiles::DisplayRect* crop = nullptr) {
   // The design's picture well: a dark rounded box, the picture centred in it
   // in its own shape.
-  HBRUSH fill = CreateSolidBrush(Sidebar);
-  HPEN edge = CreatePen(PS_SOLID, 1, Border);
-  const auto old_fill = SelectObject(dc, fill), old_edge = SelectObject(dc, edge);
-  RoundRect(dc, well.left, well.top, well.right, well.bottom, scale(8), scale(8));
-  SelectObject(dc, old_fill);
-  SelectObject(dc, old_edge);
-  DeleteObject(fill);
-  DeleteObject(edge);
+  round_box(dc, well, scale(8), Sidebar, Border, scale(1));
   RECT box = well;
   InflateRect(&box, -scale(2), -scale(2));
   const auto* t = find_thumbnail(id);
@@ -3244,14 +3397,7 @@ LRESULT CALLBACK drag_ghost_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM 
     RECT r{};
     GetClientRect(hwnd, &r);
     FillRect(dc, &r, background_brush);
-    HBRUSH fill = CreateSolidBrush(Card);
-    HPEN pen = CreatePen(PS_SOLID, scale(2), Accent);
-    const auto old_fill = SelectObject(dc, fill), old_pen = SelectObject(dc, pen);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(10), scale(10));
-    SelectObject(dc, old_fill);
-    SelectObject(dc, old_pen);
-    DeleteObject(fill);
-    DeleteObject(pen);
+    round_box(dc, r, scale(10), Card, Accent, scale(2));
     // The picture alone: panel names stay internal.
     draw_thumbnail(dc, rectangle(8, 8, DragGhostWidth - 16, DragGhostHeight - 16), setup.picked_texture, L"");
     EndPaint(hwnd, &paint);
@@ -3501,7 +3647,7 @@ void draw_setup(HDC dc, const win::Status& sample) {
                                                  L"It is saved for this aircraft variant only."));
   // Under the displays, as in the design.
   text(dc, hint.c_str(), 248, SetupSlotTop + SetupSlotHeight + 18, 758, 34, small,
-       !blocker.empty()        ? RGB(236, 182, 92)
+       !blocker.empty()        ? Amber
        : !setup.picked.empty() ? Accent
                                : Muted,
        DT_LEFT | DT_WORDBREAK);
@@ -3514,16 +3660,11 @@ void draw_setup(HDC dc, const win::Status& sample) {
     // A picked panel marks every display as a drop target; the one a drag is
     // over lights up.
     const bool over = setup.dragging && setup.drop_side == side;
-    panel(dc, x, y, width, SetupSlotHeight, over ? RGB(30, 64, 63) : setup.picked.empty() ? Background : RGB(22, 48, 47));
+    panel(dc, x, y, width, SetupSlotHeight, over ? AccentTint : setup.picked.empty() ? Background : blend(Background, AccentTint, 55));
     if (!setup.picked.empty()) {
-      HPEN pen = CreatePen(over ? PS_SOLID : PS_DOT, over ? scale(2) : 1, Accent);
-      const auto old_pen = SelectObject(dc, pen);
-      const auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-      const auto r = setup.slot_areas[unsigned_side];
-      RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(10), scale(10));
-      SelectObject(dc, old_brush);
-      SelectObject(dc, old_pen);
-      DeleteObject(pen);
+      // A drop target is outlined in the accent; heavier under the drag.
+      round_box(dc, setup.slot_areas[unsigned_side], scale(10), NoColor, over ? Accent : blend(Background, Accent, 55),
+                scale(over ? 2 : 1));
     }
     // The design's slot: the display's name and pill, its picture, the panel
     // placed there, then the button (build_controls).
@@ -3534,7 +3675,7 @@ void draw_setup(HDC dc, const win::Status& sample) {
                                 ? s.discovered.textures[unsigned_side]
                                 : "";
     const wchar_t* state = name.empty() ? tr(L"Not placed") : name == own ? (built_in ? tr(L"Default") : tr(L"Saved")) : tr(L"Your choice");
-    const COLORREF state_color = name.empty() ? RGB(236, 182, 92) : name == own ? Muted : RGB(126, 176, 255);
+    const COLORREF state_color = name.empty() ? Amber : name == own ? Muted : Blue;
     const int pill = std::min(chip_width(dc, state), inner / 2);
     chip(dc, x + 10 + inner - pill, y + 10, state, state_color, pill);
     text(dc, display_side_title(s, unsigned_side), x + 10, y + 10, inner - pill - 8, 22, heading, Text,
@@ -3595,15 +3736,12 @@ bool draw_page_button(const DRAWITEMSTRUCT& item) {
   FillRect(item.hDC, &r, surround);
   DeleteObject(surround);
   const bool picked = !setup.picked.empty() && setup.picked == setup.card_names[slot];
-  HBRUSH brush = CreateSolidBrush(Background);
-  HPEN pen = CreatePen(PS_SOLID, scale(picked ? 2 : 1), picked ? Accent : Border);
-  const auto old_brush = SelectObject(item.hDC, brush);
-  const auto old_pen = SelectObject(item.hDC, pen);
-  RoundRect(item.hDC, r.left, r.top, r.right, r.bottom, scale(10), scale(10));
-  SelectObject(item.hDC, old_brush);
-  SelectObject(item.hDC, old_pen);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  const bool hot = hot_button == item.hwndItem;
+  round_box(item.hDC, r, scale(10), hot && !picked ? Raised : Background,
+            picked ? Accent
+            : hot  ? BorderStrong
+                   : Border,
+            scale(picked ? 2 : 1));
   if (found == items.end())
     return true;
   const RECT box{r.left + scale(6), r.top + scale(6), r.right - scale(6), r.bottom - scale(52)};
@@ -4250,16 +4388,12 @@ LiveLayout live_layout(HWND hwnd, const profiles::AircraftProfile* profile) {
 }
 void live_button(HDC dc, const RECT& r, const wchar_t* label, int action, bool selected = false, bool primary = false) {
   live_buttons.push_back({r, action});
-  HBRUSH brush = CreateSolidBrush(primary ? Accent : selected ? RGB(30, 64, 63) : Card);
-  HPEN pen = CreatePen(PS_SOLID, scale(1), selected || primary ? Accent : Border);
-  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
-  RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(9), scale(9));
-  SelectObject(dc, oldb);
-  SelectObject(dc, oldp);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  ButtonLook look;
+  look.primary = primary;
+  look.chosen = selected;
+  button_box(dc, r, look, Background);
   SelectObject(dc, normal);
-  SetTextColor(dc, primary ? Background : selected ? Accent : Text);
+  SetTextColor(dc, button_text(look));
   SetBkMode(dc, TRANSPARENT);
   auto bounds = r;
   DrawTextW(dc, label, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -5637,14 +5771,12 @@ void draw_dialog_button(const DRAWITEMSTRUCT& item) {
   const bool disabled = (item.itemState & ODS_DISABLED) != 0, down = !disabled && (item.itemState & ODS_SELECTED) != 0;
   const bool focus = (item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT);
   FillRect(item.hDC, &item.rcItem, card_brush);
-  HBRUSH brush = CreateSolidBrush(disabled ? RGB(20, 24, 31) : down ? Border : Card);
-  HPEN pen = CreatePen(PS_SOLID, scale(1), disabled ? RGB(36, 44, 54) : focus ? Accent : Border);
-  const auto old_brush = SelectObject(item.hDC, brush), old_pen = SelectObject(item.hDC, pen);
-  RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, scale(9), scale(9));
-  SelectObject(item.hDC, old_brush);
-  SelectObject(item.hDC, old_pen);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  ButtonLook look;
+  look.disabled = disabled;
+  look.down = down;
+  look.focus = focus;
+  look.hot = hot_button == item.hwndItem;
+  button_box(item.hDC, item.rcItem, look, Card);
   wchar_t label[160]{};
   GetWindowTextW(item.hwndItem, label, 160);
   RECT r = item.rcItem;
@@ -5663,7 +5795,8 @@ INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
                    tr(L"Every aircraft Taxi Cam has a setup for. Change one in Setup while it is loaded. Copy to this aircraft "
                       L"starts the aircraft loaded now from one you set up; Remove deletes one you set up."),
                    -1, 20, 50, 600, 64, 0, small);
-    dialog_control(hwnd, L"LISTBOX", L"", 801, 20, 118, 600, 192, WS_BORDER | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP);
+    dialog_control(hwnd, L"LISTBOX", L"", 801, 20, 118, 600, 192,
+                   WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT | WS_TABSTOP);
     dialog_control(hwnd, L"STATIC", L"", 805, 20, 318, 600, 24);
     dialog_control(hwnd, L"STATIC", L"", 803, 20, 346, 600, 44, 0, small);
     // A set-up aircraft's Copy and Remove, then an included aircraft's resets.
@@ -5681,8 +5814,46 @@ INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
     SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
     return TRUE;
   }
-  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORLISTBOX)
+  if (message == WM_CTLCOLORLISTBOX) {
+    // The list is a well in the dialog, like a picture's.
+    SetBkColor(reinterpret_cast<HDC>(w), Sidebar);
+    static const HBRUSH well = CreateSolidBrush(Sidebar);
+    return reinterpret_cast<INT_PTR>(well);
+  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC)
     return dialog_colors(w);
+  if (message == WM_MEASUREITEM && reinterpret_cast<MEASUREITEMSTRUCT*>(l)->CtlType == ODT_LISTBOX) {
+    reinterpret_cast<MEASUREITEMSTRUCT*>(l)->itemHeight = static_cast<UINT>(scale(30));
+    SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
+    return TRUE;
+  }
+  if (message == WM_DRAWITEM && reinterpret_cast<const DRAWITEMSTRUCT*>(l)->CtlType == ODT_LISTBOX) {
+    // A row: the chosen one tinted, with the accent at its left edge.
+    const auto& item = *reinterpret_cast<const DRAWITEMSTRUCT*>(l);
+    HBRUSH well = CreateSolidBrush(Sidebar);
+    FillRect(item.hDC, &item.rcItem, well);
+    DeleteObject(well);
+    if (item.itemID != static_cast<UINT>(-1)) {
+      const bool chosen = (item.itemState & ODS_SELECTED) != 0;
+      RECT row = item.rcItem;
+      InflateRect(&row, -scale(4), -scale(2));
+      if (chosen) {
+        round_box(item.hDC, row, scale(6), blend(Sidebar, Accent, 16));
+        const int middle = (row.top + row.bottom) / 2;
+        round_box(item.hDC, {row.left, middle - scale(7), row.left + scale(3), middle + scale(7)}, scale(2), Accent);
+      }
+      std::wstring label(static_cast<size_t>(std::max<LRESULT>(0, SendMessageW(item.hwndItem, LB_GETTEXTLEN, item.itemID, 0))) + 1, L'\0');
+      SendMessageW(item.hwndItem, LB_GETTEXT, item.itemID, reinterpret_cast<LPARAM>(label.data()));
+      RECT words{row.left + scale(12), row.top, row.right - scale(8), row.bottom};
+      const auto old_font = SelectObject(item.hDC, normal);
+      SetBkMode(item.hDC, TRANSPARENT);
+      SetTextColor(item.hDC, chosen ? Text : blend(Muted, Text, 60));
+      DrawTextW(item.hDC, label.c_str(), -1, &words, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+      SelectObject(item.hDC, old_font);
+    }
+    SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
+    return TRUE;
+  }
   if (message == WM_DRAWITEM && reinterpret_cast<const DRAWITEMSTRUCT*>(l)->CtlType == ODT_BUTTON) {
     draw_dialog_button(*reinterpret_cast<const DRAWITEMSTRUCT*>(l));
     SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, TRUE);
@@ -6141,13 +6312,13 @@ void build_controls() {
   const wchar_t* names[]{tr(L"Overview"), tr(L"Setup"), tr(L"Options"), tr(L"Diagnostics")};
   constexpr int nav_ids[]{100 + OverviewPage, 100 + CamerasPage, 100 + OptionsPage, 100 + DiagnosticsPage};
   for (int slot = 0; slot < 4; ++slot)
-    navigation.push_back(button(names[slot], nav_ids[slot], 20, 156 + slot * 49, 166, 40));
-  const auto donate_button = button(tr(L"Donate"), 513, 24, 590, 162, 40);
-  const auto report_button = button(tr(L"Report a bug"), 512, 24, 638, 162, 40);
+    navigation.push_back(button(names[slot], nav_ids[slot], 12, 96 + slot * 44, 186, 38));
+  const auto donate_button = button(tr(L"Donate"), 513, 12, 598, 186, 36);
+  const auto report_button = button(tr(L"Report a bug"), 512, 12, 636, 186, 36);
   // The version, with What's new beside it.
-  const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 60, 22);
+  const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 26, 688, 56, 22);
   SendMessageW(version_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
-  const HWND whats_new_link = button(changelog_fetcher.busy() ? tr(L"Loading…") : tr(L"What's new"), 515, 90, 692, 96, 22);
+  const HWND whats_new_link = button(changelog_fetcher.busy() ? tr(L"Loading…") : tr(L"What's new"), 515, 86, 688, 110, 22);
   SendMessageW(whats_new_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
   sidebar_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
                                     CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
@@ -6561,16 +6732,11 @@ void close_alert() {
   alert_view.window = nullptr;
 }
 void draw_alert_button(HDC dc, const RECT& r, const std::wstring& label, bool primary) {
-  HBRUSH brush = CreateSolidBrush(primary ? Accent : Card);
-  HPEN pen = CreatePen(PS_SOLID, scale(1), primary ? Accent : Border);
-  const auto oldb = SelectObject(dc, brush), oldp = SelectObject(dc, pen);
-  RoundRect(dc, r.left, r.top, r.right, r.bottom, scale(9), scale(9));
-  SelectObject(dc, oldb);
-  SelectObject(dc, oldp);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  ButtonLook look;
+  look.primary = primary;
+  button_box(dc, r, look, Card);
   SelectObject(dc, normal);
-  SetTextColor(dc, primary ? Background : Text);
+  SetTextColor(dc, button_text(look));
   SetBkMode(dc, TRANSPARENT);
   auto bounds = r;
   DrawTextW(dc, label.c_str(), -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -6609,7 +6775,7 @@ LRESULT CALLBACK alert_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       FillRect(dc, &client, fill);
       DeleteObject(fill);
       // An amber frame: it needs the pilot, like the amber chips on Overview.
-      HBRUSH frame = CreateSolidBrush(RGB(236, 182, 92));
+      HBRUSH frame = CreateSolidBrush(Amber);
       for (int i = 0; i < scale(2); ++i) {
         RECT edge{client.left + i, client.top + i, client.right - i, client.bottom - i};
         FrameRect(dc, &edge, frame);
@@ -6742,17 +6908,24 @@ void choose_language(const wchar_t* preference) {
 void draw_page(HDC dc) {
   hit_areas.clear();
   power_areas.clear();
+  surfaces.clear();
   RECT client{};
   GetClientRect(window, &client);
   FillRect(dc, &client, background_brush);
-  auto left = rectangle(0, 0, 210, 780);
+  // The sidebar: the app's mark and name, the pages, then the quiet links.
+  RECT left{0, 0, scale(210), client.bottom};
   HBRUSH b = CreateSolidBrush(Sidebar);
   FillRect(dc, &left, b);
   DeleteObject(b);
-  DrawIconEx(dc, scale(24), scale(35), icon, scale(32), scale(32), 0, nullptr, DI_NORMAL);
-  text(dc, L"TAXI CAM", 68, 33, 134, 22, heading);
-  text(dc, tr(L"Native taxi cameras"), 24, 84, 176, 22, small, Muted);
-  text(dc, tr(L"WINDOWS COMPANION"), 24, 120, 182, 22, small, Muted);
+  RECT divider{scale(210) - 1, 0, scale(210), client.bottom};
+  b = CreateSolidBrush(Border);
+  FillRect(dc, &divider, b);
+  RECT rule{scale(20), scale(586), scale(190), scale(586) + 1};
+  FillRect(dc, &rule, b);
+  DeleteObject(b);
+  DrawIconEx(dc, scale(20), scale(26), icon, scale(34), scale(34), 0, nullptr, DI_NORMAL);
+  text(dc, L"Taxi Cam", 64, 23, 138, 24, heading);
+  text(dc, tr(L"Native taxi cameras"), 64, 45, 140, 18, small, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   // A step is titled with the aircraft it sets up.
   std::wstring title = page == OverviewPage      ? tr(L"Overview")
                        : page == OptionsPage     ? tr(L"Options")
@@ -6802,7 +6975,6 @@ void draw_page(HDC dc) {
     // Without the package nothing can be recognised: the card says so in
     // amber, first thing on the page.
     const bool inactive = package_inactive(sample);
-    constexpr COLORREF Amber = RGB(236, 182, 92);
     text(dc,
          connection_disconnected.load(std::memory_order_acquire) ? tr(L"Disconnected")
          : !sample.graphics_ready                                ? tr(L"Waiting for the simulator")
@@ -6848,7 +7020,7 @@ void draw_page(HDC dc) {
            unsupported ? tr(L"Not set up")
            : choose    ? tr(L"Choose displays")
                        : tr(L"Saved"),
-           unsupported || choose ? RGB(236, 182, 92) : Accent);
+           unsupported || choose ? Amber : Accent);
     panel(dc, 244, 430, 766, 246);
     text(dc, tr(L"Cockpit displays"), 262, 440, 180, 32, heading);
     text(dc, tr(L"Select one to change it in Displays."), 446, 440, 314, 32, small, Muted,
@@ -7050,7 +7222,21 @@ void draw_page(HDC dc) {
          sample.scene_ready ? tr(L"Ready") : tr(L"Waiting"), std::to_wstring(sample.left_id), std::to_wstring(sample.right_id),
          std::to_wstring(sample.captures), std::to_wstring(sample.composed), std::to_wstring(sample.stamps),
          std::to_wstring(sample.hook_failures)});
-    text(dc, counts.c_str(), 262, 140, 360, 136, normal, Text, DT_LEFT | DT_WORDBREAK);
+    // A row per line: its name, then its value in one column. A line is
+    // split at its run of spaces, which no longer has to align anything.
+    int row_y = 138;
+    for (size_t start = 0; start <= counts.size();) {
+      const auto end = std::min(counts.find(L'\n', start), counts.size());
+      const auto row_text = counts.substr(start, end - start);
+      const auto gap = row_text.find(L"  ");
+      const auto value_at = gap == std::wstring::npos ? gap : row_text.find_first_not_of(L' ', gap);
+      text(dc, row_text.substr(0, gap).c_str(), 262, row_y, 150, 20, normal, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      if (value_at != std::wstring::npos)
+        text(dc, row_text.substr(value_at).c_str(), 420, row_y, 200, 20, normal, Text,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      row_y += 20;
+      start = end + 1;
+    }
     const auto stage = [&](unsigned i) { return decimal(sample.stage_ms[i], 3); };
     const auto timing = tr_format(L"Probe CPU: {0} ms (max {1})", {decimal(sample.probe_cpu_ms, 2), decimal(sample.probe_max_ms, 2)}) +
                         L"\n" +
@@ -7507,37 +7693,55 @@ void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
   HBRUSH surround = CreateSolidBrush(on_card ? Card : Background);
   FillRect(item.hDC, &r, surround);
   DeleteObject(surround);
-  HBRUSH brush = CreateSolidBrush(current ? RGB(30, 64, 63) : down ? Border : on_card ? Background : Card);
-  HPEN pen = CreatePen(PS_SOLID, scale(1), current || attention ? Accent : Border);
-  const auto old_brush = SelectObject(item.hDC, brush);
-  const auto old_pen = SelectObject(item.hDC, pen);
+  const bool hot = hot_button == item.hwndItem;
   const int height = r.bottom - r.top;
-  RoundRect(item.hDC, r.left, r.top, r.right, r.bottom, height, height);
-  const int d = scale(20), cx = r.left + scale(9), cy = r.top + (height - d) / 2;
-  HBRUSH circle = CreateSolidBrush(current ? Accent : Border);
-  SelectObject(item.hDC, circle);
-  SelectObject(item.hDC, GetStockObject(NULL_PEN));
-  Ellipse(item.hDC, cx, cy, cx + d, cy + d);
-  SelectObject(item.hDC, old_brush);
-  SelectObject(item.hDC, old_pen);
-  DeleteObject(circle);
-  DeleteObject(brush);
-  DeleteObject(pen);
+  round_box(item.hDC, r, height / 2,
+            current ? AccentTint
+            : down  ? Sidebar
+            : hot   ? RaisedHot
+                    : Raised,
+            current || attention ? Accent
+            : hot                ? BorderStrong
+                                 : blend(Raised, Text, 7),
+            scale(1));
+  const int d = scale(20), cx = r.left + scale(8), cy = r.top + (height - d) / 2;
+  disc(item.hDC, cx + d / 2, cy + d / 2, d / 2, current ? Accent : attention ? blend(Raised, Accent, 45) : blend(Raised, Text, 14));
   SetBkMode(item.hDC, TRANSPARENT);
   wchar_t number[4];
   std::swprintf(number, 4, L"%u", step + 1);
   RECT number_box{cx, cy, cx + d, cy + d};
   SelectObject(item.hDC, small);
-  SetTextColor(item.hDC, current ? Background : Text);
+  SetTextColor(item.hDC, current ? Sidebar : Text);
   DrawTextW(item.hDC, number, -1, &number_box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   RECT label_box{cx + d + scale(8), r.top, r.right - scale(10), r.bottom};
   SelectObject(item.hDC, normal);
-  SetTextColor(item.hDC, Text);
+  SetTextColor(item.hDC, current ? Accent : Text);
   DrawTextW(item.hDC, step_name(step), -1, &label_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 // The page a navigation button stands for: Setup for every step.
 bool navigation_selected(int id) {
   return id == 100 + CamerasPage ? setup_step(page) >= 0 : id - 100 == page;
+}
+// The buttons that are switches: named for a setting, and On or Off.
+bool is_switch(int id) {
+  switch (id) {
+    case AdvancedId:
+    case DoorToggleId:
+    case 221:
+    case 223:
+    case 224:
+    case 225:
+    case 226:
+    case 227:
+    case 229:
+    case 230:
+    case 232:
+    case 233:
+    case 240:
+      return true;
+    default:
+      return id >= SetupTestId && id < SetupTestId + 3;
+  }
 }
 bool is_on(int id, const win::Settings& s) {
   switch (id) {
@@ -7589,6 +7793,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
       DWORD corner = 2;
       DwmSetWindowAttribute(hwnd, 33, &corner, sizeof(corner));
+      // Windows 11 colours the caption and border to match; Windows 10 ignores these.
+      COLORREF caption = Sidebar, edge = Border;
+      DwmSetWindowAttribute(hwnd, 35, &caption, sizeof(caption));
+      DwmSetWindowAttribute(hwnd, 34, &edge, sizeof(edge));
       icon = make_icon();
       SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
       SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
@@ -7616,8 +7824,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const int action = hotkey_registration.action(w, l);
       const auto focus = GetFocus();
       const auto focused_id = focus && GetParent(focus) == hwnd ? GetDlgCtrlID(focus) : 0;
-      if (action >= 0 && !preview_ui &&
-          !(focused_id >= 620 && focused_id < 620 + static_cast<int>(win::CameraHotkeyNames.size())))
+      if (action >= 0 && !preview_ui && !(focused_id >= 620 && focused_id < 620 + static_cast<int>(win::CameraHotkeyNames.size())))
         toggle_camera_from_hotkey(static_cast<unsigned>(action));
       return 0;
     }
@@ -7788,68 +7995,112 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const bool selected = !disabled && ((id >= 100 && id < 106 && navigation_selected(id)) || is_on(id, draft()) ||
                                           page_button_selected(id) || (id >= 420 && id < 428 && gallery_button_routed(id)) ||
                                           (id >= SetupTestId && id < SetupTestId + 3 && ((setup.testing >> (id - SetupTestId)) & 1)));
-      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || (id >= 512 && id <= 515) ? Sidebar : Background);
+      const bool hot = !disabled && hot_button == item->hwndItem;
+      const bool down = !disabled && (item->itemState & ODS_SELECTED) != 0;
+      const bool focus = (item->itemState & ODS_FOCUS) && !(item->itemState & ODS_NOFOCUSRECT);
+      const COLORREF surface = surface_under(item->hwndItem);
+      HBRUSH surround = CreateSolidBrush(surface);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
+      SetBkMode(item->hDC, TRANSPARENT);
+      wchar_t label[160]{};
+      GetWindowTextW(item->hwndItem, label, 160);
+      RECT r = item->rcItem;
       if (id == 514 || id == 515) {
+        // The version and What's new: quiet links under the sidebar.
         const int saved = SaveDC(item->hDC);
-        wchar_t label[64]{};
-        GetWindowTextW(item->hwndItem, label, 64);
-        SelectObject(item->hDC, version_font);
-        SetTextColor(item->hDC, disabled ? Muted : (item->itemState & ODS_SELECTED ? Text : Accent));
-        SetBkMode(item->hDC, TRANSPARENT);
-        auto bounds = item->rcItem;
-        DrawTextW(item->hDC, label, -1, &bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(item->hDC, hot ? version_font : small);
+        SetTextColor(item->hDC, disabled ? Faint : down ? Text : id == 515 || hot ? Accent : Muted);
+        DrawTextW(item->hDC, label, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         RestoreDC(item->hDC, saved);
+        return TRUE;
+      }
+      if ((id >= 100 && id < 106) || id == 512 || id == 513) {
+        // A sidebar row: its icon and name; the current page is tinted, with
+        // the accent at its left edge.
+        const bool page_row = id < 106;
+        if (selected)
+          round_box(item->hDC, r, scale(8), blend(Sidebar, Accent, 13));
+        else if (hot || down)
+          round_box(item->hDC, r, scale(8), blend(Sidebar, Text, down ? 5 : 9));
+        if (focus && !selected)
+          round_box(item->hDC, r, scale(8), NoColor, BorderStrong, scale(1));
+        const int middle = (r.top + r.bottom) / 2;
+        if (selected)
+          round_box(item->hDC, {r.left, middle - scale(9), r.left + scale(3), middle + scale(9)}, scale(2), Accent);
+        const COLORREF ink = disabled ? Faint : selected ? Accent : hot ? Text : page_row ? blend(Muted, Text, 45) : Muted;
+        const int size = scale(16), icon_x = r.left + scale(14);
+        if (id == 512)
+          draw_bug_icon(item->hDC, {icon_x - scale(2), r.top, icon_x + size + scale(2), r.bottom}, ink);
+        else
+          draw_nav_icon(item->hDC,
+                        id == 513                     ? 4
+                        : id == 100 + OverviewPage    ? 0
+                        : id == 100 + OptionsPage     ? 2
+                        : id == 100 + DiagnosticsPage ? 3
+                                                      : 1,
+                        icon_x, middle - size / 2, size, ink);
+        RECT words{icon_x + size + scale(12), r.top, r.right - scale(8), r.bottom};
+        SelectObject(item->hDC, normal);
+        SetTextColor(item->hDC, disabled ? Faint : selected || hot ? Text : page_row ? blend(Muted, Text, 55) : Muted);
+        RECT extent{};
+        DrawTextW(item->hDC, label, -1, &extent, DT_CALCRECT | DT_SINGLELINE);
+        if (extent.right > words.right - words.left)
+          SelectObject(item->hDC, small);
+        DrawTextW(item->hDC, label, -1, &words, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         return TRUE;
       }
       const bool primary = id == 500 || id == NextId || (id >= LiveFeedId && id < LiveFeedId + static_cast<int>(profiles::CameraViews)) ||
                            (id >= SetupPlaceId && id < SetupPlaceId + static_cast<int>(MaxDisplaySides));
-      const bool down = !disabled && (item->itemState & ODS_SELECTED) != 0;
-      // Disabled owner-draw buttons need an explicit muted fill/label; EnableWindow
-      // alone leaves them looking enabled because this path paints every button.
-      const COLORREF fill = disabled ? RGB(20, 24, 31) : primary ? Accent : selected ? RGB(30, 64, 63) : down ? Border : Card;
-      const COLORREF outline = disabled ? RGB(36, 44, 54) : selected || primary ? Accent : Border;
-      HBRUSH brush = CreateSolidBrush(fill);
-      HPEN pen = CreatePen(PS_SOLID, scale(1), outline);
-      const auto oldb = SelectObject(item->hDC, brush), oldp = SelectObject(item->hDC, pen);
-      RoundRect(item->hDC, item->rcItem.left, item->rcItem.top, item->rcItem.right, item->rcItem.bottom, scale(9), scale(9));
-      SelectObject(item->hDC, oldb);
-      SelectObject(item->hDC, oldp);
-      DeleteObject(brush);
-      DeleteObject(pen);
-      RECT r = item->rcItem;
-      if (id == 512) {
-        // Report a bug: the bug at the left, then the words.
-        draw_bug_icon(item->hDC, {r.left, r.top, r.left + scale(40), r.bottom}, disabled ? Muted : Accent);
-        wchar_t label[64]{};
-        GetWindowTextW(item->hwndItem, label, 64);
-        RECT words{r.left + scale(40), r.top, r.right - scale(8), r.bottom};
-        SelectObject(item->hDC, normal);
-        SetTextColor(item->hDC, disabled ? Muted : Text);
-        SetBkMode(item->hDC, TRANSPARENT);
-        DrawTextW(item->hDC, label, -1, &words, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-      } else {
-        wchar_t label[160];
-        GetWindowTextW(item->hwndItem, label, 160);
-        // Clear, for a shortcut or a controller button, is a ×.
-        if ((id >= 630 && id < 630 + static_cast<int>(win::CameraHotkeyNames.size())) ||
-            (id >= 690 && id < 690 + static_cast<int>(win::CameraHotkeyNames.size())))
-          std::wcscpy(label, L"×");
-        SelectObject(item->hDC, normal);
-        SetTextColor(item->hDC, disabled ? Muted : primary ? Background : selected ? Accent : Text);
-        SetBkMode(item->hDC, TRANSPARENT);
-        InflateRect(&r, -scale(10), 0);
-        // A translation can outgrow a button sized for English: step down to the
-        // small font with less padding, and shorten with an ellipsis only after that.
+      const bool toggle = is_switch(id);
+      ButtonLook look;
+      look.primary = primary;
+      look.chosen = selected && !toggle;
+      look.hot = hot;
+      look.down = down;
+      look.disabled = disabled;
+      look.focus = focus;
+      button_box(item->hDC, r, look, surface);
+      // Clear, for a shortcut or a controller button, is a ×.
+      if ((id >= 630 && id < 630 + static_cast<int>(win::CameraHotkeyNames.size())) ||
+          (id >= 690 && id < 690 + static_cast<int>(win::CameraHotkeyNames.size())))
+        std::wcscpy(label, L"×");
+      SelectObject(item->hDC, normal);
+      SetTextColor(item->hDC, button_text(look));
+      if (toggle) {
+        // A switch: its name at the left, the switch itself at the right. The
+        // window text still says On or Off; the name is that text without it.
+        for (const bool state : {true, false}) {
+          const auto suffix = state ? tr_format(L"{0}: On", {L""}) : tr_format(L"{0}: Off", {L""});
+          const auto length = std::wcslen(label);
+          if (!suffix.empty() && length > suffix.size() && !std::wcscmp(label + length - suffix.size(), suffix.c_str())) {
+            label[length - suffix.size()] = 0;
+            break;
+          }
+        }
+        const int track = scale(16), width = switch_width(track);
+        draw_switch(item->hDC, r.right - scale(10) - width, (r.top + r.bottom - track) / 2, track, selected, disabled, Raised);
+        RECT words{r.left + scale(12), r.top, r.right - scale(18) - width, r.bottom};
         RECT extent{};
         DrawTextW(item->hDC, label, -1, &extent, DT_CALCRECT | DT_SINGLELINE);
-        if (extent.right > r.right - r.left) {
+        if (extent.right > words.right - words.left) {
           SelectObject(item->hDC, small);
-          InflateRect(&r, scale(6), 0);
+          words.left -= scale(4);
+          words.right += scale(4);
         }
-        DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(item->hDC, label, -1, &words, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return TRUE;
       }
+      InflateRect(&r, -scale(10), 0);
+      // A translation can outgrow a button sized for English: step down to the
+      // small font with less padding, and shorten with an ellipsis only after that.
+      RECT extent{};
+      DrawTextW(item->hDC, label, -1, &extent, DT_CALCRECT | DT_SINGLELINE);
+      if (extent.right > r.right - r.left) {
+        SelectObject(item->hDC, small);
+        InflateRect(&r, scale(6), 0);
+      }
+      DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
       return TRUE;
     }
     case AreaPickerMessage:

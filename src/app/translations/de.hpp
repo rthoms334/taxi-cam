@@ -509,7 +509,6 @@ inline constexpr Translation GermanTranslations[]{
      L"Tastenkombination."},
     {L"Use default displays", L"Standardanzeigen verwenden"},
     {L"WHAT'S NEW", L"NEUIGKEITEN"},
-    {L"WINDOWS COMPANION", L"WINDOWS-BEGLEIT-APP"},
     {L"Waiting", L"Wartet"},
     {L"Waiting for Microsoft Flight Simulator 2024", L"Warten auf Microsoft Flight Simulator 2024"},
     {L"Waiting for a display to be found for this aircraft.", L"Warten, bis eine Anzeige für dieses Flugzeug gefunden wird."},

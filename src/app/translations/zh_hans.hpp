@@ -447,7 +447,6 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
      L"请使用 Ctrl 或 Alt 配合字母、数字或功能键（F12 除外），或清除该快捷键。"},
     {L"Use default displays", L"使用默认显示屏"},
     {L"WHAT'S NEW", L"新增功能"},
-    {L"WINDOWS COMPANION", L"WINDOWS 伴随程序"},
     {L"Waiting", L"等待中"},
     {L"Waiting for Microsoft Flight Simulator 2024", L"正在等待 Microsoft Flight Simulator 2024"},
     {L"Waiting for a display to be found for this aircraft.", L"正在等待为此机型找到显示屏。"},

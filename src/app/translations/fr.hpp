@@ -505,7 +505,6 @@ inline constexpr Translation FrenchTranslations[]{
      L"Utilisez Ctrl ou Alt avec une lettre, un chiffre ou une touche de fonction (sauf F12), ou effacez le raccourci."},
     {L"Use default displays", L"Utiliser les écrans par défaut"},
     {L"WHAT'S NEW", L"NOUVEAUTÉS"},
-    {L"WINDOWS COMPANION", L"COMPAGNON WINDOWS"},
     {L"Waiting", L"En attente"},
     {L"Waiting for Microsoft Flight Simulator 2024", L"En attente de Microsoft Flight Simulator 2024"},
     {L"Waiting for a display to be found for this aircraft.", L"En attente d'un écran pour cet avion."},
