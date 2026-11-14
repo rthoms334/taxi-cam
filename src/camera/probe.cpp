@@ -74,8 +74,12 @@ struct Runtime {
   // A refused kept pair falls back to the full reset only for the transition
   // it was refused in (its token); a newer transition starts without it.
   // Observer thread only.
-  bool kept_resize_refused = false;
-  std::uint64_t kept_resize_token = 0;
+  bool kept_refused = false;
+  std::uint64_t kept_refused_token = 0;
+  // The check (and feed, or -1) that refused the last kept pair to take the
+  // full reset, for bridge.log. Protected by mutex.
+  const char* kept_refusal = "none";
+  int kept_refused_feed = -1;
   std::atomic<std::uint64_t> scene_session_epoch{0};
   bool retained_restart_requested = false;
   profiles::CameraPanes allocation_panes = profiles::A380.camera_panes;
@@ -332,6 +336,8 @@ void publish_transition(Runtime& runtime, ProbeSnapshot& report) {
   if (runtime.session_reset.holding()) {
     report.profile_transition_id = runtime.session_reset.profile();
     report.profile_transition_failed = runtime.session_reset_failed;
+    report.profile_transition_refusal = runtime.session_reset_failed ? "session_reset" : "none";
+    report.profile_transition_refused_feed = -1;
     report.profile_transition_ready =
         !runtime.session_reset_failed && runtime.session_reset.ready(get_aircraft_session_readiness().ready, report.pair);
     report.profile_transition_pending = !report.profile_transition_ready && !report.profile_transition_failed;
@@ -342,6 +348,8 @@ void publish_transition(Runtime& runtime, ProbeSnapshot& report) {
     report.profile_transition_pending = runtime.profile_transition.pending();
     report.profile_transition_ready = runtime.profile_transition.ready();
     report.profile_transition_failed = runtime.profile_transition.failed();
+    report.profile_transition_refusal = report.profile_transition_failed ? runtime.profile_transition.refusal() : "none";
+    report.profile_transition_refused_feed = report.profile_transition_failed ? runtime.profile_transition.refused_feed() : -1;
   }
 }
 
@@ -1671,7 +1679,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
     if (action == RetainedProfileTransition::Decision::close) {
       const auto before_views = views;
       if (!manager_context(runtime, manager) || runtime.token != pair.owner)
-        transition.refuse();
+        transition.refuse("close_context");
       else {
         apply_gates(runtime, pair.owned_ids, {}, report, true);
         inspect_pair(runtime, pair.owned_ids, report, views, false);
@@ -1686,7 +1694,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
         if (unchanged)
           transition.inspect(runtime.token, runtime.pair.snapshot(), views);
         else
-          transition.refuse();
+          transition.refuse("close_changed");
       }
     }
     validated = transition.ready();
@@ -1704,9 +1712,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
     panes = timed(runtime, ProbeStage::lifecycle, [&] { return resize_kept_panes(runtime, pair); });
     if (panes == KeptPanes::failed) {
       ++runtime.kept_resize_failures;
-      runtime.kept_resize_refused = true;
-      runtime.kept_resize_token = token;
-      transition.refuse();
+      transition.refuse("resize_failed");
       validated = false;
     } else if (panes == KeptPanes::pending || runtime.resized_dimensions != before) {
       transition.rebase(runtime.resized_dimensions);
@@ -1729,13 +1735,16 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   const std::lock_guard lock(runtime.mutex);
   if (token == runtime.profile_transition_token) {
     runtime.profile_transition = transition;
-    // Once the bridge has resumed the kept pair it no longer waits on this
-    // transition, so a refusal now would leave the cameras closed for the
-    // rest of the simulator session. The observer takes the full reset
-    // instead, which the bridge follows as a transition of its own.
-    if (resume_requested && transition.failed()) {
-      runtime.kept_resize_refused = true;
-      runtime.kept_resize_token = token;
+    // A refused kept pair would leave the cameras closed for the rest of the
+    // simulator session, whether the bridge still waits on this transition
+    // (2026-11-07, iniBuilds A350: a display choice that reshaped the cameras
+    // was refused before the resume, and nothing but restarting the simulator
+    // brought them back) or has already resumed the pair. The observer takes
+    // the full reset instead, which the bridge follows as a transition of
+    // its own.
+    if (transition.failed()) {
+      runtime.kept_refused = true;
+      runtime.kept_refused_token = token;
     }
     if (validated)
       runtime.aircraft_profile = runtime.requested_profile;
@@ -2325,13 +2334,15 @@ void observer(void* manager) noexcept {
       if (!ec::any_owned(before.owned_ids) && !before.creation_pending)
         runtime.aircraft_profile = runtime.requested_profile;
       // A refusal recorded for an earlier transition never decides a newer one.
-      if (runtime.kept_resize_refused && runtime.kept_resize_token != runtime.profile_transition_token)
-        runtime.kept_resize_refused = false;
-      if ((runtime.flight_change_hold || runtime.kept_resize_refused) && runtime.profile_transition.failed()) {
+      if (runtime.kept_refused && runtime.kept_refused_token != runtime.profile_transition_token)
+        runtime.kept_refused = false;
+      if ((runtime.flight_change_hold || runtime.kept_refused) && runtime.profile_transition.failed()) {
         // The kept pair could not be revalidated or resized: the full reset
         // retires it and creates a new one.
         ++runtime.flight_change_fallbacks;
-        runtime.kept_resize_refused = false;
+        runtime.kept_refusal = runtime.profile_transition.refusal();
+        runtime.kept_refused_feed = runtime.profile_transition.refused_feed();
+        runtime.kept_refused = false;
         begin_session_reset(runtime, *runtime.requested_profile);
       }
       if (!runtime.session_reset.holding() && !runtime.flight_change_hold &&
@@ -3132,6 +3143,8 @@ void observer(void* manager) noexcept {
       runtime.published.mount_available = parenting_available(runtime);
       runtime.published.flight_change_holds = runtime.flight_change_holds;
       runtime.published.flight_change_fallbacks = runtime.flight_change_fallbacks;
+      runtime.published.kept_refusal = runtime.kept_refusal;
+      runtime.published.kept_refused_feed = runtime.kept_refused_feed;
       runtime.published.sim_paused = get_aircraft_session_readiness().paused;
       runtime.published.mount_contract_error = runtime.mount_contract_error;
       {
@@ -3322,6 +3335,8 @@ std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept {
   runtime.published.profile_transition_pending = runtime.profile_transition.pending();
   runtime.published.profile_transition_ready = runtime.profile_transition.ready();
   runtime.published.profile_transition_failed = runtime.profile_transition.failed();
+  runtime.published.profile_transition_refusal = runtime.profile_transition.failed() ? runtime.profile_transition.refusal() : "none";
+  runtime.published.profile_transition_refused_feed = runtime.profile_transition.failed() ? runtime.profile_transition.refused_feed() : -1;
   return token;
 }
 

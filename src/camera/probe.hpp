@@ -84,6 +84,10 @@ struct ProbeSnapshot {
   bool profile_transition_pending = false;
   bool profile_transition_ready = false;
   bool profile_transition_failed = false;
+  // The check that refused the transition and its feed (-1: none), while it
+  // is failed: a RetainedProfileTransition refusal, or "session_reset".
+  const char* profile_transition_refusal = "none";
+  int profile_transition_refused_feed = -1;
   MountPair mounts = default_mounts();
   std::array<MountedPose, kMaxCameraFeeds> mounted_poses{};
   std::uint64_t updates = 0;
@@ -115,6 +119,9 @@ struct ProbeSnapshot {
   // Flight changes that kept the camera pair, and kept pairs that failed
   // revalidation and took the full reset instead (begin_flight_change).
   std::uint64_t flight_change_holds = 0, flight_change_fallbacks = 0;
+  // The check and feed that refused the last kept pair to take the full reset.
+  const char* kept_refusal = "none";
+  int kept_refused_feed = -1;
   std::string mount_contract_error;
   // Camera shadow slices (view_cascades.hpp): the contract proof and the hook.
   bool cascades_available = false;

@@ -26,7 +26,9 @@ SRWLOCK control_lock = SRWLOCK_INIT;
 std::array<QueueState, kMaximumQueues> queues;
 std::atomic<Execute> original{nullptr};
 std::atomic<UnknownQueueObserver> discover_queue{nullptr};
-thread_local bool discovering_queue = false;
+// The queue whose first submit this thread is offering to the discovery
+// callback: a call that reached this wrapper for that queue.
+thread_local ID3D12CommandQueue* discovering_queue = nullptr;
 void** saved_slot = nullptr;
 void** pending_slot = nullptr;
 DWORD pending_protection = 0;
@@ -182,9 +184,9 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   auto* entry = find_queue(queue);
   if (!entry && !inside_wrapper && !discovering_queue) {
     if (const auto discover = discover_queue.load(std::memory_order_acquire)) {
-      discovering_queue = true;
+      discovering_queue = queue;
       discover(queue);
-      discovering_queue = false;
+      discovering_queue = nullptr;
       entry = find_queue(queue);
     }
   }
@@ -350,7 +352,12 @@ Result register_queue(ID3D12CommandQueue* queue, const Callbacks& callbacks) noe
   if (!read_pointer(slot, current))
     return respond(Status::invalid_slot_memory);
   if (consumed) {
-    if (current != reinterpret_cast<void*>(&submit))
+    // Another tool hooked this slot after us. A queue first seen once that
+    // has happened can still be registered from its own discovery: that call
+    // reached this wrapper through the other hook, exactly as the queues
+    // registered earlier are reached now. The slot is not written again.
+    // Without that evidence the slot's holder is not known to forward here.
+    if (current != reinterpret_cast<void*>(&submit) && discovering_queue != queue)
       return respond(Status::slot_changed);
   } else {
     if (!current || current == reinterpret_cast<void*>(&submit))

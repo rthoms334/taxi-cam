@@ -29,12 +29,16 @@ class RetainedProfileTransition {
     dimensions_ = dimensions;
     resizing_ = false;
     state_ = Decision::wait;
-    if (!id || pair.request_pending || pair.creation_pending)
-      state_ = Decision::refused;
+    refusal_ = "none";
+    refused_feed_ = -1;
+    if (!id)
+      refuse("no_profile");
+    else if (pair.request_pending || pair.creation_pending)
+      refuse("pair_pending");
     else if (!engine_camera::any_owned(ids_))
       state_ = Decision::ready;
     else if (!valid_pair(pair))
-      state_ = Decision::refused;
+      refuse("pair_invalid");
   }
   // The controller is still processing. Its published empty snapshot cannot
   // prove absence until cancel_uncreated_request or a fresh owned pair settles.
@@ -45,6 +49,8 @@ class RetainedProfileTransition {
     dimensions_ = {};
     awaiting_pair_ = id != 0;
     state_ = id ? Decision::wait : Decision::refused;
+    refusal_ = id ? "none" : "no_profile";
+    refused_feed_ = -1;
   }
   // PairController publishes ownership before the probe can publish allocation
   // expectations. Never bind a new pair to an earlier pair's dimensions during
@@ -60,8 +66,10 @@ class RetainedProfileTransition {
       return state_;
     if (awaiting_pair_)
       return Decision::wait;
-    if (!matches(pair) || manager != owner_)
-      return state_ = Decision::refused;
+    if (!matches(pair))
+      return refuse("pair_changed");
+    if (manager != owner_)
+      return refuse("manager_changed");
     bool open = false;
     const unsigned feeds = std::max(2u, engine_camera::owned_count(ids_));
     for (unsigned i = 0; i < feeds; ++i) {
@@ -74,17 +82,23 @@ class RetainedProfileTransition {
       // here and its cameras never came back). resize_kept_panes awaits the
       // new output, bounded; identity stays strict.
       const bool output = view.resource_present && view.resource_address;
-      if (view.status != engine_camera::OwnedViewStatus::ready || view.mode != 2 || (!resizing_ && !output) || !view.view_address ||
-          !view.node_address || !view.camera_address || view.view_index < 0 || view.view_index >= 8 || view.dimensions != dimensions_[i] ||
-          (!resizing_ && view.output_dimensions != dimensions_[i][0]))
-        return state_ = Decision::refused;
+      const char* const refusal = view.status != engine_camera::OwnedViewStatus::ready               ? "view_status"
+                                  : view.mode != 2                                                   ? "view_mode"
+                                  : !resizing_ && !output                                            ? "output_missing"
+                                  : !view.view_address || !view.node_address || !view.camera_address ? "view_address"
+                                  : view.view_index < 0 || view.view_index >= 8                      ? "view_index"
+                                  : view.dimensions != dimensions_[i]                                ? "view_dimensions"
+                                  : !resizing_ && view.output_dimensions != dimensions_[i][0]        ? "output_dimensions"
+                                                                                                     : nullptr;
+      if (refusal)
+        return refuse(refusal, static_cast<int>(i));
       open |= (view.flags[0] & 1u) == 0;
     }
     for (unsigned i = 0; i < feeds; ++i)
       for (unsigned j = i + 1; j < feeds; ++j)
         if (views[i].view_address == views[j].view_address || views[i].view_index == views[j].view_index ||
             (views[i].resource_address && views[i].resource_address == views[j].resource_address))
-          return state_ = Decision::refused;
+          return refuse("views_shared", static_cast<int>(j));
     return state_ = open ? Decision::close : Decision::ready;
   }
   bool matches(const Pair& pair) const noexcept { return valid_pair(pair) && pair.owner == owner_ && pair.owned_ids == ids_; }
@@ -97,10 +111,18 @@ class RetainedProfileTransition {
   }
   void resized() noexcept { resizing_ = false; }
   bool can_resume(const Pair& pair) const noexcept { return ready() && matches(pair); }
-  void refuse() noexcept {
+  // The first refusal names its check (and feed, or -1) for bridge.log; a
+  // refused transition stays refused, so later calls keep that reason.
+  Decision refuse(const char* reason, int feed = -1) noexcept {
     awaiting_pair_ = false;
-    state_ = Decision::refused;
+    if (state_ != Decision::refused) {
+      refusal_ = reason;
+      refused_feed_ = feed;
+    }
+    return state_ = Decision::refused;
   }
+  const char* refusal() const noexcept { return refusal_; }
+  int refused_feed() const noexcept { return refused_feed_; }
   void consume() noexcept {
     id_ = 0;
     awaiting_pair_ = false;
@@ -124,5 +146,7 @@ class RetainedProfileTransition {
   Dimensions dimensions_{};
   bool awaiting_pair_ = false, resizing_ = false;
   Decision state_ = Decision::wait;
+  const char* refusal_ = "none";
+  int refused_feed_ = -1;
 };
 }  // namespace taxi_camera::native_camera

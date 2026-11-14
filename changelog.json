@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "1.3.5",
+      "date": "2026-11-14",
+      "fixes": [
+        "Fixed a cause of the cameras staying off after you change aircraft while another tool that hooks the simulator's graphics, such as GlassOut, is running. If Taxi Cam does lose its connection to the simulator's graphics, its log now says why.",
+        "When Taxi Cam can't keep its cameras through a display change in Setup, it now replaces them instead of leaving them stopped until you restart the simulator.",
+        "If a change does stop Taxi Cam's cameras, Overview now says so instead of saying it is waiting for the cockpit displays to be drawn, and the log records what stopped them."
+      ]
+    },
+    {
       "version": "1.3.4",
       "date": "2026-11-09",
       "fixes": [
