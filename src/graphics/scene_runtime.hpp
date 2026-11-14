@@ -113,7 +113,9 @@ void set_gpu_timing_enabled(bool enabled);
 void set_waiting_stale_ms(std::uint64_t ms);
 bool init_device(std::uint64_t key, ID3D12Device* device);
 void destroy_device(std::uint64_t key);
-bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue);
+// status, when given, receives the queue hook's answer (registered for a queue
+// that needs no observation).
+bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue, engine_hook::queue_submit::Status* status = nullptr);
 bool prepare(std::uint64_t key);
 // Format-26 SDR display exposure only; finite EV is clamped to [-16, +4].
 // Applied to the next completed source pair without restarting the scene.
