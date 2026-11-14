@@ -1,5 +1,5 @@
 # Usage: python tools/icon/make_icon.py src/app/taxi-cam.ico [preview.png]
-# Draws the Taxi Cam icon at each shell size: a dark tile with the hold-short
+# Draws the Taxi Cam icon at each shell size: a dark tile in a yellow border with the hold-short
 # marking (two dashed lines over two solid ones) and TAXI in plain strokes.
 import sys
 from PIL import Image, ImageDraw, ImageChops
@@ -10,8 +10,12 @@ def draw(size):
     def aa(fn):
         m=Image.new('L',(n,n),0); fn(ImageDraw.Draw(m)); return m.resize((size,size),Image.BOX)
     radius=size*56/256
-    inner=aa(lambda d:d.rounded_rectangle((0,0,n-1,n-1),radius*k,fill=255))
+    # A yellow border around the dark tile, a whole number of pixels wide.
+    tile=aa(lambda d:d.rounded_rectangle((0,0,n-1,n-1),radius*k,fill=255))
+    edge_w=max(1,round(size*8/256))
+    inner=aa(lambda d:d.rounded_rectangle((edge_w*k,edge_w*k,n-1-edge_w*k,n-1-edge_w*k),max(0,radius-edge_w)*k,fill=255))
     img=Image.new('RGBA',(size,size),(0,0,0,0))
+    img.paste(Image.new('RGBA',(size,size),YELLOW),(0,0),tile)
     img.paste(Image.new('RGBA',(size,size),TILE),(0,0),inner)
     # The marking, on whole pixels so the lines stay crisp.
     small=size<=24
