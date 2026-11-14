@@ -209,10 +209,23 @@ and polls four times a second without painting.
 `BaseInstrument.js` is still not used: it is the file other packages
 override most, and UI and EFB pages load it.
 
-Not run in the simulator. To check: vRAAS and YourControls both installed,
-`launcher.log` says `mode=script ... carrier=XMLLogic.js`, and `bridge.log`
-reads marks and routes the displays; then that vRAAS's and YourControls' own
-functions still work.
+Not run in the simulator. `tools/panel-marks/conflict-scenario.ps1` sets
+the scenario up in the Community folder, from real package folders
+(`-RaasFrom`, `-YourControlsFrom`) or as stand-ins made from the installed
+stock files, and `-Status` prints the log lines below. The script itself has
+not been run yet. With MSFS and Taxi Cam closed for each change:
+
+1. Baseline, on the released 1.3.4: `launcher.log` says `mode=script` and
+   `bridge.log` reads 0 panel textures. A stand-in that does not fail here
+   does not reproduce the conflict, so nothing after it counts: use the real
+   YourControls.
+2. This build, same Community folder, started twice (the first start
+   rewrites the package and asks for a restart): `launcher.log` says
+   `mode=script ... carrier=XMLLogic.js`, and `bridge.log` reads marks and
+   routes the displays.
+3. With the real add-ons: vRAAS's and YourControls' own functions still
+   work.
+4. `-Remove`, then one more start: the package is back on the page.
 
 **Manifest.** The package declares the file in
 `globally_overriden_base_sim_files`, as Community packages that override
