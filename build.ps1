@@ -93,7 +93,7 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/bridge/bridge_main.cpp')) {
     $compileJobs += New-TaxiJob -Name 'taxi-camera-bridge.dll' -File $compiler -Arguments @($common + '-shared' + (Join-Path $taskRoot 'src/bridge/bridge_main.cpp') + $objects + $bridgeResource + $libs + '-Wl,--no-insert-timestamp' + '-o' + (Join-Path $out 'taxi-camera-bridge.dll')) -Failure 'Native bridge link failed.'
 }
 $companion = Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')
-$companionLibs = @('-lbcrypt','-ldxgi','-lversion','-lshell32','-lcomctl32','-lcomdlg32','-ladvapi32','-ldwmapi','-luxtheme','-lwinhttp','-lhid','-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lwindowscodecs')
+$companionLibs = @('-lbcrypt','-ldxgi','-lversion','-lshell32','-lcomctl32','-lcomdlg32','-ladvapi32','-ldwmapi','-luxtheme','-lwinhttp','-lhid','-lole32','-loleaut32','-lshlwapi','-lmsxml6','-lwindowscodecs','-lgdiplus')
 $setupSources = @($setup | ForEach-Object { Join-Path $taskRoot $_ })
 if ($companion) {
     $windres = Join-Path (Split-Path -Parent $compiler) 'llvm-windres.exe'

@@ -1,8 +1,30 @@
 {
   "releases": [
     {
-      "version": "1.3.5",
+      "version": "1.4.0",
       "date": "2026-11-14",
+      "features": [
+        {
+          "title": "A new look for Taxi Cam",
+          "text": "Taxi Cam's window is redesigned around four places: Home, Aircraft, Options and Help. Home tells you in one sentence whether the cameras are working and what to do if they aren't, and has a card for each cockpit display with its picture, its shortcut and one switch. There is a new icon to match.",
+          "image": "docs/whats-new/1.4.0/overview.png"
+        },
+        {
+          "title": "Cameras from the tray",
+          "text": "Click the Taxi Cam icon in the tray for a small panel with a switch for each display's cameras, the door camera and the TAXI buttons, so you don't need to open the window in flight. Double-click the icon for the full window.",
+          "image": "docs/whats-new/1.4.0/tray-panel.png"
+        },
+        {
+          "title": "Everything for your aircraft in one place",
+          "text": "Aircraft holds what is saved for the aircraft you have loaded: its Displays, Taxi cameras, Door camera and Picture (frame rate and brightness, which now has sliders). Open any of them in any order. An aircraft you set up for the first time is still taken through them step by step.",
+          "image": "docs/whats-new/1.4.0/options.png"
+        },
+        {
+          "title": "Options and Help",
+          "text": "Options is now only what applies to every aircraft: Auto-connect, Auto aircraft, notifications, language and updates. Help replaces Diagnostics: it shows in plain words whether the simulator, cameras and displays are working, with Report a bug and the log folder beside it.",
+          "image": "docs/whats-new/1.4.0/setup.png"
+        }
+      ],
       "fixes": [
         "Fixed a cause of the cameras staying off after you change aircraft while another tool that hooks the simulator's graphics, such as GlassOut, is running. If Taxi Cam does lose its connection to the simulator's graphics, its log now says why.",
         "When Taxi Cam can't keep its cameras through a display change in Setup, it now replaces them instead of leaving them stopped until you restart the simulator.",

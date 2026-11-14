@@ -19,6 +19,7 @@ Supporting files are kept separate:
 | --- | --- |
 | `tests/` | App, camera, graphics, hook, installer and diagnostic tests; shared fixtures are in `tests/support/` |
 | `tools/diagnostics/` | Optional interface-inventory, pose, material and telemetry tools for development |
+| `tools/icon/` | `make_icon.py` draws `src/app/taxi-cam.ico` at every shell size (Python with Pillow); rerun it to change the icon |
 | `installer/` | Inno Setup definition and package/build/bootstrap scripts; Setup itself runs no scripts |
 | `ci/` | Release version lookup, pinned toolchain helpers and release publication |
 | `.github/workflows/` | GitHub Actions PR test build, AI review, risk gate and the gated Windows release workflow |

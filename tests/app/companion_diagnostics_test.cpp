@@ -81,8 +81,9 @@ void marking_controls_tests() {
     draw_page(dc);
     bool matching = true;
     for (const bool right : {false, true}) {
-      const int x = 817 + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
-      const int y = 225 + static_cast<int>(std::lround(current.nose_dot[1] * 45));  // Below the step pills.
+      // The guide page is drawn at its own layout's coordinates, shifted into the page.
+      const int x = 817 + LegacyShiftX + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
+      const int y = 225 + LegacyShiftY + static_cast<int>(std::lround(current.nose_dot[1] * 45));
       // The corner is inside a square and outside the former circular marker.
       matching = matching && GetPixel(dc, x, y) == marking_color && GetPixel(dc, x + 6, y + 6) == marking_color;
     }
@@ -470,6 +471,178 @@ void autosave_setup_tests() {
   RemoveDirectoryW((win::settings_override + L"\\profiles\\discovered").c_str());
 }
 }  // namespace
+// The redesign's own controls: Picture's brightness sliders, Options'
+// switches, and the tray flyout's rows. Everything is put back for the cases
+// after it.
+void redesign_controls_tests() {
+  const auto saved = current;
+  const auto saved_notice = notice;
+  const int saved_page = page;
+  current.profile = profiles::A359.id;
+  current.auto_profile = 0;
+  current.follow_taxi = 1;
+  // Every page has the four places in its header; Home has no way back to need.
+  require(GetDlgItem(window, 100 + OverviewPage) && GetDlgItem(window, 100 + CamerasPage) && GetDlgItem(window, 100 + PreferencesPage) &&
+              GetDlgItem(window, 100 + DiagnosticsPage) && GetDlgItem(window, 602),
+          "The header has Home, Aircraft, Options, Help and the menu");
+  command(100 + CamerasPage);
+  require(page == SetupPage && GetDlgItem(window, StepPillId) && GetDlgItem(window, 100 + PicturePage) && GetDlgItem(window, AdvancedId) &&
+              !GetDlgItem(window, NextId) && !GetDlgItem(window, BackId) && GetDlgItem(window, 100 + OverviewPage),
+          "Aircraft opens Displays with its four sections; an aircraft with a setup has no Back or Next, and Home stays one click away");
+  command(100 + PicturePage);
+  const HWND day = GetDlgItem(window, BrightnessSliderId);
+  require(page == PicturePage && day && GetDlgItem(window, BrightnessSliderId + 1) && !GetDlgItem(window, 240) &&
+              !GetDlgItem(window, NotificationsId) && !GetDlgItem(window, AdvancedId),
+          "Picture is the aircraft's frame rate and brightness, without the app's switches");
+  wchar_t label[64]{};
+  SendMessageW(day, TBM_SETPOS, TRUE, 11);
+  procedure(window, WM_HSCROLL, MAKEWPARAM(TB_THUMBPOSITION, 11), reinterpret_cast<LPARAM>(day));
+  GetDlgItemTextW(window, 201, label, 64);
+  auto edited = current;
+  require(std::wstring(label) == L"-1.25" && read_fields(edited) && edited.day_brightness == -1.25f,
+          "A brightness slider writes a quarter-EV value the page reads");
+  SetDlgItemTextW(window, 202, L"+1.5");
+  procedure(window, WM_COMMAND, MAKEWPARAM(202, EN_CHANGE), reinterpret_cast<LPARAM>(GetDlgItem(window, 202)));
+  require(SendDlgItemMessageW(window, BrightnessSliderId + 1, TBM_GETPOS, 0, 0) == 22, "A typed brightness moves its slider");
+  SetDlgItemTextW(window, 201, L"+0.00");
+  SetDlgItemTextW(window, 202, L"+0.00");
+  // Options: the same for every aircraft. Its switches change their own
+  // label without rebuilding the page.
+  command(100 + PreferencesPage);
+  require(page == PreferencesPage && GetDlgItem(window, 240) && GetDlgItem(window, 230) && GetDlgItem(window, NotificationsId) &&
+              GetDlgItem(window, LanguageId) && GetDlgItem(window, UpdatesId) && !GetDlgItem(window, 201),
+          "Options has the app's switches, the language and the update check");
+  const HWND language = GetDlgItem(window, LanguageId);
+  const auto notifications = current.notifications;
+  command(NotificationsId);
+  GetDlgItemTextW(window, NotificationsId, label, 64);
+  require(current.notifications != notifications && GetDlgItem(window, LanguageId) == language &&
+              std::wstring(label) == (current.notifications ? L"Show notifications: On" : L"Show notifications: Off"),
+          "Show notifications toggles, says its new state and leaves the page's controls in place");
+  command(NotificationsId);
+  // Turning Auto-connect off asks for nothing; it is put back directly, since
+  // turning it on would also ask for a connection.
+  const bool connect = auto_connect.load();
+  auto_connect.store(true);
+  command(240);
+  GetDlgItemTextW(window, 240, label, 64);
+  require(!auto_connect.load() && GetDlgItem(window, LanguageId) == language && std::wstring(label) == L"Auto-connect: Off",
+          "Auto-connect toggles, says its new state and leaves the page's controls in place");
+  auto_connect.store(connect);
+  // Help: what to do about a problem, beside the camera tests.
+  command(100 + DiagnosticsPage);
+  require(page == DiagnosticsPage && GetDlgItem(window, 512) && GetDlgItem(window, 510) && GetDlgItem(window, 229),
+          "Help has Report a bug, Open log folder and the camera tests");
+  command(100 + PicturePage);
+  // An aircraft without a setup: Home offers to set it up, and its steps keep
+  // Back and Next (the last one Finish) after its displays are placed, which
+  // is when the bridge starts reporting it as set up.
+  const auto loaded = [](const char* folder, bool set_up, std::uint32_t epoch) {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+    status.heartbeat = GetTickCount64();
+    status.panel_discovery = 1;
+    status.identity_sample_ms = 1;
+    status.detected_profile = set_up ? profiles::DiscoveredProfileId : 0;
+    status.aircraft_session_epoch = epoch;
+    std::snprintf(status.aircraft_path, sizeof(status.aircraft_path), "SimObjects/Airplanes/%s/aircraft.cfg", folder);
+  };
+  const auto epoch = current.aircraft_session_epoch;
+  loaded("Fixture_One", false, epoch);
+  page = OverviewPage;
+  build_controls();
+  require(GetDlgItem(window, HomeActionId) != nullptr, "Home offers Set up this aircraft for an aircraft without a setup");
+  // Home has been timing it: one sample is not enough, and the time one
+  // aircraft has gone without a setup does not count for another.
+  page = SetupPage;
+  build_controls();
+  require(!GetDlgItem(window, NextId), "One sample of an aircraft without a setup does not start a guided setup");
+  guided_candidate_since -= GuidedHoldMs;
+  loaded("Fixture_Three", false, epoch);
+  build_controls();
+  require(!GetDlgItem(window, NextId), "nor does the time another aircraft went without one");
+  page = OverviewPage;
+  build_controls();
+  guided_candidate_since -= GuidedHoldMs;
+  loaded("Fixture_Two", true, epoch);
+  build_controls();
+  loaded("Fixture_One", false, epoch);
+  page = SetupPage;
+  build_controls();
+  require(!GetDlgItem(window, NextId), "or a time left over from before the steps were opened");
+  page = OverviewPage;
+  build_controls();
+  guided_candidate_since -= GuidedHoldMs;  // It has stayed that way while Home was open.
+  page = SetupPage;
+  build_controls();
+  require(GetDlgItem(window, NextId) && !GetDlgItem(window, BackId) && GetDlgItem(window, 100 + OverviewPage),
+          "A first-time setup starts with Next on Displays; Home in the header is the way out, not a Cancel");
+  loaded("Fixture_One", true, epoch);
+  build_controls();
+  require(GetDlgItem(window, NextId) != nullptr, "and keeps it once its displays are placed");
+  page = DoorPage;
+  build_controls();
+  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "through to Door camera, where Next is Finish");
+  // A flight restart or a teleport is a new session for the same aircraft.
+  loaded("Fixture_One", true, epoch + 1);
+  sync_aircraft_session();
+  build_controls();
+  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "A new flight session with the same aircraft keeps the guided setup");
+  // Another aircraft ends it, whether the bridge already reports it as set up
+  // or still waits for Auto aircraft to select its saved setup.
+  loaded("Fixture_Two", true, epoch + 2);
+  sync_aircraft_session();
+  build_controls();
+  require(!GetDlgItem(window, NextId) && !GetDlgItem(window, BackId), "A set-up aircraft loaded during a guided setup has no Back or Next");
+  page = OverviewPage;
+  build_controls();
+  require(!GetDlgItem(window, HomeActionId), "Home drops the offer once the aircraft has a setup");
+  loaded("Fixture_One", false, epoch + 2);
+  page = SetupPage;
+  build_controls();
+  loaded("Fixture_One", true, epoch + 2);
+  page = OverviewPage;
+  build_controls();
+  page = SetupPage;
+  build_controls();
+  require(!GetDlgItem(window, NextId) && !GetDlgItem(window, BackId), "Leaving the steps ends the guided setup");
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+  }
+  page = PicturePage;
+  build_controls();
+  // The flyout: a row per display's cameras, then TAXI-button control, which
+  // works with an unfinished value left in Settings.
+  const auto rows = flyout_rows();
+  require(rows.size() == profiles::A359.sides + (current.door_side < MaxDisplaySides ? 1u : 0u) + 1u &&
+              rows.back().action == FlyoutFollow && rows.back().on && rows.back().enabled,
+          "The flyout lists each display, the door camera where it has a display, and TAXI-button control");
+  SetDlgItemTextW(window, 201, L"abc");
+  const HDC dc = CreateCompatibleDC(nullptr);
+  const HBITMAP bitmap = CreateBitmap(FlyoutWidth, flyout_height(rows.size()), 1, 32, nullptr);
+  const auto old_bitmap = SelectObject(dc, bitmap);
+  const RECT client{0, 0, FlyoutWidth, flyout_height(rows.size())};
+  paint_flyout(dc, client);
+  SelectObject(dc, old_bitmap);
+  DeleteObject(bitmap);
+  DeleteDC(dc);
+  const auto follow = std::find_if(flyout_items.begin(), flyout_items.end(), [](const auto& item) { return item.action == FlyoutFollow; });
+  require(follow != flyout_items.end() && flyout_items.size() == rows.size() + 2, "The flyout's rows and its two buttons can be clicked");
+  const HWND stand_in = CreateWindowW(L"STATIC", L"", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, instance, nullptr);
+  const POINT centre{(follow->bounds.left + follow->bounds.right) / 2, (follow->bounds.top + follow->bounds.bottom) / 2};
+  flyout_procedure(stand_in, WM_LBUTTONUP, 0, MAKELPARAM(centre.x, centre.y));
+  require(!current.follow_taxi, "The flyout's TAXI row turns TAXI-button control off with an unfinished value in Settings");
+  flyout_procedure(stand_in, WM_LBUTTONUP, 0, MAKELPARAM(centre.x, centre.y));
+  require(current.follow_taxi && current.manual_mask == 0, "and on again, clearing manual cameras");
+  DestroyWindow(stand_in);
+  current = saved;
+  notice = saved_notice;
+  dirty = false;
+  autosave_due = 0;
+  page = saved_page;
+  build_controls();
+}
 int main() {
   try {
     instance = GetModuleHandleW(nullptr);
@@ -492,6 +665,7 @@ int main() {
     current.auto_profile = 0;
     page = 0;
     build_controls();
+    redesign_controls_tests();
     wchar_t connection_label[96]{};
     GetDlgItemTextW(window, 241, connection_label, 96);
     require(GetDlgItem(window, 241) && !GetDlgItem(window, 220) && !GetDlgItem(window, 242) && std::wstring(connection_label) == L"Connect",
