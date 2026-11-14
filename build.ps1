@@ -307,7 +307,10 @@ if ($Validate) {
     foreach ($entry in $nativeTests) {
         $testArgs = @(if ($entry.ContainsKey('Args')) { $entry.Args })
         [void](Add-Run $entry.Exe $testArgs "Native test failed: $($entry.Name)" -Timing:($timingTests -contains $entry.Name))
-        if ($entry.Name -eq 'queue-submit') { [void](Add-Run $entry.Exe @('augment') 'Queue submission augmentation failed.') }
+        if ($entry.Name -eq 'queue-submit') {
+            [void](Add-Run $entry.Exe @('augment') 'Queue submission augmentation failed.')
+            [void](Add-Run $entry.Exe @('chained') 'Queue registration under another hook failed.')
+        }
     }
     [void](Add-Run $diagnosticsTest @() 'Diagnostic controls validation failed.')
     [void](Add-Run $hotkeysTest @() 'Camera shortcut controls validation failed.')

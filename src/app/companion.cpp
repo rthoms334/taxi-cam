@@ -30,6 +30,7 @@ using std::min;
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/display_snapshot.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/status_messages.hpp"
 #include "../shared/sim_messages.hpp"
 #include "settings_store.hpp"
 #include "startup_state.hpp"
@@ -2178,19 +2179,30 @@ std::wstring setup_aircraft_name() {
 // The bridge pictured cockpit panels and none carried a mark: the panel
 // marks package is not loaded in this simulator session.
 bool package_conflict() noexcept;
+std::wstring packages_in_the_way();
+// The other add-ons that change the cockpit files Taxi Cam's package uses,
+// by folder name, after a message about the package: without the names the
+// pilot can't tell which add-on to move out (issue 200). Nothing is added
+// while there is none.
+std::wstring with_packages_in_the_way(std::wstring text) {
+  const auto names = packages_in_the_way();
+  if (!names.empty())
+    text += L" " + tr_format(L"Add-ons in your Community folder that change the same cockpit files: {0}.", {names});
+  return text;
+}
 // Another add-on's copy of the cockpit page Taxi Cam can't add to: the package
 // was left out, so restarting or reinstalling won't help.
-const wchar_t* package_conflict_text() {
-  return tr(
-      L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a way "
-      L"Taxi Cam can't add to. Taxi Cam can't recognise your displays while that add-on is installed.");
+std::wstring package_conflict_text() {
+  return with_packages_in_the_way(
+      tr(L"Another add-on in your Community folder changes the cockpit page Taxi Cam uses to recognise your displays, in a way "
+         L"Taxi Cam can't add to. Taxi Cam can't recognise your displays while that add-on is installed."));
 }
-const wchar_t* package_inactive_text() {
+std::wstring package_inactive_text() {
   if (package_conflict())
     return package_conflict_text();
-  return tr(
-      L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the "
-      L"simulator; if that doesn't help, run the Taxi Cam installer again.");
+  return with_packages_in_the_way(
+      tr(L"Taxi Cam's display package is not active in the simulator, so it can't recognise the cockpit displays. Restart the "
+         L"simulator; if that doesn't help, run the Taxi Cam installer again."));
 }
 bool package_inactive(const win::Status& sample) {
   return fresh_status(sample) && static_cast<win::PanelMapState>(sample.panel_state) == win::PanelMapState::inactive;
@@ -3868,6 +3880,13 @@ bool displays_to_choose(const win::Status& sample) {
 // has been checked for it (check_marks_package, on the connection worker).
 std::mutex marks_community_mutex;
 std::filesystem::path marks_community;
+// The other packages between Taxi Cam and the cockpit pages at that check
+// (marks_package::in_the_way), comma separated.
+std::wstring marks_in_the_way;
+std::wstring packages_in_the_way() {
+  const std::lock_guard lock(marks_community_mutex);
+  return marks_in_the_way;
+}
 void convert_legacy_displays() {
   win::Status sample;
   {
@@ -3964,15 +3983,19 @@ void log_marks_package(win::marks_package::Outcome outcome, const std::filesyste
         out += (out.empty() ? L"" : L",") + name;
       return out.empty() ? std::wstring(L"none") : out;
     };
-    // mode: the file ours replaces (page, or VCockpit.js while another
-    // package takes the page); *_takers: packages whose manifest lists it.
+    // mode: the file ours replaces (page, or a script while another package
+    // takes the page); carrier: the script the package on disk replaces;
+    // *_packages: packages with a copy; *_takers: those whose manifest lists
+    // it.
     const auto overrides = win::marks_package::other_page_overrides(community);
     const auto taken = win::marks_package::takers(community);
+    const auto carrier = win::marks_package::written_carrier(community);
     const auto line = std::wstring(L"Display package: outcome=") + widen(win::marks_package::outcome_name(outcome)) + L" community=" +
                       (community.empty() ? std::wstring(L"none") : community.wstring()) + L" mode=" +
                       widen(win::marks_package::mode_name(win::marks_package::mode_for(taken))) + L" other_page_packages=" +
                       names(overrides.page) + L" page_takers=" + names(taken.page) + L" script_packages=" + names(overrides.script) +
-                      L" script_takers=" + names(taken.script) + L" base_instrument_packages=" + names(overrides.base_instrument);
+                      L" script_takers=" + names(taken.script) + L" base_instrument_packages=" + names(overrides.base_instrument) +
+                      L" logic_packages=" + names(overrides.logic) + L" carrier=" + (carrier.empty() ? L"none" : widen(carrier.c_str()));
     const auto text = win::redact(win::report_utf8(line), win::report_redactions());
     const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
     std::wstring redacted(static_cast<std::size_t>(wide > 0 ? wide : 0), L'\0');
@@ -4004,6 +4027,11 @@ void check_marks_package(const std::wstring& simulator_exe) {
       marks_community = community;
     }
     outcome = win::marks_package::ensure(simulator, community, win::marks_package::helper_text());
+    std::wstring names;
+    for (const auto& name : win::marks_package::in_the_way(community))
+      names += (names.empty() ? L"" : L", ") + name;
+    const std::lock_guard lock(marks_community_mutex);
+    marks_in_the_way = std::move(names);
   } catch (...) {
   }
   log_marks_package(outcome, community);
@@ -5303,7 +5331,7 @@ bool store_aircraft_setup(const win::Status& sample, bool quiet) {
   // lower display already placed is the user's choice and stays.
   if (next.door_side == win::DoorSideNone && layout.sides == MaxDisplaySides && (!same || earlier.discovered.sides < MaxDisplaySides))
     next.door_side = MaxDisplaySides - 1;
-  if (!win::prepare_profile_selection(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
+  if (!win::prepare_layout_save(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
     notice = tr(L"Could not save this aircraft. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
     return false;
@@ -6986,7 +7014,10 @@ void draw_page(HDC dc) {
          : unsupported || (sample.graphics_ready && has_displays) ? Accent
                                                                   : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
+    // A change that cannot finish lists no displays either: the bridge's own
+    // line says so, where "waiting for displays" would hide it (issue 202).
+    const bool change_paused = sample.heartbeat && !std::strcmp(sample.message, win::TransitionFailedMessage);
+    const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported && !change_paused;
     // Two lines at most in this box: the alert and Displays give the rest.
     const auto line = inactive && package_conflict()
                           ? std::wstring(tr(L"Another add-on's cockpit page stops Taxi Cam recognising your displays."))
@@ -6997,9 +7028,9 @@ void draw_page(HDC dc) {
                                          : live;
     // Left of Auto-connect and Disconnect (686-992), as the heading is.
     text(dc, line.c_str(), 262, 166, 410, 36, small,
-         inactive          ? Amber
-         : late_empty_pfds ? Accent
-                           : Muted,
+         inactive || change_paused ? Amber
+         : late_empty_pfds         ? Accent
+                                   : Muted,
          DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
     panel(dc, 244, 222, 766, 84);
     text(dc, tr(L"Setup"), 262, 230, 120, 26, heading);
@@ -7389,6 +7420,9 @@ DWORD WINAPI connection_worker(void*) {
     const DWORD pid = attach.pid;
     if (attached && (pid != attached || (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0))) {
       mailbox.close();
+      DWORD exit_code = 0;
+      if (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0 && GetExitCodeProcess(process, &exit_code))
+        win::log_simulator_exit(win::settings_directory(), attached, exit_code);
       if (process)
         CloseHandle(process);
       process = nullptr;
@@ -7429,7 +7463,10 @@ DWORD WINAPI connection_worker(void*) {
       manual_armed = manual_armed || command == win::ConnectCommand::connect || command == win::ConnectCommand::reset;
       ignore_heartbeat_through = 0;
       startup_retry = {};
-      process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+      // The query right lets a crash be told from a normal exit afterwards.
+      process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (!process)
+        process = OpenProcess(SYNCHRONIZE, FALSE, pid);
       if (!auto_on && !manual_armed) {
         {
           const std::lock_guard lock(app_mutex);

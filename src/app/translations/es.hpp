@@ -445,6 +445,7 @@ inline constexpr Translation SpanishTranslations[]{
      L"No se pudo verificar ni iniciar el instalador. Vuelve a buscar actualizaciones."},
     {L"The legacy taxi add-on is loaded. Run the native installer, then restart MSFS.",
      L"El complemento de rodaje antiguo está cargado. Ejecuta el instalador nativo y reinicia MSFS."},
+    {L"MSFS stopped while Taxi Cam was starting.", L"MSFS se cerró mientras Taxi Cam se iniciaba."},
     {L"The native bridge refused startup.", L"El puente nativo rechazó el inicio."},
     {L"The profile's own displays are back.", L"Vuelven a usarse las pantallas propias del perfil."},
     {L"The saved image could not be opened.", L"No se pudo abrir la imagen guardada."},
@@ -697,6 +698,8 @@ inline constexpr Translation SpanishTranslations[]{
      L"add to. Taxi Cam can't recognise your displays while that add-on is installed.",
      L"Otro complemento de tu carpeta Community cambia la página de cabina que Taxi Cam usa para reconocer tus pantallas, de una forma a "
      L"la que Taxi Cam no puede añadir nada. Mientras ese complemento esté instalado, Taxi Cam no puede reconocer tus pantallas."},
+    {L"Add-ons in your Community folder that change the same cockpit files: {0}.",
+     L"Complementos de tu carpeta Community que cambian los mismos archivos de cabina: {0}."},
     {L"Another add-on's cockpit page stops Taxi Cam recognising your displays.",
      L"La página de cabina de otro complemento impide que Taxi Cam reconozca tus pantallas."},
     {L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.",
