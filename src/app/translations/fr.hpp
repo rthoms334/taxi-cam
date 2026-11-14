@@ -700,6 +700,8 @@ inline constexpr Translation FrenchTranslations[]{
      L"add to. Taxi Cam can't recognise your displays while that add-on is installed.",
      L"Un autre module de votre dossier Community modifie la page du cockpit qu'utilise Taxi Cam pour reconnaître vos écrans, d'une façon "
      L"que Taxi Cam ne peut pas compléter. Tant que ce module est installé, Taxi Cam ne peut pas reconnaître vos écrans."},
+    {L"Add-ons in your Community folder that change the same cockpit files: {0}.",
+     L"Modules de votre dossier Community qui modifient les mêmes fichiers du cockpit : {0}."},
     {L"Another add-on's cockpit page stops Taxi Cam recognising your displays.",
      L"La page du cockpit d'un autre module empêche Taxi Cam de reconnaître vos écrans."},
     {L"Taxi Cam could not find the simulator's Community folder for its display package. Run the Taxi Cam installer again.",

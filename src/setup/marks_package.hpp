@@ -17,6 +17,15 @@
 //   script is 23.5 KB of the simulator's logic, so this is used only when
 //   the page is taken: a simulator update to it runs our copy for one
 //   session until the next check rewrites it.
+//   A copy of VCockpit.js in any other Community package rules that script
+//   out, listed in its manifest or not (issue 200: with vRAAS taking the
+//   page, no mark was read on a Steam PC while YourControls and
+//   fscopilot-bridge, each with an unlisted copy, were installed, and marks
+//   were read with both removed; a Store reporter saw the same with
+//   YourControls, not checked in the log). Ours then replaces the
+//   next script every copy of the page loads that no other package holds,
+//   Instruments/Shared/Utils/XMLLogic.js (ScriptCarriers); not yet run in
+//   the simulator.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -48,6 +57,24 @@ inline constexpr wchar_t MarkerName[] = L"taxi-cam-marks.stock.txt";
 inline constexpr char PageRelative[] = "html_ui/Pages/VCockpit/Core/VCockpit.html";
 inline constexpr char HelperRelative[] = "html_ui/Pages/VCockpit/Core/taxi-cam-marks.js";
 inline constexpr char ScriptRelative[] = "html_ui/Pages/VCockpit/Core/VCockpit.js";
+inline constexpr char LogicRelative[] = "html_ui/Pages/VCockpit/Instruments/Shared/Utils/XMLLogic.js";
+// The stock scripts ours can replace in script mode, in order of choice:
+// where the file is, the `src` of the stock page's line that loads it, and
+// how our manifest lists it.
+struct Carrier {
+  const char* relative;
+  std::string_view src, listed;
+  // The file's own name, for the marker and the logs.
+  std::string_view name() const noexcept {
+    const std::string_view path(relative);
+    return path.substr(path.rfind('/') + 1);
+  }
+};
+inline constexpr Carrier ScriptCarriers[] = {
+    {ScriptRelative, "VCockpit.js", "\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.js"},
+    {LogicRelative, "/Pages/VCockpit/Instruments/Shared/Utils/XMLLogic.js",
+     "\\\\html_ui\\\\pages\\\\VCockpit\\\\Instruments\\\\Shared\\\\Utils\\\\XMLLogic.js"},
+};
 // Bumped when the files this writes change shape.
 inline constexpr char FormatVersion[] = "3";
 enum class Mode { page, script };
@@ -63,14 +90,17 @@ inline std::string_view helper_text() noexcept {
   return data ? std::string_view(static_cast<const char*>(data), SizeofResource(nullptr, found)) : std::string_view{};
 }
 
-// A page's `<script ... src="VCockpit.js">` lines: how many, and for the last
-// one where the next line starts, its indent and its line ending.
+// A page's `<script ... src="VCockpit.js">` lines (or another script's, by
+// its `src`): how many, and for the last one where the next line starts, its
+// indent and its line ending.
 struct ScriptLine {
   std::size_t count = 0, next = std::string_view::npos;
   std::string_view indent, ending;
 };
-inline ScriptLine script_lines(std::string_view stock) {
-  constexpr std::string_view script = R"(<script type="text/javascript" src="VCockpit.js"></script>)";
+inline ScriptLine script_lines(std::string_view stock, std::string_view src = ScriptCarriers[0].src) {
+  std::string script = R"(<script type="text/javascript" src=")";
+  script += src;
+  script += R"("></script>)";
   std::size_t found = std::string_view::npos, count = 0, start = 0;
   std::string_view indent, ending;
   while (start < stock.size()) {
@@ -96,9 +126,10 @@ inline ScriptLine script_lines(std::string_view stock) {
   }
   return {count, found, indent, ending};
 }
-// Whether a page loads VCockpit.js exactly once, by the stock line.
-inline bool loads_script(std::string_view page) {
-  return script_lines(page).count == 1;
+// Whether a page loads VCockpit.js (or that script) exactly once, by the
+// stock line.
+inline bool loads_script(std::string_view page, std::string_view src = ScriptCarriers[0].src) {
+  return script_lines(page, src).count == 1;
 }
 // The stock page with the helper's script line after the VCockpit.js line,
 // keeping that line's indent and line ending. Empty when the page has no or
@@ -121,8 +152,10 @@ inline std::string patch_page(std::string_view stock) {
   out += stock.substr(found);
   return out;
 }
-// The stock VCockpit.js with the helper added at its end, on lines of its
-// own. Empty when the script is empty or already carries the helper.
+// A stock script (VCockpit.js, XMLLogic.js) with the helper added at its
+// end, on lines of its own. The helper waits for the page's panel by itself,
+// so it runs the same from a script the page loads before VCockpit.js.
+// Empty when the script is empty or already carries the helper.
 inline constexpr std::string_view ScriptBanner = "// Taxi Cam panel marks (taxi-cam-marks.js), added by Taxi Cam.";
 inline std::string patch_script(std::string_view stock, std::string_view helper) {
   if (stock.empty() || helper.empty() || stock.find(ScriptBanner) != std::string_view::npos)
@@ -177,8 +210,9 @@ inline bool lists_file(std::string_view manifest, std::string_view relative) {
 inline bool lists_page(std::string_view manifest) {
   return lists_file(manifest, PageRelative);
 }
-// The package's manifest, overriding the page or the script.
-inline std::string manifest_json(std::string_view minimum_version, Mode mode = Mode::page) {
+// The package's manifest, overriding the page or a script (VCockpit.js
+// unless another is named).
+inline std::string manifest_json(std::string_view minimum_version, Mode mode = Mode::page, const Carrier* carrier = nullptr) {
   std::string out =
       "{\r\n  \"dependencies\": [],\r\n  \"content_type\": \"MISC\",\r\n  \"title\": \"Taxi Cam panel marks\",\r\n"
       "  \"manufacturer\": \"\",\r\n  \"creator\": \"Taxi Cam\",\r\n  \"package_version\": \"1.0.0\",\r\n"
@@ -188,8 +222,9 @@ inline std::string manifest_json(std::string_view minimum_version, Mode mode = M
       "\",\r\n  \"release_notes\": { \"neutral\": { \"LastUpdate\": \"\", \"OlderHistory\": \"\" } },\r\n"
       "  \"export_type\": \"Community\",\r\n  \"package_order_hint\": \"";
   out += OwnOrderHint;
-  out += "\",\r\n  \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\";
-  out += mode == Mode::script ? "VCockpit.js" : "VCockpit.html";
+  out += "\",\r\n  \"globally_overriden_base_sim_files\": [ \"";
+  out += mode == Mode::script ? (carrier ? carrier : &ScriptCarriers[0])->listed
+                              : std::string_view{"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.html"};
   out += "\" ]\r\n}\r\n";
   return out;
 }
@@ -212,12 +247,20 @@ inline std::string layout_json(const std::vector<LayoutEntry>& entries) {
 // What the marker file records: the mode, the stock file the package was
 // made from and the helper. A difference in any of them rewrites it, so
 // another package taking the page or giving it back, or a simulator update,
-// is followed at the next check.
-inline std::string marker_text(std::string_view stock_hash, std::string_view helper_hash, Mode mode = Mode::page) {
+// is followed at the next check. A script other than VCockpit.js is named
+// too; VCockpit.js is not, so a package 1.3.4 wrote stays current.
+inline std::string marker_text(std::string_view stock_hash,
+                               std::string_view helper_hash,
+                               Mode mode = Mode::page,
+                               const Carrier* carrier = nullptr) {
   std::string out = "format=";
   out += FormatVersion;
   out += "\r\nmode=";
   out += mode_name(mode);
+  if (mode == Mode::script && carrier && carrier != &ScriptCarriers[0]) {
+    out += "\r\ncarrier=";
+    out += carrier->name();
+  }
   out += "\r\nstock=";
   out += stock_hash;
   out += "\r\nhelper=";
@@ -370,13 +413,37 @@ inline std::filesystem::path stock_package(const std::filesystem::path& simulato
       return candidate;
   return {};
 }
+// A stock file of the cockpit pages, as installed: in the stock vcockpits
+// package, else in the one other stock package beside it that has it. Empty
+// when none or several have it.
+inline std::filesystem::path stock_file(const std::filesystem::path& stock, const char* relative) {
+  if (detail::exists(stock / relative))
+    return stock / relative;
+  std::filesystem::path found;
+  std::error_code error;
+  std::filesystem::directory_iterator entries(stock.parent_path(), std::filesystem::directory_options::skip_permission_denied, error);
+  for (; !error && entries != std::filesystem::directory_iterator(); entries.increment(error)) {
+    const auto candidate = entries->path() / relative;
+    if (!detail::exists(candidate))
+      continue;
+    if (!found.empty())
+      return {};
+    found = candidate;
+  }
+  return found;
+}
 // Other Community packages that ship their own copy of a stock file every
-// cockpit page loads: the page, its VCockpit.js, or BaseInstrument.js (which
-// runs in every page). Names only, sorted; packages directly in the
-// Community folder; Taxi Cam's own package (the one with its marker) left out.
+// cockpit page loads: the page, its VCockpit.js, XMLLogic.js, or
+// BaseInstrument.js (which runs in every page). Names only, sorted; packages
+// directly in the Community folder; Taxi Cam's own package (the one with its
+// marker) left out.
 inline constexpr char BaseInstrumentRelative[] = "html_ui/Pages/VCockpit/Instruments/Shared/BaseInstrument.js";
 struct PageOverrides {
-  std::vector<std::wstring> page, script, base_instrument;
+  std::vector<std::wstring> page, script, logic, base_instrument;
+  // The packages with a copy of that script, listed in their manifest or not.
+  const std::vector<std::wstring>& holders(const Carrier& carrier) const noexcept {
+    return &carrier == &ScriptCarriers[0] ? script : logic;
+  }
 };
 inline PageOverrides other_page_overrides(const std::filesystem::path& community) {
   PageOverrides out;
@@ -393,16 +460,20 @@ inline PageOverrides other_page_overrides(const std::filesystem::path& community
       out.page.push_back(name);
     if (detail::exists(folder / ScriptRelative))
       out.script.push_back(name);
+    if (detail::exists(folder / LogicRelative))
+      out.logic.push_back(name);
     if (detail::exists(folder / BaseInstrumentRelative))
       out.base_instrument.push_back(name);
   }
-  for (auto* list : {&out.page, &out.script, &out.base_instrument})
+  for (auto* list : {&out.page, &out.script, &out.logic, &out.base_instrument})
     std::sort(list->begin(), list->end());
   return out;
 }
-// The other packages that replace the stock page or its script: those of
-// other_page_overrides whose manifest lists the file as globally overridden
-// (in MSFS 2024 an unlisted copy replaces nothing).
+// The other packages whose manifest lists the stock page or its script as
+// globally overridden. The page counts as taken only when listed (an unlisted
+// copy of the page has not been seen to load). A script does not need
+// listing to get in the way: ensure() goes by every copy
+// (PageOverrides::holders), and `script` here is for the logs.
 struct Takers {
   std::vector<std::wstring> page, script;
 };
@@ -421,9 +492,44 @@ inline Takers takers(const std::filesystem::path& community) {
   const auto overrides = other_page_overrides(community);
   return {listing(community, overrides.page, PageRelative), listing(community, overrides.script, ScriptRelative)};
 }
-// Ours replaces the page while no other package does, else the script.
+// Ours replaces the page while no other package does, else a script.
 inline Mode mode_for(const Takers& taken) noexcept {
   return taken.page.empty() ? Mode::page : Mode::script;
+}
+// The other packages between Taxi Cam and the cockpit pages, for the
+// companion's messages: those taking the page, and those holding a script
+// ours had to pass over, up to the first script no package holds (all of
+// them when every script is held). None while the page is free: ours is on
+// the page then, where another package's copy of a script does no harm.
+// Sorted, each once.
+inline std::vector<std::wstring> in_the_way(const std::filesystem::path& community) {
+  const auto overrides = other_page_overrides(community);
+  auto out = listing(community, overrides.page, PageRelative);
+  if (out.empty())
+    return out;
+  for (const auto& carrier : ScriptCarriers) {
+    const auto& holders = overrides.holders(carrier);
+    if (holders.empty())
+      break;
+    out.insert(out.end(), holders.begin(), holders.end());
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+// The script the package Taxi Cam wrote replaces, by its file name; empty in
+// page mode, without a package, or for a marker that names no mode.
+inline std::string written_carrier(const std::filesystem::path& community) {
+  std::string marker;
+  if (community.empty() || !detail::read_file(community / PackageName / MarkerName, marker) ||
+      marker.find("\r\nmode=script\r\n") == std::string::npos)
+    return {};
+  constexpr std::string_view key = "\r\ncarrier=";
+  const auto at = marker.find(key);
+  if (at == std::string::npos)
+    return std::string(ScriptCarriers[0].name());
+  const auto end = marker.find("\r\n", at + key.size());
+  return marker.substr(at + key.size(), end == std::string::npos ? end : end - at - key.size());
 }
 
 enum class Outcome { current, written, removed, no_community, no_simulator, page_changed, failed, conflict };
@@ -500,9 +606,11 @@ inline std::string_view strip_bom(std::string_view text) noexcept {
   return text.size() >= 3 && text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? text.substr(3) : text;
 }
 // Makes the package current: the stock page plus the helper's script line
-// while no other package replaces the page, else the stock VCockpit.js plus
-// the helper (mode_for). Re-run at every check, it follows another package
-// taking the page or giving it back, and simulator updates. A package
+// while no other package replaces the page, else a stock script plus the
+// helper (mode_for): the first of ScriptCarriers that every taking page
+// loads and no other package has a copy of. Re-run at every check, it
+// follows another package taking the page or giving it back, and simulator
+// updates. A package
 // folder without the marker file is never touched: it is not one Taxi Cam
 // made. `running_since`: when the running simulator started (FILETIME, 0
 // when none runs, StartUnknown when one may run from an unknown time);
@@ -534,8 +642,10 @@ inline Outcome ensure(const std::filesystem::path& simulator,
       return Outcome::failed;
     return why == Outcome::page_changed && had ? Outcome::removed : why;
   };
-  const auto taken = takers(community);
+  const auto overrides = other_page_overrides(community);
+  const Takers taken{listing(community, overrides.page, PageRelative), listing(community, overrides.script, ScriptRelative)};
   const auto mode = mode_for(taken);
+  const Carrier* carrier = nullptr;
   std::string source, patched;
   if (mode == Mode::page) {
     source = page;
@@ -547,20 +657,35 @@ inline Outcome ensure(const std::filesystem::path& simulator,
       patched.insert(0, "\xEF\xBB\xBF");
   } else {
     // Whichever package's page loads has to load the script, and no other
-    // package may replace the script: else that add-on is left to work
-    // alone.
-    bool loaded = taken.script.empty();
+    // package may have a copy of it, listed or not (issue 200). The first
+    // script that passes carries the helper; with none, the add-ons in the
+    // way are left to work alone (conflict), unless only the simulator's
+    // own files ruled the scripts out (page_changed).
+    std::vector<std::string> pages;
     for (const auto& name : taken.page) {
       std::string other;
-      loaded = loaded && detail::read_file(community / name / PageRelative, other) && loads_script(strip_bom(other));
+      detail::read_file(community / name / PageRelative, other);
+      pages.push_back(std::move(other));
     }
-    if (!loaded)
-      return leave_out(Outcome::conflict);
-    if (!detail::read_file(stock / ScriptRelative, source))
-      return leave_out(Outcome::page_changed);
-    patched = patch_script(source, helper);
-    if (patched.empty())
-      return leave_out(Outcome::page_changed);
+    bool blocked = false;
+    for (const auto& candidate : ScriptCarriers) {
+      if (!overrides.holders(candidate).empty() || !std::all_of(pages.begin(), pages.end(), [&](const std::string& other) {
+            return loads_script(strip_bom(other), candidate.src);
+          })) {
+        blocked = true;
+        continue;
+      }
+      const auto installed = stock_file(stock, candidate.relative);
+      if (installed.empty() || !detail::read_file(installed, source))
+        continue;
+      patched = patch_script(source, helper);
+      if (patched.empty())
+        continue;
+      carrier = &candidate;
+      break;
+    }
+    if (!carrier)
+      return leave_out(blocked ? Outcome::conflict : Outcome::page_changed);
   }
   // The 1.3.3 test builds' later-named folder is out of date wherever ours is.
   if (!remove_named(community, LatePackageName))
@@ -569,7 +694,7 @@ inline Outcome ensure(const std::filesystem::path& simulator,
   if (mode == Mode::page)
     files = {{PageRelative, patched}, {HelperRelative, helper}};
   else
-    files = {{ScriptRelative, patched}};
+    files = {{carrier->relative, patched}};
   // Our files this mode doesn't use (the other mode's, or an older format's)
   // go, best effort, only where no running simulator has them mounted: with
   // none running, or once the package was written before the running one
@@ -580,13 +705,13 @@ inline Outcome ensure(const std::filesystem::path& simulator,
   // behind replaces nothing: our manifest and layout.json don't list it.
   const auto started = running_since ? *running_since : simulator_started();
   const auto clear_unused = [&] {
-    for (const char* relative : {PageRelative, HelperRelative, ScriptRelative})
+    for (const char* relative : {PageRelative, HelperRelative, ScriptRelative, LogicRelative})
       if (std::none_of(files.begin(), files.end(), [&](const auto& file) { return std::string_view(file.first) == relative; })) {
         std::error_code ignored;
         std::filesystem::remove(package / relative, ignored);
       }
   };
-  const auto expected = marker_text(detail::sha256(source), detail::sha256(helper), mode);
+  const auto expected = marker_text(detail::sha256(source), detail::sha256(helper), mode, carrier);
   // The marker alone doesn't say the files are there: a delete that gave up
   // part way leaves it behind without them.
   const bool complete = std::all_of(files.begin(), files.end(), [&](const auto& file) { return detail::exists(package / file.first); });
@@ -597,15 +722,17 @@ inline Outcome ensure(const std::filesystem::path& simulator,
   }
   std::error_code error;
   const bool fresh = !detail::exists(package);
-  const auto core = package / L"html_ui\\Pages\\VCockpit\\Core";
   const auto give_up = [&] {
     if (fresh && !detail::exists(marker))
       detail::remove_tree(package);
     return Outcome::failed;
   };
-  std::filesystem::create_directories(core, error);
-  if (error)
-    return give_up();
+  // Each file's folder (the scripts are not all in Core).
+  for (const auto& file : files) {
+    std::filesystem::create_directories((package / file.first).parent_path(), error);
+    if (error)
+      return give_up();
+  }
   // The marker first, matching no hashes until the end: a write that stops
   // part way leaves a package Taxi Cam still owns, so the next check rewrites
   // it and the uninstaller removes it.
@@ -616,7 +743,7 @@ inline Outcome ensure(const std::filesystem::path& simulator,
   for (const auto& [relative, text] : files)
     if (!detail::write_file(package / relative, text))
       return Outcome::failed;
-  if (!detail::write_file(package / L"manifest.json", manifest_json(minimum_game_version(manifest), mode)))
+  if (!detail::write_file(package / L"manifest.json", manifest_json(minimum_game_version(manifest), mode, carrier)))
     return Outcome::failed;
   std::vector<LayoutEntry> entries;
   for (const auto& [relative, text] : files) {
