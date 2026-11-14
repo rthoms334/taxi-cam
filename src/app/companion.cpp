@@ -7034,8 +7034,8 @@ void draw_page(HDC dc) {
   if (page == OverviewPage) {
     // The header: the app, its aircraft (build_controls) with how its setup
     // stands, and the connection's state beside Connect.
-    DrawIconEx(dc, scale(PageLeft), scale(13), icon, scale(30), scale(30), 0, nullptr, DI_NORMAL);
-    text(dc, L"Taxi Cam", 62, 16, 80, 24, heading);
+    DrawIconEx(dc, scale(PageLeft), scale(12), icon, scale(32), scale(32), 0, nullptr, DI_NORMAL);
+    text(dc, L"Taxi Cam", 64, 16, 78, 24, heading);
     rule(146, 18, 1, 20);
     const auto s = draft();
     const bool choose = !unsupported && displays_to_choose(sample);
@@ -7865,7 +7865,7 @@ void paint_flyout(HDC dc, const RECT& client) {
     sample = status;
   }
   // The aircraft, and the connection in a few words.
-  DrawIconEx(dc, scale(16), scale(17), icon, scale(30), scale(30), 0, nullptr, DI_NORMAL);
+  DrawIconEx(dc, scale(16), scale(16), icon, scale(32), scale(32), 0, nullptr, DI_NORMAL);
   const auto s = draft();
   const auto* profile = profiles::find(s.profile);
   words(profile ? profile->name : L"Taxi Cam", 56, 12, FlyoutWidth - 72, 22, heading, Text);
