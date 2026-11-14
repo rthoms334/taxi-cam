@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.3.5",
+      "date": "2026-11-14",
+      "fixes": [
+        "Setting up an aircraft's displays is calmer: placing a display where it already was, or confirming its area, no longer restarts the cameras with PLEASE WAIT. They now restart only when you move a display to another panel or swap the pilot displays."
+      ]
+    },
+    {
       "version": "1.3.4",
       "date": "2026-11-09",
       "fixes": [
