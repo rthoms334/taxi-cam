@@ -69,8 +69,10 @@ inline void log_attach(const std::wstring& directory, const SimulatorAttach& att
   } catch (...) {
   }
 }
-// A simulator that ended with a non-zero exit code, and the bridge's stack
-// overflow record for that process when it wrote one (crash_evidence.hpp).
+// A simulator that ended with a non-zero exit code. When that code is a stack
+// overflow, the line also carries the bridge's stack overflow record for that
+// process if it wrote one (crash_evidence.hpp); a record of an overflow the
+// simulator survived says nothing about a later exit with another code.
 inline void log_simulator_exit(const std::wstring& directory, DWORD pid, DWORD code) noexcept {
   try {
     if (directory.empty() || !pid || !code)
@@ -84,7 +86,10 @@ inline void log_simulator_exit(const std::wstring& directory, DWORD pid, DWORD c
     // The newest record of this process ID: IDs are reused across sessions.
     WIN32_FIND_DATAW entry{}, newest{};
     const auto search = FindFirstFileW((directory + L"\\renderer-fault-" + std::to_wstring(pid) + L"-*.bin").c_str(), &entry);
-    if (search != INVALID_HANDLE_VALUE) {
+    if (code != static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW)) {
+      if (search != INVALID_HANDLE_VALUE)
+        FindClose(search);
+    } else if (search != INVALID_HANDLE_VALUE) {
       do {
         if (!(entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
             crash_evidence::record_filename(entry.cFileName) &&

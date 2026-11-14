@@ -15,7 +15,7 @@ namespace taxi_camera::standalone::crash_evidence {
 // context's output-merger state (RBX+0x79a0..0x7a40: eight slot pairs, count
 // at +0x7910 is outside and read separately) and the first 0x100 bytes of the
 // slot-1 render-target record, each only after VirtualQuery shows a committed,
-// readable range. No stack pages or image data are copied. Never sent over IPC.
+// readable range. Those versions copy no stack or image data. Never sent over IPC.
 // Version 3 also records a stack overflow on any thread (code C00000FD): the
 // thread's stack bounds and the stack values that point into executable image
 // memory, each as module base, offset and repeat count, plus the size, link
@@ -384,9 +384,11 @@ inline void add_frame(Record* destination, std::uint64_t module, std::uint64_t a
   destination->frames[destination->frame_count++] = {module, static_cast<std::uint32_t>(rva), 1};
   note_module(destination, module);
 }
-// A stack overflow ends the process, so the first one is recorded wherever it
-// happens. Runs on the faulting thread with very little stack left: small
-// locals, VirtualQuery and bounded copies into the mapped record only.
+// The first stack overflow takes an empty record wherever it happens, because
+// it normally ends the process. One the simulator catches and survives leaves
+// a completed record that a later renderer fault replaces (capture below).
+// Runs on the faulting thread with very little stack left: small locals,
+// VirtualQuery and bounded copies into the mapped record only.
 inline LONG capture_overflow(Record* destination,
                              const EXCEPTION_RECORD& e,
                              const CONTEXT& c,
@@ -502,9 +504,19 @@ inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) no
   // time (capture_fault_site_code; 1.9.12.0: +0x3E5C054). No fixed site.
   const auto rva = address - destination->module;
   const bool located = code_capture && code_capture->match_rva && rva == code_capture->match_rva;
-  if (!located || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS ||
-      InterlockedCompareExchange(&destination->state, 1, 0) != 0)
+  if (!located || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS)
     return EXCEPTION_CONTINUE_SEARCH;
+  // The renderer fault is what the record exists for: it takes an empty record,
+  // or replaces a completed stack overflow that the process survived. An
+  // overflow still being written (state 1) keeps the record.
+  if (InterlockedCompareExchange(&destination->state, 1, 0) != 0 &&
+      (destination->code != static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW) || InterlockedCompareExchange(&destination->state, 1, 2) != 2))
+    return EXCEPTION_CONTINUE_SEARCH;
+  destination->frame_count = 0;
+  destination->module_count = 0;
+  destination->fault_address = 0;
+  destination->stack_limit = 0;
+  destination->stack_base = 0;
   // Only bounded copies into an already mapped, initialized record. No file
   // operations, allocation, locks, engine calls or exception suppression here.
   destination->code = e.ExceptionCode;

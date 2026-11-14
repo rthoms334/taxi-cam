@@ -155,14 +155,17 @@ void launcher_log_checks(const std::wstring& directory) {
     write_record(L"renderer-fault-4243-1.bin", 4242, 0x333);  // Named for another process.
     log_simulator_exit(directory, 4242, 0xC00000FD);
     log_simulator_exit(directory, 4243, 0xC0000005);
+    log_simulator_exit(directory, 4242, 0xC0000409);  // Its overflow record is not this exit's cause.
     log_simulator_exit(directory, 4244, 0);
     log = read_small_text_file(directory + L"\\launcher.log");
     require(log.find(L"simulator exit pid=4242 code=0xc00000fd | stack overflow: thread=77 stack_kb=256 fault=0x7ff800001234 "
                      L"chain=dxgi.dll+0x1234*1,main+0x222*500") != std::wstring::npos,
             "A simulator stack overflow is logged with its chain from the newest record of that process");
-    require(log.find(L"simulator exit pid=4243 code=0xc0000005\r\n") != std::wstring::npos && log.find(L"pid=4244") == std::wstring::npos &&
-                log.find(L"0x333") == std::wstring::npos && log.find(L"0x111") == std::wstring::npos,
-            "Other crash codes log the exit alone; a clean exit and another process's record log nothing");
+    require(log.find(L"simulator exit pid=4243 code=0xc0000005\r\n") != std::wstring::npos &&
+                log.find(L"simulator exit pid=4242 code=0xc0000409\r\n") != std::wstring::npos &&
+                log.find(L"pid=4244") == std::wstring::npos && log.find(L"0x333") == std::wstring::npos &&
+                log.find(L"0x111") == std::wstring::npos,
+            "Other crash codes log the exit alone, even beside an overflow record; a clean exit and another process's record log nothing");
     for (const auto* name : {L"renderer-fault-4242-1.bin", L"renderer-fault-4242-2.bin", L"renderer-fault-4243-1.bin"})
       DeleteFileW((directory + L"\\" + name).c_str());
   }

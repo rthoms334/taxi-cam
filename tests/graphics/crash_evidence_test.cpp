@@ -435,6 +435,32 @@ int main() {
     EXCEPTION_POINTERS overflow_pointers{&overflow, &overflow_context};
     assert(ce::capture(&dispatched, &overflow_pointers) == EXCEPTION_CONTINUE_SEARCH && dispatched.state == 2);
     assert(dispatched.stack_base > dispatched.stack_limit && dispatched.frame_count >= 2);
+    // An overflow the process survived does not keep the record from the
+    // renderer fault it exists for: that fault replaces it, once.
+    {
+      ce::Record survived;
+      survived.module = record.module;
+      assert(ce::capture_overflow(&survived, overflow, overflow_context, fake_limit, fake_base) == EXCEPTION_CONTINUE_SEARCH);
+      assert(survived.state == 2 && survived.frame_count == 2 && ce::describe_overflow(survived, text, sizeof(text)));
+      context.Rbx = 777;
+      assert(ce::capture(&survived, &pointers) == EXCEPTION_CONTINUE_SEARCH && survived.state == 2);
+      assert(survived.code == static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION) && survived.fault_rva == site.match_rva &&
+             survived.context.Rbx == 777 && survived.frame_count == 0 && survived.module_count == 0 && survived.stack_base == 0);
+      assert(!ce::describe_overflow(survived, text, sizeof(text)));
+      context.Rbx = 778;
+      assert(ce::capture(&survived, &pointers) == EXCEPTION_CONTINUE_SEARCH && survived.context.Rbx == 777);
+      // An overflow after a renderer fault leaves that record alone too.
+      assert(ce::capture_overflow(&survived, overflow, overflow_context, fake_limit, fake_base) == EXCEPTION_CONTINUE_SEARCH);
+      assert(survived.code == static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION) && survived.frame_count == 0);
+      // An overflow still being written keeps the record.
+      ce::Record writing;
+      writing.module = record.module;
+      writing.state = 1;
+      writing.code = static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW);
+      assert(ce::capture(&writing, &pointers) == EXCEPTION_CONTINUE_SEARCH && writing.state == 1 &&
+             writing.code == static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW));
+      context.Rbx = 1234;
+    }
     // Other records and codes have no overflow description.
     assert(!ce::describe_overflow(record, text, sizeof(text)) && !ce::describe_overflow(ce::Record{}, text, sizeof(text)));
     assert(VirtualFree(stack, 0, MEM_RELEASE));
