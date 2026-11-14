@@ -66,11 +66,10 @@ void render(HICON icon, int size, const std::wstring& destination) {
     for (int x = 0; x < size; ++x)
       pixels[y * size + x] = ((x / 8 + y / 8) & 1) ? 0xffcccccc : 0xffeeeeee;
   require(DrawIconEx(dc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL) && GdiFlush(), "Shell icon renders onto checkerboard");
-  unsigned edge{}, asphalt{}, marking{}, label_left{}, label_right{}, hold_short_left{}, hold_short_right{};
+  unsigned asphalt{}, marking{}, label_left{}, label_right{}, hold_short_left{}, hold_short_right{};
   for (int i = 0; i < size * size; ++i) {
     const auto color = pixels[i] & 0xffffff;
     const auto red = (color >> 16) & 255, green = (color >> 8) & 255, blue = color & 255;
-    edge += color == 0x3e4550;
     asphalt += color == 0x121417;
     // The smallest lettering is antialiased against asphalt; include blended yellow.
     const bool yellow = red > 130 && green > 110 && blue < 90 && red > green && green > blue + 50;
@@ -80,13 +79,12 @@ void render(HICON icon, int size, const std::wstring& destination) {
     hold_short_left += yellow && i / size < size / 2 && i % size < size / 3;
     hold_short_right += yellow && i / size < size / 2 && i % size >= size * 2 / 3;
   }
-  const bool branding = edge > 0 && asphalt > static_cast<unsigned>(size * size / 4) && marking > static_cast<unsigned>(size * size / 50) &&
+  const bool branding = asphalt > static_cast<unsigned>(size * size / 4) && marking > static_cast<unsigned>(size * size / 50) &&
                         label_left > 0 && label_right > 0 && hold_short_left > 0 && hold_short_right > 0;
   if (!branding)
-    std::fprintf(stderr,
-                 "Icon %d px: border=%u asphalt=%u marking=%u label-left=%u label-right=%u hold-short-left=%u hold-short-right=%u\n", size,
-                 edge, asphalt, marking, label_left, label_right, hold_short_left, hold_short_right);
-  require(branding, "Extracted branding retains asphalt, its grey edge, centred TAXI label and full-width hold-short marking");
+    std::fprintf(stderr, "Icon %d px: asphalt=%u marking=%u label-left=%u label-right=%u hold-short-left=%u hold-short-right=%u\n", size,
+                 asphalt, marking, label_left, label_right, hold_short_left, hold_short_right);
+  require(branding, "Extracted branding retains asphalt, centred TAXI label and full-width hold-short marking");
   require((pixels[0] & 0xffffff) == 0xeeeeee, "Icon corner remains transparent");
   BITMAPFILEHEADER header{};
   header.bfType = 0x4d42;

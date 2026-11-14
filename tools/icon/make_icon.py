@@ -3,18 +3,15 @@
 # marking (two dashed lines over two solid ones) and TAXI in plain strokes.
 import sys
 from PIL import Image, ImageDraw, ImageChops
-TILE=(18,20,23,255); EDGE=(62,69,80,255); YELLOW=(242,194,48,255)
+TILE=(18,20,23,255); YELLOW=(242,194,48,255)
 SIZES=[16,20,24,32,40,48,64,128,256]
 def draw(size):
     k=8; n=size*k
     def aa(fn):
         m=Image.new('L',(n,n),0); fn(ImageDraw.Draw(m)); return m.resize((size,size),Image.BOX)
     radius=size*56/256
-    tile=aa(lambda d:d.rounded_rectangle((0,0,n-1,n-1),radius*k,fill=255))
-    edge_w=max(1,round(size*5/256))
-    inner=aa(lambda d:d.rounded_rectangle((edge_w*k,edge_w*k,n-1-edge_w*k,n-1-edge_w*k),max(0,radius-edge_w)*k,fill=255))
+    inner=aa(lambda d:d.rounded_rectangle((0,0,n-1,n-1),radius*k,fill=255))
     img=Image.new('RGBA',(size,size),(0,0,0,0))
-    img.paste(Image.new('RGBA',(size,size),EDGE),(0,0),tile)
     img.paste(Image.new('RGBA',(size,size),TILE),(0,0),inner)
     # The marking, on whole pixels so the lines stay crisp.
     small=size<=24
