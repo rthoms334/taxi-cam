@@ -534,6 +534,42 @@ void redesign_controls_tests() {
   require(page == DiagnosticsPage && GetDlgItem(window, 512) && GetDlgItem(window, 510) && GetDlgItem(window, 229),
           "Help has Report a bug, Open log folder and the camera tests");
   command(100 + PicturePage);
+  // An aircraft without a setup: Home offers to set it up, and its steps keep
+  // Back and Next (the last one Finish) after its displays are placed, which
+  // is when the bridge starts reporting it as set up.
+  const auto unprofiled = [](bool set_up) {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+    status.heartbeat = GetTickCount64();
+    status.panel_discovery = 1;
+    status.identity_sample_ms = 1;
+    status.detected_profile = set_up ? profiles::DiscoveredProfileId : 0;
+  };
+  unprofiled(false);
+  page = OverviewPage;
+  build_controls();
+  require(GetDlgItem(window, HomeActionId) != nullptr, "Home offers Set up this aircraft for an aircraft without a setup");
+  page = SetupPage;
+  build_controls();
+  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "A first-time setup starts with Back and Next on Displays");
+  unprofiled(true);
+  build_controls();
+  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "and keeps them once its displays are placed");
+  page = DoorPage;
+  build_controls();
+  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "through to Door camera, where Next is Finish");
+  page = OverviewPage;
+  build_controls();
+  require(!GetDlgItem(window, HomeActionId), "Home drops the offer once the aircraft has a setup");
+  page = SetupPage;
+  build_controls();
+  require(!GetDlgItem(window, NextId) && !GetDlgItem(window, BackId), "Leaving the steps ends the guided setup");
+  {
+    const std::lock_guard lock(app_mutex);
+    status = {};
+  }
+  page = PicturePage;
+  build_controls();
   // The flyout: a row per display's cameras, then TAXI-button control, which
   // works with an unfinished value left in Settings.
   const auto rows = flyout_rows();

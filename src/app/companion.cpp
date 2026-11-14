@@ -6324,11 +6324,26 @@ void draw_look_icons(HDC dc, const RECT& well, unsigned view) {
 }
 // An aircraft set up for the first time goes through Setup's steps in order,
 // with Back and Next; one that has a setup opens any of them directly.
+// It starts on any step while the aircraft has no setup, or while its cameras
+// are being positioned, and lasts until the steps are left: placing its
+// displays makes it a set-up aircraft at once, which must not take Back,
+// Next and Finish away from the rest of the steps.
+bool guided{};
 bool guided_setup(const win::Status& sample) {
-  return unsupported_aircraft(sample) || setup.positioning;
+  if (setup_step(page) < 0)
+    guided = false;
+  else if (unsupported_aircraft(sample) || setup.positioning)
+    guided = true;
+  return guided;
 }
-// What the pages were last built for, so a change of either rebuilds them.
+// What Home offers for the aircraft: nothing, Set up this aircraft (1) or
+// Choose displays (2).
+int home_action(const win::Status& sample) {
+  return unsupported_aircraft(sample) ? 1 : displays_to_choose(sample) ? 2 : 0;
+}
+// What the pages were last built for, so a change of any rebuilds them.
 bool built_with_displays{}, built_guided{};
+int built_home_action{};
 void build_controls() {
   refreshing = true;
   if (setup_step(page) < 0)
@@ -6363,6 +6378,7 @@ void build_controls() {
   }
   built_with_displays = built_for.graphics_ready != 0;
   built_guided = guided_setup(built_for);
+  built_home_action = home_action(built_for);
   // The header, the same on every page: the four places, then the menu.
   // Pages open by id (100 + page); Aircraft opens Displays.
   const wchar_t* places[]{tr(L"Home"), tr(L"Aircraft"), tr(L"Options"), tr(L"Help")};
@@ -6391,7 +6407,7 @@ void build_controls() {
   if (page == OverviewPage) {
     // The status card: what to do about an aircraft that needs setting up,
     // then Connect.
-    const bool needs_setup = unsupported_aircraft(built_for), needs_displays = !needs_setup && displays_to_choose(built_for);
+    const bool needs_setup = built_home_action == 1, needs_displays = built_home_action == 2;
     button(tr(win::connection_button_label(connection_requested.load(std::memory_order_acquire))), 241, 838, HomeStatusTop + 20, 120, 36);
     if (needs_setup || needs_displays)
       button(needs_setup ? tr(L"Set up this aircraft") : tr(L"Choose displays"), HomeActionId, 628, HomeStatusTop + 20, 200, 36);
@@ -8694,15 +8710,16 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (shortcut_window == window)
         refresh_lvar_status(window);
       {
-        // Home shows the displays once the simulator does, and a step its
-        // Back and Next while the aircraft is being set up: either changing
-        // rebuilds the page, without touching fields being edited elsewhere.
+        // Home shows the displays once the simulator does and its button for
+        // an aircraft that needs setting up, and a step its Back and Next
+        // while the aircraft is being set up: any of them changing rebuilds
+        // the page, without touching fields being edited elsewhere.
         win::Status latest;
         {
           const std::lock_guard lock(app_mutex);
           latest = status;
         }
-        if ((page == OverviewPage && (latest.graphics_ready != 0) != built_with_displays) ||
+        if ((page == OverviewPage && ((latest.graphics_ready != 0) != built_with_displays || home_action(latest) != built_home_action)) ||
             (setup_step(page) >= 0 && guided_setup(latest) != built_guided && !dirty))
           build_controls();
       }
