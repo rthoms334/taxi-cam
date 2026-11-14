@@ -3407,6 +3407,26 @@ void plan_display_submission(void*,
     r.queue_patch_plans.fetch_add(1, std::memory_order_relaxed);
   outcome(plan.count ? DisplaySubmissionOutcome::planned : empty_reason);
 }
+// The failure code names why the queue hook refused, so a report's
+// "Hook failures: last_error=" line tells the cases apart.
+const char* queue_registration_error(queue_hook::Status status) noexcept {
+  switch (status) {
+    case queue_hook::Status::slot_changed:
+      return "queue_registration_failed:slot_changed";
+    case queue_hook::Status::queue_limit:
+      return "queue_registration_failed:queue_limit";
+    case queue_hook::Status::different_vtable:
+      return "queue_registration_failed:different_vtable";
+    case queue_hook::Status::invalid_queue_memory:
+    case queue_hook::Status::invalid_slot_memory:
+      return "queue_registration_failed:invalid_memory";
+    case queue_hook::Status::protection_change_failed:
+    case queue_hook::Status::protection_restore_failed:
+      return "queue_registration_failed:protection";
+    default:
+      return "queue_registration_failed";
+  }
+}
 void unknown_queue(ID3D12CommandQueue* queue) noexcept {
   if (owned_depth || !registry().ready || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return;
@@ -3415,8 +3435,9 @@ void unknown_queue(ID3D12CommandQueue* queue) noexcept {
     error("queue_device_mismatch");
     return;
   }
-  if (!runtime::init_queue(registry().key, queue))
-    error("queue_registration_failed");
+  auto status = queue_hook::Status::registered;
+  if (!runtime::init_queue(registry().key, queue, &status))
+    error(queue_registration_error(status));
 }
 std::array<NativeSlot, 10> creations;
 constexpr std::array<unsigned, 10> CreationSlots{27, 29, 30, 53, 55, 69, 70, 76, 77, 78};
