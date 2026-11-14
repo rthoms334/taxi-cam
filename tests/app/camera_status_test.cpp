@@ -50,6 +50,9 @@ int main() {
   scene.profile_transition_failed = true;
   require(std::strstr(camera_transition_message(scene), "validation failed") && !std::strstr(camera_transition_message(scene), "parked"),
           "A failed aircraft transition reused an unrelated prior camera message");
+  // The companion recognises this line by the shared text (Overview).
+  require(!std::strcmp(camera_transition_message(scene), standalone::TransitionFailedMessage),
+          "A failed aircraft transition is not the line the companion recognises");
   scene.profile_transition_failed = false;
   scene.pair.request_pending = true;
   require(std::strstr(camera_transition_message(scene), "pending camera startup"),
