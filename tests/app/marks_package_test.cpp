@@ -74,6 +74,21 @@ int main() {
   require(marks_package::patch_script("", "(function () {})();").empty(), "an empty stock script is refused");
   require(marks_package::loads_script(Stock) && !marks_package::loads_script("<html><head></head></html>"),
           "a page that loads VCockpit.js is told apart");
+  // The second script ours can replace (issue 200), by the stock page's line.
+  const auto& logic = marks_package::ScriptCarriers[1];
+  require(marks_package::loads_script(Stock, logic.src) && !marks_package::loads_script("<html><head></head></html>", logic.src) &&
+              logic.name() == "XMLLogic.js" && marks_package::ScriptCarriers[0].name() == "VCockpit.js",
+          "a page that loads XMLLogic.js is told apart");
+  const auto logic_manifest = marks_package::manifest_json("1.9.21", marks_package::Mode::script, &logic);
+  require(logic_manifest.find("\\\\html_ui\\\\pages\\\\VCockpit\\\\Instruments\\\\Shared\\\\Utils\\\\XMLLogic.js\"") != std::string::npos &&
+              logic_manifest.find("VCockpit.js") == std::string::npos &&
+              marks_package::lists_file(logic_manifest, marks_package::LogicRelative),
+          "its manifest names that script only");
+  require(marks_package::marker_text("a", "b", marks_package::Mode::script, &marks_package::ScriptCarriers[0]) ==
+                  marks_package::marker_text("a", "b", marks_package::Mode::script) &&
+              marks_package::marker_text("a", "b", marks_package::Mode::script, &logic).find("\r\ncarrier=XMLLogic.js\r\n") !=
+                  std::string::npos,
+          "the marker names a script other than VCockpit.js, and is unchanged for VCockpit.js");
   const auto layout = marks_package::layout_json({{"a/b.html", 10, 20}, {"a/c.js", 30, 40}});
   require(layout.find("{ \"path\": \"a/b.html\", \"size\": 10, \"date\": 20 },") != std::string::npos &&
               layout.find("{ \"path\": \"a/c.js\", \"size\": 30, \"date\": 40 }\r\n") != std::string::npos,
@@ -273,6 +288,103 @@ int main() {
           marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(package / marks_package::PageRelative),
           "with the page free, ours replaces the page and loads that package's script");
       erase(script_tool);
+      // Issue 200: with the page taken, another package's copy of
+      // VCockpit.js that its manifest does not list (YourControls) still
+      // left no mark readable. Ours moves to the next script every page
+      // loads, XMLLogic.js, and back when that package goes.
+      {
+        fs::create_directories((other / marks_package::PageRelative).parent_path());
+        write(other / marks_package::PageRelative, other_page);
+        write(other / "manifest.json", "{ " + listed + " }");
+        const auto stock_logic = simulator / "Packages" / "asobo-vcockpits-core" / marks_package::LogicRelative;
+        fs::create_directories(stock_logic.parent_path());
+        write(stock_logic, "class LogicXMLElement {}\r\n");
+        const auto logic_file = package / marks_package::LogicRelative;
+        const auto holder = community / "YourControls";
+        const auto hold_script = [&] {
+          fs::create_directories((holder / marks_package::ScriptRelative).parent_path());
+          write(holder / marks_package::ScriptRelative, "their copy");
+          write(holder / "manifest.json", "{ \"title\": \"YourControls\" }");
+        };
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(script_file) &&
+                    marks_package::written_carrier(community) == "VCockpit.js",
+                "with VCockpit.js free, ours replaces it");
+        hold_script();
+        require(marks_package::takers(community).script.empty() &&
+                    marks_package::other_page_overrides(community).script == std::vector<std::wstring>{L"YourControls"},
+                "an unlisted copy of the script is found");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(logic_file) &&
+                    cleared(script_file) && marks_package::written_carrier(community) == "XMLLogic.js",
+                "another package's unlisted VCockpit.js moves ours to XMLLogic.js");
+        require(read(logic_file).rfind("class LogicXMLElement {}", 0) == 0 && read(logic_file).find("helper") != std::string::npos &&
+                    read(logic_file).find(marks_package::ScriptBanner) != std::string::npos,
+                "the stock XMLLogic.js with the helper after it");
+        require(read(package / "manifest.json").find("XMLLogic.js\"") != std::string::npos &&
+                    read(package / "manifest.json").find("VCockpit.js") == std::string::npos &&
+                    read(package / "layout.json").find("Utils/XMLLogic.js") != std::string::npos &&
+                    read(package / "layout.json").find("VCockpit.js") == std::string::npos,
+                "the manifest and layout name XMLLogic.js only");
+        require(read(marker).find("\r\nmode=script\r\ncarrier=XMLLogic.js\r\n") != std::string::npos, "the marker names the script");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::current, "and is left alone while nothing changes");
+        require(marks_package::in_the_way(community) == (std::vector<std::wstring>{L"YourControls", L"panel-raas"}),
+                "both add-ons are named for the companion's message");
+        write(stock_logic, "class LogicXMLElement { update() {} }\r\n");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
+                    read(logic_file).find("update()") != std::string::npos,
+                "a simulator update to XMLLogic.js rewrites ours");
+        // A running simulator keeps the script it mounted.
+        erase(holder);
+        require(marks_package::ensure(simulator, community, "helper", 1) == Outcome::written && fs::exists(script_file) &&
+                    fs::exists(logic_file),
+                "a switch back while the simulator runs keeps its mounted XMLLogic.js");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::current && cleared(logic_file) &&
+                    marks_package::written_carrier(community) == "VCockpit.js",
+                "with that package gone, ours is on VCockpit.js again");
+        // A taking page that doesn't load XMLLogic.js: nothing left to use.
+        hold_script();
+        std::string without_logic(other_page);
+        without_logic.erase(
+            without_logic.find("    <script type=\"text/javascript\" src=\"/Pages/VCockpit/Instruments/Shared/Utils/XMLLogic.js\""),
+            std::string_view(
+                "    <script type=\"text/javascript\" src=\"/Pages/VCockpit/Instruments/Shared/Utils/XMLLogic.js\"></script>\r\n")
+                .size());
+        write(other / marks_package::PageRelative, without_logic);
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict && !fs::exists(package) &&
+                    marks_package::written_carrier(community).empty(),
+                "a taking page without XMLLogic.js leaves ours out");
+        write(other / marks_package::PageRelative, other_page);
+        // Another package with a copy of XMLLogic.js too.
+        const auto logic_tool = community / "logic-tool";
+        fs::create_directories((logic_tool / marks_package::LogicRelative).parent_path());
+        write(logic_tool / marks_package::LogicRelative, "their logic");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict && !fs::exists(package),
+                "both scripts held by other packages leaves ours out");
+        require(marks_package::in_the_way(community) == (std::vector<std::wstring>{L"YourControls", L"logic-tool", L"panel-raas"}),
+                "every add-on in the way is named");
+        erase(logic_tool);
+        // XMLLogic.js installed in another stock package, or in two.
+        erase(stock_logic);
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict,
+                "no installed XMLLogic.js with VCockpit.js held: left out");
+        const auto elsewhere = simulator / "Packages" / "asobo-vcockpits-instruments" / marks_package::LogicRelative;
+        fs::create_directories(elsewhere.parent_path());
+        write(elsewhere, "class LogicXMLElement {}\r\n");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(logic_file),
+                "XMLLogic.js in another stock package is used");
+        const auto twice_installed = simulator / "Packages" / "fs-base-ui" / marks_package::LogicRelative;
+        fs::create_directories(twice_installed.parent_path());
+        write(twice_installed, "another\r\n");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict && !fs::exists(package),
+                "two stock copies outside the vcockpits package: no guess");
+        erase(simulator / "Packages" / "fs-base-ui");
+        erase(simulator / "Packages" / "asobo-vcockpits-instruments");
+        erase(holder);
+        erase(other);
+        require(marks_package::in_the_way(community).empty(), "with the add-ons gone, none is named");
+        require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
+                    fs::exists(package / marks_package::PageRelative),
+                "and ours is on the page");
+      }
       // The stock script gone while the page is taken: like a changed page.
       fs::create_directories((other / marks_package::PageRelative).parent_path());
       write(other / marks_package::PageRelative, other_page);
@@ -323,13 +435,16 @@ int main() {
     fs::create_directories(community / "zzz-page" / "html_ui" / "Pages" / "VCockpit" / "Core");
     write(community / "zzz-page" / marks_package::PageRelative, "page");
     write(community / "zzz-page" / marks_package::ScriptRelative, "script");
+    fs::create_directories((community / "zzz-page" / marks_package::LogicRelative).parent_path());
+    write(community / "zzz-page" / marks_package::LogicRelative, "logic");
     fs::create_directories(community / "base-tool" / "html_ui" / "Pages" / "VCockpit" / "Instruments" / "Shared");
     write(community / "base-tool" / marks_package::BaseInstrumentRelative, "base");
     fs::create_directories(community / "livery-only");
     const auto overrides = marks_package::other_page_overrides(community);
     require(overrides.page == std::vector<std::wstring>{L"zzz-page"} && overrides.script == std::vector<std::wstring>{L"zzz-page"} &&
+                overrides.logic == std::vector<std::wstring>{L"zzz-page"} &&
                 overrides.base_instrument == std::vector<std::wstring>{L"base-tool"},
-            "other page, script and BaseInstrument packages are listed, ours and unrelated ones are not");
+            "other page, script, XMLLogic and BaseInstrument packages are listed, ours and unrelated ones are not");
     require(marks_package::other_page_overrides({}).page.empty(), "no Community folder: nothing listed");
     fs::remove_all(community / "zzz-page", ignored);
     fs::remove_all(community / "base-tool", ignored);

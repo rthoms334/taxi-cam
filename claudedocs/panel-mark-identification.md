@@ -164,6 +164,56 @@ so its PFD/ND text beside our helper is unverified. While the simulator
 runs, a mode switch keeps the old mode's files (they are mounted); they go
 at the first check of a later session.
 
+### When another package holds the script too (issue 200, 2026-11-14)
+
+Script mode failed on two reporters' PCs with the real vRAAS. Both had
+`panel-raas` taking the page and `YourControls` in the Community folder (one
+also `fscopilot-bridge`), each with its own copy of `Core/VCockpit.js` that
+its manifest does not list:
+
+| PC | Community beside `panel-raas` | Result (`bridge.log`) |
+|---|---|---|
+| Steam, A350-900, 1.3.3 | `YourControls`, `fscopilot-bridge` | 0 of 28 panel textures read, package inactive |
+| Steam, A350-1000, 1.3.4 | none | 16 of 25 read, displays found |
+| Steam, A350-1000, 1.3.4 | `YourControls`, `fscopilot-bridge` | 0 of 27 read, package inactive |
+| Store, iniBuilds A380, 1.3.4 | none (`YourControls` moved out) | 22 of 31 read, displays found |
+
+The Store reporter says the displays were not found with `YourControls` in;
+that session's scan was not checked in the log. So the earlier rule here,
+"in MSFS 2024 an unlisted copy replaces nothing", was wrong for the script:
+a copy our manifest lists lost to one theirs does not. Why is not
+established (mount order between hinted and unhinted packages is a guess).
+`fscopilot-bridge` alone has not been tried. In page mode the same packages
+do no harm: the first reporter's displays were found with both installed
+and vRAAS removed, because our page names the helper by its own line.
+
+**Choice: any other package's copy of a script rules that script out, and
+ours moves to the next one every copy of the page loads**
+(`ScriptCarriers`): `Core/VCockpit.js` first, then
+`Instruments/Shared/Utils/XMLLogic.js`, which the stock page (and vRAAS's
+older copy of it) loads by an absolute path before `VCockpit.js`. The helper
+only sets a timer when it loads and waits for the panel data, so it does not
+need `VCockpit.js` to have run. A script is usable when every taking page
+loads it by the stock line, no other Community package has a copy, and the
+installed file is found: in `asobo-vcockpits-core`, else in the one other
+stock package beside it that has it. With no usable script the package is
+left out (`conflict`), and the companion's message names the packages in
+the way, as it now also does when the package is written but not active.
+
+The trade-offs of "Other load points" apply to `XMLLogic.js` as to
+`VCockpit.js`: a simulator update runs our older copy for one session. Not
+known: its size, which stock package holds it, and whether pages other than
+the cockpit panels load it. In such a page the helper finds no panel data
+and polls four times a second without painting.
+
+`BaseInstrument.js` is still not used: it is the file other packages
+override most, and UI and EFB pages load it.
+
+Not run in the simulator. To check: vRAAS and YourControls both installed,
+`launcher.log` says `mode=script ... carrier=XMLLogic.js`, and `bridge.log`
+reads marks and routes the displays; then that vRAAS's and YourControls' own
+functions still work.
+
 **Manifest.** The package declares the file in
 `globally_overriden_base_sim_files`, as Community packages that override
 base files do.
