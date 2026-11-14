@@ -1976,8 +1976,6 @@ constexpr int SetupSlotTop = 96, SetupSlotHeight = 206, SetupSlotPicture = 104, 
 constexpr const wchar_t* ControlsActionNames[]{ui_text(L"Left"), ui_text(L"Right"), ui_text(L"Both"), ui_text(L"Lower"), ui_text(L"Door")};
 constexpr unsigned SetupSteps = 3;
 bool advanced = false;
-// An aircraft is being set up for the first time, step by step (guided_setup).
-bool guided = false;
 // Where Taxi cameras' controls card starts, below its cards.
 int controls_top() {
   return StepTop + (advanced ? CameraCardAdvancedHeight + 10 + CameraGuidesHeight : CameraCardHeight) + 14;
@@ -4116,8 +4114,6 @@ void sync_aircraft_session() {
   win::reset_aircraft_session(s, sample.aircraft_session_epoch);
   publish(s);
   profile_selection = {};
-  // Another aircraft: a first-time setup under way was the last one's.
-  guided = false;
   // Do not rebuild numeric edits when a flight changes in the background.
   SetDlgItemTextW(window, 229, switch_label(tr(L"Scene test"), false).c_str());
   refresh_side_toggles(s);
@@ -6328,17 +6324,30 @@ void draw_look_icons(HDC dc, const RECT& well, unsigned view) {
 }
 // An aircraft set up for the first time goes through Setup's steps in order,
 // with Back and Next; one that has a setup opens any of them directly.
-// It starts on any step while the aircraft has no setup, or while its cameras
-// are being positioned, and lasts until the steps are left or another
-// aircraft is loaded (sync_aircraft_session): placing its displays makes it
-// a set-up aircraft at once, which must not take Back, Next and Finish away
-// from the rest of the steps.
+// It starts on a step while the aircraft loaded has neither a profile nor a
+// saved setup (one with a saved setup is only waiting for Auto aircraft to
+// select it), or while its cameras are being positioned. It is for that
+// aircraft, by its variant: it lasts until the steps are left or another
+// aircraft is loaded. Placing its displays makes it a set-up aircraft at
+// once, and a flight restart or a teleport starts a new session for the same
+// aircraft; neither takes Back, Next and Finish away from the rest of the steps.
+std::uint64_t guided_for{};  // The variant's hash; 1 for an aircraft not named yet; 0 for none.
 bool guided_setup(const win::Status& sample) {
-  if (setup_step(page) < 0)
-    guided = false;
-  else if (unsupported_aircraft(sample) || setup.positioning)
-    guided = true;
-  return guided;
+  if (setup_step(page) < 0) {
+    guided_for = 0;
+    return false;
+  }
+  profiles::VariantKey variant{};
+  const std::string_view path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
+  const bool named = fresh_status(sample) && sample.identity_sample_ms && profiles::variant_key(path, variant);
+  const std::uint64_t loaded = named ? std::max<std::uint64_t>(2, variant_hash(variant)) : 0;
+  if (guided_for > 1 && loaded && loaded != guided_for)
+    guided_for = 0;
+  if (!guided_for && ((named && unsupported_aircraft(sample) && !saved_layout(variant, GetTickCount64())) || setup.positioning))
+    guided_for = loaded ? loaded : 1;
+  else if (guided_for == 1 && loaded)
+    guided_for = loaded;
+  return guided_for != 0;
 }
 // What Home offers for the aircraft: nothing, Set up this aircraft (1) or
 // Choose displays (2).

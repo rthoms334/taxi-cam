@@ -537,44 +537,48 @@ void redesign_controls_tests() {
   // An aircraft without a setup: Home offers to set it up, and its steps keep
   // Back and Next (the last one Finish) after its displays are placed, which
   // is when the bridge starts reporting it as set up.
-  const auto unprofiled = [](bool set_up) {
+  const auto loaded = [](const char* folder, bool set_up, std::uint32_t epoch) {
     const std::lock_guard lock(app_mutex);
     status = {};
     status.heartbeat = GetTickCount64();
     status.panel_discovery = 1;
     status.identity_sample_ms = 1;
     status.detected_profile = set_up ? profiles::DiscoveredProfileId : 0;
+    status.aircraft_session_epoch = epoch;
+    std::snprintf(status.aircraft_path, sizeof(status.aircraft_path), "SimObjects/Airplanes/%s/aircraft.cfg", folder);
   };
-  unprofiled(false);
+  const auto epoch = current.aircraft_session_epoch;
+  loaded("Fixture_One", false, epoch);
   page = OverviewPage;
   build_controls();
   require(GetDlgItem(window, HomeActionId) != nullptr, "Home offers Set up this aircraft for an aircraft without a setup");
   page = SetupPage;
   build_controls();
   require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "A first-time setup starts with Back and Next on Displays");
-  unprofiled(true);
+  loaded("Fixture_One", true, epoch);
   build_controls();
   require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "and keeps them once its displays are placed");
   page = DoorPage;
   build_controls();
   require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "through to Door camera, where Next is Finish");
-  // Another aircraft loaded while a step is open ends the guided setup: it
-  // was the last aircraft's.
-  {
-    const std::lock_guard lock(app_mutex);
-    status.heartbeat = GetTickCount64();
-    status.aircraft_session_epoch = current.aircraft_session_epoch + 1;
-  }
+  // A flight restart or a teleport is a new session for the same aircraft.
+  loaded("Fixture_One", true, epoch + 1);
+  sync_aircraft_session();
+  build_controls();
+  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "A new flight session with the same aircraft keeps the guided setup");
+  // Another aircraft ends it, whether the bridge already reports it as set up
+  // or still waits for Auto aircraft to select its saved setup.
+  loaded("Fixture_Two", true, epoch + 2);
   sync_aircraft_session();
   build_controls();
   require(!GetDlgItem(window, NextId) && !GetDlgItem(window, BackId), "A set-up aircraft loaded during a guided setup has no Back or Next");
   page = OverviewPage;
   build_controls();
   require(!GetDlgItem(window, HomeActionId), "Home drops the offer once the aircraft has a setup");
-  unprofiled(false);
+  loaded("Fixture_One", false, epoch + 2);
   page = SetupPage;
   build_controls();
-  unprofiled(true);
+  loaded("Fixture_One", true, epoch + 2);
   page = OverviewPage;
   build_controls();
   page = SetupPage;
