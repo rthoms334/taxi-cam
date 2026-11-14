@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.3.5",
+      "date": "2026-11-14",
+      "fixes": [
+        "Changing aircraft while another tool that hooks the simulator's graphics is running, such as GlassOut, no longer leaves the cameras off until you restart the simulator. If Taxi Cam does lose its connection to the simulator's graphics, its log now says why."
+      ]
+    },
+    {
       "version": "1.3.4",
       "date": "2026-11-09",
       "fixes": [

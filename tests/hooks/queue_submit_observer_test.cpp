@@ -335,6 +335,66 @@ void mock() {
           "Removed hook still observed or omitted an original call");
 }
 
+// Another tool hooking the same slot after Taxi Cam (GlassOut's capture DLL):
+// its hook forwards every call to whatever the slot held before it.
+Execute chained_next = nullptr;
+std::atomic<unsigned> chained_calls{0};
+void STDMETHODCALLTYPE chaining(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
+  ++chained_calls;
+  chained_next(queue, count, lists);
+}
+Context* discovery_context = nullptr;
+std::atomic<unsigned> discoveries{0};
+qs::Status discovery_status = qs::Status::not_installed;
+ID3D12CommandQueue* discover_instead = nullptr;
+void discover(ID3D12CommandQueue* queue) noexcept {
+  ++discoveries;
+  discovery_status = qs::register_queue(discover_instead ? discover_instead : queue, callbacks(discovery_context)).status;
+}
+
+void chained() {
+  auto* first_context = new Context;
+  auto* first = new MockQueue;
+  first->context = first_context;
+  auto** table = *reinterpret_cast<void***>(first);
+  require(qs::register_queue(first, callbacks(first_context)).status == qs::Status::registered, "First queue registration failed");
+  chained_next = reinterpret_cast<Execute>(slot_value(table + 10));
+  replace(table + 10, reinterpret_cast<void*>(&chaining));
+  ID3D12CommandList* lists[] = {reinterpret_cast<ID3D12CommandList*>(0x10000)};
+  invoke(first, 1, lists);
+  require(chained_calls == 1 && first->calls == 1 && first_context->before == 1 && first_context->after == 1 && first_context->bad == 0,
+          "A queue registered before the other hook lost its observation");
+  // Outside a discovery nothing shows that the slot's holder forwards here.
+  auto* unproven = new MockQueue;
+  require(qs::register_queue(unproven, callbacks(new Context)).status == qs::Status::slot_changed && unproven->references == 1,
+          "A queue was registered under another hook without a call reaching the wrapper");
+  discovery_context = new Context;
+  require(qs::set_unknown_queue_observer(discover), "Discovery callback was refused");
+  // A discovery admits only the queue whose call reached the wrapper.
+  auto* bystander = new MockQueue;
+  discover_instead = unproven;
+  invoke(bystander, 1, lists);
+  require(discoveries == 1 && discovery_status == qs::Status::slot_changed && unproven->references == 1 && bystander->calls == 1 &&
+              bystander->bad == 0 && discovery_context->before == 0,
+          "A discovery registered a queue other than its own under another hook");
+  discover_instead = nullptr;
+  // A queue first seen after the other tool hooked (frame generation makes a
+  // new one when a flight loads) is registered from its own first submit.
+  auto* late = new MockQueue;
+  late->context = discovery_context;
+  invoke(late, 1, lists);
+  require(discoveries == 2 && discovery_status == qs::Status::registered && late->references == 2 && late->calls == 1 && late->bad == 0 &&
+              discovery_context->before == 1 && discovery_context->after == 1 && discovery_context->bad == 0,
+          "A queue first seen under another hook was not registered and observed from its first submit");
+  discovery_context->phase = 0;
+  invoke(late, 1, lists);
+  require(discoveries == 2 && late->calls == 2 && discovery_context->before == 2 && discovery_context->after == 2 &&
+              discovery_context->bad == 0 && slot_value(table + 10) == reinterpret_cast<void*>(&chaining),
+          "The late queue was discovered twice, lost observation or the other hook's slot was rewritten");
+  require(qs::remove().status == qs::Status::slot_changed && slot_value(table + 10) == reinterpret_cast<void*>(&chaining),
+          "Removal overwrote the other tool's hook");
+}
+
 struct AugmentationContext : Context {
   std::array<qs::Insertion, qs::kMaximumInsertions> insertions{};
   std::array<ID3D12CommandList*, qs::kMaximumCommandLists + qs::kMaximumInsertions> expected_lists{};
@@ -755,6 +815,8 @@ int main(int argc, char** argv) {
       mock();
     else if (mode == "augment")
       augmentation();
+    else if (mode == "chained")
+      chained();
     else if (mode == "hardware" || mode == "warp")
       gpu(mode == "warp");
     else if (mode == "fail-writable" || mode == "fail-install-restore" || mode == "fail-cas-restore" || mode == "fail-remove-restore")

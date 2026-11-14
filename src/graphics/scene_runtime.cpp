@@ -324,7 +324,9 @@ void destroy_device(std::uint64_t key) {
   }
   manager().destroy_device(key);
 }
-bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
+bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue, engine_hook::queue_submit::Status* status) {
+  if (status)
+    *status = engine_hook::queue_submit::Status::registered;
   if (!queue || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return true;
   auto callbacks = manager().callbacks();
@@ -341,6 +343,8 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
     manager().submission_refused(q, reason);
   };
   const auto result = engine_hook::queue_submit::register_queue(queue, callbacks);
+  if (status)
+    *status = result.status;
   const bool ready = result.protection_restored && (result.status == engine_hook::queue_submit::Status::registered ||
                                                     result.status == engine_hook::queue_submit::Status::already_registered);
   if (!ready) {

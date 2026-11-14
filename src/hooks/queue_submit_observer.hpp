@@ -148,6 +148,8 @@ Result register_queue(ID3D12CommandQueue* queue, const Callbacks& callbacks) noe
 // Optional native bootstrap discovery. Called outside the submission/registry locks,
 // before observation begins, with the application's live queue argument. The callback
 // may register a DIRECT queue. No default means the original fail-closed behavior.
+// Registering that same queue from the callback also succeeds while another
+// tool's hook holds the slot: the call being discovered came through it.
 using UnknownQueueObserver = void (*)(ID3D12CommandQueue*) noexcept;
 bool set_unknown_queue_observer(UnknownQueueObserver) noexcept;
 
