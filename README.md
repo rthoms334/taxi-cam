@@ -49,7 +49,7 @@ If Setup cannot configure automatic startup and can verify the startup file is u
 
 For manual launch, start Taxi Cam from the Start menu (or tray) while MSFS is running. You can leave **Auto-connect** on, or turn it off and use **Connect** at the main menu or in a loaded flight. Connect enables camera operation and changes to **Disconnect**, which stops camera output and temporary requests. Choose Connect again to resume or retry an attachment. Disconnect keeps your Auto-connect preference but suspends automatic retries until you choose Connect again. These controls do not stop MSFS or overwrite calibration. After an in-flight connection, wait for the next cockpit draws while the bridge learns existing display bindings. Recovery remains unresolved for already-powered A350 displays whose old views cannot be associated with those draws; a populated texture list alone does not guarantee output. See [startup timing](docs/reshade-compatibility.md#startup-timing).
 
-On its first launch, **Settings** opens so you can explore the controls. Close the window or select **Hide to tray** to keep the app running in the system tray. Later automatic starts stay in the tray and close a few seconds after the simulator does, like the simulator's other add-ons, so Steam no longer shows the simulator as running. Opening Taxi Cam from the Windows Start menu shows Settings again, and a Taxi Cam started that way stays in the tray until you quit it. The first-launch choice is remembered across updates.
+On its first launch, **Settings** opens so you can explore the controls. Close the window to keep the app running in the system tray. Clicking its tray icon opens a small panel with a switch for each display's cameras, the door camera and TAXI-button control; double-click the icon, or choose **Open Taxi Cam** there, for Settings. Later automatic starts stay in the tray and close a few seconds after the simulator does, like the simulator's other add-ons, so Steam no longer shows the simulator as running. Opening Taxi Cam from the Windows Start menu shows Settings again, and a Taxi Cam started that way stays in the tray until you quit it. The first-launch choice is remembered across updates.
 
 ### If Windows flags Taxi Cam
 
@@ -65,7 +65,7 @@ Please don't disable your antivirus to work around this. Only restore the file f
 
 ## Using Taxi Cam
 
-1. Load an aircraft. Leave **Auto aircraft** enabled in **Overview** to select the matching settings automatically. For an aircraft without a profile, **Overview** says it is not set up yet: open **Setup** and start with **Displays** (see [Supported aircraft](#supported-aircraft)). Once it is set up, it is selected automatically too.
+1. Load an aircraft. Leave **Auto aircraft** enabled in **Options** to select the matching settings automatically. For an aircraft without a profile, **Overview** says it is not set up yet: open **Setup** and start with **Displays** (see [Supported aircraft](#supported-aircraft)). Once it is set up, it is selected automatically too.
 2. Allow a few seconds for the cameras to become ready.
 3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380 and on aircraft you set up yourself, use **Ctrl + Shift + L**, **R** or **B**. Repeat the control to turn them off.
 
@@ -79,7 +79,7 @@ Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles th
 
 ## Adjusting the views
 
-Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved separately for each aircraft profile.
+Double-click the Taxi Cam tray icon, or right-click it and open **Settings**. **Overview** is the page it opens on; the button at its top right opens **Options**. Adjustments are saved separately for each aircraft profile.
 
 **Setup** has three steps, **Displays**, **Taxi cameras** and **Door camera**, which the step pills on **Overview** also open. Every change saves by itself, a moment after you stop typing; there is no Save button. **Next** goes on to the next step (the last step's is **Finish**), and **Back**, **Cancel** and the step pills move between pages. **Advanced** in the header shows each step's extra values and pages; it is not saved.
 
@@ -145,7 +145,7 @@ Use **Check for updates** in the tray menu, or download the latest installer fro
 
 Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, open **Setup → Taxi cameras**, select **Reset shortcuts**.
 
-Click the version number at the bottom of the settings sidebar to open the Taxi Cam GitHub repository in your browser.
+Click the version number at the bottom of **Overview** to open the Taxi Cam GitHub repository in your browser.
 
 To remove the mod, close both applications and uninstall **Taxi Cam** from Windows Installed apps. **Keep settings** is the default choice so a later installation can reuse them. Choose **Remove saved settings** to clear camera profiles, calibration, guides, keyboard shortcuts and first-launch preferences instead. This also clears known profiles retained under the former **380 Taxi Cam** name, preventing them from being imported again. Logs and unrelated files are kept.
 

@@ -81,8 +81,9 @@ void marking_controls_tests() {
     draw_page(dc);
     bool matching = true;
     for (const bool right : {false, true}) {
-      const int x = 817 + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
-      const int y = 225 + static_cast<int>(std::lround(current.nose_dot[1] * 45));  // Below the step pills.
+      // The guide page is drawn at its own layout's coordinates, shifted into the page.
+      const int x = 817 + LegacyShiftX + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
+      const int y = 225 + LegacyShiftY + static_cast<int>(std::lround(current.nose_dot[1] * 45));
       // The corner is inside a square and outside the former circular marker.
       matching = matching && GetPixel(dc, x, y) == marking_color && GetPixel(dc, x + 6, y + 6) == marking_color;
     }

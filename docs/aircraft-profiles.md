@@ -1,6 +1,6 @@
 # Aircraft integration
 
-**Auto aircraft** on Overview selects a supported profile from public SimConnect metadata. The matcher requires an add-on path component in the `AircraftLoaded` response. The FBW A380's own aircraft path identifies that integration; its `ATC TYPE` can be the Airbus brand string `ATCCOM.ATC_NAME AIRBUS.0.text`, not the ICAO code `A388`. The A350 profiles additionally require the variant's type. Type and path must come from the same metadata poll, and two distinct samples must agree before switching. A missing response does not select a default aircraft. Manual selection uses the same aircraft identity checks and turns automatic selection off.
+**Auto aircraft** in **Options** selects a supported profile from public SimConnect metadata. The matcher requires an add-on path component in the `AircraftLoaded` response. The FBW A380's own aircraft path identifies that integration; its `ATC TYPE` can be the Airbus brand string `ATCCOM.ATC_NAME AIRBUS.0.text`, not the ICAO code `A388`. The A350 profiles additionally require the variant's type. Type and path must come from the same metadata poll, and two distinct samples must agree before switching. A missing response does not select a default aircraft. Manual selection uses the same aircraft identity checks and turns automatic selection off.
 
 Each profile owns its camera calibration and display colours. Before switching, the companion saves edits to the departing profile and loads the arriving profile's own file. Invalid unfinished input delays a switch rather than discarding edits.
 
