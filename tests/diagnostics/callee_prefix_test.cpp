@@ -9,6 +9,7 @@
 
 namespace {
 using namespace taxi_camera::discovery;
+static_assert(kMaximumTargetPrefixReadBytes == 512 && kMaximumCallProofReadBytes == 40 && kMaximumBranchProofReadBytes == 48);
 
 constexpr std::uint32_t kCall = 0x1100;
 constexpr std::uint32_t kTarget = 0x2000;
@@ -203,7 +204,7 @@ struct Fixture {
     require(result.read_bytes == prefix_bytes && result.proof_bytes == proof_bytes,
             "Attempted read-byte counters differ from reader calls");
     for (const auto& entry : result.entries)
-      require(entry.decoded_bytes <= entry.bytes_read && entry.bytes_read <= 64 && entry.instructions.size() <= 64,
+      require(entry.decoded_bytes <= entry.attempted_bytes && entry.attempted_bytes <= 64 && entry.instructions.size() <= 64,
               "Decoded metadata exceeded the read prefix");
     return result;
   }
@@ -220,7 +221,7 @@ void basic_and_returns() {
   const auto& entry = result.entries[0];
   require(result.valid && result.error.empty() && result.read_failures == 0 && result.read_bytes == 64 && result.proof_bytes == 5 &&
               entry.proof_call_rva == kCall && entry.entry_rva == kTarget && entry.ret_observed && entry.stop_reason == "ret" &&
-              entry.bytes_read == 64 && entry.decoded_bytes == 2 && entry.instructions.size() == 2,
+              entry.attempted_bytes == 64 && entry.decoded_bytes == 2 && entry.instructions.size() == 2,
           "An aligned RET did not stop decoding after a bounded prefix read");
   require(test.decoder.calls == std::vector<std::uint32_t>{kTarget, kTarget + 1}, "Decoder continued after RET");
 
@@ -429,7 +430,8 @@ void failure_and_peer_preservation() {
     test.reader.fail_rva = failing_rva;
     auto result = test.run();
     require(!result.valid && result.read_failures == 1 && result.entries[0].stop_reason == "unreadable" && result.proof_bytes == 5 &&
-                result.read_bytes == (failing_rva == kCall ? 0u : 64u),
+                result.read_bytes == (failing_rva == kCall ? 0u : 64u) &&
+                result.entries[0].attempted_bytes == (failing_rva == kCall ? 0u : 64u) && result.entries[0].decoded_bytes == 0,
             "A failed exact read was accepted or incorrectly counted");
     test = Fixture{};
     test.reader.hole_rva = failing_rva;
@@ -532,7 +534,7 @@ struct BranchFixture : Fixture {
     }
     require(result.read_bytes == target_bytes && result.proof_bytes == proof_bytes, "Branch attempted-byte counters were wrong");
     for (const auto& entry : result.entries)
-      require(entry.bytes_read <= 64 && entry.decoded_bytes <= entry.bytes_read && entry.instructions.size() <= 64,
+      require(entry.attempted_bytes <= 64 && entry.decoded_bytes <= entry.attempted_bytes && entry.instructions.size() <= 64,
               "Branch decoded metadata exceeded the target prefix");
     return result;
   }
@@ -835,7 +837,7 @@ struct FurtherBranchFixture : BranchFixture {
     }
     require(result.read_bytes == target_bytes && result.proof_bytes == proof_bytes, "Further-branch attempted-byte counters were wrong");
     for (const auto& entry : result.entries)
-      require(entry.bytes_read <= 64 && entry.decoded_bytes <= entry.bytes_read && entry.instructions.size() <= 64,
+      require(entry.attempted_bytes <= 64 && entry.decoded_bytes <= entry.attempted_bytes && entry.instructions.size() <= 64,
               "Further-branch decoded metadata exceeded its read");
     return result;
   }
@@ -882,7 +884,7 @@ void further_branch_success_and_refusals() {
         test.branch_proof.entries[0].error = "partial";
         break;
       case 6:
-        test.branch_proof.entries[0].bytes_read = 0;
+        test.branch_proof.entries[0].attempted_bytes = 0;
         break;
       case 7:
         test.branch_proof.entries[0].decoded_bytes = 65;

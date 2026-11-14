@@ -66,6 +66,8 @@ Additional focused checks remain available:
 - `tests/graphics/scene_capture_manager_test.ps1`: recording lifetime, submission receipts and capture publication.
 - `tests/graphics/reshade_validation.ps1 -ReShadeDll <trusted-local-dll>`: actual proxy forwarding, native device identity and PFD pixel preservation in isolated hardware/WARP harnesses; see [ReShade compatibility](../docs/reshade-compatibility.md).
 - `tests/hooks/render_boundary_test.ps1`: native render-boundary observations.
+- `tests/repository/comments_test.ps1`: no comments in project files outside tool directives and the shrinking per-file baseline in `comment_baseline.json` (see [AGENTS.md](../AGENTS.md#no-comments)); `-List` prints every remaining comment. `build.ps1 -Validate` runs it first.
+- `tests/installer/installer_script_test.ps1`: the release AppId and setup mutex stay fixed, English is the first (fallback) Setup language, and every listed message file has the same keys and `%n` placeholders as `en.isl`. `build.ps1 -Validate` runs it.
 - `tests/installer/package_test.ps1`: exact five-file runtime inventory, validated binary hashes, and verbatim `LICENSE.txt` and `THIRD_PARTY_NOTICES.txt` contents.
 - `tests/setup/startup_xml_test.cpp`: strict launch parsing, opt-in repair of the recognized mislabeled launch header, exact-original backups, add-on/comment preservation, idempotence, concurrency/encryption refusal with injected backup, protection and visibility faults, and physical-path visibility checks before XML writes.
 - `tests/setup/prerequisites_test.cpp`: missing, 32-bit, truncated and malformed PE fixtures for Windows and simulator components, and app-local runtime precedence. No fixture is loaded or executed.

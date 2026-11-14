@@ -3,3 +3,4 @@ BasedOnStyle: Chromium
 ---
 Language: Cpp
 ColumnLimit: 140
+FixNamespaceComments: false

@@ -1,8 +1,9 @@
-// Runs taxi-cam-marks.js against a stub DOM and rasterises what it draws
-// into a texture-sized RGBA file (bilinear when scale is not 1), for
-// decode_raw.exe. node stub-page.js <helper.js> <fixtures/x.json> <out.raw> [scale] [background]
 const fs = require("fs"), vm = require("vm");
 const [, , helperPath, panelJson, outPath, scaleArg, backgroundArg] = process.argv;
+if (!outPath) {
+  console.error("usage: node stub-page.js <helper.js> <fixtures/x.json> <out.raw> [scale] [background]");
+  process.exit(2);
+}
 const data = JSON.parse(fs.readFileSync(panelJson, "utf8"));
 const canvases = [];
 const timers = [];
@@ -24,13 +25,13 @@ const ctx = {
 };
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(helperPath, "utf8"), ctx);
-// Run the start timer: the blocks are drawn (the read poll would hide them).
-for (let i = 0; i < 10 && timers.length; i++) { const [f] = timers.shift(); f(); }
+const startTimersRunBeforeTheReadPollWouldHideTheBlocks = 10;
+for (let i = 0; i < startTimersRunBeforeTheReadPollWouldHideTheBlocks && timers.length; i++) { const [f] = timers.shift(); f(); }
 const W = data.vDisplaySize.x, H = data.vDisplaySize.y, scale = Number(scaleArg || 1);
 const TW = Math.round(W * scale), TH = Math.round(H * scale);
 const page = Buffer.alloc(W * H * 4);
-// A display's background (default near-black) with a few lines of symbology.
-const background = Number(backgroundArg || 4);
+const nearBlackDisplayBackground = 4;
+const background = Number(backgroundArg || nearBlackDisplayBackground);
 for (let i = 0; i < W * H; i++) { page[i * 4] = page[i * 4 + 1] = page[i * 4 + 2] = background; page[i * 4 + 3] = 255; }
 for (let y = 40; y < H; y += 97) for (let x = 0; x < W; x++) { const o = (y * W + x) * 4; page[o] = 0; page[o + 1] = 255; page[o + 2] = 0; }
 for (const c of canvases) {
@@ -45,7 +46,6 @@ for (const c of canvases) {
     }
   }
 }
-// Bilinear into the texture size.
 const tex = Buffer.alloc(TW * TH * 4);
 for (let y = 0; y < TH; y++) for (let x = 0; x < TW; x++) {
   const sx = (x + 0.5) * W / TW - 0.5, sy = (y + 0.5) * H / TH - 0.5, x0 = Math.floor(sx), y0 = Math.floor(sy), fx = sx - x0, fy = sy - y0;

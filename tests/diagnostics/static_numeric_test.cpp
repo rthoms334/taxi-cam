@@ -11,6 +11,7 @@
 
 namespace {
 using namespace taxi_camera::discovery;
+static_assert(kMaximumNumericReadBytes == 256 && kLargestNumericBatchBytes == 192);
 
 struct SyntheticReader final : ImageReader {
   std::vector<std::uint8_t> bytes = std::vector<std::uint8_t>(0x5000);

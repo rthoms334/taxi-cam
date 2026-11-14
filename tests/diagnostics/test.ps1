@@ -58,8 +58,19 @@ $importTestExecutable = Join-Path $outputDirectory 'import-slot-test.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Import-slot metadata tests failed to compile.' }
 & $importTestExecutable
 if ($LASTEXITCODE -ne 0) { throw 'Import-slot metadata tests failed.' }
+$mainModuleTestExecutable = Join-Path $outputDirectory 'main-module-inventory-test.exe'
+& $compiler @common (Join-Path $repoRoot 'tools/diagnostics/image_inventory.cpp') (Join-Path $repoRoot 'tools/diagnostics/main_module_inventory.cpp') (Join-Path $repoRoot 'tests/diagnostics/main_module_inventory_test.cpp') '-ladvapi32' '-o' $mainModuleTestExecutable
+if ($LASTEXITCODE -ne 0) { throw 'Main-module inventory tests failed to compile.' }
+& $mainModuleTestExecutable
+if ($LASTEXITCODE -ne 0) { throw 'Main-module inventory tests failed.' }
 & $compiler @common (Join-Path $repoRoot 'tools/diagnostics/image_inventory.cpp') (Join-Path $repoRoot 'tools/diagnostics/llvm_decoder.cpp') (Join-Path $repoRoot 'tools/diagnostics/main_module_inventory.cpp') (Join-Path $repoRoot 'tools/diagnostics/main.cpp') '-ladvapi32' '-o' $inventoryExecutable
 if ($LASTEXITCODE -ne 0) { throw 'Native inventory helper failed to compile.' }
+$imports = @(& (Join-Path (Get-TaxiToolchain $repoRoot) 'llvm-readobj.exe') '--coff-imports' $inventoryExecutable |
+  Where-Object { $_ -match '^\s*Symbol: (\S+)' } | ForEach-Object { $Matches[1] })
+if ($LASTEXITCODE -ne 0 -or $imports -notcontains 'ReadProcessMemory') { throw 'The inventory helper import table could not be read.' }
+$processChanges = @($imports | Where-Object { $_ -in @('WriteProcessMemory', 'VirtualProtectEx', 'VirtualAllocEx', 'CreateRemoteThread',
+  'CreateRemoteThreadEx', 'SetThreadContext', 'DebugActiveProcess', 'AdjustTokenPrivileges', 'LookupPrivilegeValueW') })
+if ($processChanges.Count -ne 0) { throw "The inventory helper imports process-changing APIs: $($processChanges -join ', ')" }
 & $inventoryExecutable '--decoder-self-test'
 if ($LASTEXITCODE -ne 0) { throw 'The real LLVM C decoder self-test failed.' }
 $selfOutput = & $inventoryExecutable '--self'

@@ -45,9 +45,9 @@ void json_string(const std::string& value) {
 void report(const MainModuleInventory& result, std::int64_t elapsed_ms) {
   const auto& image = result.image;
   std::cout << std::boolalpha << "{\n  \"schema\": 1,\n  \"process_id\": " << result.process_id << ",\n  \"module_name\": ";
-  json_string(utf8(result.module_name));
+  json_string(utf8(result.module_basename));
   std::cout << ",\n  \"candidate_module_name\": ";
-  json_string(utf8(result.candidate_module_name));
+  json_string(utf8(result.candidate_module_basename));
   std::cout << ",\n  \"identity_method\": ";
   json_string(result.identity_method);
   std::cout << ",\n  \"main_module_verified\": " << result.main_module_verified << ",\n  \"valid_image\": " << image.valid_image
@@ -89,7 +89,7 @@ void report(const MainModuleInventory& result, std::int64_t elapsed_ms) {
   }
   std::cout << "\n  ]\n}\n";
 }
-}  // namespace
+}
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "--decoder-self-test") {

@@ -9,14 +9,12 @@
 namespace taxi_camera::discovery {
 namespace {
 
-// LLVM's documented public C disassembler boundary. These are compiler-library
-// functions in the pinned local toolchain, never simulator function addresses.
-using OpInfoCallback = int (*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, int, void*);
-using SymbolLookupCallback = const char* (*)(void*, std::uint64_t, std::uint64_t*, std::uint64_t, const char**);
-using CreateDisassembler = void* (*)(const char*, void*, int, OpInfoCallback, SymbolLookupCallback);
-using DisassembleInstruction = std::size_t (*)(void*, std::uint8_t*, std::uint64_t, std::uint64_t, char*, std::size_t);
-using DisposeDisassembler = void (*)(void*);
-using InitializeTarget = void (*)();
+using LlvmOpInfoCallback = int (*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, int, void*);
+using LlvmSymbolLookupCallback = const char* (*)(void*, std::uint64_t, std::uint64_t*, std::uint64_t, const char**);
+using LlvmCreateDisasm = void* (*)(const char*, void*, int, LlvmOpInfoCallback, LlvmSymbolLookupCallback);
+using LlvmDisasmInstruction = std::size_t (*)(void*, std::uint8_t*, std::uint64_t, std::uint64_t, char*, std::size_t);
+using LlvmDisasmDispose = void (*)(void*);
+using LlvmInitializeTarget = void (*)();
 
 class LlvmDecoder final : public InstructionDecoder {
  public:
@@ -30,24 +28,23 @@ class LlvmDecoder final : public InstructionDecoder {
   }
 
   bool initialize(std::string& error) {
-    // Generated from dependencies.json when building this developer-only tool.
-    auto library_path = std::filesystem::path(TAXI_LLVM_LIBRARY_PATH);
-    library_path.make_preferred();
-    if (GetFileAttributesW(library_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    auto pinned_library_path = std::filesystem::path(TAXI_LLVM_LIBRARY_PATH);
+    pinned_library_path.make_preferred();
+    if (GetFileAttributesW(pinned_library_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
       error = "The pinned LLVM disassembler library path was not found (Windows error " + std::to_string(GetLastError()) + ").";
       return false;
     }
-    library_ = LoadLibraryExW(library_path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    library_ = LoadLibraryExW(pinned_library_path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (library_ == nullptr) {
       error = "Loading the pinned local LLVM disassembler library failed (Windows error " + std::to_string(GetLastError()) + ").";
       return false;
     }
-    const auto create = reinterpret_cast<CreateDisassembler>(GetProcAddress(library_, "LLVMCreateDisasm"));
-    decode_ = reinterpret_cast<DisassembleInstruction>(GetProcAddress(library_, "LLVMDisasmInstruction"));
-    dispose_ = reinterpret_cast<DisposeDisassembler>(GetProcAddress(library_, "LLVMDisasmDispose"));
-    const auto target_info = reinterpret_cast<InitializeTarget>(GetProcAddress(library_, "LLVMInitializeX86TargetInfo"));
-    const auto target_mc = reinterpret_cast<InitializeTarget>(GetProcAddress(library_, "LLVMInitializeX86TargetMC"));
-    const auto disassembler = reinterpret_cast<InitializeTarget>(GetProcAddress(library_, "LLVMInitializeX86Disassembler"));
+    const auto create = reinterpret_cast<LlvmCreateDisasm>(GetProcAddress(library_, "LLVMCreateDisasm"));
+    decode_ = reinterpret_cast<LlvmDisasmInstruction>(GetProcAddress(library_, "LLVMDisasmInstruction"));
+    dispose_ = reinterpret_cast<LlvmDisasmDispose>(GetProcAddress(library_, "LLVMDisasmDispose"));
+    const auto target_info = reinterpret_cast<LlvmInitializeTarget>(GetProcAddress(library_, "LLVMInitializeX86TargetInfo"));
+    const auto target_mc = reinterpret_cast<LlvmInitializeTarget>(GetProcAddress(library_, "LLVMInitializeX86TargetMC"));
+    const auto disassembler = reinterpret_cast<LlvmInitializeTarget>(GetProcAddress(library_, "LLVMInitializeX86Disassembler"));
     if (create == nullptr || decode_ == nullptr || dispose_ == nullptr || target_info == nullptr || target_mc == nullptr ||
         disassembler == nullptr) {
       error = "The pinned LLVM library is missing a required public C disassembler export.";
@@ -74,10 +71,10 @@ class LlvmDecoder final : public InstructionDecoder {
  private:
   HMODULE library_ = nullptr;
   void* context_ = nullptr;
-  DisassembleInstruction decode_ = nullptr;
-  DisposeDisassembler dispose_ = nullptr;
+  LlvmDisasmInstruction decode_ = nullptr;
+  LlvmDisasmDispose dispose_ = nullptr;
 };
-}  // namespace
+}
 
 std::unique_ptr<InstructionDecoder> create_pinned_llvm_decoder(std::string& error) {
   auto decoder = std::make_unique<LlvmDecoder>();
@@ -103,4 +100,4 @@ bool llvm_decoder_self_test(std::string& error) {
   return true;
 }
 
-}  // namespace taxi_camera::discovery
+}

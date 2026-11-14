@@ -154,7 +154,7 @@ void named_import() {
   require(result.valid && result.available && result.status == "named_import" && result.error.empty(), "Named import was not found");
   require(result.module == "VCRUNTIME140.dll" && result.symbol == "__RTDynamicCast", "Module or symbol mismatch");
   require(result.descriptor_rva == Directory && result.lookup_thunk_rva == Lookup && result.iat_slot_rva == Iat &&
-              result.name_rva == Name && !result.by_ordinal && result.ordinal == 0,
+              result.hint_name_rva == Name && !result.by_ordinal && result.ordinal == 0,
           "Normalized metadata mismatch");
   budget(reader, result);
 
@@ -183,13 +183,38 @@ void named_import() {
   budget(reader, next);
 }
 
+bool any_read_overlaps(const SyntheticReader& reader, std::uint32_t begin, std::uint32_t size) {
+  return std::any_of(reader.reads.begin(), reader.reads.end(), [&](const auto& read) {
+    return std::uint64_t(read.first) < std::uint64_t(begin) + size && begin < std::uint64_t(read.first) + read.second;
+  });
+}
+
+void only_the_requested_name_is_read() {
+  const auto image = metadata();
+  auto reader = fixture();
+  auto result = inspect_import_slot(reader, image, Iat);
+  require(result.available && !any_read_overlaps(reader, Name, kImportNameHintBytes), "The import-name hint was read");
+
+  constexpr std::uint32_t unrelated_name = Name + 0x80;
+  reader = fixture();
+  reader.word(Lookup, unrelated_name, 8);
+  reader.word(unrelated_name, 7, 2);
+  reader.literal(unrelated_name + 2, "UnrelatedImport");
+  reader.word(Lookup + 8, Name, 8);
+  result = inspect_import_slot(reader, image, Iat + 8);
+  require(
+      result.available && result.symbol == "__RTDynamicCast" && result.thunks_read == 2 && !any_read_overlaps(reader, unrelated_name, 0x20),
+      "A preceding lookup entry's hint/name string was read");
+  budget(reader, result);
+}
+
 void unavailable_cases() {
   const auto image = metadata();
   auto reader = fixture();
   reader.word(Lookup, 0x8000000000000123ull, 8);
   auto result = inspect_import_slot(reader, image, Iat);
   require(result.valid && !result.available && result.status == "ordinal_only" && result.by_ordinal && result.ordinal == 0x123 &&
-              result.module == "VCRUNTIME140.dll" && result.symbol.empty() && result.name_rva == 0,
+              result.module == "VCRUNTIME140.dll" && result.symbol.empty() && result.hint_name_rva == 0,
           "Ordinal import was mistaken for a name");
   budget(reader, result);
 
@@ -497,6 +522,7 @@ void hard_caps() {
 int main() {
   try {
     named_import();
+    only_the_requested_name_is_read();
     unavailable_cases();
     malformed_headers();
     malformed_tables();

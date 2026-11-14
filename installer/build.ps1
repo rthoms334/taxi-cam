@@ -9,7 +9,6 @@ if ($base -notmatch '^taxi-cam-(\d+\.\d+\.\d+)-build\.(\d+)-windows-x64$' -or [I
 $version = $Matches[1]; $buildNumber = [int]$Matches[2]
 $work = Join-Path $repoRoot ('build/installer/' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $work | Out-Null
-# Expand-Archive rejects traversal entries; use a fresh directory for each immutable input.
 Expand-Archive -LiteralPath $zip -DestinationPath $work
 $payload = Join-Path $work $base
 if (-not (Test-Path -LiteralPath $payload -PathType Container)) { throw 'ZIP payload directory does not match its asset name.' }
@@ -17,7 +16,6 @@ if (-not (Test-Path -LiteralPath $payload -PathType Container)) { throw 'ZIP pay
 $receipt = Assert-TaxiNativeReceipt (Join-Path $repoRoot 'build/native')
 $info = Get-Content -Raw -LiteralPath ([IO.Path]::ChangeExtension($zip, '.build-info.json')) | ConvertFrom-Json
 if ($receipt.version -ne $version -or $receipt.buildNumber -ne $buildNumber -or $info.buildNumber -ne $buildNumber -or $info.sourceCommit -notmatch '^[0-9a-fA-F]{40}$' -or $info.version -ne $version -or $info.build -ne "build.$buildNumber") { throw 'Package version, build number or source provenance does not match.' }
-# Windows PowerShell 5.1 returns a JSON array as one object; enumerate it for both versions.
 $manifest = @(Get-Content -Raw -LiteralPath ([IO.Path]::ChangeExtension($zip, '.manifest.json')) | ConvertFrom-Json | ForEach-Object { $_ })
 $allowed = @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','LICENSE.txt','THIRD_PARTY_NOTICES.txt')
 if ($manifest.Count -ne $allowed.Count) { throw 'The runtime package must contain exactly five required files, including LICENSE.txt.' }

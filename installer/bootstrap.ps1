@@ -17,12 +17,9 @@ if (-not (Test-Path -LiteralPath $archive)) {
 if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $dependency.sha256) { throw 'Cached Inno Setup SHA256 mismatch.' }
 $compiler = Join-Path $destination 'ISCC.exe'
 if (-not (Test-Path -LiteralPath $compiler)) {
-    # Official portable mode disables registry integration, shortcuts and uninstall registration.
     $process = Start-Process -FilePath $archive -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER','/PORTABLE=1',('/DIR="' + $destination + '"')) -WindowStyle Hidden -Wait -PassThru
     if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $compiler)) { throw "Inno Setup portable extraction failed: $($process.ExitCode)" }
 }
-# Message files for Setup languages that Inno does not ship. Each is pinned by
-# hash, cached with the other dependencies and never installed.
 foreach ($translation in @($dependencies.'inno-setup-translations')) {
     $cache = Join-Path $root $translation.file
     if (-not (Test-Path -LiteralPath $cache)) {

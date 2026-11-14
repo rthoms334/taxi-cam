@@ -235,6 +235,10 @@ int main() {
     limits.scan_bytes = 1024;
     auto bounded = inspect_image(image, limits);
     require(bounded.scan_truncated && bounded.scanned_bytes + bounded.skipped_bytes <= 1024, "Scan budget exceeded");
+    limits.scan_bytes = 0x1000;
+    bounded = inspect_image(image, limits);
+    require(bounded.scan_truncated && has(bounded, 0x2400) && !has(bounded, 0x1100),
+            "Executable sections were scanned before embedded data under a byte budget");
     limits.scan_bytes = 16 * 1024 * 1024;
     limits.records = 1;
     bounded = inspect_image(image, limits);

@@ -25,14 +25,12 @@ if ([IO.Path]::GetFileName($installerPath) -cne $expectedInstaller -or
     [IO.Path]::GetFileName($packagePath) -cne "$expectedBase.zip" -or $receipt.buildNumber -ne $BuildNumber) {
     throw 'Release asset names and validated application must match the release build.'
 }
-# Workflow run numbers identify artifacts. The published tag is the next
-# vX.Y.Z-build.N after the last release tag on this main commit's history.
-# Checkout has no persisted credentials. Fetch tags and origin/main through
-# gh's credential helper, scoped to this command; no token is written to config.
-& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin --tags --force
-if ($LASTEXITCODE -ne 0) { throw 'Could not fetch release tags from origin.' }
-& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin main:refs/remotes/origin/main --force
-if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
+function Invoke-OriginFetchWithGhCredentialForThisCommandOnly([string[]]$Arguments, [string]$Failure) {
+    & git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin @Arguments
+    if ($LASTEXITCODE -ne 0) { throw $Failure }
+}
+Invoke-OriginFetchWithGhCredentialForThisCommandOnly @('--tags', '--force') 'Could not fetch release tags from origin.'
+Invoke-OriginFetchWithGhCredentialForThisCommandOnly @('main:refs/remotes/origin/main', '--force') 'Could not fetch origin/main.'
 $tag = Get-TaxiNextPublishTag -Repository $root -Commit $Commit -Version $receipt.version
 $title = "Taxi Cam $($receipt.version)"
 function Invoke-Gh([string[]]$Arguments) {
@@ -68,8 +66,6 @@ if ($existing) {
         return
     }
 }
-# Notes start after the last release tag on main, including unpublished
-# first-parent merges that landed between that tag and this commit.
 $previous = Get-TaxiLastMainReleaseTag -Repository $root -Commit $Commit -ExcludeCommit
 $entries = @(Get-TaxiReleaseChangeEntries -Repository $root -FromRef $previous -ToCommit $Commit)
 $numbers = @($entries | Where-Object { $_.Number -gt 0 } | ForEach-Object { [int]$_.Number })
@@ -79,7 +75,7 @@ try {
         $entries = @(Get-TaxiReleaseChangeEntries -Repository $root -FromRef $previous -ToCommit $Commit -PullRequestInfo $pullRequests)
     }
 } catch {
-    # Git merge subjects and bodies remain the notes source if GitHub is unreachable.
+    Write-Output 'GitHub pull request details are unavailable; release notes use the merge commit text.'
 }
 $runUrl = "$env:GITHUB_SERVER_URL/$Repository/actions/runs/$BuildRunId"
 $notes = New-TaxiReleaseNotes -Repository $Repository -Commit $Commit -PreviousTag $previous -BuildRunUrl $runUrl -Entries $entries
@@ -94,8 +90,6 @@ if (-not $existing) {
         '--notes-file',$notesPath)
     [void](Invoke-Gh -Arguments $arguments)
 }
-# Keep the release a draft until all assets are uploaded. Reruns repair drafts
-# but never replace a published release's assets.
 [void](Invoke-Gh -Arguments @('release','upload',$tag,$packagePath,$installerPath,$checksum,$receiptPath,'--repo',$Repository,'--clobber'))
 $recorded = & git rev-parse -q --verify "$tag^{commit}"
 if ($LASTEXITCODE -eq 0) {
@@ -104,8 +98,6 @@ if ($LASTEXITCODE -eq 0) {
     & git tag $tag $Commit
     if ($LASTEXITCODE -ne 0) { throw 'Could not record the publish tag locally.' }
 }
-# Auto-update reads GitHub's latest published release. Mark this one Latest
-# only when it is the last v*-build.N tag reachable on origin/main (or main).
 $latest = if ((Get-TaxiLastPublishedMainTag -Repository $root) -ceq $tag) { '--latest=true' } else { '--latest=false' }
 [void](Invoke-Gh -Arguments @('release','edit',$tag,'--repo',$Repository,'--draft=false',$latest))
 $url = Invoke-Gh -Arguments @('release','view',$tag,'--repo',$Repository,'--json','url','--jq','.url')

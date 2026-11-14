@@ -1,19 +1,15 @@
 [CmdletBinding()]
 param([string]$Output = (Join-Path $PSScriptRoot '../src/app/taxi-cam.ico'))
 $ErrorActionPreference = 'Stop'
-# A full-width hold-short marking and TAXI label inside a teal rounded square.
-# Eight samples per axis keep the deterministic glyph clear at shell sizes.
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
 public static class TaxiCamIcon {
-    // Fixed 3x5 block glyphs avoid machine-dependent font rasterization.
-    static readonly byte[,] Letters = {
-        {7,2,2,2,2}, // T
-        {2,5,7,5,5}, // A
-        {5,5,2,5,5}, // X
-        {7,2,2,2,7}  // I
-    };
+    static readonly byte[] GlyphT = {7,2,2,2,2};
+    static readonly byte[] GlyphA = {2,5,7,5,5};
+    static readonly byte[] GlyphX = {5,5,2,5,5};
+    static readonly byte[] GlyphI = {7,2,2,2,7};
+    static readonly byte[][] FixedBlockGlyphsForTaxi = { GlyphT, GlyphA, GlyphX, GlyphI };
     static bool RoundedSquare(double x, double y, double halfExtent, double radius) {
         double dx = Math.Max(Math.Abs(x - 16) - halfExtent + radius, 0);
         double dy = Math.Max(Math.Abs(y - 16) - halfExtent + radius, 0);
@@ -23,15 +19,16 @@ public static class TaxiCamIcon {
         if (x < 4 || x >= 28 || y < 19.5 || y >= 27.5) return false;
         int column = (int)((x - 4) / 1.6), row = (int)((y - 19.5) / 1.6);
         int letter = column / 4, pixel = column % 4;
-        return pixel < 3 && (Letters[letter,row] & (1 << (2 - pixel))) != 0;
+        return pixel < 3 && (FixedBlockGlyphsForTaxi[letter][row] & (1 << (2 - pixel))) != 0;
+    }
+    static bool SolidHoldShortLines(double y) {
+        return Math.Abs(y - 11) <= 0.6 || Math.Abs(y - 13) <= 0.6;
+    }
+    static bool DashedHoldShortLines(double x, double y) {
+        return (Math.Abs(y - 7) <= 0.6 || Math.Abs(y - 9) <= 0.6) && ((x + 0.75) % 4.75 <= 3.5);
     }
     static bool Markings(double x, double y) {
-        // Two continuous hold-short lines below, two dashed lines beyond.
-        // The asphalt mask clips each full-width bar before the teal border.
-        if (Math.Abs(y - 11) <= 0.6 || Math.Abs(y - 13) <= 0.6) return true;
-        if ((Math.Abs(y - 7) <= 0.6 || Math.Abs(y - 9) <= 0.6) &&
-            ((x + 0.75) % 4.75 <= 3.5)) return true;
-        return TaxiLabel(x, y);
+        return SolidHoldShortLines(y) || DashedHoldShortLines(x, y) || TaxiLabel(x, y);
     }
     static byte[] Image(int size) {
         var pixels = new uint[size * size];
