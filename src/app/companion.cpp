@@ -1976,6 +1976,8 @@ constexpr int SetupSlotTop = 96, SetupSlotHeight = 206, SetupSlotPicture = 104, 
 constexpr const wchar_t* ControlsActionNames[]{ui_text(L"Left"), ui_text(L"Right"), ui_text(L"Both"), ui_text(L"Lower"), ui_text(L"Door")};
 constexpr unsigned SetupSteps = 3;
 bool advanced = false;
+// An aircraft is being set up for the first time, step by step (guided_setup).
+bool guided = false;
 // Where Taxi cameras' controls card starts, below its cards.
 int controls_top() {
   return StepTop + (advanced ? CameraCardAdvancedHeight + 10 + CameraGuidesHeight : CameraCardHeight) + 14;
@@ -4114,6 +4116,8 @@ void sync_aircraft_session() {
   win::reset_aircraft_session(s, sample.aircraft_session_epoch);
   publish(s);
   profile_selection = {};
+  // Another aircraft: a first-time setup under way was the last one's.
+  guided = false;
   // Do not rebuild numeric edits when a flight changes in the background.
   SetDlgItemTextW(window, 229, switch_label(tr(L"Scene test"), false).c_str());
   refresh_side_toggles(s);
@@ -6325,10 +6329,10 @@ void draw_look_icons(HDC dc, const RECT& well, unsigned view) {
 // An aircraft set up for the first time goes through Setup's steps in order,
 // with Back and Next; one that has a setup opens any of them directly.
 // It starts on any step while the aircraft has no setup, or while its cameras
-// are being positioned, and lasts until the steps are left: placing its
-// displays makes it a set-up aircraft at once, which must not take Back,
-// Next and Finish away from the rest of the steps.
-bool guided{};
+// are being positioned, and lasts until the steps are left or another
+// aircraft is loaded (sync_aircraft_session): placing its displays makes it
+// a set-up aircraft at once, which must not take Back, Next and Finish away
+// from the rest of the steps.
 bool guided_setup(const win::Status& sample) {
   if (setup_step(page) < 0)
     guided = false;

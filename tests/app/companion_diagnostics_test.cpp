@@ -558,9 +558,25 @@ void redesign_controls_tests() {
   page = DoorPage;
   build_controls();
   require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "through to Door camera, where Next is Finish");
+  // Another aircraft loaded while a step is open ends the guided setup: it
+  // was the last aircraft's.
+  {
+    const std::lock_guard lock(app_mutex);
+    status.heartbeat = GetTickCount64();
+    status.aircraft_session_epoch = current.aircraft_session_epoch + 1;
+  }
+  sync_aircraft_session();
+  build_controls();
+  require(!GetDlgItem(window, NextId) && !GetDlgItem(window, BackId), "A set-up aircraft loaded during a guided setup has no Back or Next");
   page = OverviewPage;
   build_controls();
   require(!GetDlgItem(window, HomeActionId), "Home drops the offer once the aircraft has a setup");
+  unprofiled(false);
+  page = SetupPage;
+  build_controls();
+  unprofiled(true);
+  page = OverviewPage;
+  build_controls();
   page = SetupPage;
   build_controls();
   require(!GetDlgItem(window, NextId) && !GetDlgItem(window, BackId), "Leaving the steps ends the guided setup");
