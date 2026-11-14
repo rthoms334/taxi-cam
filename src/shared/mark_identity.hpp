@@ -150,6 +150,28 @@ class ReplacementWatch {
   std::uint64_t hold_until_ = 0;
 };
 
+// The pages a replacement's show is for: the panels of the read textures
+// lost since the marks last came down with no replacement waiting. Other
+// pages stay dark, so a panel Taxi Cam never reads shows no mark in flight.
+class ReplacementTargets {
+ public:
+  // panel: the lost texture's panel number, 0 when unknown.
+  void lost(unsigned panel) noexcept {
+    const auto bit = panel_marks::panel_bit(panel);
+    mask_ |= bit;
+    all_ = all_ || !bit;
+  }
+  // The mask to show, 0 for every page.
+  std::uint64_t mask() const noexcept { return all_ ? 0 : mask_; }
+  // Whether a show of that mask (0: every page) has these panels' marks up.
+  bool covered_by(std::uint64_t shown) const noexcept { return !shown || (!all_ && !(mask_ & ~shown)); }
+  void reset() noexcept { *this = {}; }
+
+ private:
+  std::uint64_t mask_ = 0;
+  bool all_ = false;
+};
+
 struct Gauge {
   std::array<char, 48> section{}, name{};
   std::uint8_t index{};

@@ -888,6 +888,7 @@ DWORD run_impl() {
       std::uint64_t id{}, next_ms{};
       unsigned tries{};
       bool read{};
+      unsigned panel{};         // Once read: its panel's number, 0 when its marks give none.
       bool empty{};             // A picture of it came back without a mark.
       std::uint64_t seen_ms{};  // When the scan first listed the texture.
       // Its draws and submissions now, and when its last picture was asked:
@@ -918,6 +919,9 @@ DWORD run_impl() {
     // texture has been destroyed.
     bool session_read = false;
     mark_identity::ReplacementWatch replacements;
+    // The panels those replacements belong to: only their pages are asked.
+    mark_identity::ReplacementTargets targets;
+    std::uint64_t shown_mask{};       // While shown_again: the panels asked, 0 for every page.
     unsigned lost{};                  // Read textures destroyed since the marks last went up for them.
     std::uint64_t refreshed_epoch{};  // The aircraft session the texture list was last refreshed in.
     // Sides a camera is asked for that have no texture, as of the last pass,
@@ -1167,6 +1171,9 @@ DWORD run_impl() {
       entry->next_ms = now + MarkRetryMs;
       if (marks) {
         entry->read = true;
+        const auto* texture = panel_identity.store.find(id);
+        const auto* gauge = texture ? texture->first() : nullptr;
+        entry->panel = gauge ? mark_identity::panel_number(gauge->section.data()) : 0;
         ++mark_scan.unsignalled;
         ++mark_scan.read;
       }
@@ -1182,6 +1189,8 @@ DWORD run_impl() {
         mark_scan.shown_again = mark_scan.session_shown = mark_scan.session_read = false;
         mark_scan.lost = mark_scan.wanted_unassigned = mark_scan.asked_sides = 0;
         mark_scan.replacements.reset();
+        mark_scan.targets.reset();
+        mark_scan.shown_mask = 0;
         mark_scan.verdict.reset();
         // The last flight's pictures without marks do not count for this one:
         // its listed textures are counted again below, before they are pruned.
@@ -1250,16 +1259,20 @@ DWORD run_impl() {
         mark_scan.next_refresh = now + MarkRefreshMs;
         const auto records = win::display_resource_records();
         unsigned lost = 0;
+        const bool replaced = mark_scan.refreshed_epoch == epoch;
         std::erase_if(mark_scan.entries, [&](const MarkScan::Entry& entry) {
           const bool gone = std::none_of(records.begin(), records.end(), [&](const auto& record) { return record.id == entry.id; });
           lost += gone && entry.read;
+          if (gone && entry.read && replaced)
+            mark_scan.targets.lost(entry.panel);
           return gone;
         });
         // Textures already gone at a session's first refresh went with the
         // last flight, while the scan was not allowed: nothing replaces them.
-        if (lost && mark_scan.refreshed_epoch == epoch) {
+        // Marks up for other panels only do not serve this loss.
+        if (lost && replaced) {
           mark_scan.lost += lost;
-          mark_scan.replacements.lost(now, mark_scan.shown_again);
+          mark_scan.replacements.lost(now, mark_scan.shown_again && mark_scan.targets.covered_by(mark_scan.shown_mask));
         }
         mark_scan.refreshed_epoch = epoch;
         for (const auto& record : records) {
@@ -1294,12 +1307,14 @@ DWORD run_impl() {
         return static_cast<unsigned>(
             std::count_if(mark_scan.entries.begin(), mark_scan.entries.end(), [](const MarkScan::Entry& entry) { return entry.read; }));
       };
-      const auto ask_show = [&] {
+      // panels: the pages asked (panel_marks::panel_bit), 0 for every page.
+      const auto ask_show = [&](std::uint64_t panels = 0) {
         mark_scan.shown_again = true;
         mark_scan.shown_ms = now;
+        mark_scan.shown_mask = panels;
         mark_scan.replacements.shown(now);
         mark_scan.lost = 0;
-        native_camera::signal_panel_marks_show();
+        native_camera::signal_panel_marks_show(panels);
         for (auto& entry : mark_scan.entries)
           if (!entry.read) {
             entry.tries = 0;
@@ -1323,6 +1338,8 @@ DWORD run_impl() {
         mark_scan.unsignalled = 0;
         mark_scan.shown_again = false;
         mark_scan.replacements.taken_down(now);
+        if (!mark_scan.replacements.pending(now))
+          mark_scan.targets.reset();
       };
       // A camera asked for on a display with no texture, with a texture
       // unread and the marks down: for a side not asked about yet, as soon as
@@ -1354,11 +1371,19 @@ DWORD run_impl() {
         log_status(log_to, detail);
       } else if (mark_scan.shown_again && now - mark_scan.shown_ms >= MarkShowMs) {
         take_down("time limit");
-      } else if (mark_scan.replacements.due(now, mark_scan.shown_again, mark_scan.shown_ms)) {
-        char detail[128];
-        std::snprintf(detail, sizeof(detail), "Display marks: %u read panel textures destroyed; cockpit pages asked to show their marks.",
-                      mark_scan.lost);
-        ask_show();
+      } else if (const bool up = mark_scan.shown_again && mark_scan.targets.covered_by(mark_scan.shown_mask);
+                 // Marks up for other panels: this loss's pages are asked at once.
+                 mark_scan.replacements.due(now, up, mark_scan.shown_again ? 0 : mark_scan.shown_ms)) {
+        const auto panels = mark_scan.targets.mask();
+        char detail[160];
+        if (panels)
+          std::snprintf(detail, sizeof(detail),
+                        "Display marks: %u read panel textures destroyed; their cockpit pages asked to show their marks (panels=%#llx).",
+                        mark_scan.lost, static_cast<unsigned long long>(panels));
+        else
+          std::snprintf(detail, sizeof(detail), "Display marks: %u read panel textures destroyed; cockpit pages asked to show their marks.",
+                        mark_scan.lost);
+        ask_show(panels);
         log_status(log_to, detail);
       } else if (camera_waits) {
         mark_scan.asked_sides |= mark_scan.wanted_unassigned;

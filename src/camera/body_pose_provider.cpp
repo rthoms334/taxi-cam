@@ -12,6 +12,7 @@
 #include <cwchar>
 #include <utility>
 #include "../profiles/catalog.hpp"
+#include "../shared/panel_marks.hpp"
 #include "body_pose_math.hpp"
 #include "pmdg_display_select.hpp"
 
@@ -1504,19 +1505,24 @@ void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted
 }
 namespace {
 // A value no page saw before: pages compare with the value at their load, and
-// an L:var outlives the flight. Positive: read; negative: show again.
-void signal_panel_marks(bool read) noexcept {
+// an L:var outlives the flight. Positive: read; negative: show again, from
+// panel_marks::kTargetedBase for the pages of some panels only.
+void signal_panel_marks(bool read, std::uint64_t panels) noexcept {
+  static std::atomic<unsigned> serial{0};
+  const auto last = std::llabs(panel_marks_signal.load(std::memory_order_relaxed));
   auto value = static_cast<std::int64_t>(GetTickCount64() % 1000000000ull + 1);
-  if (value == std::llabs(panel_marks_signal.load(std::memory_order_relaxed)))
+  if (!read && panels)
+    value = static_cast<std::int64_t>(panel_marks::targeted_show(panels, serial.fetch_add(1, std::memory_order_relaxed)));
+  else if (value == last)
     ++value;
   panel_marks_signal.store(read ? value : -value, std::memory_order_release);
 }
 }  // namespace
 void signal_panel_marks_read() noexcept {
-  signal_panel_marks(true);
+  signal_panel_marks(true, 0);
 }
-void signal_panel_marks_show() noexcept {
-  signal_panel_marks(false);
+void signal_panel_marks_show(std::uint64_t panels) noexcept {
+  signal_panel_marks(false, panels);
 }
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept {
   AcquireSRWLockShared(&state.lock);

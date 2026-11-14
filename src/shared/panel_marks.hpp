@@ -34,6 +34,23 @@ inline constexpr std::array<std::uint8_t, kColumns> kFinder{7, 0, 7, 0, 4, 2, 1,
 inline constexpr std::size_t kMaxPayload = 160;
 inline constexpr unsigned kMaxRows = 1 + ((kMaxPayload + 2) * 8 + kRowBits - 1) / kRowBits;
 
+// A show for some panels only (L:TAXICAM_MARKS, a negative value): from
+// kTargetedBase its magnitude is kTargetedBase + mask * kTargetedSerials +
+// serial, mask bit n-1 for the page of panel n ("VCockpit05" is 5). A smaller
+// magnitude asks every page. The page cannot tell a panel drawn on the screen
+// from one on a cockpit display (the FlyByWire popup panel, issue 217): its
+// mark must not come back each time some display's texture is replaced. Exact
+// in the L:var's double: below 2^53.
+inline constexpr unsigned kTargetPanels = 48, kTargetedSerials = 16;
+inline constexpr std::uint64_t kTargetedBase = 1ull << 52;
+// 0 for a panel the mask cannot name: every page is asked then.
+constexpr std::uint64_t panel_bit(unsigned panel) noexcept {
+  return panel >= 1 && panel <= kTargetPanels ? 1ull << (panel - 1) : 0;
+}
+constexpr std::uint64_t targeted_show(std::uint64_t mask, unsigned serial) noexcept {
+  return kTargetedBase + (mask & ((1ull << kTargetPanels) - 1)) * kTargetedSerials + serial % kTargetedSerials;
+}
+
 enum class Kind : std::uint8_t { gauge = 0, panel = 1 };
 struct Mark {
   Kind kind = Kind::gauge;

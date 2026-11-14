@@ -165,10 +165,11 @@ void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept;
 // Cache-only: tells every cockpit page that Taxi Cam has read its panel marks
 // (L:TAXICAM_MARKS gets a positive value it has not had, src/panel_marks), or
-// asks them to show their marks again (a new negative value). The worker sets
-// it on its next pass.
+// asks them to show their marks again (a new negative value): every page, or
+// with panels (panel_marks::panel_bit) only the pages of those panels. The
+// worker sets it on its next pass.
 void signal_panel_marks_read() noexcept;
-void signal_panel_marks_show() noexcept;
+void signal_panel_marks_show(std::uint64_t panels = 0) noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;
