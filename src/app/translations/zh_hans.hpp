@@ -345,6 +345,7 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"Select an aircraft you set up to remove it.", L"请选择一个你设置的机型以将其移除。"},
     {L"Select an aircraft you set up to copy from.", L"请选择一个你设置的机型作为复制来源。"},
     {L"Saved aircraft", L"已保存的机型"},
+    {L"Setup", L"设置"},
     {L"Settings", L"设置"},
     {L"Settings updated.", L"设置已更新。"},
     {L"Show notifications", L"显示通知"},

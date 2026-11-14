@@ -391,6 +391,7 @@ inline constexpr Translation SpanishTranslations[]{
     {L"Select an aircraft you set up to remove it.", L"Selecciona una aeronave que hayas configurado para quitarla."},
     {L"Select an aircraft you set up to copy from.", L"Selecciona una aeronave que hayas configurado como origen."},
     {L"Saved aircraft", L"Aeronaves guardadas"},
+    {L"Setup", L"Configuración"},
     {L"Settings", L"Configuración"},
     {L"Settings updated.", L"Configuración actualizada."},
     {L"Show notifications", L"Mostrar notificaciones"},
