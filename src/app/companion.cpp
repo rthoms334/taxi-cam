@@ -6408,13 +6408,15 @@ void build_controls() {
     button(tr(L"Picture"), 100 + PicturePage, 352 + 3 * 158, 62, 150, 32);
     if (step >= 0) {
       if (built_guided) {
-        const auto back = step == 0 ? std::wstring(tr(L"Cancel")) : tr_format(L"Back: {0}", {step_name(static_cast<unsigned>(step) - 1)});
-        button(back.c_str(), BackId, PageLeft, 627, 190, 42);
+        // Back is the step before; the first step has none. Leaving is Home,
+        // in the header, one click from any step.
+        if (step > 0)
+          button(tr_format(L"Back: {0}", {step_name(static_cast<unsigned>(step) - 1)}).c_str(), BackId, PageLeft, 627, 190, 42);
         const auto next = step + 1 < static_cast<int>(SetupSteps) ? tr_format(L"Next: {0}", {step_name(static_cast<unsigned>(step) + 1)})
                                                                   : std::wstring(tr(L"Finish"));
         button(next.c_str(), NextId, 786, 627, 190, 42);
       }
-      button(switch_label(tr(L"Advanced"), advanced).c_str(), AdvancedId, built_guided ? 224 : PageLeft, 631, 140, 34);
+      button(switch_label(tr(L"Advanced"), advanced).c_str(), AdvancedId, built_guided && step > 0 ? 224 : PageLeft, 631, 140, 34);
     }
   }
   if (page == OverviewPage) {
@@ -7526,7 +7528,7 @@ void draw_page(HDC dc) {
                                  : tr(L"Adjust each taxi camera in the live view: drag to aim, arrows to move, the wheel to zoom."))
         : page == GuidesPage ? tr(L"Advanced: move the guide points; they show live and are saved for this aircraft.")
                              : tr(L"A cabin camera on a cockpit display, turned on from the flight deck.");
-    const int x = built_guided ? 376 : 176, width = (built_guided ? 776 : 976) - x;
+    const int x = built_guided && step > 0 ? 376 : 176, width = (built_guided ? 776 : 976) - x;
     text(dc, quiet ? purpose : notice.c_str(), x, 629, width, 40, small, !quiet && dirty ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
   } else if (!quiet) {
     text(dc, notice.c_str(), PageLeft, page == OverviewPage ? 604 : 640, PageWidth, 24, small, dirty ? Accent : Muted,

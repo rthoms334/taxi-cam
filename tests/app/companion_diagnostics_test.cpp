@@ -554,10 +554,11 @@ void redesign_controls_tests() {
   require(GetDlgItem(window, HomeActionId) != nullptr, "Home offers Set up this aircraft for an aircraft without a setup");
   page = SetupPage;
   build_controls();
-  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "A first-time setup starts with Back and Next on Displays");
+  require(GetDlgItem(window, NextId) && !GetDlgItem(window, BackId) && GetDlgItem(window, 100 + OverviewPage),
+          "A first-time setup starts with Next on Displays; Home in the header is the way out, not a Cancel");
   loaded("Fixture_One", true, epoch);
   build_controls();
-  require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "and keeps them once its displays are placed");
+  require(GetDlgItem(window, NextId) != nullptr, "and keeps it once its displays are placed");
   page = DoorPage;
   build_controls();
   require(GetDlgItem(window, NextId) && GetDlgItem(window, BackId), "through to Door camera, where Next is Finish");
