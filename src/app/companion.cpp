@@ -5170,7 +5170,7 @@ bool store_aircraft_setup(const win::Status& sample, bool quiet) {
   // lower display already placed is the user's choice and stays.
   if (next.door_side == win::DoorSideNone && layout.sides == MaxDisplaySides && (!same || earlier.discovered.sides < MaxDisplaySides))
     next.door_side = MaxDisplaySides - 1;
-  if (!win::prepare_profile_selection(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
+  if (!win::prepare_layout_save(next, s, s.auto_profile != 0) || !win::save_settings(next)) {
     notice = tr(L"Could not save this aircraft. Check access to your local settings folder.");
     InvalidateRect(window, nullptr, FALSE);
     return false;

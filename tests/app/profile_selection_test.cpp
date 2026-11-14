@@ -36,6 +36,30 @@ int main() {
   reset_aircraft_session(retry, 13);
   assert(retry.aircraft_session_epoch == 13 && !retry.manual_mask && !retry.left_id);
   assert(retry.mounts == selected.mounts && retry.profile_request == 10);
+  // Saving a set-up aircraft's displays: the layout already running is no new
+  // selection (the cameras keep running), another layout or aircraft is.
+  Settings running;
+  running.profile = taxi_camera::profiles::DiscoveredProfileId;
+  running.profile_request = 20;
+  std::snprintf(running.discovered.key, sizeof(running.discovered.key), "SimObjects/Airplanes/FNX_32X/presets/fnx/FNX_320_CFM_SL");
+  running.discovered.sides = 3;
+  for (unsigned side = 0; side < 3; ++side) {
+    std::snprintf(running.discovered.textures[side], sizeof(running.discovered.textures[side]), "VCockpit0%u/1", side + 1);
+    running.discovered.shapes[side] = {768, 768, 5};
+  }
+  running.manual_mask = 3;
+  auto saved = running;
+  saved.display_override.areas[2] = {0, 0, 768, 671};
+  assert(prepare_layout_save(saved, running, true));
+  assert(saved.profile_request == 20 && saved.auto_profile && !saved.manual_mask);
+  auto swapped = running;
+  std::swap(swapped.discovered.textures[0], swapped.discovered.textures[1]);
+  assert(prepare_layout_save(swapped, running, true) && swapped.profile_request == 21);
+  auto other = running;
+  std::snprintf(other.discovered.key, sizeof(other.discovered.key), "SimObjects/Airplanes/FNX_32X/presets/fnx/FNX_321_CFM_WF_SC");
+  assert(prepare_layout_save(other, running, true) && other.profile_request == 21);
+  auto first = running;
+  assert(prepare_layout_save(first, previous, true) && first.profile_request == previous.profile_request + 1);
   previous.profile_request = UINT64_MAX;
   const auto unchanged = retry;
   assert(!prepare_profile_selection(retry, previous, true));
