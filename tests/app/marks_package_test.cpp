@@ -275,14 +275,16 @@ int main() {
               "a taken page without the script leaves ours out");
       write(other / marks_package::PageRelative, other_page);
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written, "with the script line, ours comes back");
-      // Another package replacing the script too: left alone.
+      // Another package replacing the script too, with no XMLLogic.js
+      // installed here to move to: left alone. (With one installed, ours
+      // moves to it: the issue 200 cases below.)
       const auto script_tool = community / "script-tool";
       fs::create_directories((script_tool / marks_package::ScriptRelative).parent_path());
       write(script_tool / marks_package::ScriptRelative, "tool");
       write(script_tool / "manifest.json",
             "{ \"globally_overriden_base_sim_files\": [ \"\\\\html_ui\\\\pages\\\\VCockpit\\\\Core\\\\VCockpit.js\" ] }");
       require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::conflict && !fs::exists(package),
-              "a taken script leaves ours out while the page is taken");
+              "a taken script and no installed XMLLogic.js leave ours out while the page is taken");
       erase(other);
       require(
           marks_package::ensure(simulator, community, "helper", 0) == Outcome::written && fs::exists(package / marks_package::PageRelative),
@@ -301,6 +303,11 @@ int main() {
         write(stock_logic, "class LogicXMLElement {}\r\n");
         const auto logic_file = package / marks_package::LogicRelative;
         const auto holder = community / "YourControls";
+        const auto logic_tool_file = [&] {
+          const auto file = community / "logic-tool" / marks_package::LogicRelative;
+          fs::create_directories(file.parent_path());
+          return file;
+        };
         const auto hold_script = [&] {
           fs::create_directories((holder / marks_package::ScriptRelative).parent_path());
           write(holder / marks_package::ScriptRelative, "their copy");
@@ -378,8 +385,17 @@ int main() {
                 "two stock copies outside the vcockpits package: no guess");
         erase(simulator / "Packages" / "fs-base-ui");
         erase(simulator / "Packages" / "asobo-vcockpits-instruments");
-        erase(holder);
+        // A script held on its own does no harm in page mode: not named.
+        hold_script();
+        write(logic_tool_file(), "their logic");
+        require(marks_package::in_the_way(community) == (std::vector<std::wstring>{L"YourControls", L"logic-tool", L"panel-raas"}),
+                "with the page taken and both scripts held, all are named");
+        erase(community / "logic-tool");
+        require(marks_package::in_the_way(community) == (std::vector<std::wstring>{L"YourControls", L"panel-raas"}),
+                "a package holding only the script ours passed over is named, with the page's taker");
         erase(other);
+        require(marks_package::in_the_way(community).empty(), "with the page free, a package holding a script is not named");
+        erase(holder);
         require(marks_package::in_the_way(community).empty(), "with the add-ons gone, none is named");
         require(marks_package::ensure(simulator, community, "helper", 0) == Outcome::written &&
                     fs::exists(package / marks_package::PageRelative),

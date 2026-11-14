@@ -19,8 +19,10 @@
 //   session until the next check rewrites it.
 //   A copy of VCockpit.js in any other Community package rules that script
 //   out, listed in its manifest or not (issue 200: with vRAAS taking the
-//   page, YourControls' unlisted copy left no mark readable on two PCs, Store
-//   and Steam, and moving it out brought them back). Ours then replaces the
+//   page, no mark was read on a Steam PC while YourControls and
+//   fscopilot-bridge, each with an unlisted copy, were installed, and marks
+//   were read with both removed; a Store reporter saw the same with
+//   YourControls, not checked in the log). Ours then replaces the
 //   next script every copy of the page loads that no other package holds,
 //   Instruments/Shared/Utils/XMLLogic.js (ScriptCarriers); not yet run in
 //   the simulator.
@@ -494,14 +496,23 @@ inline Takers takers(const std::filesystem::path& community) {
 inline Mode mode_for(const Takers& taken) noexcept {
   return taken.page.empty() ? Mode::page : Mode::script;
 }
-// The other packages between Taxi Cam and the cockpit pages: those taking
-// the page and those with a copy of a script ours could replace. Sorted, each
-// once; for the companion's messages.
+// The other packages between Taxi Cam and the cockpit pages, for the
+// companion's messages: those taking the page, and those holding a script
+// ours had to pass over, up to the first script no package holds (all of
+// them when every script is held). None while the page is free: ours is on
+// the page then, where another package's copy of a script does no harm.
+// Sorted, each once.
 inline std::vector<std::wstring> in_the_way(const std::filesystem::path& community) {
   const auto overrides = other_page_overrides(community);
   auto out = listing(community, overrides.page, PageRelative);
-  for (const auto& carrier : ScriptCarriers)
-    out.insert(out.end(), overrides.holders(carrier).begin(), overrides.holders(carrier).end());
+  if (out.empty())
+    return out;
+  for (const auto& carrier : ScriptCarriers) {
+    const auto& holders = overrides.holders(carrier);
+    if (holders.empty())
+      break;
+    out.insert(out.end(), holders.begin(), holders.end());
+  }
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());
   return out;
