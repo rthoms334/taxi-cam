@@ -215,7 +215,7 @@ std::vector<Surface> surfaces;
 void panel(HDC dc, int x, int y, int w, int h, COLORREF color = Card) {
   const auto r = rectangle(x, y, w, h);
   surfaces.push_back({r, color});
-  // A well set into a card has no outline of its own; a card has a hairline.
+  // A card has a hairline; a well set into a card has a fainter edge of its own colour.
   round_box(dc, r, scale(color == Card ? 12 : 10), color, color == Card ? Border : blend(color, Text, 6));
 }
 // The colour behind a child control of the settings window.
@@ -7240,7 +7240,8 @@ void draw_page(HDC dc) {
     draw_gallery(dc, sample);
   } else if (page == 4) {
     panel(dc, 244, 124, 766, 166);
-    // The spaces align the values in the proportional font; translations realign them.
+    // Each line is a name and its value, separated by a run of at least two
+    // spaces or, as in Simplified Chinese, by a colon (see the rows below).
     const auto counts = tr_format(
         L"Bridge                 {0}\n"
         L"Camera pair         {1}\n"
@@ -7254,14 +7255,20 @@ void draw_page(HDC dc) {
          std::to_wstring(sample.captures), std::to_wstring(sample.composed), std::to_wstring(sample.stamps),
          std::to_wstring(sample.hook_failures)});
     // A row per line: its name, then its value in one column. A line is
-    // split at its run of spaces, which no longer has to align anything.
+    // split at its run of spaces, or at its colon when it has none; a line
+    // with neither is drawn whole.
     int row_y = 138;
     for (size_t start = 0; start <= counts.size();) {
       const auto end = std::min(counts.find(L'\n', start), counts.size());
       const auto row_text = counts.substr(start, end - start);
-      const auto gap = row_text.find(L"  ");
-      const auto value_at = gap == std::wstring::npos ? gap : row_text.find_first_not_of(L' ', gap);
-      text(dc, row_text.substr(0, gap).c_str(), 262, row_y, 150, 20, normal, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      const auto spaces = row_text.find(L"  ");
+      const auto gap = spaces != std::wstring::npos ? spaces : row_text.find_first_of(L"\uFF1A:");
+      const auto value_at = gap == std::wstring::npos ? gap : row_text.find_first_not_of(L" \uFF1A:", gap);
+      if (gap == std::wstring::npos)
+        text(dc, row_text.c_str(), 262, row_y, 358, 20, normal, Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      else
+        text(dc, row_text.substr(0, gap).c_str(), 262, row_y, 150, 20, normal, Muted,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
       if (value_at != std::wstring::npos)
         text(dc, row_text.substr(value_at).c_str(), 420, row_y, 200, 20, normal, Text,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -7902,7 +7909,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         // The display under the cursor lights up.
         if (const int side = drop_side_at({static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))}); side != setup.drop_side) {
           setup.drop_side = side;
-          InvalidateRect(hwnd, nullptr, FALSE);
+          // The slots' buttons too: their corners show the slot's colour.
+          RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
         return 0;
       }
