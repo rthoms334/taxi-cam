@@ -392,6 +392,7 @@ inline constexpr Translation SimplifiedChineseTranslations[]{
     {L"The installer could not be verified or started. Please check for updates again.", L"安装程序无法验证或启动。请再次检查更新。"},
     {L"The legacy taxi add-on is loaded. Run the native installer, then restart MSFS.",
      L"检测到旧版滑行插件已载入。请运行原生安装程序，然后重新启动 MSFS。"},
+    {L"MSFS stopped while Taxi Cam was starting.", L"Taxi Cam 启动期间 MSFS 已停止运行。"},
     {L"The native bridge refused startup.", L"原生桥接拒绝启动。"},
     {L"The profile's own displays are back.", L"已恢复此机型配置自带的显示屏。"},
     {L"The saved image could not be opened.", L"无法打开已保存的图像。"},

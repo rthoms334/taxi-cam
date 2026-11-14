@@ -118,6 +118,54 @@ void launcher_log_checks(const std::wstring& directory) {
               log.find(L"error=1223 phase=bridge_start") != std::wstring::npos &&
               log.find(L"start_wait_observed=0 start_wait=0x00000102 start_wait_error=0 start_cancelled=1") != std::wstring::npos,
           "Written diagnostics preserve failed versus cancelled startup waits");
+  require(exception_exit_code(0xC00000FD) && exception_exit_code(0xC0000005) && !exception_exit_code(0) &&
+              !exception_exit_code(ERROR_BAD_ENVIRONMENT) && !exception_exit_code(0x80000003) && !exception_exit_code(ERROR_ALREADY_EXISTS),
+          "A start thread that ended with an exception code is a simulator crash, not a bridge refusal");
+  {
+    // A simulator that died of a stack overflow: launcher.log names the exit
+    // code and the chain from the newest record of that process.
+    const auto write_record = [&](const wchar_t* name, DWORD process, std::uint32_t rva) {
+      crash_evidence::Record record;
+      record.process = process;
+      record.state = 2;
+      record.code = 0xC00000FD;
+      record.thread = 77;
+      record.module = 0x140000000;
+      record.stack_limit = 0x1000000;
+      record.stack_base = 0x1040000;
+      record.fault_address = 0x7ff800001234;
+      record.frame_count = 2;
+      record.frames[0] = {0x7ff800000000, 0x1234, 1};
+      record.frames[1] = {0x140000000, rva, 500};
+      record.module_count = 1;
+      record.modules[0].base = 0x7ff800000000;
+      std::strcpy(record.modules[0].name, "dxgi.dll");
+      const auto file =
+          CreateFileW((directory + L"\\" + name).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      DWORD written{};
+      const bool ok = file != INVALID_HANDLE_VALUE &&
+                      WriteFile(file, static_cast<const void*>(&record), sizeof(record), &written, nullptr) && written == sizeof(record);
+      if (file != INVALID_HANDLE_VALUE)
+        CloseHandle(file);
+      require(ok, "Write a stack overflow record");
+    };
+    write_record(L"renderer-fault-4242-1.bin", 4242, 0x111);
+    Sleep(20);
+    write_record(L"renderer-fault-4242-2.bin", 4242, 0x222);
+    write_record(L"renderer-fault-4243-1.bin", 4242, 0x333);  // Named for another process.
+    log_simulator_exit(directory, 4242, 0xC00000FD);
+    log_simulator_exit(directory, 4243, 0xC0000005);
+    log_simulator_exit(directory, 4244, 0);
+    log = read_small_text_file(directory + L"\\launcher.log");
+    require(log.find(L"simulator exit pid=4242 code=0xc00000fd | stack overflow: thread=77 stack_kb=256 fault=0x7ff800001234 "
+                     L"chain=dxgi.dll+0x1234*1,main+0x222*500") != std::wstring::npos,
+            "A simulator stack overflow is logged with its chain from the newest record of that process");
+    require(log.find(L"simulator exit pid=4243 code=0xc0000005\r\n") != std::wstring::npos && log.find(L"pid=4244") == std::wstring::npos &&
+                log.find(L"0x333") == std::wstring::npos && log.find(L"0x111") == std::wstring::npos,
+            "Other crash codes log the exit alone; a clean exit and another process's record log nothing");
+    for (const auto* name : {L"renderer-fault-4242-1.bin", L"renderer-fault-4242-2.bin", L"renderer-fault-4243-1.bin"})
+      DeleteFileW((directory + L"\\" + name).c_str());
+  }
   const auto path = directory + L"\\launcher.log";
   const auto file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   require(file != INVALID_HANDLE_VALUE, "Prepare a launcher log at its former stop-writing threshold");

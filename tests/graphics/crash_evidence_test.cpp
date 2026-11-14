@@ -219,10 +219,78 @@ void retention_cases() {
       "PASS renderer fault retention: sixteen records, empty-first oldest pruning, active mappings/locks preserved, unrelated files "
       "untouched.");
 }
+
+// A real overflow in a child process: the handler has to work on the stack an
+// overflow leaves, and the mapped record has to outlive the process.
+volatile unsigned recursion_limit = ~0u;
+[[gnu::noinline]] unsigned recurse(unsigned depth) {
+  volatile char pad[256];
+  pad[0] = static_cast<char>(depth);
+  if (depth >= recursion_limit)
+    return 0;
+  return recurse(depth + 1) + static_cast<unsigned>(pad[0]);
+}
+// Registered last: ends the child with the exception code, without a Windows
+// error report for a crash the test caused on purpose.
+LONG CALLBACK end_process(EXCEPTION_POINTERS* exception) {
+  TerminateProcess(GetCurrentProcess(), exception->ExceptionRecord->ExceptionCode);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+int overflow_child(const wchar_t* directory) {
+  static ce::Mapping mapping;
+  if (!ce::create_record(directory, GetCurrentProcessId(), GetTickCount64(), reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr)),
+                         mapping))
+    return 2;
+  ce::record = mapping.memory;
+  if (!AddVectoredExceptionHandler(1, ce::handler) || !AddVectoredExceptionHandler(0, end_process))
+    return 3;
+  return recurse(0) ? 4 : 5;
+}
+void real_overflow_case() {
+  Directory directory;
+  wchar_t image[32768]{};
+  assert(GetModuleFileNameW(nullptr, image, 32768));
+  assert(SetEnvironmentVariableW(L"TAXI_CAM_OVERFLOW_CHILD", directory.path.c_str()));
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION child{};
+  assert(CreateProcessW(image, nullptr, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child));
+  SetEnvironmentVariableW(L"TAXI_CAM_OVERFLOW_CHILD", nullptr);
+  assert(WaitForSingleObject(child.hProcess, 60000) == WAIT_OBJECT_0);
+  DWORD code = 0;
+  assert(GetExitCodeProcess(child.hProcess, &code) && code == static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW));
+  CloseHandle(child.hThread);
+  CloseHandle(child.hProcess);
+  WIN32_FIND_DATAW entry{};
+  const auto search = FindFirstFileW(directory.file(L"renderer-fault-*.bin").c_str(), &entry);
+  assert(search != INVALID_HANDLE_VALUE && ce::record_filename(entry.cFileName));
+  FindClose(search);
+  const auto file = CreateFileW(directory.file(entry.cFileName).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                OPEN_EXISTING, 0, nullptr);
+  assert(file != INVALID_HANDLE_VALUE);
+  ce::Record record;
+  DWORD read = 0;
+  assert(ReadFile(file, static_cast<void*>(&record), sizeof(record), &read, nullptr) && read == sizeof(record));
+  CloseHandle(file);
+  assert(record.state == 2 && record.process == child.dwProcessId && record.code == static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW));
+  assert(record.stack_base > record.stack_limit && record.frame_count >= 1);
+  // The recursion's return address repeats all the way up the scanned stack.
+  bool repeated = false;
+  for (std::uint32_t i = 0; i < record.frame_count; ++i)
+    repeated = repeated || (record.frames[i].module == record.module && record.frames[i].hits >= 16);
+  assert(repeated);
+  char text[4096]{};
+  assert(ce::describe_overflow(record, text, sizeof(text)) && std::strstr(text, "main+0x"));
+  std::printf("PASS real stack overflow in a child process: %s\n", text);
+}
 }  // namespace
 
 int main() {
+  wchar_t child_directory[32768]{};
+  if (const auto length = GetEnvironmentVariableW(L"TAXI_CAM_OVERFLOW_CHILD", child_directory, 32768); length && length < 32768)
+    return overflow_child(child_directory);
   retention_cases();
+  real_overflow_case();
   ce::Record record;
   record.module = 0x10000000;
   CONTEXT context{};
@@ -294,8 +362,85 @@ int main() {
     VirtualFree(record_memory, 0, MEM_RELEASE);
     VirtualFree(context_memory, 0, MEM_RELEASE);
   }
-  // Legacy 4 KiB version-1 records remain valid retention candidates; a
-  // current 8 KiB record is one too, and other sizes or versions are not.
+  // A stack overflow is recorded wherever it happens: the values on the stack
+  // that point into executable image memory, by module and offset with a
+  // repeat count, and nothing else from the stack.
+  {
+    // The scan gives up after this many unreadable pages; a shorter tail would let it reach other memory.
+    const std::size_t tail = std::size_t{0x1000} * ce::overflow_unreadable_pages;
+    auto* stack = static_cast<std::uint64_t*>(VirtualAlloc(nullptr, 0x2000 + tail, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    assert(stack);
+    DWORD previous = 0;
+    // The page at the stack pointer is the guard page; the pages after the
+    // values are unreadable, which ends the scan.
+    assert(VirtualProtect(stack, 0x1000, PAGE_READWRITE | PAGE_GUARD, &previous));
+    assert(VirtualProtect(reinterpret_cast<unsigned char*>(stack) + 0x2000, tail, PAGE_NOACCESS, &previous));
+    const auto own = reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
+    const auto system = reinterpret_cast<std::uint64_t>(GetModuleHandleW(L"ntdll.dll"));
+    const auto own_code = reinterpret_cast<std::uint64_t>(static_cast<void (*)()>(retention_cases));
+    const auto system_code = reinterpret_cast<std::uint64_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlCaptureContext"));
+    assert(own && system && own_code > own && system_code > system);
+    auto* values = stack + 0x1000 / 8;
+    // The read-only shared system page: no allocation of this test lies in or just below it.
+    const std::uint64_t fake_limit = 0x7ffe0000, fake_base = 0x7ffe1000;
+    values[0] = 0;                                         // Not an address.
+    values[1] = reinterpret_cast<std::uint64_t>(&values);  // Data, not an image.
+    values[2] = own_code;
+    values[3] = fake_limit + 0x80;  // A pointer into the thread's own stack.
+    values[4] = system_code;
+    values[5] = own_code;
+    values[6] = own;  // Image headers are not executable.
+    values[7] = system_code;
+    values[8] = own_code;
+    CONTEXT overflow_context{};
+    overflow_context.Rsp = reinterpret_cast<std::uint64_t>(stack) + 0xff4;  // Unaligned, inside the guard page.
+    EXCEPTION_RECORD overflow{};
+    overflow.ExceptionCode = static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW);
+    overflow.ExceptionAddress = reinterpret_cast<void*>(system_code + 1);
+    ce::Record recorded;
+    recorded.module = own;
+    assert(ce::capture_overflow(&recorded, overflow, overflow_context, fake_limit, fake_base) == EXCEPTION_CONTINUE_SEARCH);
+    assert(recorded.state == 2 && recorded.code == static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW) && recorded.version == 3);
+    assert(recorded.fault_address == system_code + 1 && recorded.stack_limit == fake_limit && recorded.stack_base == fake_base);
+    assert(recorded.frame_count == 3 && recorded.module_count == 2);
+    assert(recorded.frames[0].module == system && recorded.frames[0].rva == system_code + 1 - system && recorded.frames[0].hits == 1);
+    assert(recorded.frames[1].module == own && recorded.frames[1].rva == own_code - own && recorded.frames[1].hits == 3);
+    assert(recorded.frames[2].module == system && recorded.frames[2].rva == system_code - system && recorded.frames[2].hits == 2);
+    assert(recorded.modules[0].base == system && recorded.modules[0].size && !_stricmp(recorded.modules[0].name, "ntdll.dll"));
+    assert(recorded.modules[1].base == own && recorded.modules[1].size && !recorded.modules[1].name[0]);
+    // The guard page was queried, never touched.
+    MEMORY_BASIC_INFORMATION guard{};
+    assert(VirtualQuery(stack, &guard, sizeof(guard)) && (guard.Protect & PAGE_GUARD));
+    // One shot: a second overflow leaves the record alone.
+    overflow.ExceptionAddress = reinterpret_cast<void*>(own_code);
+    assert(ce::capture_overflow(&recorded, overflow, overflow_context, fake_limit, fake_base) == EXCEPTION_CONTINUE_SEARCH);
+    assert(recorded.fault_address == system_code + 1 && recorded.frame_count == 3);
+    char text[512]{};
+    assert(ce::describe_overflow(recorded, text, sizeof(text)) == std::strlen(text));
+    char expected[512]{};
+    std::snprintf(expected, sizeof(expected), "thread=%lu stack_kb=4 fault=0x%llx chain=%s+0x%lx*1,main+0x%lx*3,%s+0x%lx*2",
+                  GetCurrentThreadId(), static_cast<unsigned long long>(system_code + 1), recorded.modules[0].name,
+                  static_cast<unsigned long>(recorded.frames[0].rva), static_cast<unsigned long>(recorded.frames[1].rva),
+                  recorded.modules[0].name, static_cast<unsigned long>(recorded.frames[2].rva));
+    assert(!std::strcmp(text, expected));
+    // A short buffer is filled and terminated; counts read from a file are bounded.
+    char brief[24]{};
+    assert(ce::describe_overflow(recorded, brief, sizeof(brief)) == sizeof(brief) - 1 && !std::strncmp(brief, expected, sizeof(brief) - 1));
+    recorded.frame_count = 1000;
+    recorded.module_count = 1000;
+    char bounded[4096]{};
+    assert(ce::describe_overflow(recorded, bounded, sizeof(bounded)) && std::strlen(bounded) < sizeof(bounded) - 1);
+    // Through the handler entry, with this thread's real stack bounds.
+    ce::Record dispatched;
+    EXCEPTION_POINTERS overflow_pointers{&overflow, &overflow_context};
+    assert(ce::capture(&dispatched, &overflow_pointers) == EXCEPTION_CONTINUE_SEARCH && dispatched.state == 2);
+    assert(dispatched.stack_base > dispatched.stack_limit && dispatched.frame_count >= 2);
+    // Other records and codes have no overflow description.
+    assert(!ce::describe_overflow(record, text, sizeof(text)) && !ce::describe_overflow(ce::Record{}, text, sizeof(text)));
+    assert(VirtualFree(stack, 0, MEM_RELEASE));
+  }
+  // Legacy 4 KiB version-1 records remain valid retention candidates; current
+  // 8 KiB records of versions 2 and 3 are too, and other sizes or versions are not.
   {
     Directory directory;
     const auto write = [&](unsigned ticks, std::size_t size, std::uint32_t version, std::uint32_t bytes) {
@@ -315,7 +460,8 @@ int main() {
     };
     assert(write(1, ce::legacy_record_file_bytes, 1, 1400));
     assert(write(2, ce::record_file_bytes, 2, static_cast<std::uint32_t>(sizeof(ce::Record))));
-    assert(!write(3, ce::legacy_record_file_bytes, 3, 1400));
+    assert(write(3, ce::record_file_bytes, 3, static_cast<std::uint32_t>(sizeof(ce::Record))));
+    assert(!write(6, ce::record_file_bytes, 4, 1400));
     assert(!write(4, 2048, 1, 1400));
     assert(!write(5, ce::legacy_record_file_bytes, 1, 4097));
   }
@@ -350,5 +496,5 @@ int main() {
   }
   std::puts(
       "PASS renderer fault evidence: exact-site filter, located-site filter, bounded register copy, one-shot publication, "
-      "code capture pattern search, exception continues unchanged.");
+      "code capture pattern search, stack overflow chain by module and offset, exception continues unchanged.");
 }

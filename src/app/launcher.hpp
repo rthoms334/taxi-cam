@@ -452,6 +452,11 @@ inline LoaderWaitResult wait_for_loader(HANDLE thread, const std::atomic<bool>* 
       return wait;
   }
 }
+// A thread of a process that died from an unhandled exception reports that
+// exception code (0xC0000000 and above). TaxiCameraStart returns Win32 errors.
+inline bool exception_exit_code(DWORD code) noexcept {
+  return (code & 0xC0000000u) == 0xC0000000u;
+}
 inline LaunchResult loader_wait_failure(const LoaderWaitResult& wait, bool starting_bridge) {
   if (wait.cancelled)
     return {false, ERROR_CANCELLED,
@@ -584,6 +589,8 @@ inline LaunchResult load_bridge(DWORD pid,
     return loader_wait_failure(trace.start_wait, true);
   if (trace.start_result_error)
     return {false, trace.start_result_error, ui_text(L"Cannot read the native bridge startup result. See launcher.log.")};
+  if (exception_exit_code(result))
+    return {false, result, ui_text(L"MSFS stopped while Taxi Cam was starting.")};
   if (result)
     return {false, result, ui_text(L"The native bridge refused startup.")};
   trace.phase = L"complete";
