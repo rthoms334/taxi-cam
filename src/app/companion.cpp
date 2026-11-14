@@ -7234,6 +7234,9 @@ DWORD WINAPI connection_worker(void*) {
     const DWORD pid = attach.pid;
     if (attached && (pid != attached || (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0))) {
       mailbox.close();
+      DWORD exit_code = 0;
+      if (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0 && GetExitCodeProcess(process, &exit_code))
+        win::log_simulator_exit(win::settings_directory(), attached, exit_code);
       if (process)
         CloseHandle(process);
       process = nullptr;
@@ -7274,7 +7277,10 @@ DWORD WINAPI connection_worker(void*) {
       manual_armed = manual_armed || command == win::ConnectCommand::connect || command == win::ConnectCommand::reset;
       ignore_heartbeat_through = 0;
       startup_retry = {};
-      process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+      // The query right lets a crash be told from a normal exit afterwards.
+      process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (!process)
+        process = OpenProcess(SYNCHRONIZE, FALSE, pid);
       if (!auto_on && !manual_armed) {
         {
           const std::lock_guard lock(app_mutex);

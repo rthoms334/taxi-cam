@@ -1,5 +1,6 @@
 #pragma once
 #include "launcher.hpp"
+#include "../bridge/crash_evidence.hpp"
 #include "../shared/rotating_log.hpp"
 #include <cstdio>
 #include <string>
@@ -65,6 +66,56 @@ inline void log_attach(const std::wstring& directory, const SimulatorAttach& att
         utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond, attach.pid, attach.accepted, unsigned(attach.used_configured),
         unsigned(!attach.used_configured), configured.empty() ? L"" : configured.c_str(), attach.path.empty() ? L"" : attach.path.c_str());
     append_launcher_log(directory, prefix);
+  } catch (...) {
+  }
+}
+// A simulator that ended with a non-zero exit code. When that code is a stack
+// overflow, the line also carries the bridge's stack overflow record for that
+// process if it wrote one (crash_evidence.hpp); a record of an overflow the
+// simulator survived says nothing about a later exit with another code.
+inline void log_simulator_exit(const std::wstring& directory, DWORD pid, DWORD code) noexcept {
+  try {
+    if (directory.empty() || !pid || !code)
+      return;
+    SYSTEMTIME utc{};
+    GetSystemTime(&utc);
+    wchar_t prefix[160]{};
+    std::swprintf(prefix, 160, L"%04u-%02u-%02uT%02u:%02u:%02uZ simulator exit pid=%lu code=0x%08lx", utc.wYear, utc.wMonth, utc.wDay,
+                  utc.wHour, utc.wMinute, utc.wSecond, pid, code);
+    std::wstring line = prefix;
+    // The newest record of this process ID: IDs are reused across sessions.
+    WIN32_FIND_DATAW entry{}, newest{};
+    const auto search = FindFirstFileW((directory + L"\\renderer-fault-" + std::to_wstring(pid) + L"-*.bin").c_str(), &entry);
+    if (code != static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW)) {
+      if (search != INVALID_HANDLE_VALUE)
+        FindClose(search);
+    } else if (search != INVALID_HANDLE_VALUE) {
+      do {
+        if (!(entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+            crash_evidence::record_filename(entry.cFileName) &&
+            (!newest.cFileName[0] || CompareFileTime(&entry.ftLastWriteTime, &newest.ftLastWriteTime) > 0))
+          newest = entry;
+      } while (FindNextFileW(search, &entry));
+      FindClose(search);
+    }
+    if (newest.cFileName[0]) {
+      const auto file =
+          CreateFileW((directory + L"\\" + newest.cFileName).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+      if (file != INVALID_HANDLE_VALUE) {
+        crash_evidence::Record record;
+        DWORD read{};
+        char text[3072]{};
+        if (ReadFile(file, static_cast<void*>(&record), sizeof(record), &read, nullptr) && read == sizeof(record) &&
+            record.bytes == sizeof(record) && record.process == pid && crash_evidence::describe_overflow(record, text, sizeof(text))) {
+          line += L" | stack overflow: ";
+          for (const char* letter = text; *letter; ++letter)
+            line += static_cast<wchar_t>(static_cast<unsigned char>(*letter));
+        }
+        CloseHandle(file);
+      }
+    }
+    append_launcher_log(directory, line + L"\r\n");
   } catch (...) {
   }
 }

@@ -447,6 +447,7 @@ inline constexpr Translation GermanTranslations[]{
      L"Das Installationsprogramm konnte nicht überprüft oder gestartet werden. Suchen Sie erneut nach Updates."},
     {L"The legacy taxi add-on is loaded. Run the native installer, then restart MSFS.",
      L"Das alte Taxi-Add-on ist geladen. Führen Sie das native Installationsprogramm aus und starten Sie MSFS dann neu."},
+    {L"MSFS stopped while Taxi Cam was starting.", L"MSFS wurde beendet, während Taxi Cam gestartet wurde."},
     {L"The native bridge refused startup.", L"Die native Bridge hat den Start verweigert."},
     {L"The profile's own displays are back.", L"Die eigenen Anzeigen des Profils sind wiederhergestellt."},
     {L"The saved image could not be opened.", L"Das gespeicherte Bild konnte nicht geöffnet werden."},

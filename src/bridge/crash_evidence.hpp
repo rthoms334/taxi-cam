@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <limits>
@@ -14,9 +15,27 @@ namespace taxi_camera::standalone::crash_evidence {
 // context's output-merger state (RBX+0x79a0..0x7a40: eight slot pairs, count
 // at +0x7910 is outside and read separately) and the first 0x100 bytes of the
 // slot-1 render-target record, each only after VirtualQuery shows a committed,
-// readable range. No stack pages or image data are copied. Never sent over IPC.
+// readable range. Those versions copy no stack or image data. Never sent over IPC.
+// Version 3 also records a stack overflow on any thread (code C00000FD): the
+// thread's stack bounds and the stack values that point into executable image
+// memory, each as module base, offset and repeat count, plus the size, link
+// time and export name of up to eight of those modules. No other stack value
+// and no file path is kept.
+struct Frame {
+  std::uint64_t module = 0;
+  std::uint32_t rva = 0, hits = 0;
+};
+struct ModuleNote {
+  std::uint64_t base = 0;
+  std::uint32_t size = 0, timestamp = 0;
+  char name[32]{};
+};
+inline constexpr unsigned overflow_frames = 48, overflow_modules = 8;
+// 32 KiB of stack above the faulting stack pointer: a recursion repeats well
+// within that, and the handler runs on the little stack an overflow leaves.
+inline constexpr unsigned overflow_scan_slots = 4096, overflow_unreadable_pages = 16;
 struct Record {
-  std::uint32_t magic = 0x54434352, version = 2, bytes = sizeof(Record), process = 0;
+  std::uint32_t magic = 0x54434352, version = 3, bytes = sizeof(Record), process = 0;
   volatile LONG state = 0;  // 0 empty, 1 writing, 2 complete
   DWORD code = 0, parameters = 0, thread = 0;
   std::uint64_t module = 0, fault_rva = 0;
@@ -29,6 +48,12 @@ struct Record {
   std::uint64_t slot1_record_address = 0;
   std::uint8_t output_merger_state[0xA0]{};
   std::uint8_t slot1_record[0x100]{};
+  // Stack overflow only. frames[0] is the faulting instruction when it lies in
+  // an image; the rest are in the order first met going up the stack.
+  std::uint64_t fault_address = 0, stack_limit = 0, stack_base = 0;
+  std::uint32_t frame_count = 0, module_count = 0;
+  Frame frames[overflow_frames]{};
+  ModuleNote modules[overflow_modules]{};
 };
 inline constexpr std::size_t record_file_bytes = 8192;
 inline constexpr std::size_t legacy_record_file_bytes = 4096;
@@ -114,7 +139,7 @@ inline bool inspect_record(HANDLE file, Candidate& candidate) noexcept {
     static_assert(sizeof(Prefix) == offsetof(Record, state) + sizeof(LONG));
     DWORD read{};
     if (!ReadFile(file, &prefix, sizeof(prefix), &read, nullptr) || read != sizeof(prefix) || prefix.magic != 0x54434352 ||
-        prefix.version < 1 || prefix.version > 2 || prefix.bytes == 0 || prefix.bytes > information.nFileSizeLow || prefix.state < 0 ||
+        prefix.version < 1 || prefix.version > 3 || prefix.bytes == 0 || prefix.bytes > information.nFileSizeLow || prefix.state < 0 ||
         prefix.state > 2)
       return false;
     state = prefix.state;
@@ -285,11 +310,193 @@ inline bool copy_readable(void* destination, std::uint64_t source, std::size_t s
   return true;
 }
 
+// The memory region holding `address`, by VirtualQuery alone: no loader lock,
+// so it is safe on a faulting thread. `image` is the owning module's base when
+// the region is committed executable image memory, else 0.
+struct Region {
+  std::uint64_t begin = 0, end = 0, image = 0;
+};
+inline bool query_region(std::uint64_t address, Region& region) noexcept {
+  MEMORY_BASIC_INFORMATION information{};
+  if (VirtualQuery(reinterpret_cast<const void*>(address), &information, sizeof(information)) != sizeof(information) ||
+      !information.RegionSize)
+    return false;
+  region.begin = reinterpret_cast<std::uint64_t>(information.BaseAddress);
+  region.end = region.begin + information.RegionSize;
+  const auto protection = information.Protect & 0xff;
+  const bool executable = protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ || protection == PAGE_EXECUTE_READWRITE ||
+                          protection == PAGE_EXECUTE_WRITECOPY;
+  region.image = information.State == MEM_COMMIT && information.Type == MEM_IMAGE && executable && !(information.Protect & PAGE_GUARD)
+                     ? reinterpret_cast<std::uint64_t>(information.AllocationBase)
+                     : 0;
+  return true;
+}
+// End of the committed, readable, non-guard region holding `address`, or 0.
+inline std::uint64_t readable_end(std::uint64_t address) noexcept {
+  MEMORY_BASIC_INFORMATION information{};
+  if (VirtualQuery(reinterpret_cast<const void*>(address), &information, sizeof(information)) != sizeof(information) ||
+      information.State != MEM_COMMIT || (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0 || !(information.Protect & 0xff))
+    return 0;
+  return reinterpret_cast<std::uint64_t>(information.BaseAddress) + information.RegionSize;
+}
+// Size, link time and export name read from the loaded image's own headers.
+inline void note_module(Record* destination, std::uint64_t base) noexcept {
+  for (std::uint32_t i = 0; i < destination->module_count; ++i)
+    if (destination->modules[i].base == base)
+      return;
+  if (destination->module_count >= overflow_modules)
+    return;
+  auto& note = destination->modules[destination->module_count++];
+  note.base = base;
+  IMAGE_DOS_HEADER dos{};
+  if (!copy_readable(&dos, base, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 || dos.e_lfanew > 4096)
+    return;
+  IMAGE_NT_HEADERS64 headers{};
+  if (!copy_readable(&headers, base + static_cast<std::uint32_t>(dos.e_lfanew), sizeof(headers)) ||
+      headers.Signature != IMAGE_NT_SIGNATURE || headers.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    return;
+  note.size = headers.OptionalHeader.SizeOfImage;
+  note.timestamp = headers.FileHeader.TimeDateStamp;
+  const auto& directory = headers.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+  IMAGE_EXPORT_DIRECTORY exports{};
+  if (headers.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT || !directory.VirtualAddress ||
+      directory.VirtualAddress >= note.size || !copy_readable(&exports, base + directory.VirtualAddress, sizeof(exports)) ||
+      !exports.Name || exports.Name >= note.size)
+    return;
+  char name[sizeof(note.name)]{};
+  const auto available = note.size - exports.Name;
+  if (!copy_readable(name, base + exports.Name, available < sizeof(name) - 1 ? available : sizeof(name) - 1))
+    return;
+  for (std::size_t i = 0; i + 1 < sizeof(name) && name[i]; ++i)
+    note.name[i] = name[i] > ' ' && name[i] < 0x7f && name[i] != '|' ? name[i] : '?';
+}
+inline void add_frame(Record* destination, std::uint64_t module, std::uint64_t address) noexcept {
+  const auto rva = address - module;
+  if (address < module || rva > (std::numeric_limits<std::uint32_t>::max)())
+    return;
+  for (std::uint32_t i = 0; i < destination->frame_count; ++i)
+    if (destination->frames[i].module == module && destination->frames[i].rva == rva) {
+      ++destination->frames[i].hits;
+      return;
+    }
+  if (destination->frame_count >= overflow_frames)
+    return;
+  destination->frames[destination->frame_count++] = {module, static_cast<std::uint32_t>(rva), 1};
+  note_module(destination, module);
+}
+// The first stack overflow takes an empty record wherever it happens, because
+// it normally ends the process. One the simulator catches and survives leaves
+// a completed record that a later renderer fault replaces (capture below).
+// Runs on the faulting thread with very little stack left: small locals,
+// VirtualQuery and bounded copies into the mapped record only.
+inline LONG capture_overflow(Record* destination,
+                             const EXCEPTION_RECORD& e,
+                             const CONTEXT& c,
+                             std::uint64_t stack_limit,
+                             std::uint64_t stack_base) noexcept {
+  if (InterlockedCompareExchange(&destination->state, 1, 0) != 0)
+    return EXCEPTION_CONTINUE_SEARCH;
+  destination->code = e.ExceptionCode;
+  destination->parameters = 0;
+  destination->thread = GetCurrentThreadId();
+  destination->context = c;
+  destination->fault_address = reinterpret_cast<std::uint64_t>(e.ExceptionAddress);
+  destination->stack_limit = stack_limit;
+  destination->stack_base = stack_base;
+  destination->frame_count = 0;
+  destination->module_count = 0;
+  Region region;
+  if (query_region(destination->fault_address, region) && region.image)
+    add_frame(destination, region.image, destination->fault_address);
+  region = {};
+  auto cursor = (c.Rsp + 7) & ~std::uint64_t{7};
+  const bool on_thread_stack = c.Rsp < stack_base && stack_base - c.Rsp <= (std::uint64_t{1} << 30);
+  std::uint64_t readable = 0;
+  unsigned unreadable = 0;
+  for (unsigned slot = 0; slot < overflow_scan_slots; ++slot, cursor += 8) {
+    if (on_thread_stack && cursor + 8 > stack_base)
+      break;
+    if (cursor + 8 > readable) {
+      readable = readable_end(cursor);
+      if (cursor + 8 > readable) {
+        // The pages at the stack pointer can be the guard page just consumed.
+        if (++unreadable > overflow_unreadable_pages)
+          break;
+        readable = 0;
+        cursor = (cursor | 0xfff) + 1 - 8;
+        continue;
+      }
+    }
+    std::uint64_t value = 0;
+    std::memcpy(&value, reinterpret_cast<const void*>(cursor), sizeof(value));
+    if (value < 0x10000 || value >= 0x00007fffffff0000 || (value >= stack_limit && value < stack_base))
+      continue;
+    if (value < region.begin || value >= region.end)
+      if (!query_region(value, region)) {
+        region = {};
+        continue;
+      }
+    if (region.image)
+      add_frame(destination, region.image, value);
+  }
+  InterlockedExchange(&destination->state, 2);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+// One text line for a completed stack-overflow record, e.g.
+// "thread=1 stack_kb=1024 chain=dxgi.dll+0x1234*40,main+0x5678*40". A module
+// without an export name is "main" (the simulator image) or its base address.
+// Counts are bounded here because the record is read back from a file.
+inline std::size_t describe_overflow(const Record& source, char* text, std::size_t size) noexcept {
+  if (!text || size < 2 || source.magic != 0x54434352 || source.version < 3 || source.state != 2 ||
+      source.code != static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW))
+    return 0;
+  std::size_t used = 0;
+  const auto append = [&](const char* format, auto... values) noexcept {
+    if (used + 1 >= size)
+      return;
+    const int written = std::snprintf(text + used, size - used, format, values...);
+    if (written > 0)
+      used = used + static_cast<std::size_t>(written) < size ? used + static_cast<std::size_t>(written) : size - 1;
+  };
+  append("thread=%lu stack_kb=%llu fault=0x%llx chain=", static_cast<unsigned long>(source.thread),
+         static_cast<unsigned long long>(source.stack_base > source.stack_limit ? (source.stack_base - source.stack_limit) / 1024 : 0),
+         static_cast<unsigned long long>(source.fault_address));
+  const auto frames = source.frame_count < overflow_frames ? source.frame_count : overflow_frames;
+  const auto modules = source.module_count < overflow_modules ? source.module_count : overflow_modules;
+  for (std::uint32_t i = 0; i < frames; ++i) {
+    const auto& frame = source.frames[i];
+    char name[sizeof(ModuleNote::name)]{};
+    for (std::uint32_t m = 0; m < modules; ++m)
+      if (source.modules[m].base == frame.module)
+        for (std::size_t n = 0; n + 1 < sizeof(name) && source.modules[m].name[n]; ++n) {
+          const char letter = source.modules[m].name[n];
+          name[n] = letter > ' ' && letter < 0x7f && letter != '|' ? letter : '?';
+        }
+    if (i)
+      append("%s", ",");
+    if (name[0])
+      append("%s", name);
+    else if (frame.module == source.module)
+      append("%s", "main");
+    else
+      append("0x%llx", static_cast<unsigned long long>(frame.module));
+    append("+0x%lx*%lu", static_cast<unsigned long>(frame.rva), static_cast<unsigned long>(frame.hits));
+  }
+  if (!frames)
+    append("%s", "none");
+  return used;
+}
+
 inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) noexcept {
   if (!destination || !exception || !exception->ExceptionRecord || !exception->ContextRecord)
     return EXCEPTION_CONTINUE_SEARCH;
   const auto& e = *exception->ExceptionRecord;
   const auto& c = *exception->ContextRecord;
+  if (e.ExceptionCode == static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW)) {
+    const auto* block = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    return capture_overflow(destination, e, c, reinterpret_cast<std::uint64_t>(block->StackLimit),
+                            reinterpret_cast<std::uint64_t>(block->StackBase));
+  }
   const auto address = reinterpret_cast<std::uint64_t>(e.ExceptionAddress);
   if (e.ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !destination->module || address < destination->module)
     return EXCEPTION_CONTINUE_SEARCH;
@@ -297,9 +504,19 @@ inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) no
   // time (capture_fault_site_code; 1.9.12.0: +0x3E5C054). No fixed site.
   const auto rva = address - destination->module;
   const bool located = code_capture && code_capture->match_rva && rva == code_capture->match_rva;
-  if (!located || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS ||
-      InterlockedCompareExchange(&destination->state, 1, 0) != 0)
+  if (!located || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS)
     return EXCEPTION_CONTINUE_SEARCH;
+  // The renderer fault is what the record exists for: it takes an empty record,
+  // or replaces a completed stack overflow that the process survived. An
+  // overflow still being written (state 1) keeps the record.
+  if (InterlockedCompareExchange(&destination->state, 1, 0) != 0 &&
+      (destination->code != static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW) || InterlockedCompareExchange(&destination->state, 1, 2) != 2))
+    return EXCEPTION_CONTINUE_SEARCH;
+  destination->frame_count = 0;
+  destination->module_count = 0;
+  destination->fault_address = 0;
+  destination->stack_limit = 0;
+  destination->stack_base = 0;
   // Only bounded copies into an already mapped, initialized record. No file
   // operations, allocation, locks, engine calls or exception suppression here.
   destination->code = e.ExceptionCode;
