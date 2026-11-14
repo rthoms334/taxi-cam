@@ -552,10 +552,28 @@ void redesign_controls_tests() {
   page = OverviewPage;
   build_controls();
   require(GetDlgItem(window, HomeActionId) != nullptr, "Home offers Set up this aircraft for an aircraft without a setup");
+  // Home has been timing it: one sample is not enough, and the time one
+  // aircraft has gone without a setup does not count for another.
   page = SetupPage;
   build_controls();
   require(!GetDlgItem(window, NextId), "One sample of an aircraft without a setup does not start a guided setup");
-  guided_candidate_since -= GuidedHoldMs;  // It has stayed that way.
+  guided_candidate_since -= GuidedHoldMs;
+  loaded("Fixture_Three", false, epoch);
+  build_controls();
+  require(!GetDlgItem(window, NextId), "nor does the time another aircraft went without one");
+  page = OverviewPage;
+  build_controls();
+  guided_candidate_since -= GuidedHoldMs;
+  loaded("Fixture_Two", true, epoch);
+  build_controls();
+  loaded("Fixture_One", false, epoch);
+  page = SetupPage;
+  build_controls();
+  require(!GetDlgItem(window, NextId), "or a time left over from before the steps were opened");
+  page = OverviewPage;
+  build_controls();
+  guided_candidate_since -= GuidedHoldMs;  // It has stayed that way while Home was open.
+  page = SetupPage;
   build_controls();
   require(GetDlgItem(window, NextId) && !GetDlgItem(window, BackId) && GetDlgItem(window, 100 + OverviewPage),
           "A first-time setup starts with Next on Displays; Home in the header is the way out, not a Cancel");

@@ -6332,27 +6332,32 @@ void draw_look_icons(HDC dc, const RECT& well, unsigned view) {
 // once, and a flight restart or a teleport starts a new session for the same
 // aircraft; neither takes Back, Next and Finish away from the rest of the steps.
 std::uint64_t guided_for{};  // The variant's hash; 1 for an aircraft not named yet; 0 for none.
+// "No setup" has to hold for a moment: one sample that misses an aircraft's
+// profile while it is still being recognised starts nothing. The hold is for
+// one variant and is followed on every status sample, whatever the page, so
+// an aircraft that has been loaded for a while is guided from the first click.
 constexpr ULONGLONG GuidedHoldMs = 1500;
-ULONGLONG guided_candidate_since{};  // When the aircraft loaded was first seen without a setup.
+std::uint64_t guided_candidate{};  // The variant seen without a setup; 0 for none.
+ULONGLONG guided_candidate_since{};
 bool guided_setup(const win::Status& sample) {
-  if (setup_step(page) < 0) {
-    guided_for = 0;
-    return false;
-  }
   profiles::VariantKey variant{};
   const std::string_view path(sample.aircraft_path, strnlen(sample.aircraft_path, sizeof(sample.aircraft_path)));
   const bool named = fresh_status(sample) && sample.identity_sample_ms && profiles::variant_key(path, variant);
   const std::uint64_t loaded = named ? std::max<std::uint64_t>(2, variant_hash(variant)) : 0;
-  if (guided_for > 1 && loaded && loaded != guided_for)
-    guided_for = 0;
-  // "No setup" has to hold for a moment: one sample that misses an
-  // aircraft's profile while it is still being recognised starts nothing.
   const auto now = GetTickCount64();
   const bool without_setup = named && unsupported_aircraft(sample) && !saved_layout(variant, now);
-  if (!without_setup)
-    guided_candidate_since = 0;
-  else if (!guided_candidate_since)
+  if (!without_setup) {
+    guided_candidate = 0;
+  } else if (guided_candidate != loaded) {
+    guided_candidate = loaded;
     guided_candidate_since = now;
+  }
+  if (setup_step(page) < 0) {
+    guided_for = 0;
+    return false;
+  }
+  if (guided_for > 1 && loaded && loaded != guided_for)
+    guided_for = 0;
   if (!guided_for && ((without_setup && now - guided_candidate_since >= GuidedHoldMs) || setup.positioning))
     guided_for = loaded ? loaded : 1;
   else if (guided_for == 1 && loaded)
@@ -8744,8 +8749,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           const std::lock_guard lock(app_mutex);
           latest = status;
         }
+        const bool guided = guided_setup(latest);  // On every sample: it times how long an aircraft has had no setup.
         if ((page == OverviewPage && ((latest.graphics_ready != 0) != built_with_displays || home_action(latest) != built_home_action)) ||
-            (setup_step(page) >= 0 && guided_setup(latest) != built_guided && !dirty))
+            (setup_step(page) >= 0 && guided != built_guided && !dirty))
           build_controls();
       }
       if (flyout) {
