@@ -527,11 +527,11 @@ void report_bug() {
       details.simulator, win::bug_report_aircraft(context), win::bug_report_environment(details, win::bug_report_created(context.now)), {}};
   const auto bundle = win::write_report_bundle(win::settings_directory(), installation, details,
                                                win::bug_report_info(form, win::bug_report_snapshot(context)));
-  form.logs = bundle.path.empty() ? "Taxi Cam could not save the report file (" + bundle.error +
-                                        "). Attach bridge.log from Diagnostics > Open log folder instead."
-                                  : "Report file: " + bundle.name +
-                                        "\nDrag it into this box from the File Explorer window Taxi Cam opened, or click the attach "
-                                        "bar below and paste (Ctrl+V) into File name: Taxi Cam copied its location.";
+  form.logs = bundle.path.empty()
+                  ? "Taxi Cam could not save the report file (" + bundle.error + "). Attach bridge.log from Help > Open log folder instead."
+                  : "Report file: " + bundle.name +
+                        "\nDrag it into this box from the File Explorer window Taxi Cam opened, or click the attach "
+                        "bar below and paste (Ctrl+V) into File name: Taxi Cam copied its location.";
   // Select the file first; the form then opens in front of File Explorer.
   if (!bundle.path.empty()) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -549,7 +549,7 @@ void report_bug() {
   if (result <= 32) {
     MessageBoxW(window,
                 tr(L"Could not open your browser. Open github.com/rthoms334/taxi-cam/issues and choose Bug report. "
-                   L"Attach logs from Diagnostics > Open log folder and include your Taxi Cam version."),
+                   L"Attach logs from Help > Open log folder and include your Taxi Cam version."),
                 tr(L"Taxi Cam bug report"), MB_OK | MB_ICONWARNING);
     return;
   }
@@ -1922,8 +1922,11 @@ void choose_texture(unsigned list, std::uint64_t id) {
 // Displays (the aircraft setup, with texture routing as its Advanced page),
 // Taxi cameras (with the guide values as its Advanced page) and Door camera.
 // Each camera's step has the controls that turn it on.
-constexpr int OverviewPage = 0, CamerasPage = 1, OptionsPage = 2, RoutingPage = 3, DiagnosticsPage = 4, GuidesPage = 5, SetupPage = 6,
-              DoorPage = 7;
+// The window's pages. Home is Overview; Aircraft is Setup's three steps
+// (Displays with its texture routing, Taxi cameras with its guide values,
+// Door camera) and Picture; Options is PreferencesPage; Help is DiagnosticsPage.
+constexpr int OverviewPage = 0, CamerasPage = 1, PicturePage = 2, RoutingPage = 3, DiagnosticsPage = 4, GuidesPage = 5, SetupPage = 6,
+              DoorPage = 7, PreferencesPage = 8;
 constexpr int SetupPreviousId = 452, SetupNextId = 453, SetupRefreshId = 456, SetupSwapId = 457, SetupTestId = 458, SetupBuiltInId = 461,
               SetupCardButtonId = 750, SetupPlaceId = 754;
 // The step pills (Overview and every step), Advanced, and a step's Back and
@@ -1931,6 +1934,8 @@ constexpr int SetupPreviousId = 452, SetupNextId = 453, SetupRefreshId = 456, Se
 constexpr int StepPillId = 710, AdvancedId = 716, BackId = 717, NextId = 718, DoorToggleId = 719;
 // Options: its notifications switch and its language button.
 constexpr int NotificationsId = 606, LanguageId = 607, BrightnessSliderId = 206;
+// Home's action for an aircraft that needs setting up, and Options' update check.
+constexpr int HomeActionId = 609, UpdatesId = 608;
 // Displays' display area, Taxi cameras' and Door camera's Adjust live view and
 // Defaults per feed, the Advanced pages' openers, the door camera's display
 // (none, then each side) and picture, and Overview's way to choose its display.
@@ -1959,10 +1964,11 @@ constexpr int CameraCardHeight = 186, CameraCardAdvancedHeight = 204, CameraGuid
 // Overview's display cards, as the design draws them: the picture across the
 // card, the display's name with its panel's pill, then the cameras' switches
 // (draw_display_strip and build_controls share them).
-constexpr int DisplayCardTop = 130, DisplayCardHeight = 366, DisplayCardPicture = 282, DisplayCardSwitches = 302;
-// Under them, two cards side by side: the in-flight switches, and Setup.
-constexpr int OverviewCardsTop = 508, OverviewCardsHeight = 96, OverviewControlsLeft = PageLeft, OverviewControlsWidth = 300,
-              OverviewSetupLeft = OverviewControlsLeft + OverviewControlsWidth + 16;
+constexpr int DisplayCardTop = 228, DisplayCardHeight = 310, DisplayCardPicture = 226, DisplayCardSwitches = 246;
+// Above them the status card and the aircraft's card; under them the
+// in-flight switches.
+constexpr int HomeStatusTop = 72, HomeStatusHeight = 76, HomeAircraftTop = 160, HomeAircraftHeight = 56, HomeFlightTop = 550,
+              HomeFlightHeight = 48;
 // Displays: the slot cards (name and pill, picture, panel, button), the hint
 // under them and the gallery below.
 constexpr int SetupSlotTop = 96, SetupSlotHeight = 206, SetupSlotPicture = 104, SetupGalleryTop = 352, SetupGalleryCards = 394,
@@ -1988,6 +1994,10 @@ int setup_step(int shown) {
     default:
       return -1;
   }
+}
+// Aircraft's pages: what is saved for the aircraft loaded.
+bool aircraft_page(int shown) {
+  return setup_step(shown) >= 0 || shown == PicturePage;
 }
 const wchar_t* step_name(unsigned step) {
   return step == 0 ? tr(L"Displays") : step == 1 ? tr(L"Taxi cameras") : tr(L"Door camera");
@@ -2197,7 +2207,7 @@ bool package_inactive(const win::Status& sample) {
 std::wstring setup_blocker(const win::Status& sample) {
   // Pictures and the panel list need the bridge connection.
   if (!fresh_status(sample) || !sample.graphics_ready || !draft().enabled)
-    return tr(L"Choose Connect on Overview with this aircraft loaded in a flight.");
+    return tr(L"Choose Connect on Home with this aircraft loaded in a flight.");
   if (!setup.key[0])
     return tr(L"Waiting for the simulator to report which aircraft is loaded.");
   if (!sample.panel_discovery)
@@ -3825,7 +3835,7 @@ bool apply(bool save = true) {
   // save: the user changed a setting (else a switch applied pending fields).
   notice = save ? tr(L"Saved. Adjustments apply while the cameras are running.") : tr(L"Settings updated.");
   if (save && hotkey_registration.conflicts())
-    notice = tr(L"Saved. Some shortcuts are unavailable; check Setup > Taxi cameras.");
+    notice = tr(L"Saved. Some shortcuts are unavailable; check Aircraft > Taxi cameras.");
   InvalidateRect(window, nullptr, FALSE);
   return true;
 }
@@ -4122,7 +4132,7 @@ void toggle_camera_from_hotkey(unsigned action) {
   const auto now = GetTickCount64();
   if (action == win::CameraDoor) {
     if (!win::toggle_door_camera(s)) {
-      notice = tr(L"This aircraft has no door camera display. Choose one in Setup > Door camera.");
+      notice = tr(L"This aircraft has no door camera display. Choose one in Aircraft > Door camera.");
       InvalidateRect(window, nullptr, FALSE);
       return;
     }
@@ -4532,7 +4542,7 @@ void paint_live_view(HWND hwnd, HDC dc) {
   else if (live_door(*profile) && !win::door_camera_set_up(s))
     caption = profiles::side_mask(*profile) & (1u << (MaxDisplaySides - 1))
                   ? tr(L"Choose the display it fills. The lower display is the usual place.")
-                  : tr(L"Place the lower display in Setup > Displays to show the door camera there.");
+                  : tr(L"Place the lower display in Aircraft > Displays to show the door camera there.");
   else if (!live_view.id)
     caption = tr(L"Waiting for a display to be found for this aircraft.");
   else {
@@ -5809,7 +5819,7 @@ INT_PTR CALLBACK saved_list_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
     place_dialog(hwnd, tr(L"Taxi Cam — Saved aircraft"), 640, 504);
     dialog_control(hwnd, L"STATIC", tr(L"Saved aircraft"), -1, 20, 17, 600, 28, 0, heading);
     dialog_control(hwnd, L"STATIC",
-                   tr(L"Every aircraft Taxi Cam has a setup for. Change one in Setup while it is loaded. Copy to this aircraft "
+                   tr(L"Every aircraft Taxi Cam has a setup for. Change one in Aircraft while it is loaded. Copy to this aircraft "
                       L"starts the aircraft loaded now from one you set up; Remove deletes one you set up."),
                    -1, 20, 50, 600, 64, 0, small);
     dialog_control(hwnd, L"LISTBOX", L"", 801, 20, 118, 600, 192,
@@ -6312,6 +6322,13 @@ void draw_look_icons(HDC dc, const RECT& well, unsigned view) {
   SelectObject(dc, old_brush);
   DeleteObject(fill);
 }
+// An aircraft set up for the first time goes through Setup's steps in order,
+// with Back and Next; one that has a setup opens any of them directly.
+bool guided_setup(const win::Status& sample) {
+  return unsupported_aircraft(sample) || setup.positioning;
+}
+// What the pages were last built for, so a change of either rebuilds them.
+bool built_with_displays{}, built_guided{};
 void build_controls() {
   refreshing = true;
   if (setup_step(page) < 0)
@@ -6339,37 +6356,48 @@ void build_controls() {
     tip.lpszText = const_cast<wchar_t*>(words);
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
   };
-  // The header's icon buttons (their window text names them for screen
-  // readers and tooltips): the menu on every page; Options from Overview; and
-  // the way back, to Overview from Options and to Options from Diagnostics.
-  // Pages are opened by id (100 + page).
+  win::Status built_for;
+  {
+    const std::lock_guard lock(app_mutex);
+    built_for = status;
+  }
+  built_with_displays = built_for.graphics_ready != 0;
+  built_guided = guided_setup(built_for);
+  // The header, the same on every page: the four places, then the menu.
+  // Pages open by id (100 + page); Aircraft opens Displays.
+  const wchar_t* places[]{tr(L"Home"), tr(L"Aircraft"), tr(L"Options"), tr(L"Help")};
+  constexpr int place_ids[]{100 + OverviewPage, 100 + CamerasPage, 100 + PreferencesPage, 100 + DiagnosticsPage};
+  for (int k = 0; k < 4; ++k)
+    button(places[k], place_ids[k], 190 + k * 104, 10, 96, 36);
   tooltip(button(tr(L"Menu"), 602, 932, 10, 44, 36), tr(L"Menu"));
-  if (page == OverviewPage) {
-    button(tr(L"Options"), 100 + OptionsPage, 836, 10, 88, 36);
-  } else {
-    // The way back, at the left of every other page: to Options from
-    // Diagnostics, to Overview from Options and from any step of Setup.
-    const bool nested = page == DiagnosticsPage;
-    const wchar_t* back = nested ? tr(L"Options") : tr(L"Overview");
-    tooltip(button(back, 100 + (nested ? OptionsPage : OverviewPage), PageLeft, 10, 44, 36), back);
-  }
-  // A step has its pills in the header, and Back and Next (the last finishes)
-  // with Advanced between them. Every change saves by itself (autosave), so
-  // no page has a Save button.
-  if (step >= 0) {
+  if (aircraft_page(page)) {
+    // Aircraft's sections, under the header. A step keeps Advanced at its
+    // foot; an aircraft being set up for the first time also has Back and
+    // Next there (the last finishes). Every change saves by itself.
     for (unsigned k = 0; k < SetupSteps; ++k)
-      button(step_name(k), StepPillId + static_cast<int>(k), 440 + static_cast<int>(k) * 164, 11, 156, 34);
-    const auto back = step == 0 ? std::wstring(tr(L"Cancel")) : tr_format(L"Back: {0}", {step_name(static_cast<unsigned>(step) - 1)});
-    button(back.c_str(), BackId, PageLeft, 627, 190, 42);
-    button(switch_label(tr(L"Advanced"), advanced).c_str(), AdvancedId, 224, 631, 140, 34);
-    const auto next = step + 1 < static_cast<int>(SetupSteps) ? tr_format(L"Next: {0}", {step_name(static_cast<unsigned>(step) + 1)})
-                                                              : std::wstring(tr(L"Finish"));
-    button(next.c_str(), NextId, 786, 627, 190, 42);
+      button(step_name(k), StepPillId + static_cast<int>(k), 352 + static_cast<int>(k) * 158, 62, 150, 32);
+    button(tr(L"Picture"), 100 + PicturePage, 352 + 3 * 158, 62, 150, 32);
+    if (step >= 0) {
+      if (built_guided) {
+        const auto back = step == 0 ? std::wstring(tr(L"Cancel")) : tr_format(L"Back: {0}", {step_name(static_cast<unsigned>(step) - 1)});
+        button(back.c_str(), BackId, PageLeft, 627, 190, 42);
+        const auto next = step + 1 < static_cast<int>(SetupSteps) ? tr_format(L"Next: {0}", {step_name(static_cast<unsigned>(step) + 1)})
+                                                                  : std::wstring(tr(L"Finish"));
+        button(next.c_str(), NextId, 786, 627, 190, 42);
+      }
+      button(switch_label(tr(L"Advanced"), advanced).c_str(), AdvancedId, built_guided ? 224 : PageLeft, 631, 140, 34);
+    }
   }
   if (page == OverviewPage) {
-    // The header: the aircraft, then at the right the connection.
-    HWND combo = child(L"COMBOBOX", L"", 210, 184, 10, 232, 340, CBS_DROPDOWNLIST | WS_VSCROLL);
-    center_combo(combo, 10, 36);
+    // The status card: what to do about an aircraft that needs setting up,
+    // then Connect.
+    const bool needs_setup = unsupported_aircraft(built_for), needs_displays = !needs_setup && displays_to_choose(built_for);
+    button(tr(win::connection_button_label(connection_requested.load(std::memory_order_acquire))), 241, 838, HomeStatusTop + 20, 120, 36);
+    if (needs_setup || needs_displays)
+      button(needs_setup ? tr(L"Set up this aircraft") : tr(L"Choose displays"), HomeActionId, 628, HomeStatusTop + 20, 200, 36);
+    // The aircraft's card: which aircraft, its sections, and the saved ones.
+    HWND combo = child(L"COMBOBOX", L"", 210, 42, HomeAircraftTop + 10, 250, 340, CBS_DROPDOWNLIST | WS_VSCROLL);
+    center_combo(combo, HomeAircraftTop + 10, 36);
     for (const auto* profile : profiles::Catalog)
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(profile->name));
     for (size_t i = 0; i < profiles::Catalog.size(); ++i)
@@ -6380,30 +6408,28 @@ void build_controls() {
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(set_up->name));
       SendMessageW(combo, CB_SETCURSEL, profiles::Catalog.size(), 0);
     }
-    button(tr(win::connection_button_label(connection_requested.load(std::memory_order_acquire))), 241, 716, 10, 112, 36);
-    // Cockpit displays: at the right of each display's card, the switch of
-    // the cameras drawn there, as their shortcuts turn them on.
+    for (unsigned k = 0; k < SetupSteps; ++k)
+      button(step_name(k), StepPillId + static_cast<int>(k), 404 + static_cast<int>(k) * 130, HomeAircraftTop + 12, 124, 32);
+    button(tr(L"Saved aircraft…"), 646, 798, HomeAircraftTop + 12, 160, 32);
+    // Cockpit displays, once the simulator shows them: at the right of each
+    // display's card, the switch of the cameras drawn there, as their
+    // shortcuts turn them on.
     const auto* profile = profiles::find(s.profile);
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     constexpr int previews[]{224, 225, 232};
-    for (const auto& card : display_cards(s))
-      button(switch_label(side_toggle_name(s, card.side), s.manual_mask & (1u << card.side)).c_str(), previews[card.side],
-             card.x + card.width - 12 - 52, DisplayCardTop + DisplayCardSwitches + 2, 52, 44);
-    // Under the cards, two cards. In flight: TAXI-button control and the
-    // door camera's switch, or a way to choose its display.
-    button(switch_label(pmdg_cam_control(s) ? tr(L"CAM button") : tr(L"TAXI buttons"), s.follow_taxi && !manual).c_str(), 221,
-           OverviewControlsLeft + 8, OverviewCardsTop + 8, OverviewControlsWidth - 16, 40);
+    if (built_with_displays)
+      for (const auto& card : display_cards(s))
+        button(switch_label(side_toggle_name(s, card.side), s.manual_mask & (1u << card.side)).c_str(), previews[card.side],
+               card.x + card.width - 12 - 52, DisplayCardTop + DisplayCardSwitches + 2, 52, 44);
+    // In flight: TAXI-button control and the door camera's switch, or a way
+    // to choose its display.
+    button(switch_label(pmdg_cam_control(s) ? tr(L"CAM button") : tr(L"TAXI buttons"), s.follow_taxi && !manual).c_str(), 221, 32,
+           HomeFlightTop + 4, 460, 40);
     EnableWindow(GetDlgItem(window, 221), !manual);
     if (s.door_side < MaxDisplaySides)
-      button(switch_label(tr(L"Door camera"), s.door_on).c_str(), DoorToggleId, OverviewControlsLeft + 8, OverviewCardsTop + 48,
-             OverviewControlsWidth - 16, 40);
+      button(switch_label(tr(L"Door camera"), s.door_on).c_str(), DoorToggleId, 508, HomeFlightTop + 4, 460, 40);
     else
-      button(tr(L"Choose display…"), DoorChooseId, OverviewControlsLeft + OverviewControlsWidth - 12 - 150, OverviewCardsTop + 52, 150, 32);
-    // Setup: its three steps, and the saved aircraft.
-    for (unsigned k = 0; k < SetupSteps; ++k)
-      button(step_name(k), StepPillId + static_cast<int>(k), OverviewSetupLeft + 18 + static_cast<int>(k) * 166, OverviewCardsTop + 50, 158,
-             34);
-    button(tr(L"Saved aircraft…"), 646, PageLeft + PageWidth - 12 - 170, OverviewCardsTop + 10, 170, 32);
+      button(tr(L"Choose display…"), DoorChooseId, 818, HomeFlightTop + 8, 150, 32);
     // The footer's links: the version, What's new, and at the right Report a
     // bug and Donate.
     const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, PageLeft, 645, 56, 22);
@@ -6501,26 +6527,30 @@ void build_controls() {
     SendMessageW(target, TBM_SETPAGESIZE, 0, 5);
     SendMessageW(target, TBM_SETPOS, TRUE, std::clamp(s.camera_rate, kMinimumCameraRate, kMaximumCameraRate));
     EnableWindow(target, pending_camera_mode == static_cast<unsigned>(CameraMode::custom));
-    // Picture: each brightness as a slider in quarter EV steps beside its
-    // value, which can also be typed; then the ground-speed colour.
+    // Each brightness as a slider in quarter EV steps beside its value,
+    // which can also be typed; then the ground-speed colour.
     const float brightness[]{s.day_brightness, s.night_brightness};
     for (int i = 0; i < 2; ++i) {
-      HWND slider = child(TRACKBAR_CLASSW, L"", BrightnessSliderId + i, 206, 392 + i * 68, 184, 30, TBS_HORZ | TBS_NOTICKS);
+      const int x = i ? 526 : 42;
+      HWND slider = child(TRACKBAR_CLASSW, L"", BrightnessSliderId + i, x + 164, 366, 170, 30, TBS_HORZ | TBS_NOTICKS);
       SendMessageW(slider, TBM_SETRANGE, FALSE, MAKELPARAM(0, 24));
       SendMessageW(slider, TBM_SETPAGESIZE, 0, 4);
       SendMessageW(slider, TBM_SETPOS, TRUE, std::clamp(static_cast<int>(std::lround(brightness[i] * 4)) + 16, 0, 24));
-      edit(brightness[i], 201 + i, 398, 392 + i * 68, 76);
+      edit(brightness[i], 201 + i, x + 344, 366, 76);
     }
-    button(tr(L"Ground-speed colour"), 231, 42, 532, 220, 34);
+    button(tr(L"Ground-speed colour"), 231, 42, 448, 220, 34);
     const auto* display_profile = profiles::find(s.profile);
     EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
-    // App: what Taxi Cam does by itself, and its language.
-    button(switch_label(tr(L"Auto-connect"), auto_connect.load(std::memory_order_acquire)).c_str(), 240, 518, 394, 448, 40);
-    button(switch_label(tr(L"Auto aircraft"), s.auto_profile).c_str(), 230, 518, 436, 448, 40);
-    button(switch_label(tr(L"Show notifications"), s.notifications).c_str(), NotificationsId, 518, 478, 448, 40);
+  } else if (page == PreferencesPage) {
+    // What Taxi Cam does by itself, its language, and its updates: the same
+    // for every aircraft.
+    button(switch_label(tr(L"Auto-connect"), auto_connect.load(std::memory_order_acquire)).c_str(), 240, 32, 82, 936, 40);
+    button(switch_label(tr(L"Auto aircraft"), s.auto_profile).c_str(), 230, 32, 124, 936, 40);
+    button(switch_label(tr(L"Show notifications"), s.notifications).c_str(), NotificationsId, 32, 166, 936, 40);
     const auto* language = win::find_language(language_preference);
-    button(language ? language->native_name : tr(L"Follow Windows"), LanguageId, 776, 523, 182, 34);
-    tooltip(button(tr(L"Diagnostics"), 100 + DiagnosticsPage, 924, 592, 44, 36), tr(L"Diagnostics"));
+    button(language ? language->native_name : tr(L"Follow Windows"), LanguageId, 776, 211, 182, 34);
+    button(updater.busy() ? tr(L"Checking for updates...") : tr(L"Check for updates"), UpdatesId, 738, 286, 220, 34);
+    EnableWindow(GetDlgItem(window, UpdatesId), !preview_ui && !updater.busy() && !update_prompt);
   } else if (page == RoutingPage) {
     origin_x = LegacyShiftX;
     origin_y = LegacyShiftY;
@@ -6539,17 +6569,19 @@ void build_controls() {
                    SW_HIDE);
     update_gallery_buttons();
   } else if (page == 4) {
-    button(switch_label(tr(L"Scene test"), s.scene_test).c_str(), 229, 42, 280, 200);
+    // What to do about a problem, then the camera tests.
+    button(tr(L"Report a bug"), 512, 738, 82, 220, 34);
+    button(tr(L"Open log folder"), 510, 738, 124, 220, 34);
+    button(switch_label(tr(L"Scene test"), s.scene_test).c_str(), 229, 42, 232, 200);
     // Calibration bars identify each screen.
     const auto* side_profile = profiles::find(s.profile);
     const unsigned sides = side_profile && side_profile->sides > 2 ? 3 : 2;
     constexpr int calibrations[]{226, 227, 233};
     for (unsigned side = 0; side < sides; ++side)
       button(switch_label(side_toggle_name(s, side), s.calibration_mask & (1u << side)).c_str(), calibrations[side],
-             536 + static_cast<int>(side) * 142, 280, 134);
-    edit(s.calibration_budget, 203, 838, 354, 120);
-    button(tr(L"Stop camera tests"), 511, 748, 402, 210);
-    button(tr(L"Open log folder"), 510, PageLeft, 462, 210);
+             536 + static_cast<int>(side) * 142, 232, 134);
+    edit(s.calibration_budget, 203, 838, 300, 120);
+    button(tr(L"Stop camera tests"), 511, 748, 340, 210);
   } else if (page == GuidesPage) {
     origin_x = LegacyShiftX;
     origin_y = LegacyShiftY;
@@ -6977,7 +7009,7 @@ std::pair<const wchar_t*, COLORREF> connection_state(const win::Status& sample) 
                          : !sample.graphics_ready                                ? tr(L"Waiting for the simulator")
                          : inactive                                              ? tr(L"Taxi Cam can't recognise your displays")
                          : unsupported                                           ? tr(L"This aircraft is not set up yet")
-                                                                                 : tr(L"Native bridge connected");
+                                                                                 : tr(L"Cameras ready");
   const bool connected =
       sample.graphics_ready && has_displays && !inactive && !unsupported && !connection_disconnected.load(std::memory_order_acquire);
   return {state, inactive ? Warning : connected ? Ok : unsupported && sample.graphics_ready ? Accent : Faint};
@@ -7014,98 +7046,104 @@ void draw_page(HDC dc) {
   };
   const int step = setup_step(page);
   const bool unsupported = unsupported_aircraft(sample);
-  // Without the package nothing can be recognised: Overview says so, first
-  // thing on the page.
+  // Without the package nothing can be recognised: Home says so, first thing.
   const bool inactive = package_inactive(sample);
-  if (page == OverviewPage) {
-    // The header: the app, its aircraft (build_controls) with how its setup
-    // stands, and the connection's state beside Connect.
-    DrawIconEx(dc, scale(PageLeft), scale(12), icon, scale(32), scale(32), 0, nullptr, DI_NORMAL);
-    text(dc, L"Taxi Cam", 66, 16, 104, 24, heading);
-    rule(174, 18, 1, 20);
-    const auto s = draft();
-    const bool choose = !unsupported && displays_to_choose(sample);
-    // Only when the aircraft's setup needs something.
-    int state_left = 428;
-    if (profiles::find(s.profile) && (unsupported || choose))
-      state_left += chip(dc, 426, 17, unsupported ? tr(L"Not set up") : tr(L"Choose displays"), Warning, 130) + 12;
+  // The header, the same on every page: the app, its places (build_controls),
+  // and the connection in a few words.
+  DrawIconEx(dc, scale(PageLeft), scale(12), icon, scale(32), scale(32), 0, nullptr, DI_NORMAL);
+  text(dc, L"Taxi Cam", 66, 16, 104, 24, heading);
+  rule(174, 18, 1, 20);
+  if (page != OverviewPage) {
     const auto [state, state_color] = connection_state(sample);
-    const int state_room = 704 - state_left - 14;
-    const HFONT state_font = fitting(state, state_room, normal, small);
+    const int state_room = 920 - 622 - 14;
+    const HFONT state_font = fitting(state, state_room, small, small);
     SelectObject(dc, state_font);
     SIZE state_size{};
     GetTextExtentPoint32W(dc, state, static_cast<int>(std::wcslen(state)), &state_size);
     const int state_width = std::min(state_room, MulDiv(state_size.cx, 96, static_cast<int>(dpi)) + 2);
-    disc(dc, scale(704 - state_width - 10), scale(28), scale(4), state_color);
-    text(dc, state, 704 - state_width, 16, state_width, 24, state_font, state_color == Warning ? Warning : Text,
+    disc(dc, scale(920 - state_width - 10), scale(28), scale(4), state_color);
+    text(dc, state, 920 - state_width, 16, state_width, 24, state_font, state_color == Warning ? Warning : Muted,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    // The page: its displays. The line under the title says what is
-    // happening when that is more than the header's few words, and
-    // otherwise what selecting a display does.
-    text(dc, tr(L"Cockpit displays"), PageLeft, 68, PageWidth, 32, title_font);
+  }
+  if (page == OverviewPage) {
+    const auto s = draft();
+    const auto* profile = profiles::find(s.profile);
+    const bool choose = !unsupported && displays_to_choose(sample);
+    // The status card: one sentence for what is happening, one line for
+    // what to do about it, and its buttons (build_controls).
     // A change that cannot finish lists no displays either: the bridge's own
     // line says so, where "waiting for displays" would hide it (issue 202).
     const bool change_paused = sample.heartbeat && !std::strcmp(sample.message, win::TransitionFailedMessage);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported && !change_paused;
-    const auto line = inactive && package_conflict()
-                          ? std::wstring(tr(L"Another add-on's cockpit page stops Taxi Cam recognising your displays."))
-                      : inactive ? std::wstring(tr(L"Display package not active. Restart the simulator, or run the installer again."))
-                      : late_empty_pfds  ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. "
-                                                           L"Restart Flight only if the list stays empty."))
-                      : sample.heartbeat ? widen(sample.message)
-                                         : live;
-    const bool plain =
-        !inactive && !late_empty_pfds && !change_paused && (line.empty() || line == tr(L"Waiting for Microsoft Flight Simulator 2024"));
-    text(dc, plain ? tr(L"Select one to change it in Displays.") : line.c_str(), PageLeft, 100, PageWidth, 22, small,
-         inactive || change_paused ? Warning
-         : late_empty_pfds         ? Accent
-                                   : Muted,
+    const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
+    const bool paused = connection_disconnected.load(std::memory_order_acquire);
+    const auto bridge_line = sample.heartbeat ? widen(sample.message) : std::wstring();
+    const wchar_t* headline = paused ? tr(L"Cameras are paused")
+                              : !sample.graphics_ready
+                                  ? (simulator_pid.load() ? tr(L"Connecting to the simulator") : tr(L"Waiting for the simulator"))
+                              : inactive        ? tr(L"Taxi Cam can't recognise your displays")
+                              : change_paused   ? tr(L"Cameras are not running")
+                              : unsupported     ? tr(L"This aircraft is not set up yet")
+                              : choose          ? tr(L"Choose this aircraft's displays")
+                              : late_empty_pfds ? tr(L"Waiting for the cockpit displays")
+                                                : tr(L"Cameras ready");
+    const std::wstring advice =
+        paused                           ? std::wstring(tr(L"Choose Connect to turn them back on."))
+        : !sample.graphics_ready         ? (!simulator_pid.load() && auto_connect.load(std::memory_order_acquire)
+                                                ? std::wstring(tr(L"Start Microsoft Flight Simulator. Taxi Cam connects by itself."))
+                                                : live)
+        : inactive && package_conflict() ? std::wstring(tr(L"Another add-on's cockpit page stops Taxi Cam recognising your displays."))
+        : inactive             ? std::wstring(tr(L"Display package not active. Restart the simulator, or run the installer again."))
+        : change_paused        ? bridge_line
+        : unsupported          ? std::wstring(tr(L"Set it up once: choose its displays, then aim its cameras."))
+        : choose               ? std::wstring(tr(L"After this update, choose this aircraft's displays again in Displays."))
+        : late_empty_pfds      ? std::wstring(tr(L"Waiting for cockpit displays to be drawn. Restart Flight only if the list stays empty."))
+        : !bridge_line.empty() ? bridge_line
+        : s.follow_taxi && !manual ? std::wstring(tr(L"Press TAXI in the cockpit to show them, or use a display's switch."))
+                                   : std::wstring(tr(L"Use a display's switch or its shortcut to show them."));
+    const bool trouble = inactive || change_paused;
+    const bool ready = sample.graphics_ready && has_displays && !trouble && !unsupported && !choose && !paused;
+    const COLORREF mood = trouble ? Warning : ready ? Ok : unsupported || choose ? Accent : Faint;
+    panel(dc, PageLeft, HomeStatusTop, PageWidth, HomeStatusHeight);
+    disc(dc, scale(50), scale(HomeStatusTop + 24), scale(6), mood);
+    const int words = (unsupported || choose ? 628 : 838) - 12 - 70;
+    text(dc, headline, 70, HomeStatusTop + 10, words, 28, heading, trouble ? Warning : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    draw_display_strip(dc, sample);
+    text(dc, advice.c_str(), 70, HomeStatusTop + 38, words, 34, small, Muted, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+    // The aircraft's card: a pill only when its setup needs something.
+    panel(dc, PageLeft, HomeAircraftTop, PageWidth, HomeAircraftHeight);
+    if (profile && (unsupported || choose))
+      chip(dc, 302, HomeAircraftTop + 17, unsupported ? tr(L"Not set up") : tr(L"Choose displays"), Warning, 96);
+    // The displays, once the simulator shows them; until then, what happens.
+    if (built_with_displays) {
+      draw_display_strip(dc, sample);
+    } else {
+      panel(dc, PageLeft, DisplayCardTop, PageWidth, DisplayCardHeight, Well);
+      text(dc, tr(L"How it works"), 60, DisplayCardTop + 78, 880, 30, title_font, Text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      const wchar_t* steps[]{tr(L"Start Microsoft Flight Simulator and load a flight."),
+                             tr(L"Taxi Cam connects by itself and finds your cockpit displays."),
+                             tr(L"Press TAXI in the cockpit, or use the switches here, to show the cameras.")};
+      for (int k = 0; k < 3; ++k) {
+        const int y = DisplayCardTop + 128 + k * 34;
+        disc(dc, scale(292), scale(y + 13), scale(11), Raised);
+        wchar_t number[4];
+        std::swprintf(number, 4, L"%d", k + 1);
+        text(dc, number, 281, y + 2, 22, 22, small, Text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(dc, steps[k], 316, y, 560, 26, normal, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      }
+    }
     // In flight: the switches (build_controls), and the door camera's name
     // beside the way to choose its display while it has none.
-    panel(dc, OverviewControlsLeft, OverviewCardsTop, OverviewControlsWidth, OverviewCardsHeight);
+    panel(dc, PageLeft, HomeFlightTop, PageWidth, HomeFlightHeight);
     if (s.door_side >= MaxDisplaySides)
-      text(dc, tr(L"Door camera"), OverviewControlsLeft + 16, OverviewCardsTop + 48, 120, 40, normal);
-    // Setup: after an update whose display names could not be converted, the
-    // user chooses this aircraft's displays again.
-    panel(dc, OverviewSetupLeft, OverviewCardsTop, PageLeft + PageWidth - OverviewSetupLeft, OverviewCardsHeight);
-    const wchar_t* setup_title = tr(L"Setup");
-    text(dc, setup_title, OverviewSetupLeft + 18, OverviewCardsTop + 10, 120, 30, heading);
-    SelectObject(dc, heading);
-    SIZE setup_size{};
-    GetTextExtentPoint32W(dc, setup_title, static_cast<int>(std::wcslen(setup_title)), &setup_size);
-    const int hint_x = OverviewSetupLeft + 18 + MulDiv(setup_size.cx, 96, static_cast<int>(dpi)) + 14;
-    text(dc,
-         unsupported ? tr(L"This aircraft is not set up yet. Start with Displays.")
-         : choose    ? tr(L"After this update, choose this aircraft's displays again in Displays.")
-                     : tr(L"Open any step to change it."),
-         hint_x, OverviewCardsTop + 10, PageLeft + PageWidth - 12 - 170 - 12 - hint_x, 30, small, unsupported || choose ? Accent : Muted,
-         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      text(dc, tr(L"Door camera"), 516, HomeFlightTop, 290, HomeFlightHeight, normal);
     rule(0, 632, ClientWidth, 1);
-  } else {
-    // A step is titled with the aircraft it sets up, left of its pills; the
-    // other pages with their name, right of the way back.
-    const std::wstring title = page == OptionsPage       ? tr(L"Options")
-                               : page == DiagnosticsPage ? tr(L"Diagnostics")
-                                                         : tr_format(L"Set up {0}", {setup_aircraft_name()});
-    const wchar_t* subtitle =
-        page == OptionsPage       ? tr(L"Balance visibility, colour and camera update rate.")
-        : page == DiagnosticsPage ? tr(L"Live status and the controls used during camera testing.")
-        : page == SetupPage       ? tr(L"Put each cockpit display in its place: the cameras are drawn there.")
-        : page == RoutingPage     ? tr(L"Advanced: the display texture behind each display, for this flight.")
-        : page == CamerasPage
-            ? (setup.positioning ? tr(L"The cameras start from default positions. Adjust each one in the live view.")
-                                 : tr(L"Adjust each taxi camera in the live view: drag to aim, arrows to move, the wheel to zoom."))
-        : page == GuidesPage ? tr(L"Advanced: move the guide points; they show live and are saved for this aircraft.")
-                             : tr(L"A cabin camera on a cockpit display, turned on from the flight deck.");
-    const int title_x = 80, title_width = step >= 0 ? 348 : 400;
-    text(dc, title.c_str(), title_x, 14, title_width, 28, fitting(title.c_str(), title_width, heading, small), Text,
+  } else if (aircraft_page(page)) {
+    // Aircraft is titled with the aircraft, left of its sections.
+    const std::wstring title = setup_aircraft_name();
+    text(dc, title.c_str(), PageLeft, 62, 316, 32, fitting(title.c_str(), 316, heading, small), Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    text(dc, subtitle, PageLeft, 62, PageWidth, 28, fitting(subtitle, PageWidth, normal, small),
-         setup.positioning && page == CamerasPage ? Accent : Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (step >= 0)
-      rule(0, 616, ClientWidth, 1);
+    rule(0, 616, ClientWidth, 1);
   }
   // Advanced's two pages are drawn where their controls are (LegacyShiftX);
   // what they register for the pointer and for their controls moves with them.
@@ -7187,8 +7225,9 @@ void draw_page(HDC dc) {
     const auto* base = profiles::base_profile(s.profile);
     const bool place_lower = base && profile && profile->sides < MaxDisplaySides && profiles::pilot_pair(*base);
     text(dc,
-         s.door_side == win::DoorSideNone && place_lower ? tr(L"Place the lower display in Setup > Displays to show the door camera there.")
-         : s.door_side == win::DoorSideNone              ? tr(L"Choose the display it fills. The lower display is the usual place.")
+         s.door_side == win::DoorSideNone && place_lower
+             ? tr(L"Place the lower display in Aircraft > Displays to show the door camera there.")
+         : s.door_side == win::DoorSideNone ? tr(L"Choose the display it fills. The lower display is the usual place.")
          : shares ? tr(L"While it is on it takes this display over from its taxi camera, and hands it back when it turns off.")
                   : tr(L"While it is on it fills this display; the other displays are unchanged."),
          42, 180, 524, 36, small, Muted, DT_LEFT | DT_WORDBREAK);
@@ -7277,23 +7316,23 @@ void draw_page(HDC dc) {
       const auto line = rate.text();
       text(dc, line.c_str(), 42, 300, 916, 34, small, Muted, DT_LEFT | DT_WORDBREAK);
     }
-    panel(dc, PageLeft, 352, 468, 224);
-    text(dc, tr(L"Picture"), 42, 360, 300, 28, heading);
+    panel(dc, PageLeft, 352, PageWidth, 144);
     const wchar_t* names[]{tr(L"Daytime brightness"), tr(L"Night brightness")};
     const wchar_t* descriptions[]{tr(L"EV added to the main view's exposure in daylight, −4 to +2 in 0.25 steps. 0 matches the main view."),
                                   tr(L"EV added at night, −4 to +2 in 0.25 steps. Dusk blends the two with the ambient light.")};
     for (int i = 0; i < 2; ++i) {
-      text(dc, names[i], 42, 392 + i * 68, 160, 30, fitting(names[i], 160, normal, small), Text,
+      const int x = i ? 526 : 42;
+      text(dc, names[i], x, 366, 160, 30, fitting(names[i], 160, normal, small), Text,
            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-      text(dc, descriptions[i], 42, 424 + i * 68, 432, 32, small, Muted, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+      text(dc, descriptions[i], x, 400, 420, 32, small, Muted, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
     }
-    panel(dc, 508, 352, 468, 224);
-    text(dc, tr(L"App"), 526, 360, 300, 28, heading);
-    text(dc, tr(L"Language"), 526, 520, 240, 40, normal);
-    panel(dc, PageLeft, 588, PageWidth, 44);
-    text(dc, tr(L"Diagnostics"), 42, 588, 150, 44, heading);
-    text(dc, tr(L"Live status and the controls used during camera testing."), 200, 588, 710, 44, small, Muted,
-         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  } else if (page == PreferencesPage) {
+    // The same for every aircraft: the switches' rows (build_controls), the
+    // language, and this version with its update check.
+    panel(dc, PageLeft, 72, PageWidth, 182);
+    text(dc, tr(L"Language"), 40, 208, 400, 40, normal);
+    panel(dc, PageLeft, 268, PageWidth, 70);
+    text(dc, L"Taxi Cam " TAXI_CAM_VERSION_WIDE, 42, 268, 400, 70, heading);
   } else if (page == RoutingPage) {
     panel(dc, 244, 172, 766, 190);
     text(dc, tr(L"Assigned displays"), 262, 182, 255, 34, heading);
@@ -7303,9 +7342,25 @@ void draw_page(HDC dc) {
     text(dc, tr(L"Select a picture to enlarge it."), 446, 386, 190, 32, small, Muted);
     draw_gallery(dc, sample);
   } else if (page == 4) {
-    panel(dc, PageLeft, 96, PageWidth, 160);
-    // Each line is a name and its value, separated by a run of at least two
-    // spaces or, as in Simplified Chinese, by a colon (see the rows below).
+    // Whether each part is working, in plain words, beside what to do about
+    // a problem (build_controls).
+    panel(dc, PageLeft, 72, PageWidth, 96);
+    const bool simulator = simulator_pid.load() != 0;
+    const unsigned found = (sample.left_id != 0) + (sample.right_id != 0) + (sample.lower_id != 0);
+    const wchar_t* parts[]{tr(L"Simulator"), tr(L"Cameras"), tr(L"Displays")};
+    const bool working[]{simulator, sample.scene_ready != 0, found != 0};
+    const std::wstring states[]{simulator ? tr(L"Connected") : tr(L"Waiting"), sample.scene_ready ? tr(L"Ready") : tr(L"Waiting"),
+                                found ? std::to_wstring(found) : std::wstring(tr(L"Waiting for displays"))};
+    for (int k = 0; k < 3; ++k) {
+      const int y = 82 + k * 26;
+      disc(dc, scale(50), scale(y + 12), scale(5), working[k] ? Ok : Faint);
+      text(dc, parts[k], 68, y, 150, 24, normal, Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      text(dc, states[k].c_str(), 226, y, 480, 24, normal, working[k] ? Text : Muted,
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    // The numbers behind them, for a bug report.
+    panel(dc, PageLeft, 402, PageWidth, 198);
+    text(dc, tr(L"Technical details"), 42, 408, 400, 28, heading);
     const auto counts = tr_format(
         L"Bridge                 {0}\n"
         L"Camera pair         {1}\n"
@@ -7321,7 +7376,7 @@ void draw_page(HDC dc) {
     // A row per line: its name, then its value in one column. A line is
     // split at its run of spaces, or at its colon when it has none; a line
     // with neither is drawn whole.
-    int row_y = 106;
+    int row_y = 440;
     for (size_t start = 0; start <= counts.size();) {
       const auto end = std::min(counts.find(L'\n', start), counts.size());
       const auto row_text = counts.substr(start, end - start);
@@ -7347,15 +7402,16 @@ void draw_page(HDC dc) {
                             L"Activation {8}   Publish {9}",
                             {stage(0), stage(1), stage(2), stage(3), stage(4), stage(5), stage(6), stage(7), stage(8), stage(9)}) +
                         L"\n\n" + tr(L"Excludes engine rendering and GPU time.");
-    text(dc, timing.c_str(), 500, 112, 458, 136, small, Muted, DT_LEFT | DT_WORDBREAK);
+    text(dc, timing.c_str(), 500, 442, 458, 150, small, Muted, DT_LEFT | DT_WORDBREAK);
     // The tests, with Stop camera tests at the bottom right.
-    panel(dc, PageLeft, 266, PageWidth, 182);
-    text(dc, tr(L"Calibration bars"), 396, 280, 130, 36, small, Muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    text(dc, tr(L"Scene test renders without PFD delivery. Calibration bars identify each screen and pause TAXI-button control."), 42, 324,
+    panel(dc, PageLeft, 182, PageWidth, 206);
+    text(dc, tr(L"Camera tests"), 42, 190, 400, 28, heading);
+    text(dc, tr(L"Calibration bars"), 396, 232, 130, 36, small, Muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text(dc, tr(L"Scene test renders without PFD delivery. Calibration bars identify each screen and pause TAXI-button control."), 42, 274,
          916, 22, small, Muted, DT_LEFT | DT_WORDBREAK);
     const auto line = sample.heartbeat ? widen(sample.message) : live;
-    text(dc, tr(L"Calibration batches per 50 ms (64–16384)"), 42, 357, 700, 24, small, Muted);
-    text(dc, line.c_str(), PageLeft, 512, PageWidth, 38, small, Muted, DT_LEFT | DT_WORDBREAK);
+    text(dc, tr(L"Calibration batches per 50 ms (64–16384)"), 42, 303, 700, 24, small, Muted);
+    text(dc, line.c_str(), PageLeft, 606, PageWidth, 22, small, Muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   } else if (page == SetupPage) {
     draw_setup(dc, sample);
   } else if (page == GuidesPage) {
@@ -7428,15 +7484,25 @@ void draw_page(HDC dc) {
     for (size_t k = first_surface; k < surfaces.size(); ++k)
       OffsetRect(&surfaces[k].bounds, scale(LegacyShiftX), scale(LegacyShiftY));
   }
-  // What just happened: beside a step's Back and Advanced, under Overview's
-  // controls, and along the bottom of the other pages.
-  if (step >= 0)
-    text(dc, notice.c_str(), 376, 629, 400, 40, small, dirty ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
-  else if (page == OverviewPage)
-    text(dc, notice.c_str(), PageLeft, 608, PageWidth, 20, small, dirty ? Accent : Muted,
+  // What just happened, at the foot of the page. On a step it gives way to
+  // what the step is for while there is nothing to say: "Changes are saved"
+  // is true of every page and says nothing.
+  const bool quiet = notice.empty() || notice == tr(L"Changes are saved for this aircraft.");
+  if (step >= 0) {
+    const wchar_t* purpose =
+        page == SetupPage     ? tr(L"Put each cockpit display in its place: the cameras are drawn there.")
+        : page == RoutingPage ? tr(L"Advanced: the display texture behind each display, for this flight.")
+        : page == CamerasPage
+            ? (setup.positioning ? tr(L"The cameras start from default positions. Adjust each one in the live view.")
+                                 : tr(L"Adjust each taxi camera in the live view: drag to aim, arrows to move, the wheel to zoom."))
+        : page == GuidesPage ? tr(L"Advanced: move the guide points; they show live and are saved for this aircraft.")
+                             : tr(L"A cabin camera on a cockpit display, turned on from the flight deck.");
+    const int x = built_guided ? 376 : 176, width = (built_guided ? 776 : 976) - x;
+    text(dc, quiet ? purpose : notice.c_str(), x, 629, width, 40, small, !quiet && dirty ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
+  } else if (!quiet) {
+    text(dc, notice.c_str(), PageLeft, page == OverviewPage ? 604 : 640, PageWidth, 24, small, dirty ? Accent : Muted,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-  else
-    text(dc, notice.c_str(), PageLeft, 640, PageWidth, 34, small, dirty ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
+  }
 }
 
 DWORD WINAPI connection_worker(void*) {
@@ -8076,17 +8142,19 @@ void open_flyout() {
 // A step pill: its number in a circle, then its name. The current step is
 // filled; on Overview, Displays stands out while the aircraft is not set up
 // or its displays are to be chosen again.
-void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
+void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step) {
   win::Status sample;
   {
     const std::lock_guard lock(app_mutex);
     sample = status;
   }
-  const bool current = setup_step(page) == static_cast<int>(step);
+  // Picture is the fourth section, after the steps.
+  const bool current = step < SetupSteps ? setup_step(page) == static_cast<int>(step) : page == PicturePage;
   const bool attention = page == OverviewPage && step == 0 && (unsupported_aircraft(sample) || displays_to_choose(sample));
+  const bool numbered = step < SetupSteps && page != OverviewPage && built_guided;
   const bool down = (item.itemState & ODS_SELECTED) != 0;
   const auto& r = item.rcItem;
-  HBRUSH surround = CreateSolidBrush(on_card ? Card : surface_under(item.hwndItem));
+  HBRUSH surround = CreateSolidBrush(surface_under(item.hwndItem));
   FillRect(item.hDC, &r, surround);
   DeleteObject(surround);
   const bool hot = hot_button == item.hwndItem;
@@ -8100,19 +8168,28 @@ void draw_step_pill(const DRAWITEMSTRUCT& item, unsigned step, bool on_card) {
             : hot                ? BorderStrong
                                  : blend(Raised, Text, 7),
             scale(1));
-  const int d = scale(20), cx = r.left + scale(8), cy = r.top + (height - d) / 2;
-  disc(item.hDC, cx + d / 2, cy + d / 2, d / 2, current ? Well : attention ? blend(Raised, Accent, 45) : blend(Raised, Text, 14));
   SetBkMode(item.hDC, TRANSPARENT);
-  wchar_t number[4];
-  std::swprintf(number, 4, L"%u", step + 1);
-  RECT number_box{cx, cy, cx + d, cy + d};
-  SelectObject(item.hDC, small);
-  SetTextColor(item.hDC, Text);
-  DrawTextW(item.hDC, number, -1, &number_box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-  RECT label_box{cx + d + scale(8), r.top, r.right - scale(10), r.bottom};
+  wchar_t label[96]{};
+  GetWindowTextW(item.hwndItem, label, 96);
+  RECT label_box{r.left + scale(10), r.top, r.right - scale(10), r.bottom};
+  if (numbered) {
+    const int d = scale(20), cx = r.left + scale(8), cy = r.top + (height - d) / 2;
+    disc(item.hDC, cx + d / 2, cy + d / 2, d / 2, current ? Well : blend(Raised, Text, 14));
+    wchar_t number[4];
+    std::swprintf(number, 4, L"%u", step + 1);
+    RECT number_box{cx, cy, cx + d, cy + d};
+    SelectObject(item.hDC, small);
+    SetTextColor(item.hDC, Text);
+    DrawTextW(item.hDC, number, -1, &number_box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    label_box.left = cx + d + scale(8);
+  }
   SelectObject(item.hDC, normal);
   SetTextColor(item.hDC, current ? Well : Text);
-  DrawTextW(item.hDC, step_name(step), -1, &label_box, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  RECT extent{};
+  DrawTextW(item.hDC, label, -1, &extent, DT_CALCRECT | DT_SINGLELINE);
+  if (extent.right > label_box.right - label_box.left)
+    SelectObject(item.hDC, small);
+  DrawTextW(item.hDC, label, -1, &label_box, (numbered ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 // The page a navigation button stands for: Setup for every step.
 bool navigation_selected(int id) {
@@ -8203,9 +8280,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       register_camera_hotkeys();
       update_camera_button_input();
       if (hotkey_registration.conflicts())
-        notice = tr(L"Some shortcuts are unavailable. Check Setup > Taxi cameras.");
+        notice = tr(L"Some shortcuts are unavailable. Check Aircraft > Taxi cameras.");
       else if (win::any_camera_button(button_saved) && !preview_ui && !button_input.enabled())
-        notice = tr(L"Controller buttons are unavailable. Check Setup > Taxi cameras.");
+        notice = tr(L"Controller buttons are unavailable. Check Aircraft > Taxi cameras.");
       build_controls();
       tray(true);
       SetTimer(hwnd, 1, 250, nullptr);
@@ -8411,7 +8488,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return TRUE;
       }
       if (id >= StepPillId && id < StepPillId + static_cast<int>(SetupSteps)) {
-        draw_step_pill(*item, static_cast<unsigned>(id - StepPillId), false);
+        draw_step_pill(*item, static_cast<unsigned>(id - StepPillId));
+        return TRUE;
+      }
+      if (id == 100 + PicturePage) {
+        draw_step_pill(*item, SetupSteps);
         return TRUE;
       }
       if (id == SetupSwapId) {
@@ -8451,7 +8532,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       wchar_t label[160]{};
       GetWindowTextW(item->hwndItem, label, 160);
       RECT r = item->rcItem;
-      if (id >= 512 && id <= 515) {
+      if (id >= 512 && id <= 515 && page == OverviewPage) {
         // The footer's links: quiet until the pointer is over them.
         const int saved = SaveDC(item->hDC);
         SelectObject(item->hDC, hot ? version_font : small);
@@ -8460,28 +8541,42 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         RestoreDC(item->hDC, saved);
         return TRUE;
       }
-      if (id == 602 || (id >= 100 && id < 106 && !(id == 100 + OptionsPage && page == OverviewPage))) {
-        // The header's icon buttons: the menu, Options and the way back.
+      if (id == 100 + OverviewPage || id == 100 + CamerasPage || id == 100 + PreferencesPage || id == 100 + DiagnosticsPage) {
+        // A place in the header: its name, and under the one that is open
+        // the accent.
+        const bool open = id == 100 + OverviewPage      ? page == OverviewPage
+                          : id == 100 + CamerasPage     ? aircraft_page(page)
+                          : id == 100 + PreferencesPage ? page == PreferencesPage
+                                                        : page == DiagnosticsPage;
+        if (hot || down || focus)
+          round_box(item->hDC, r, scale(8), blend(surface, Text, down ? 4 : hot ? 7 : 0), focus && !hot ? BorderStrong : NoColor, scale(1));
+        SelectObject(item->hDC, normal);
+        SetTextColor(item->hDC, open || hot ? Text : Muted);
+        RECT extent{};
+        DrawTextW(item->hDC, label, -1, &extent, DT_CALCRECT | DT_SINGLELINE);
+        if (extent.right > r.right - r.left - scale(8))
+          SelectObject(item->hDC, small);
+        DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (open) {
+          const int middle = (r.left + r.right) / 2, half = scale(14);
+          round_box(item->hDC, {middle - half, r.bottom - scale(4), middle + half, r.bottom - scale(1)}, scale(2), Accent);
+        }
+        return TRUE;
+      }
+      if (id == 602) {
+        // The header's menu: three dots.
         ButtonLook look;
         look.hot = hot;
         look.down = down;
         look.focus = focus;
         button_box(item->hDC, r, look, surface);
-        const COLORREF ink = hot ? Text : Muted;
-        const float cx = (r.left + r.right) / 2.f, cy = (r.top + r.bottom) / 2.f, u = scale(16) / 16.f, pen = std::max(1.f, scale(3) / 2.f);
-        if (id == 602) {
-          for (const int dot : {-1, 0, 1})
-            disc(item->hDC, static_cast<int>(cx + dot * 5 * u), static_cast<int>(cy), std::max(1, scale(3) / 2), ink);
-        } else {
-          // A chevron: back, or on to Diagnostics.
-          const float way = id == 100 + DiagnosticsPage ? -1.f : 1.f;
-          strokes(item->hDC,
-                  {{cx + way * 2.5f * u, cy - 5 * u, cx - way * 2.5f * u, cy}, {cx - way * 2.5f * u, cy, cx + way * 2.5f * u, cy + 5 * u}},
-                  pen, ink);
-        }
+        const float cx = (r.left + r.right) / 2.f, cy = (r.top + r.bottom) / 2.f, u = scale(16) / 16.f;
+        for (const int dot : {-1, 0, 1})
+          disc(item->hDC, static_cast<int>(cx + dot * 5 * u), static_cast<int>(cy), std::max(1, scale(3) / 2), hot ? Text : Muted);
         return TRUE;
       }
-      const bool primary = id == 500 || id == NextId || (id >= SetupPlaceId && id < SetupPlaceId + static_cast<int>(MaxDisplaySides));
+      const bool primary =
+          id == 500 || id == NextId || id == HomeActionId || (id >= SetupPlaceId && id < SetupPlaceId + static_cast<int>(MaxDisplaySides));
       const bool toggle = is_switch(id);
       ButtonLook look;
       look.primary = primary;
@@ -8499,7 +8594,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       SetTextColor(item->hDC, button_text(look));
       const int track = scale(18), track_width = switch_width(track);
       const bool bare = page == OverviewPage && (id == 224 || id == 225 || id == 232);
-      const bool row = (page == OptionsPage && (id == 230 || id == 240 || id == NotificationsId)) ||
+      const bool row = (page == PreferencesPage && (id == 230 || id == 240 || id == NotificationsId)) ||
                        (page == OverviewPage && (id == 221 || id == DoorToggleId));
       if (toggle && (bare || row)) {
         // A switch by itself beside its display, or a row of Options: its name
@@ -8523,6 +8618,20 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           RECT words{r.left + scale(8), r.top, switch_x - scale(8), r.bottom};
           SetTextColor(item->hDC, disabled ? Faint : Text);
           DrawTextW(item->hDC, label, -1, &words, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+          // What it does, in a few words, after its name.
+          const wchar_t* does = id == 240               ? tr(L"Connect when the simulator starts.")
+                                : id == 230             ? tr(L"Switch to the aircraft you load.")
+                                : id == NotificationsId ? tr(L"Tell me when the cameras need attention.")
+                                : id == 221             ? tr(L"The cockpit's buttons turn the cameras on.")
+                                                        : nullptr;
+          RECT extent{};
+          DrawTextW(item->hDC, label, -1, &extent, DT_CALCRECT | DT_SINGLELINE);
+          words.left += extent.right + scale(14);
+          if (does && words.right - words.left > scale(80)) {
+            SelectObject(item->hDC, small);
+            SetTextColor(item->hDC, disabled ? Faint : Muted);
+            DrawTextW(item->hDC, does, -1, &words, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+          }
         }
         return TRUE;
       }
@@ -8584,6 +8693,19 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       service_thumbnails();
       if (shortcut_window == window)
         refresh_lvar_status(window);
+      {
+        // Home shows the displays once the simulator does, and a step its
+        // Back and Next while the aircraft is being set up: either changing
+        // rebuilds the page, without touching fields being edited elsewhere.
+        win::Status latest;
+        {
+          const std::lock_guard lock(app_mutex);
+          latest = status;
+        }
+        if ((page == OverviewPage && (latest.graphics_ready != 0) != built_with_displays) ||
+            (setup_step(page) >= 0 && guided_setup(latest) != built_guided && !dirty))
+          build_controls();
+      }
       if (flyout) {
         // Its rows follow the aircraft: keep its height to them, growing
         // away from the edge of the screen it opened at.
@@ -8637,8 +8759,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case TrayMessage:
       if (LOWORD(l) == WM_CONTEXTMENU || LOWORD(l) == WM_RBUTTONUP) {
         HMENU menu = CreatePopupMenu();
-        if (w != 1)  // From the window's own Menu button, Settings is already open.
-          AppendMenuW(menu, MF_STRING, 600, tr(L"Settings"));
+        if (w != 1)  // From the window's own Menu button, the window is already open.
+          AppendMenuW(menu, MF_STRING, 600, tr(L"Open Taxi Cam"));
         AppendMenuW(menu, MF_STRING | (preview_ui ? MF_GRAYED : 0), 604,
                     tr(win::connection_button_label(connection_requested.load(std::memory_order_acquire))));
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
@@ -8852,7 +8974,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           choose_language(selected == LanguageMenuId ? L"" : win::UiLanguages[selected - LanguageMenuId - 1].tag);
         return 0;
       }
-      if (id >= 100 && id < 100 + DoorPage + 1) {
+      if (id == HomeActionId) {
+        open_step(0);
+        return 0;
+      }
+      if (id == UpdatesId) {
+        check_updates(true);
+        return 0;
+      }
+      if (id >= 100 && id <= 100 + PreferencesPage) {
         if (id == 100 + CamerasPage)
           open_step(0);
         else
@@ -8960,7 +9090,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           request_connection(win::ConnectCommand::connect);
         // Options keeps its fields: only this switch's label changed, and a
         // rebuild would drop an edit there that has not been saved yet.
-        if (page != OptionsPage)
+        if (page != PreferencesPage)
           build_controls();
         return 0;
       }
@@ -9211,10 +9341,10 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   current.enabled = 0;
   auto_connect.store(win::load_auto_connect(win::settings_directory()), std::memory_order_release);
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
-    notice = tr(L"Saved shortcuts were invalid and disabled. Configure them in Setup > Taxi cameras.");
+    notice = tr(L"Saved shortcuts were invalid and disabled. Configure them in Aircraft > Taxi cameras.");
   hotkey_draft = hotkey_saved;
   if (!win::load_camera_buttons(button_saved, win::settings_directory()))
-    notice = tr(L"Saved controller buttons were invalid and disabled. Configure them in Setup > Taxi cameras.");
+    notice = tr(L"Saved controller buttons were invalid and disabled. Configure them in Aircraft > Taxi cameras.");
   button_draft = button_saved;
   INITCOMMONCONTROLSEX common{sizeof(common), ICC_STANDARD_CLASSES | ICC_HOTKEY_CLASS | ICC_BAR_CLASSES};
   InitCommonControlsEx(&common);

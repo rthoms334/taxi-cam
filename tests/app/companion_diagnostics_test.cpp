@@ -471,8 +471,9 @@ void autosave_setup_tests() {
   RemoveDirectoryW((win::settings_override + L"\\profiles\\discovered").c_str());
 }
 }  // namespace
-// The redesign's own controls: Options' brightness sliders and switches, and
-// the tray flyout's rows. Everything is put back for the cases after it.
+// The redesign's own controls: Picture's brightness sliders, Options'
+// switches, and the tray flyout's rows. Everything is put back for the cases
+// after it.
 void redesign_controls_tests() {
   const auto saved = current;
   const auto saved_notice = notice;
@@ -480,12 +481,19 @@ void redesign_controls_tests() {
   current.profile = profiles::A359.id;
   current.auto_profile = 0;
   current.follow_taxi = 1;
-  page = OptionsPage;
-  build_controls();
+  // Every page has the four places in its header; Home has no way back to need.
+  require(GetDlgItem(window, 100 + OverviewPage) && GetDlgItem(window, 100 + CamerasPage) && GetDlgItem(window, 100 + PreferencesPage) &&
+              GetDlgItem(window, 100 + DiagnosticsPage) && GetDlgItem(window, 602),
+          "The header has Home, Aircraft, Options, Help and the menu");
+  command(100 + CamerasPage);
+  require(page == SetupPage && GetDlgItem(window, StepPillId) && GetDlgItem(window, 100 + PicturePage) && GetDlgItem(window, AdvancedId) &&
+              !GetDlgItem(window, NextId) && !GetDlgItem(window, BackId) && GetDlgItem(window, 100 + OverviewPage),
+          "Aircraft opens Displays with its four sections; an aircraft with a setup has no Back or Next, and Home stays one click away");
+  command(100 + PicturePage);
   const HWND day = GetDlgItem(window, BrightnessSliderId);
-  require(day && GetDlgItem(window, BrightnessSliderId + 1) && GetDlgItem(window, NotificationsId) && GetDlgItem(window, LanguageId) &&
-              GetDlgItem(window, 240) && GetDlgItem(window, 230),
-          "Options has the brightness sliders, the app's switches and the language");
+  require(page == PicturePage && day && GetDlgItem(window, BrightnessSliderId + 1) && !GetDlgItem(window, 240) &&
+              !GetDlgItem(window, NotificationsId) && !GetDlgItem(window, AdvancedId),
+          "Picture is the aircraft's frame rate and brightness, without the app's switches");
   wchar_t label[64]{};
   SendMessageW(day, TBM_SETPOS, TRUE, 11);
   procedure(window, WM_HSCROLL, MAKEWPARAM(TB_THUMBPOSITION, 11), reinterpret_cast<LPARAM>(day));
@@ -496,27 +504,36 @@ void redesign_controls_tests() {
   SetDlgItemTextW(window, 202, L"+1.5");
   procedure(window, WM_COMMAND, MAKEWPARAM(202, EN_CHANGE), reinterpret_cast<LPARAM>(GetDlgItem(window, 202)));
   require(SendDlgItemMessageW(window, BrightnessSliderId + 1, TBM_GETPOS, 0, 0) == 22, "A typed brightness moves its slider");
-  // The switches beside them change without rebuilding the page, so an edit
-  // that has not been saved yet stays in its field.
+  SetDlgItemTextW(window, 201, L"+0.00");
+  SetDlgItemTextW(window, 202, L"+0.00");
+  // Options: the same for every aircraft. Its switches change their own
+  // label without rebuilding the page.
+  command(100 + PreferencesPage);
+  require(page == PreferencesPage && GetDlgItem(window, 240) && GetDlgItem(window, 230) && GetDlgItem(window, NotificationsId) &&
+              GetDlgItem(window, LanguageId) && GetDlgItem(window, UpdatesId) && !GetDlgItem(window, 201),
+          "Options has the app's switches, the language and the update check");
+  const HWND language = GetDlgItem(window, LanguageId);
   const auto notifications = current.notifications;
   command(NotificationsId);
-  GetDlgItemTextW(window, 201, label, 64);
-  wchar_t night[64]{};
-  GetDlgItemTextW(window, 202, night, 64);
-  require(current.notifications != notifications && std::wstring(label) == L"-1.25" && std::wstring(night) == L"+1.5",
-          "Show notifications toggles and keeps a pending brightness edit");
   GetDlgItemTextW(window, NotificationsId, label, 64);
-  require(std::wstring(label) == (current.notifications ? L"Show notifications: On" : L"Show notifications: Off"),
-          "The notifications switch says its new state");
+  require(current.notifications != notifications && GetDlgItem(window, LanguageId) == language &&
+              std::wstring(label) == (current.notifications ? L"Show notifications: On" : L"Show notifications: Off"),
+          "Show notifications toggles, says its new state and leaves the page's controls in place");
   command(NotificationsId);
   // Turning Auto-connect off asks for nothing; it is put back directly, since
   // turning it on would also ask for a connection.
   const bool connect = auto_connect.load();
   auto_connect.store(true);
   command(240);
-  GetDlgItemTextW(window, 201, label, 64);
-  require(!auto_connect.load() && std::wstring(label) == L"-1.25", "Auto-connect toggles and keeps a pending brightness edit");
+  GetDlgItemTextW(window, 240, label, 64);
+  require(!auto_connect.load() && GetDlgItem(window, LanguageId) == language && std::wstring(label) == L"Auto-connect: Off",
+          "Auto-connect toggles, says its new state and leaves the page's controls in place");
   auto_connect.store(connect);
+  // Help: what to do about a problem, beside the camera tests.
+  command(100 + DiagnosticsPage);
+  require(page == DiagnosticsPage && GetDlgItem(window, 512) && GetDlgItem(window, 510) && GetDlgItem(window, 229),
+          "Help has Report a bug, Open log folder and the camera tests");
+  command(100 + PicturePage);
   // The flyout: a row per display's cameras, then TAXI-button control, which
   // works with an unfinished value left in Settings.
   const auto rows = flyout_rows();

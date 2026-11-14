@@ -6,7 +6,7 @@
       "features": [
         {
           "title": "A new look for Taxi Cam",
-          "text": "Taxi Cam's window is redesigned. Overview is now your cockpit: a card for each display with its picture, its shortcut and one switch, with the aircraft and the connection along the top. The sidebar is gone, the window is smaller, and there is a new icon to match.",
+          "text": "Taxi Cam's window is redesigned around four places: Home, Aircraft, Options and Help. Home tells you in one sentence whether the cameras are working and what to do if they aren't, and has a card for each cockpit display with its picture, its shortcut and one switch. There is a new icon to match.",
           "image": "docs/whats-new/1.4.0/overview.png"
         },
         {
@@ -15,13 +15,13 @@
           "image": "docs/whats-new/1.4.0/tray-panel.png"
         },
         {
-          "title": "Options in one place",
-          "text": "Options opens from the button at the top right of Overview. Brightness has sliders beside the values you can type, and Auto-connect, Auto aircraft, notifications and the language are together under App. Diagnostics opens from the bottom of the page.",
+          "title": "Everything for your aircraft in one place",
+          "text": "Aircraft holds what is saved for the aircraft you have loaded: its Displays, Taxi cameras, Door camera and Picture (frame rate and brightness, which now has sliders). Open any of them in any order. An aircraft you set up for the first time is still taken through them step by step.",
           "image": "docs/whats-new/1.4.0/options.png"
         },
         {
-          "title": "Setup across the whole window",
-          "text": "Setup's three steps are along the top, with Back, Advanced and Next at the bottom. The camera pictures and the keyboard, controller and L:var fields have more room.",
+          "title": "Options and Help",
+          "text": "Options is now only what applies to every aircraft: Auto-connect, Auto aircraft, notifications, language and updates. Help replaces Diagnostics: it shows in plain words whether the simulator, cameras and displays are working, with Report a bug and the log folder beside it.",
           "image": "docs/whats-new/1.4.0/setup.png"
         }
       ],
