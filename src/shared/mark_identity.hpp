@@ -120,8 +120,10 @@ class PackageVerdict {
 // times in 86 minutes, 2026-11-08), and the page behind the new texture took
 // its marks down long ago. So the marks go up whenever a read texture goes,
 // and stay up HoldMs past the last one, the time its replacement takes to be
-// listed and read. A loss while the marks are up needs no show of its own,
-// and shows are at least GapMs apart however fast textures go.
+// listed and read. A loss while the marks are up for its panel needs no show
+// of its own, and shows from marks down are at least GapMs apart however fast
+// textures go; the caller asks at once for a loss on a panel the marks are
+// not up for (ReplacementTargets), by passing no last show.
 class ReplacementWatch {
  public:
   static constexpr std::uint64_t HoldMs = 5000, GapMs = 10000;
@@ -148,6 +150,28 @@ class ReplacementWatch {
  private:
   bool owed_ = false;
   std::uint64_t hold_until_ = 0;
+};
+
+// The pages a replacement's show is for: the panels of the read textures
+// lost since the marks last came down with no replacement waiting. Other
+// pages stay dark, so a panel Taxi Cam never reads shows no mark in flight.
+class ReplacementTargets {
+ public:
+  // panel: the lost texture's panel number, 0 when unknown.
+  void lost(unsigned panel) noexcept {
+    const auto bit = panel_marks::panel_bit(panel);
+    mask_ |= bit;
+    all_ = all_ || !bit;
+  }
+  // The mask to show, 0 for every page.
+  std::uint64_t mask() const noexcept { return all_ ? 0 : mask_; }
+  // Whether a show of that mask (0: every page) has these panels' marks up.
+  bool covered_by(std::uint64_t shown) const noexcept { return !shown || (!all_ && !(mask_ & ~shown)); }
+  void reset() noexcept { *this = {}; }
+
+ private:
+  std::uint64_t mask_ = 0;
+  bool all_ = false;
 };
 
 struct Gauge {

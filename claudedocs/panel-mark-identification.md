@@ -321,7 +321,9 @@ panel size.
   display the profile names is found, without waiting for the cockpit's other
   panel textures. Otherwise they stay up at most 20 s (`MarkShowMs`). A read
   texture being destroyed brings them back on any aircraft, found or not, and
-  holds them up 5 s past the last loss (`ReplacementWatch`): on 2026-11-08 the
+  holds them up 5 s past the last loss (`ReplacementWatch`), on the lost
+  textures' own panels only (`ReplacementTargets`, a targeted value of
+  `L:TAXICAM_MARKS`; issue 217, below): on 2026-11-08 the
   Fenix A320 recreated 59 display textures in 86 minutes of flight, and the
   list fell to none identified with 20 still present. Opening the companion's
   aircraft setup asks for them each time (the setup lists only read textures),
@@ -340,6 +342,33 @@ panel size.
 First live run (A350, 2026-11-04, prototype 1): bright 5–10 px blocks,
 centred, shown 2 min after load. The user found them far too visible and too
 long; this design is the answer.
+
+## Panels drawn on the screen (issue 217, 2026-11-14)
+
+The FlyByWire A380X and A320 have a panel with `texture = NO_TEXTURE` and
+`render_on_screen` (their popup, 640×360 at screen centre). Its page got a
+block like any other, over the outside view, each time the marks went up:
+15 times in a 49-minute A380X flight in the reporter's log, as the aircraft
+recreated the clock and PFD textures.
+
+The page cannot tell. Read live through the page debugger (Store, A380X,
+loading and in flight): the popup page has the same seven panel-data fields
+and the same four attributes (`quality`, `gamestate`, `gamepad`,
+`displayVCockpitFps`) with the same values as a PFD page, and its window is
+its panel size.
+
+**Choice: a replacement's show names its panels.** The bridge keeps each read
+texture's panel number and asks only the pages of the panels it lost
+(`panel_marks::targeted_show`). A panel Taxi Cam never read is never asked
+this way. Shows of every page remain at session start, when the aircraft
+setup opens, and for a camera on a side with no texture, so the popup's
+block can still appear then. An older helper takes a targeted value as a
+show of every page.
+
+Live (dev box, Store, A380X, 2026-11-14, a local build, about 7 minutes after
+the displays were found): one read texture was destroyed and the show named
+panel 7 only (`panels=0x40`); routing was kept. Not seen: a texture read
+again after a targeted show, a PFD or SD recreated, or what was on screen.
 
 ## Bridge detection path
 

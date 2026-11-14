@@ -6,7 +6,11 @@
 // simulation (HARD_SHOW_MS of any time) at the latest. Taxi Cam talks to the
 // pages through L:TAXICAM_MARKS: a new positive value means "read, take them
 // down", a new negative value "show them again" (a display texture it could
-// not read). 0 is ignored: a flight load may reset the L:var. The format is
+// not read). A negative value from TARGETED names the panels it is for, and
+// the other pages ignore it: a display replaced in flight brings back its own
+// panel's blocks only, not those of a panel drawn on the screen, which the
+// page cannot tell from a cockpit display (the FlyByWire popup panel). 0 is
+// ignored: a flight load may reset the L:var. The format is
 // src/shared/panel_marks.hpp;
 // keep the two in step. Never touches a gauge's top-left corner, and never
 // stops the page from loading: every step is guarded.
@@ -20,6 +24,9 @@
     var COLOURS = [0, 1, 2, 3, 4, 5, 6, 7].map(function (c) {
         return "rgb(" + (c & 4 ? LEVEL : 0) + "," + (c & 2 ? LEVEL : 0) + "," + (c & 1 ? LEVEL : 0) + ")";
     });
+    // A show for some panels: -(TARGETED + mask * TARGET_SERIALS + serial),
+    // mask bit n-1 for panel n (sName "VCockpit05" is 5), up to TARGET_PANELS.
+    var TARGETED = Math.pow(2, 52), TARGET_SERIALS = 16, TARGET_PANELS = 48;
     var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, IDLE_POLL_MS = 1000, START_MS = 500, MAX_SHOW_MS = 45000, HARD_SHOW_MS = 120000;
 
     function crc16(bytes) {
@@ -78,8 +85,20 @@
         }
         return { rows: rows, cells: cells };
     }
+    // Whether a show request (the magnitude of a negative value) is for the
+    // panel of that name. One that names no panels, or a page that cannot
+    // tell its number, is asked.
+    function asked(magnitude, name) {
+        if (!(magnitude >= TARGETED))
+            return true;
+        var digits = /\d+/.exec(String(name == null ? "" : name)), panel = digits ? parseInt(digits[0], 10) : 0;
+        if (!(panel >= 1 && panel <= TARGET_PANELS))
+            return true;
+        var mask = Math.floor((magnitude - TARGETED) / TARGET_SERIALS);
+        return Math.floor(mask / Math.pow(2, panel - 1)) % 2 === 1;
+    }
     if (typeof module !== "undefined" && module.exports) {
-        module.exports = { encodePayload: encodePayload, encodeCells: encodeCells, crc16: crc16 };
+        module.exports = { encodePayload: encodePayload, encodeCells: encodeCells, crc16: crc16, asked: asked };
         return;
     }
 
@@ -217,9 +236,10 @@
             baseline = value;
         else if (value && value !== baseline) {
             baseline = value;
+            var data = panelData();
             if (value > 0)
                 hide();
-            else
+            else if (asked(-value, data && data.sName))
                 show();
         }
         if (showing) {

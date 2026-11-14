@@ -217,6 +217,46 @@ int main() {
   served.reset();
   require(!served.pending(10003), "a new session starts clean");
 
+  // A replacement's show names its panel's page only: the marks of a panel
+  // drawn on the screen must not come back with every replaced display
+  // (FlyByWire A380X popup panel, issue 217).
+  using panel_marks::kTargetedBase;
+  using panel_marks::panel_bit;
+  using panel_marks::targeted_show;
+  ReplacementTargets targets;
+  require(targets.mask() == 0 && targets.covered_by(0) && targets.covered_by(panel_bit(5)), "nothing lost: any show covers it");
+  targets.lost(5);
+  targets.lost(10);
+  require(targets.mask() == (panel_bit(5) | panel_bit(10)), "the lost panels' pages are asked");
+  require(targets.covered_by(0) && targets.covered_by(panel_bit(5) | panel_bit(10) | panel_bit(22)),
+          "served by a show of every page, or of more panels");
+  require(!targets.covered_by(panel_bit(5)), "marks up for another panel do not serve the loss");
+  targets.lost(0);
+  require(targets.mask() == 0 && !targets.covered_by(panel_bit(5) | panel_bit(10)) && targets.covered_by(0),
+          "a texture with no panel number asks every page");
+  targets.reset();
+  targets.lost(49);
+  require(targets.mask() == 0, "a panel beyond the mask asks every page");
+  targets.reset();
+  require(targets.mask() == 0 && targets.covered_by(panel_bit(1)), "reset");
+  require(panel_bit(1) == 1 && panel_bit(48) == 1ull << 47 && !panel_bit(0) && !panel_bit(49), "panel bits");
+  // The value: told apart from a show of every page (below 1e9 + 2), exact in
+  // a double, and new each time for the same panels.
+  require(targeted_show(panel_bit(5), 3) == kTargetedBase + 16 * 16 + 3, "the targeted value's layout");
+  require(
+      targeted_show(panel_bit(5), 3) != targeted_show(panel_bit(5), 4) && targeted_show(panel_bit(5), 16) == targeted_show(panel_bit(5), 0),
+      "a new value for each show");
+  const auto largest = targeted_show(~0ull, 15);
+  require(largest < (1ull << 53) && static_cast<std::uint64_t>(static_cast<double>(largest)) == largest, "exact in the L:var's double");
+  // A loss with marks up for other panels is owed its own show, at once.
+  ReplacementWatch other;
+  other.lost(10000, false);
+  other.shown(10000);
+  other.lost(11000, false);
+  require(other.due(11000, false, 0), "not held back by the gap between shows");
+  other.shown(11000);
+  require(!other.due(11001, true, 0) && other.pending(11000 + hold - 1), "then served and held like any loss");
+
   std::printf("mark-identity: %u checks passed\n", checks);
   return 0;
 }
