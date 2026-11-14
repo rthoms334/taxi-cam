@@ -1,12 +1,13 @@
 #pragma once
 
 #include "../camera/probe.hpp"
+#include "../shared/status_messages.hpp"
 
 namespace taxi_camera {
 
 inline const char* camera_transition_message(const native_camera::ProbeSnapshot& scene) noexcept {
   if (scene.profile_transition_failed)
-    return "Aircraft change paused: camera lifecycle validation failed. Restart MSFS to retry.";
+    return standalone::TransitionFailedMessage;
   if (!scene.pair.owned_ids[0] && !scene.pair.owned_ids[1])
     return "Waiting for pending camera startup to finish before changing aircraft profile.";
   return "Closing and validating retained camera views for the aircraft profile.";
@@ -16,8 +17,11 @@ inline const char* camera_transition_message(const native_camera::ProbeSnapshot&
 // one (its token moved on) while the flight stayed loaded: it retired a kept
 // pair it could not resize or revalidate, or latched a session reset. The
 // bridge has already requested its cameras, so it waits for that transition
-// like its own and requests them again. A flight change (loading, or a new
-// session epoch) keeps its own transition path.
+// like its own and requests them again. The same while the bridge still
+// waits on a transition it requested (applied_token is then that request's):
+// a kept pair refused before its resume takes the reset too, and the token
+// the bridge waits on is never acknowledged. A flight change (loading, or a
+// new session epoch) keeps its own transition path.
 inline bool camera_manager_transition(std::uint64_t applied_token,
                                       const native_camera::ProbeSnapshot& scene,
                                       bool session_unchanged) noexcept {

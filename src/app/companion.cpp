@@ -22,6 +22,7 @@
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/display_snapshot.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/status_messages.hpp"
 #include "../shared/sim_messages.hpp"
 #include "settings_store.hpp"
 #include "startup_state.hpp"
@@ -6814,7 +6815,10 @@ void draw_page(HDC dc) {
          : unsupported || (sample.graphics_ready && has_displays) ? Accent
                                                                   : Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
+    // A change that cannot finish lists no displays either: the bridge's own
+    // line says so, where "waiting for displays" would hide it (issue 202).
+    const bool change_paused = sample.heartbeat && !std::strcmp(sample.message, win::TransitionFailedMessage);
+    const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported && !change_paused;
     // Two lines at most in this box: the alert and Displays give the rest.
     const auto line = inactive && package_conflict()
                           ? std::wstring(tr(L"Another add-on's cockpit page stops Taxi Cam recognising your displays."))
@@ -6825,9 +6829,9 @@ void draw_page(HDC dc) {
                                          : live;
     // Left of Auto-connect and Disconnect (686-992), as the heading is.
     text(dc, line.c_str(), 262, 166, 410, 36, small,
-         inactive          ? Amber
-         : late_empty_pfds ? Accent
-                           : Muted,
+         inactive || change_paused ? Amber
+         : late_empty_pfds         ? Accent
+                                   : Muted,
          DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
     panel(dc, 244, 222, 766, 84);
     text(dc, tr(L"Setup"), 262, 230, 120, 26, heading);
