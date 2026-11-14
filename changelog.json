@@ -3,6 +3,13 @@
     {
       "version": "1.3.5",
       "date": "2026-11-14",
+      "features": [
+        {
+          "title": "A fresh look",
+          "text": "Settings has a cleaner look: smoother shapes, a sidebar with an icon for each page, and switches in place of the On and Off buttons. Buttons light up under the pointer. Everything is where it was.",
+          "image": "docs/whats-new/1.3.5/new-look.png"
+        }
+      ],
       "fixes": [
         "Fixed a cause of the cameras staying off after you change aircraft while another tool that hooks the simulator's graphics, such as GlassOut, is running. If Taxi Cam does lose its connection to the simulator's graphics, its log now says why.",
         "When Taxi Cam can't keep its cameras through a display change in Setup, it now replaces them instead of leaving them stopped until you restart the simulator.",
