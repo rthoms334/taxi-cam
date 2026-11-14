@@ -1122,7 +1122,7 @@ std::wstring preview_notes_root() {
 // pictures, fetched one at a time from the repository while the window is
 // open; a picture that cannot be loaded is left out.
 constexpr wchar_t WhatsNewClass[] = L"TaxiCamWhatsNew";
-constexpr int WhatsNewWidth = 760, WhatsNewHeight = 720, WhatsNewBar = 68, WhatsNewPad = 28, WhatsNewCardPad = 18;
+constexpr int WhatsNewWidth = 880, WhatsNewHeight = 720, WhatsNewBar = 68, WhatsNewPad = 28, WhatsNewCardPad = 18;
 struct WhatsNewPicture {
   std::string path;
   HBITMAP bitmap{};
@@ -1167,86 +1167,117 @@ int layout_whats_new(HWND hwnd, HDC dc, bool draw) {
       return;
     round_box(dc, {x, top + shift, x + w, top + shift + h}, radius / 2, fill, line, scale(1));
   };
-  for (const auto& b : v.blocks) {
-    using Kind = win::WhatsNewBlock::Kind;
+  const auto rule = [&](int x, int top, int w) {
+    if (!draw)
+      return;
+    RECT line{x, top + shift, x + w, top + shift + std::max(1, scale(1))};
+    HBRUSH b = CreateSolidBrush(Border);
+    FillRect(dc, &line, b);
+    DeleteObject(b);
+  };
+  using Kind = win::WhatsNewBlock::Kind;
+  const int pad = scale(WhatsNewCardPad), indent = scale(22);
+  for (std::size_t index = 0; index < v.blocks.size(); ++index) {
+    const auto& b = v.blocks[index];
     // Headings and notes around the release notes are interface wording.
     const auto label = b.wording ? tr_format(b.wording, {b.value}) : b.text;
     if (b.kind == Kind::heading) {
-      put(tr(L"WHAT'S NEW"), small, Accent, left, y, width, scale(18), DT_SINGLELINE);
-      y += scale(22);
-      const int h = measure(label, title_font, width);
-      put(label, title_font, Text, left, y, width, h);
+      // The app's icon, then the version over its date.
+      const int mark = scale(48), x = left + mark + scale(16), w = width - mark - scale(16);
+      if (draw)
+        DrawIconEx(dc, left, y + shift + scale(4), icon, mark, mark, 0, nullptr, DI_NORMAL);
+      put(tr(L"WHAT'S NEW"), small, Muted, x, y, w, scale(18), DT_SINGLELINE);
+      y += scale(18);
+      const int h = measure(label, title_font, w);
+      put(label, title_font, Text, x, y, w, h);
       y += h;
       if (!b.detail.empty()) {
-        put(b.detail, normal, Muted, left, y, width, scale(22), DT_SINGLELINE);
-        y += scale(22);
+        put(b.detail, small, Muted, x, y, w, scale(20), DT_SINGLELINE);
+        y += scale(20);
       }
-      y += scale(6);
+      y = std::max(y, scale(26) + mark + scale(8));
     } else if (b.kind == Kind::section) {
-      y += scale(20);
+      y += scale(22);
       const int h = measure(label, heading, width);
-      put(label, heading, Accent, left, y, width, h);
+      put(label, heading, Text, left, y, width, h);
       y += h + scale(10);
     } else if (b.kind == Kind::feature) {
-      // A card: title, text, then the picture at the card's width.
+      // A card: the picture across it, then the title and text.
       const int title_h = measure(label, heading, inner), text_h = measure(b.detail, normal, inner);
       const WhatsNewPicture* picture{};
       for (const auto& candidate : v.pictures)
         if (!b.image.empty() && candidate.path == b.image)
           picture = &candidate;
       const int picture_h = !picture || picture->failed ? 0 : picture->bitmap ? picture->height : inner * 9 / 16;
-      const int card_h = 2 * scale(WhatsNewCardPad) + title_h + scale(6) + text_h + (picture_h ? scale(16) + picture_h : 0);
-      box(left, y, width, card_h, Card, Border, scale(14));
-      int top = y + scale(WhatsNewCardPad);
-      const int x = left + scale(WhatsNewCardPad);
-      put(label, heading, Text, x, top, inner, title_h);
-      top += title_h + scale(6);
-      put(b.detail, normal, Muted, x, top, inner, text_h);
-      top += text_h + scale(16);
-      if (picture_h && draw) {
-        if (picture->bitmap) {
-          // Centred, with a hairline frame so dark screenshots keep an edge.
-          const int px = x + (inner - picture->width) / 2;
+      const int card_h = 2 * pad + (picture_h ? picture_h + scale(14) : 0) + title_h + scale(4) + text_h;
+      box(left, y, width, card_h, Card, Border, scale(24));
+      int top = y + pad;
+      const int x = left + pad;
+      if (picture_h) {
+        if (draw && picture->bitmap) {
+          // Centred, its corners rounded like the card's, with a hairline so
+          // dark screenshots keep an edge.
+          const int px = x + (inner - picture->width) / 2, radius = scale(8);
+          const RECT frame{px, top + shift, px + picture->width, top + shift + picture->height};
+          const int saved = SaveDC(dc);
+          HRGN clip = CreateRoundRectRgn(frame.left, frame.top, frame.right + 1, frame.bottom + 1, radius * 2, radius * 2);
+          ExtSelectClipRgn(dc, clip, RGN_AND);
           HDC memory = CreateCompatibleDC(dc);
           const auto old = SelectObject(memory, picture->bitmap);
-          BitBlt(dc, px, top + shift, picture->width, picture->height, memory, 0, 0, SRCCOPY);
+          BitBlt(dc, frame.left, frame.top, picture->width, picture->height, memory, 0, 0, SRCCOPY);
           SelectObject(memory, old);
           DeleteDC(memory);
-          HPEN pen = CreatePen(PS_SOLID, scale(1), Border);
-          const auto old_pen = SelectObject(dc, pen), old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-          Rectangle(dc, px, top + shift, px + picture->width, top + shift + picture->height);
-          SelectObject(dc, old_pen);
-          SelectObject(dc, old_brush);
-          DeleteObject(pen);
-        } else {
-          box(x, top, inner, picture_h, Well, Border, scale(8));
+          RestoreDC(dc, saved);
+          DeleteObject(clip);
+          round_box(dc, frame, radius, NoColor, BorderStrong, scale(1));
+        } else if (draw) {
+          box(x, top, inner, picture_h, Well, Border, scale(16));
           put(tr(L"Loading picture…"), small, Muted, x, top, inner, picture_h, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        top += picture_h + scale(14);
+      }
+      put(label, heading, Text, x, top, inner, title_h);
+      top += title_h + scale(4);
+      put(b.detail, normal, Muted, x, top, inner, text_h);
+      y += card_h + scale(14);
+    } else if (b.kind == Kind::bullet) {
+      // A run of fixes or changes is one card, a row each, ruled apart.
+      std::size_t last = index;
+      while (last + 1 < v.blocks.size() && v.blocks[last + 1].kind == Kind::bullet)
+        ++last;
+      const int row_w = inner - indent, gap = scale(12);
+      int card_h = gap;
+      for (std::size_t k = index; k <= last; ++k)
+        card_h += measure(v.blocks[k].wording ? tr_format(v.blocks[k].wording, {v.blocks[k].value}) : v.blocks[k].text, normal, row_w) +
+                  2 * gap + (k < last ? std::max(1, scale(1)) : 0);
+      card_h -= gap;
+      box(left, y, width, card_h, Card, Border, scale(24));
+      int top = y;
+      for (std::size_t k = index; k <= last; ++k) {
+        const auto row = v.blocks[k].wording ? tr_format(v.blocks[k].wording, {v.blocks[k].value}) : v.blocks[k].text;
+        const int h = measure(row, normal, row_w);
+        top += gap;
+        if (draw)
+          disc(dc, left + pad + scale(4), top + shift + scale(10), scale(3), Accent);
+        put(row, normal, Text, left + pad + indent, top, row_w, h);
+        top += h + gap;
+        if (k < last) {
+          rule(left + pad, top, inner);
+          top += std::max(1, scale(1));
         }
       }
       y += card_h + scale(14);
-    } else if (b.kind == Kind::bullet) {
-      const int indent = scale(20), h = measure(label, normal, width - indent);
-      if (draw) {
-        HBRUSH dot = CreateSolidBrush(Accent);
-        const auto old_brush = SelectObject(dc, dot), old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
-        const int cx = left + scale(6), cy = y + shift + scale(10), r = scale(3);
-        Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
-        SelectObject(dc, old_brush);
-        SelectObject(dc, old_pen);
-        DeleteObject(dot);
-      }
-      put(label, normal, Text, left + indent, y, width - indent, h);
-      y += h + scale(8);
+      index = last;
     } else if (b.kind == Kind::release) {
-      y += scale(12);
+      y += scale(14);
       put(label, heading, Text, left, y, width, scale(26), DT_SINGLELINE);
       if (!b.detail.empty()) {
         RECT title{0, 0, width, 0};
         SelectObject(dc, heading);
         DrawTextW(dc, label.c_str(), -1, &title, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-        put(b.detail, normal, Muted, left + title.right + scale(12), y + scale(3), width, scale(24), DT_SINGLELINE);
+        put(b.detail, small, Muted, left + title.right + scale(12), y + scale(4), width, scale(22), DT_SINGLELINE);
       }
-      y += scale(32);
+      y += scale(34);
     } else {
       const int h = measure(label, normal, width);
       put(label, normal, Muted, left, y, width, h);
@@ -1302,9 +1333,7 @@ LRESULT CALLBACK whats_new_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
       layout_whats_new(hwnd, memory, true);
       RestoreDC(memory, -1);
       RECT strip{0, bar, client.right, client.bottom};
-      HBRUSH fill = CreateSolidBrush(Well);
-      FillRect(memory, &strip, fill);
-      DeleteObject(fill);
+      FillRect(memory, &strip, background_brush);
       RECT line{0, bar, client.right, bar + scale(1)};
       HBRUSH edge = CreateSolidBrush(Border);
       FillRect(memory, &line, edge);
@@ -1312,7 +1341,7 @@ LRESULT CALLBACK whats_new_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l
       v.close = {client.right - scale(WhatsNewPad) - scale(120), bar + scale(16), client.right - scale(WhatsNewPad), bar + scale(52)};
       ButtonLook close_look;
       close_look.primary = true;
-      button_box(memory, v.close, close_look, Well);
+      button_box(memory, v.close, close_look, Background);
       SelectObject(memory, normal);
       SetTextColor(memory, button_text(close_look));
       SetBkMode(memory, TRANSPARENT);
