@@ -5,7 +5,7 @@
 # border, and inside it, clear of the border, a hold-short marking.
 #
 # - Up to 32 px: a stop bar (a dashed line over a solid one) and the taxiway
-#   centre line leading up to it. No lettering.
+#   centre line running up the tile to meet it. No lettering.
 # - 40 and 48 px: the stop bar over TAXI.
 # - 64 px and up: the full marking (two dashed lines over two solid ones) over TAXI.
 #
@@ -84,9 +84,9 @@ def draw(size):
     marking_bottom = y - gap
 
     if glyph:
-        # The centre line, from the bottom of the content up to the stop bar.
+        # The taxiway's centre line, running up the tile and meeting the stop bar.
         line = 2 if size <= 24 else 4
-        rect(size // 2 - line // 2, marking_bottom + gap, size // 2 + line // 2, x1)
+        rect(size // 2 - line // 2, marking_bottom, size // 2 + line // 2, size - b)
     else:
         # TAXI, as tall as fits under the marking and across the content.
         room = x1 - (marking_bottom + gap)

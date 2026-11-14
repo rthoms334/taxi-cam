@@ -471,6 +471,83 @@ void autosave_setup_tests() {
   RemoveDirectoryW((win::settings_override + L"\\profiles\\discovered").c_str());
 }
 }  // namespace
+// The redesign's own controls: Options' brightness sliders and switches, and
+// the tray flyout's rows. Everything is put back for the cases after it.
+void redesign_controls_tests() {
+  const auto saved = current;
+  const auto saved_notice = notice;
+  const int saved_page = page;
+  current.profile = profiles::A359.id;
+  current.auto_profile = 0;
+  current.follow_taxi = 1;
+  page = OptionsPage;
+  build_controls();
+  const HWND day = GetDlgItem(window, BrightnessSliderId);
+  require(day && GetDlgItem(window, BrightnessSliderId + 1) && GetDlgItem(window, NotificationsId) && GetDlgItem(window, LanguageId) &&
+              GetDlgItem(window, 240) && GetDlgItem(window, 230),
+          "Options has the brightness sliders, the app's switches and the language");
+  wchar_t label[64]{};
+  SendMessageW(day, TBM_SETPOS, TRUE, 11);
+  procedure(window, WM_HSCROLL, MAKEWPARAM(TB_THUMBPOSITION, 11), reinterpret_cast<LPARAM>(day));
+  GetDlgItemTextW(window, 201, label, 64);
+  auto edited = current;
+  require(std::wstring(label) == L"-1.25" && read_fields(edited) && edited.day_brightness == -1.25f,
+          "A brightness slider writes a quarter-EV value the page reads");
+  SetDlgItemTextW(window, 202, L"+1.5");
+  procedure(window, WM_COMMAND, MAKEWPARAM(202, EN_CHANGE), reinterpret_cast<LPARAM>(GetDlgItem(window, 202)));
+  require(SendDlgItemMessageW(window, BrightnessSliderId + 1, TBM_GETPOS, 0, 0) == 22, "A typed brightness moves its slider");
+  // The switches beside them change without rebuilding the page, so an edit
+  // that has not been saved yet stays in its field.
+  const auto notifications = current.notifications;
+  command(NotificationsId);
+  GetDlgItemTextW(window, 201, label, 64);
+  wchar_t night[64]{};
+  GetDlgItemTextW(window, 202, night, 64);
+  require(current.notifications != notifications && std::wstring(label) == L"-1.25" && std::wstring(night) == L"+1.5",
+          "Show notifications toggles and keeps a pending brightness edit");
+  GetDlgItemTextW(window, NotificationsId, label, 64);
+  require(std::wstring(label) == (current.notifications ? L"Show notifications: On" : L"Show notifications: Off"),
+          "The notifications switch says its new state");
+  command(NotificationsId);
+  // Turning Auto-connect off asks for nothing; it is put back directly, since
+  // turning it on would also ask for a connection.
+  const bool connect = auto_connect.load();
+  auto_connect.store(true);
+  command(240);
+  GetDlgItemTextW(window, 201, label, 64);
+  require(!auto_connect.load() && std::wstring(label) == L"-1.25", "Auto-connect toggles and keeps a pending brightness edit");
+  auto_connect.store(connect);
+  // The flyout: a row per display's cameras, then TAXI-button control, which
+  // works with an unfinished value left in Settings.
+  const auto rows = flyout_rows();
+  require(rows.size() == profiles::A359.sides + (current.door_side < MaxDisplaySides ? 1u : 0u) + 1u &&
+              rows.back().action == FlyoutFollow && rows.back().on && rows.back().enabled,
+          "The flyout lists each display, the door camera where it has a display, and TAXI-button control");
+  SetDlgItemTextW(window, 201, L"abc");
+  const HDC dc = CreateCompatibleDC(nullptr);
+  const HBITMAP bitmap = CreateBitmap(FlyoutWidth, flyout_height(rows.size()), 1, 32, nullptr);
+  const auto old_bitmap = SelectObject(dc, bitmap);
+  const RECT client{0, 0, FlyoutWidth, flyout_height(rows.size())};
+  paint_flyout(dc, client);
+  SelectObject(dc, old_bitmap);
+  DeleteObject(bitmap);
+  DeleteDC(dc);
+  const auto follow = std::find_if(flyout_items.begin(), flyout_items.end(), [](const auto& item) { return item.action == FlyoutFollow; });
+  require(follow != flyout_items.end() && flyout_items.size() == rows.size() + 2, "The flyout's rows and its two buttons can be clicked");
+  const HWND stand_in = CreateWindowW(L"STATIC", L"", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, instance, nullptr);
+  const POINT centre{(follow->bounds.left + follow->bounds.right) / 2, (follow->bounds.top + follow->bounds.bottom) / 2};
+  flyout_procedure(stand_in, WM_LBUTTONUP, 0, MAKELPARAM(centre.x, centre.y));
+  require(!current.follow_taxi, "The flyout's TAXI row turns TAXI-button control off with an unfinished value in Settings");
+  flyout_procedure(stand_in, WM_LBUTTONUP, 0, MAKELPARAM(centre.x, centre.y));
+  require(current.follow_taxi && current.manual_mask == 0, "and on again, clearing manual cameras");
+  DestroyWindow(stand_in);
+  current = saved;
+  notice = saved_notice;
+  dirty = false;
+  autosave_due = 0;
+  page = saved_page;
+  build_controls();
+}
 int main() {
   try {
     instance = GetModuleHandleW(nullptr);
@@ -493,6 +570,7 @@ int main() {
     current.auto_profile = 0;
     page = 0;
     build_controls();
+    redesign_controls_tests();
     wchar_t connection_label[96]{};
     GetDlgItemTextW(window, 241, connection_label, 96);
     require(GetDlgItem(window, 241) && !GetDlgItem(window, 220) && !GetDlgItem(window, 242) && std::wstring(connection_label) == L"Connect",

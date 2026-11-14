@@ -6938,6 +6938,9 @@ void toggle_notifications() {
   publish(s);
   if (!win::save_settings(draft()))
     notice = tr(L"Could not save settings. Check access to your local settings folder.");
+  // Options' switch, where it is shown.
+  if (GetDlgItem(window, NotificationsId))
+    SetDlgItemTextW(window, NotificationsId, switch_label(tr(L"Show notifications"), s.notifications).c_str());
   InvalidateRect(window, nullptr, FALSE);
 }
 void choose_language(const wchar_t* preference) {
@@ -7040,7 +7043,10 @@ void draw_page(HDC dc) {
     // happening when that is more than the header's few words, and
     // otherwise what selecting a display does.
     text(dc, tr(L"Cockpit displays"), PageLeft, 68, PageWidth, 32, title_font);
-    const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported;
+    // A change that cannot finish lists no displays either: the bridge's own
+    // line says so, where "waiting for displays" would hide it (issue 202).
+    const bool change_paused = sample.heartbeat && !std::strcmp(sample.message, win::TransitionFailedMessage);
+    const bool late_empty_pfds = sample.graphics_ready && !has_displays && !unsupported && !change_paused;
     const auto line = inactive && package_conflict()
                           ? std::wstring(tr(L"Another add-on's cockpit page stops Taxi Cam recognising your displays."))
                       : inactive ? std::wstring(tr(L"Display package not active. Restart the simulator, or run the installer again."))
@@ -7048,11 +7054,12 @@ void draw_page(HDC dc) {
                                                            L"Restart Flight only if the list stays empty."))
                       : sample.heartbeat ? widen(sample.message)
                                          : live;
-    const bool plain = !inactive && !late_empty_pfds && (line.empty() || line == tr(L"Waiting for Microsoft Flight Simulator 2024"));
+    const bool plain =
+        !inactive && !late_empty_pfds && !change_paused && (line.empty() || line == tr(L"Waiting for Microsoft Flight Simulator 2024"));
     text(dc, plain ? tr(L"Select one to change it in Displays.") : line.c_str(), PageLeft, 100, PageWidth, 22, small,
-         inactive          ? Warning
-         : late_empty_pfds ? Accent
-                           : Muted,
+         inactive || change_paused ? Warning
+         : late_empty_pfds         ? Accent
+                                   : Muted,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     draw_display_strip(dc, sample);
     // In flight: the switches (build_controls), and the door camera's name
@@ -7809,6 +7816,7 @@ struct FlyoutItem {
   int action{};
 };
 HWND flyout{};
+ULONGLONG flyout_closed{};  // When it last closed by losing the foreground.
 std::vector<FlyoutItem> flyout_items;
 int flyout_hot = -1;
 std::vector<FlyoutRow> flyout_rows() {
@@ -7916,6 +7924,27 @@ void paint_flyout(HDC dc, const RECT& client) {
   FrameRect(dc, &client, edge);
   DeleteObject(edge);
 }
+// TAXI-button control from the flyout, as a shortcut would change it: the
+// draft is published and saved by autosave, without reading Settings'
+// fields (an unfinished value there must not stop it) or rebuilding its page.
+void toggle_follow_taxi() {
+  sync_aircraft_session();
+  auto s = draft();
+  const auto* profile = profiles::find(s.profile);
+  if (profile && profile->taxi_control == profiles::TaxiControl::manual_only)
+    return;
+  s.follow_taxi = !s.follow_taxi;
+  if (s.follow_taxi) {
+    s.manual_mask = 0;
+    s.calibration_mask = 0;
+  }
+  publish(s);
+  dirty_notice();
+  refresh_side_toggles(s);
+  if (GetDlgItem(window, 221))
+    SetDlgItemTextW(window, 221, switch_label(pmdg_cam_control(s) ? tr(L"CAM button") : tr(L"TAXI buttons"), s.follow_taxi).c_str());
+  InvalidateRect(window, nullptr, FALSE);
+}
 int flyout_item_at(POINT point) {
   for (size_t i = 0; i < flyout_items.size(); ++i)
     if (PtInRect(&flyout_items[i].bounds, point))
@@ -7975,9 +8004,9 @@ LRESULT CALLBACK flyout_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         DestroyWindow(hwnd);
         PostMessageW(window, WM_CLOSE, 1, 0);
       } else {
-        // As the shortcuts and Overview's switches do; nothing here needs Settings open.
+        // As the shortcuts do: neither applies nor rebuilds what Settings shows.
         if (action == FlyoutFollow)
-          SendMessageW(window, WM_COMMAND, 221, 0);
+          toggle_follow_taxi();
         else
           toggle_camera_from_hotkey(static_cast<unsigned>(action));
         if (IsWindow(hwnd))
@@ -7990,8 +8019,11 @@ LRESULT CALLBACK flyout_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         DestroyWindow(hwnd);
       return 0;
     case WM_ACTIVATE:
-      if (LOWORD(w) == WA_INACTIVE)
+      if (LOWORD(w) == WA_INACTIVE) {
+        // The click that takes the foreground away may be on the tray icon.
+        flyout_closed = GetTickCount64();
         DestroyWindow(hwnd);
+      }
       return 0;
     case WM_DESTROY:
       if (flyout == hwnd)
@@ -8008,6 +8040,10 @@ void open_flyout() {
     DestroyWindow(flyout);
     return;
   }
+  // Pressing the tray icon already closed it (the taskbar took the
+  // foreground): that same click must not open it again.
+  if (GetTickCount64() - flyout_closed < 400)
+    return;
   static const bool registered = [] {
     WNDCLASSEXW type{};
     type.cbSize = sizeof(type);
@@ -8306,6 +8342,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case WM_HSCROLL:
       if (l && reinterpret_cast<HWND>(l) == GetDlgItem(hwnd, CameraTargetId)) {
         InvalidateRect(GetDlgItem(hwnd, CameraModeCardId + static_cast<int>(CameraMode::custom)), nullptr, FALSE);
+        InvalidateRect(reinterpret_cast<HWND>(l), nullptr, FALSE);  // The fill up to the thumb.
         InvalidateRect(hwnd, nullptr, FALSE);
         dirty_notice();
         return 0;
@@ -8317,6 +8354,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           wchar_t value[16];
           std::swprintf(value, 16, L"%+.2f", (static_cast<int>(SendMessageW(reinterpret_cast<HWND>(l), TBM_GETPOS, 0, 0)) - 16) / 4.);
           SetDlgItemTextW(hwnd, 201 + i, value);
+          InvalidateRect(reinterpret_cast<HWND>(l), nullptr, FALSE);
           return 0;
         }
       break;
@@ -8546,8 +8584,22 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       service_thumbnails();
       if (shortcut_window == window)
         refresh_lvar_status(window);
-      if (flyout)
+      if (flyout) {
+        // Its rows follow the aircraft: keep its height to them, growing
+        // away from the edge of the screen it opened at.
+        RECT bounds{};
+        GetWindowRect(flyout, &bounds);
+        const int height = scale(flyout_height(flyout_rows().size()));
+        if (height != bounds.bottom - bounds.top) {
+          MONITORINFO monitor{};
+          monitor.cbSize = sizeof(monitor);
+          GetMonitorInfoW(MonitorFromWindow(flyout, MONITOR_DEFAULTTONEAREST), &monitor);
+          const bool low = bounds.top > (monitor.rcWork.top + monitor.rcWork.bottom) / 2;
+          SetWindowPos(flyout, nullptr, bounds.left, low ? bounds.bottom - height : bounds.top, bounds.right - bounds.left, height,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         InvalidateRect(flyout, nullptr, FALSE);
+      }
       if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
         InvalidateRect(hwnd, nullptr, FALSE);
         invalidate_camera_mode_cards();
@@ -8613,8 +8665,6 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           check_updates(true);
         if (selected == 605) {
           toggle_notifications();
-          if (page == OptionsPage)
-            build_controls();
         }
         if (selected >= LanguageMenuId && selected <= LanguageMenuId + std::size(win::UiLanguages))
           choose_language(selected == LanguageMenuId ? L"" : win::UiLanguages[selected - LanguageMenuId - 1].tag);
@@ -8773,16 +8823,19 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           GetDlgItemTextW(hwnd, id, value, 40);
           wchar_t* end{};
           const double typed = std::wcstod(value, &end);
-          if (end != value && std::isfinite(typed))
+          if (end != value && std::isfinite(typed)) {
             SendDlgItemMessageW(hwnd, BrightnessSliderId + id - 201, TBM_SETPOS, TRUE,
                                 std::clamp(static_cast<int>(std::lround(typed * 4)) + 16, 0, 24));
+            InvalidateRect(GetDlgItem(hwnd, BrightnessSliderId + id - 201), nullptr, FALSE);
+          }
         }
         dirty_notice();
         return 0;
       }
       if (id == NotificationsId) {
+        // Only its own label changes: rebuilding the page would drop a
+        // brightness or frame-rate edit that has not been saved yet.
         toggle_notifications();
-        build_controls();
         return 0;
       }
       if (id == LanguageId) {
@@ -8901,9 +8954,14 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         else
           notice = next ? tr(L"Auto-connect on. Taxi Cam will connect when the simulator is available.")
                         : tr(L"Auto-connect off. Use Connect whenever you are ready, including in a loaded flight.");
+        SetDlgItemTextW(hwnd, 240, switch_label(tr(L"Auto-connect"), next).c_str());
+        InvalidateRect(hwnd, nullptr, FALSE);
         if (next)
           request_connection(win::ConnectCommand::connect);
-        build_controls();
+        // Options keeps its fields: only this switch's label changed, and a
+        // rebuild would drop an edit there that has not been saved yet.
+        if (page != OptionsPage)
+          build_controls();
         return 0;
       }
       if (id == 241) {

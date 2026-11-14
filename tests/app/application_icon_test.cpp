@@ -87,6 +87,14 @@ void render(HICON icon, int size, const std::wstring& destination) {
     hold_short_left += yellow && inside && y < size / 2 && x < size / 3;
     hold_short_right += yellow && inside && y < size / 2 && x >= size * 2 / 3;
   }
+  // The border: yellow at the middle of each edge.
+  const auto is_yellow = [&](int x, int y) {
+    const auto color = pixels[y * size + x] & 0xffffff;
+    const auto red = (color >> 16) & 255, green = (color >> 8) & 255, blue = color & 255;
+    return red > 130 && green > 110 && blue < 90 && red > green && green > blue + 50;
+  };
+  require(is_yellow(0, size / 2) && is_yellow(size - 1, size / 2) && is_yellow(size / 2, 0) && is_yellow(size / 2, size - 1),
+          "Icon keeps its yellow border on every edge");
   const bool lettered = size > 32;
   const bool branding = asphalt > static_cast<unsigned>(size * size / 4) && marking > static_cast<unsigned>(size * size / 50) &&
                         hold_short_left > 0 && hold_short_right > 0 && centre_line > 0 &&

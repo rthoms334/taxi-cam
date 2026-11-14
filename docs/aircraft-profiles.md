@@ -80,7 +80,7 @@ The aircraft is identified by its exact `AircraftLoaded` path: the SimObject fol
 - **Reset displays** brings back its displays and its door camera as shipped: the display it shows on with its area, **Snapshot**, and its cockpit switch (the iniBuilds A380's system display `@DU#3/6` in the area y 84–655, turned on by `INI_ECAM_ACTIVE_PAGE` **Equals** 16). Camera positions, guides, looks and every other choice stay.
 - **Factory reset** brings back everything saved for it, camera positions, guides, looks, brightness, camera mode and cockpit L:vars included, as if it had never been saved. Keyboard and controller shortcuts, **Auto aircraft** and notifications are not per aircraft and stay.
 
-The door camera's starting display applies only while an aircraft has no door camera saved (below), so a file saved once with none keeps none until one of these resets. **Auto aircraft** finds either kind as before. The **Aircraft** card on Overview shows **Saved** for an aircraft with a setup, **Not set up** for one without, and **Choose displays** after an update whose display names could not be converted.
+The door camera's starting display applies only while an aircraft has no door camera saved (below), so a file saved once with none keeps none until one of these resets. **Auto aircraft** finds either kind as before. Beside the aircraft at the top of Overview, a pill says **Not set up** for an aircraft without a setup and **Choose displays** after an update whose display names could not be converted; an aircraft with a setup shows none.
 
 ### Display names
 
@@ -109,7 +109,7 @@ Not yet established: whether four engine views are free when a set is created on
 
 The iniBuilds A380 reports `ATC TYPE=Airbus` and an `AircraftLoaded` path under `SimObjects/Airplanes/inibuilds-a380/presets/inibuilds/a380-800_rr_basic/config/aircraft.CFG`. Matching requires its exact product path component; a generic Airbus type or iniBuilds vendor folder alone cannot select this profile. The FBW A380 keeps its separate identity and settings.
 
-The cockpit marks both TAXI buttons INOP, and no supported public control contract is available for them. The profile therefore neither reads nor writes guessed TAXI variables. Use the **Left** / **Right** toggles under **Overview → Cockpit displays** or camera hotkeys. Manual control still obeys aircraft identity, session, service, GPU and speed guards.
+The cockpit marks both TAXI buttons INOP, and no supported public control contract is available for them. The profile therefore neither reads nor writes guessed TAXI variables. Use the switches on the left and right displays' cards in **Overview** or camera hotkeys. Manual control still obeys aircraft identity, session, service, GPU and speed guards.
 
 The public input inventory contains 1,000 descriptors. Subscriptions expose the captain's PFD brightness adjustment (`AIRLINER_MIP_SIDE_PFD_LEFT`) but no input-value notification for either TAXI button. The clickable cursor therefore does not provide a supported public camera toggle. This does not rule out a private aircraft interaction.
 

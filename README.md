@@ -30,10 +30,10 @@ These aircraft have built-in profiles, with camera positions, reference guides a
 - **FlyByWire A380X** — nose and tail cameras on the PFD.
 - **iniBuilds A350-900**, including **ULR** — nose and tail cameras on the PFD.
 - **iniBuilds A350-1000** — nose and tail cameras on the PFD.
-- **iniBuilds A380** — nose and tail cameras; use keyboard shortcuts or the camera switches under each display in **Overview → Cockpit displays** because its TAXI buttons are marked INOP.
+- **iniBuilds A380** — nose and tail cameras; use keyboard shortcuts or the camera switch on each display's card in **Overview** because its TAXI buttons are marked INOP.
 - **PMDG 777** (777-200ER, 777-200LR, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on either inboard navigation display or the lower DU. Split-bottom layout; ground-speed overlay off; reference guides disabled. Use the cockpit **CAM** button (see below); Ctrl + Shift + L / R / B / D also work.
 - **Aerosoft A340-600** — nose and tail cameras on the captain's and first officer's PFDs and the lower ECAM, controlled by the **CAM CAPT**, **CAM F/O** and **CAM SD** selectors (or **Ctrl + Shift + D** for the SD). The captain's PFD and the lower ECAM were confirmed in the simulator; the F/O PFD placement follows the same layout and is not yet re-checked.
-- **iniBuilds A340-300** — nose and tail cameras on the captain's and first officer's PFDs and the lower ECAM. It has no camera control in the cockpit, so use **Ctrl + Shift + L / R / B / D** or the camera switches under **Overview → Cockpit displays**. The F/O PFD and lower ECAM placement were confirmed in the simulator; the captain's PFD follows the same layout and is not yet re-checked.
+- **iniBuilds A340-300** — nose and tail cameras on the captain's and first officer's PFDs and the lower ECAM. It has no camera control in the cockpit, so use **Ctrl + Shift + L / R / B / D** or the camera switch on each display's card in **Overview**. The F/O PFD and lower ECAM placement were confirmed in the simulator; the captain's PFD follows the same layout and is not yet re-checked.
 
 ## Installation
 
@@ -130,7 +130,7 @@ If automatic detection stays at a waiting message or selects the wrong screens, 
 3. To choose the texture behind a display for this flight only, turn **Advanced** on and open **Texture routing…**. **Assigned displays** shows a picture of the texture behind each display and whether it was named, detected or chosen. Under **Display textures**, find the screen in the pictures (select one to enlarge it) and choose **Left** or **Right** on its card. Use **Swap left / right** if the two sides are reversed, or **Clear choices** to go back to automatic selection. **Auto select** off stops automatic selection altogether, so only the textures you choose are used.
 4. If the pictures are not conclusive, turn on the **Left** or **Right** calibration bars on **Diagnostics** to identify that screen with an animated pattern, then turn them off. On aircraft with working TAXI buttons, turning the last calibration bar off automatically restores button control. The iniBuilds A380 stays in manual control.
 
-Texture routing choices apply immediately and belong to the current flight; texture IDs can change after a reload. **Overview → Cockpit displays** also has a camera switch under each display (**Left**, **Right**, and **Lower** and **Door** where the aircraft has them), but the taxi camera switches turn off **TAXI buttons** on the same card. Re-enable that setting to return to cockpit-button control. Keyboard shortcuts preserve the setting.
+Texture routing choices apply immediately and belong to the current flight; texture IDs can change after a reload. **Overview** also has a camera switch on each display's card (left, right, and lower where the aircraft has one), and the door camera's switch under the cards, but the taxi camera switches turn off **TAXI buttons**, which is beside it there. Re-enable that setting to return to cockpit-button control. Keyboard shortcuts preserve the setting.
 
 ## Known issues and limitations
 
