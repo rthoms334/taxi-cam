@@ -30,7 +30,7 @@
         "When Taxi Cam can't keep its cameras through a display change in Setup, it now replaces them instead of leaving them stopped until you restart the simulator.",
         "If a change does stop Taxi Cam's cameras, Overview now says so instead of saying it is waiting for the cockpit displays to be drawn, and the log records what stopped them.",
         "Fixed a cause of the cameras restarting while you set up an aircraft's displays: saving displays that have not changed, such as placing one where it already was, no longer asks the cameras to start again.",
-        "Fixed a small black rectangle with coloured dots appearing over the outside view from time to time in the FlyByWire A380 and A320. It is the code Taxi Cam reads to find each display; when an aircraft replaces a display in flight, the code now comes back on that display only."
+        "When an aircraft replaces a cockpit display during a flight, the small code Taxi Cam reads to find it now comes back on that display only, not on every panel. In the FlyByWire A380 the code could also show as a small black rectangle over the outside view each time."
       ]
     },
     {

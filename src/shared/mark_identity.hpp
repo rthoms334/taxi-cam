@@ -120,8 +120,10 @@ class PackageVerdict {
 // times in 86 minutes, 2026-11-08), and the page behind the new texture took
 // its marks down long ago. So the marks go up whenever a read texture goes,
 // and stay up HoldMs past the last one, the time its replacement takes to be
-// listed and read. A loss while the marks are up needs no show of its own,
-// and shows are at least GapMs apart however fast textures go.
+// listed and read. A loss while the marks are up for its panel needs no show
+// of its own, and shows from marks down are at least GapMs apart however fast
+// textures go; the caller asks at once for a loss on a panel the marks are
+// not up for (ReplacementTargets), by passing no last show.
 class ReplacementWatch {
  public:
   static constexpr std::uint64_t HoldMs = 5000, GapMs = 10000;

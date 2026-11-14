@@ -895,8 +895,10 @@ DWORD run_impl() {
       // a texture drawn since is pictured first.
       std::uint64_t activity{}, tried_activity{};
     };
-    // shown_ms: when the pages were last asked to show their marks.
-    std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{}, pending_ms{}, shown_ms{};
+    // shown_ms: when pages were last asked to show their marks; shown_all_ms:
+    // when every page was. A show for some panels gives the others' textures
+    // no new chance to be read.
+    std::uint64_t epoch{}, next_refresh{}, last_new_ms{}, pending_id{}, last_reshow_ms{}, pending_ms{}, shown_ms{}, shown_all_ms{};
     std::vector<Entry> entries;
     unsigned unsignalled{}, read{}, reshows{};
     // Pictures the scan took: with marks, without, and not taken (timeout,
@@ -1185,7 +1187,7 @@ DWORD run_impl() {
       if (epoch != mark_scan.epoch) {
         mark_scan.epoch = epoch;
         mark_scan.reshows = mark_scan.unsignalled = mark_scan.pictures = mark_scan.empty = mark_scan.failed = mark_scan.empty_textures = 0;
-        mark_scan.last_reshow_ms = mark_scan.shown_ms = 0;
+        mark_scan.last_reshow_ms = mark_scan.shown_ms = mark_scan.shown_all_ms = 0;
         mark_scan.shown_again = mark_scan.session_shown = mark_scan.session_read = false;
         mark_scan.lost = mark_scan.wanted_unassigned = mark_scan.asked_sides = 0;
         mark_scan.replacements.reset();
@@ -1246,7 +1248,7 @@ DWORD run_impl() {
       // simulator keeps recreating could otherwise hold the list back.
       const bool tried = std::none_of(mark_scan.entries.begin(), mark_scan.entries.end(),
                                       [](const MarkScan::Entry& entry) { return !entry.read && entry.tries < MarkTries; });
-      const bool shown_long = mark_scan.shown_ms && now - mark_scan.shown_ms >= MarkSettleMs;
+      const bool shown_long = mark_scan.shown_all_ms && now - mark_scan.shown_all_ms >= MarkSettleMs;
       panel_identity.settled = tried || shown_long;
       // Pictures taken before the pages painted their marks give no verdict,
       // nor does an empty list (textures pictured, then recreated mid-load).
@@ -1281,7 +1283,9 @@ DWORD run_impl() {
           if (auto* entry = mark_entry(record.id))
             entry->activity = record.draws + record.activity;
           else {
-            mark_scan.entries.push_back({record.id, now, 0, false, now, record.draws + record.activity, record.draws + record.activity});
+            const auto activity = record.draws + record.activity;
+            mark_scan.entries.push_back(
+                {.id = record.id, .next_ms = now, .seen_ms = now, .activity = activity, .tried_activity = activity});
             mark_scan.last_new_ms = now;
           }
         }
@@ -1315,6 +1319,11 @@ DWORD run_impl() {
         mark_scan.replacements.shown(now);
         mark_scan.lost = 0;
         native_camera::signal_panel_marks_show(panels);
+        // Asked of some panels only: the replacements are new entries, and
+        // the other unread textures' pages show nothing new to picture.
+        if (panels)
+          return;
+        mark_scan.shown_all_ms = now;
         for (auto& entry : mark_scan.entries)
           if (!entry.read) {
             entry.tries = 0;
@@ -1347,9 +1356,12 @@ DWORD run_impl() {
       // stays asked for.
       const unsigned unserved_sides = mark_scan.wanted_unassigned & ~mark_scan.asked_sides;
       mark_scan.asked_sides &= mark_scan.wanted_unassigned;
+      // Marks up for some panels only do not serve it.
+      const bool all_up = mark_scan.shown_again && !mark_scan.shown_mask;
       const bool camera_waits =
-          mark_scan.wanted_unassigned && !mark_scan.shown_again && unread_since(0) &&
-          (!mark_scan.shown_ms || now - mark_scan.shown_ms >= (unserved_sides ? mark_identity::ReplacementWatch::GapMs : MarkReshowGapMs));
+          mark_scan.wanted_unassigned && !all_up && unread_since(0) &&
+          (!mark_scan.shown_all_ms ||
+           now - mark_scan.shown_all_ms >= (unserved_sides ? mark_identity::ReplacementWatch::GapMs : MarkReshowGapMs));
       // Marks stay up for a replaced texture even with every named display found.
       const bool replacing = mark_scan.replacements.pending(now);
       if (found && !replacing) {
@@ -1419,7 +1431,7 @@ DWORD run_impl() {
       // A display still to find (or the setup open) and a texture created
       // since the marks were last shown: its page may have taken them down
       // before the texture existed. Never once the displays are found.
-      const auto fresh = unread_since(mark_scan.shown_ms + 1);
+      const auto fresh = unread_since(mark_scan.shown_all_ms + 1);
       if (!found && fresh && (mark_scan.reshows < MarkReshows || (missing && now - mark_scan.last_reshow_ms >= MarkReshowGapMs))) {
         ++mark_scan.reshows;
         mark_scan.last_reshow_ms = now;

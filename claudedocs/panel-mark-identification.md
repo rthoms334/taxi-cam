@@ -365,7 +365,10 @@ setup opens, and for a camera on a side with no texture, so the popup's
 block can still appear then. An older helper takes a targeted value as a
 show of every page.
 
-Not run in the simulator.
+Live (dev box, Store, A380X, 2026-11-14, a local build, about 7 minutes after
+the displays were found): one read texture was destroyed and the show named
+panel 7 only (`panels=0x40`); routing was kept. Not seen: a texture read
+again after a targeted show, a PFD or SD recreated, or what was on screen.
 
 ## Bridge detection path
 
