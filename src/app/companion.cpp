@@ -6332,6 +6332,8 @@ void draw_look_icons(HDC dc, const RECT& well, unsigned view) {
 // once, and a flight restart or a teleport starts a new session for the same
 // aircraft; neither takes Back, Next and Finish away from the rest of the steps.
 std::uint64_t guided_for{};  // The variant's hash; 1 for an aircraft not named yet; 0 for none.
+constexpr ULONGLONG GuidedHoldMs = 1500;
+ULONGLONG guided_candidate_since{};  // When the aircraft loaded was first seen without a setup.
 bool guided_setup(const win::Status& sample) {
   if (setup_step(page) < 0) {
     guided_for = 0;
@@ -6343,7 +6345,15 @@ bool guided_setup(const win::Status& sample) {
   const std::uint64_t loaded = named ? std::max<std::uint64_t>(2, variant_hash(variant)) : 0;
   if (guided_for > 1 && loaded && loaded != guided_for)
     guided_for = 0;
-  if (!guided_for && ((named && unsupported_aircraft(sample) && !saved_layout(variant, GetTickCount64())) || setup.positioning))
+  // "No setup" has to hold for a moment: one sample that misses an
+  // aircraft's profile while it is still being recognised starts nothing.
+  const auto now = GetTickCount64();
+  const bool without_setup = named && unsupported_aircraft(sample) && !saved_layout(variant, now);
+  if (!without_setup)
+    guided_candidate_since = 0;
+  else if (!guided_candidate_since)
+    guided_candidate_since = now;
+  if (!guided_for && ((without_setup && now - guided_candidate_since >= GuidedHoldMs) || setup.positioning))
     guided_for = loaded ? loaded : 1;
   else if (guided_for == 1 && loaded)
     guided_for = loaded;
