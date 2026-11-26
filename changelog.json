@@ -4,7 +4,7 @@
       "version": "1.4.2",
       "date": "2026-11-26",
       "fixes": [
-        "When the simulator rebuilds a twin cockpit display texture in flight, the other active display stays connected, the rebuilt screen reconnects faster, and Taxi Cam no longer flashes its missing-displays message while a display is still active."
+        "Taxi Cam now remembers twin cockpit display panel order during a partial display rebuild instead of dropping the remaining display's mapping, checks more frequently for replaced display textures, and no longer shows the missing-displays message for a display side that is not in use."
       ]
     },
     {
