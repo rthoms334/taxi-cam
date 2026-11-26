@@ -34,6 +34,10 @@ void edits() {
   require(left == 41 && right == 42 && request == std::numeric_limits<std::uint64_t>::max(), "Exhaustion mutated the accepted tuple");
   require(update_target_assignment(left, right, request, 41, 42) == TargetAssignmentResult::unchanged,
           "Unchanged selection failed at the sequence limit");
+  request = expected;
+  require(update_target_assignment(left, right, request, 99, 99, true) == TargetAssignmentResult::changed && left == 99 && right == 99 &&
+              request == ++expected,
+          "Shared combined-atlas texture was rejected when allowed");
 }
 void lower_display() {
   std::uint64_t left{}, right{}, lower{}, request{};

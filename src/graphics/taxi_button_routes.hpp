@@ -67,9 +67,10 @@ class TaxiButtonRoutes {
 
   // The caller first validates supplied nonzero resource IDs. Zero leaves
   // that side to its name. Side 2 is not part of the pair: a lower display
-  // the user placed (named) stays.
-  bool select_explicit(const Pair& selection) noexcept {
-    if (selection[0] && selection[0] == selection[1])
+  // the user placed (named) stays. Combined-atlas layouts allow both sides to
+  // target the same texture (`allow_duplicate`).
+  bool select_explicit(const Pair& selection, bool allow_duplicate = false) noexcept {
+    if (!allow_duplicate && selection[0] && selection[0] == selection[1])
       return false;
     targets = {selection[0], selection[1], targets[2]};
     return true;

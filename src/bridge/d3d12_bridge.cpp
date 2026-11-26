@@ -418,7 +418,7 @@ struct Registry {
     // saved: a save into buffer was planned. confirmed: one has completed, so
     // buffer holds panel pixels. clean: in planned order, the area holds panel
     // pixels (no camera copy since the start or the last restore).
-    bool saved{}, confirmed{}, clean{};
+    bool saved{}, confirmed{}, clean{}, fallback{};
     // Serials of this side's shadow copies. shadow_completed[side] rises to
     // each one whose covering fence has passed, shadow_dropped[side] to each
     // one that will not run; handled_drop is the last drop acted on. Both are
@@ -1245,8 +1245,8 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
   // Creation only: RTV and barrier backfill see the same resource again.
   if (created && desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1 &&
       (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 && desc.Width <= RenderTargetShapes::MaximumEdge)
-    render_target_shapes().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels, static_cast<std::uint32_t>(desc.Format),
-                                  GetTickCount64());
+    render_target_shapes().record(static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels,
+                                  static_cast<std::uint32_t>(desc.Format), GetTickCount64());
   const bool sequenced = created && desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1 &&
                          desc.SampleDesc.Count == 1 && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 &&
                          desc.Width <= RenderTargetShapes::MaximumEdge;
@@ -2314,10 +2314,11 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
 // the side goes back to direct stamps. A first save that never completes does
 // the same. A restore that was submitted but has not completed is planned
 // again; a restore keeps being planned until it completes or the camera
-// returns. Shadows are kept only for areas up to kShadowMaxBytes, so the
+// returns (or moves on after kShadowConfirmMs while active if none was
+// submitted). Shadows are kept only for areas up to kShadowMaxBytes, so the
 // buffers stay bounded while displays are routed.
 constexpr std::uint64_t kShadowCoverMs = 250, kShadowConfirmMs = 1000, kShadowReplanMs = 250;
-constexpr std::uint64_t kShadowMaxBytes = 8u << 20;
+constexpr std::uint64_t kShadowMaxBytes = 16u << 20;
 D3D12_RECT shadow_area(const Registry& r, unsigned side, const Resource& target) noexcept {
   const auto rect = profiles::side_rect(*r.profile, side, static_cast<unsigned>(target.desc.Width), target.desc.Height);
   return {static_cast<LONG>(rect.left), static_cast<LONG>(rect.top), static_cast<LONG>(rect.right), static_cast<LONG>(rect.bottom)};
@@ -2343,7 +2344,7 @@ void forget_shadow(Registry::DisplayShadow& shadow) noexcept {
   shadow.mode = Registry::ShadowMode::off;
   shadow.target.reset();
   shadow.queue = shadow.retake_queue = nullptr;
-  shadow.saved = shadow.confirmed = shadow.clean = false;
+  shadow.saved = shadow.confirmed = shadow.clean = shadow.fallback = false;
   shadow.restore_serial = 0;
 }
 void mark_dirty(Registry::DisplayShadow& shadow, const Resource& target) noexcept {
@@ -2356,8 +2357,9 @@ void count_lost_write(Registry& r, ShadowLostWrite cause) noexcept {
 }
 // Registry lock held. Moves a side's shadow with its camera: camera on starts
 // it, on queue copies when the worker already has its buffer; camera off
-// restores what was saved. A new target or area, or a lost target, forgets it
-// without a restore.
+// restores what was saved. Changing target or area while active restores any
+// confirmed shadow first before starting the new region, or starts the new
+// region without a restore after kShadowConfirmMs if none was submitted.
 Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now) noexcept {
   using Mode = Registry::ShadowMode;
   auto& shadow = r.shadows[side];
@@ -2365,9 +2367,22 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
   const bool active =
       r.ready && (r.active_mask & ~r.calibration_mask & (1u << side)) && target && target->alive && display_item(r, *target);
   const auto area = active ? shadow_area(r, side, *target) : D3D12_RECT{};
-  if (shadow.mode != Mode::off &&
-      (!r.ready || !shadow.target || !shadow.target->alive || (active && (shadow.target != target || !same_rect(area, shadow.area)))))
-    forget_shadow(shadow);
+  if (shadow.mode != Mode::off) {
+    if (!r.ready || !shadow.target || !shadow.target->alive) {
+      forget_shadow(shadow);
+    } else if (active && (shadow.target != target || !same_rect(area, shadow.area))) {
+      if (shadow.saved && shadow.confirmed) {
+        if (shadow.mode != Mode::restoring) {
+          shadow.mode = Mode::restoring;
+          shadow.started_ms = now;
+          shadow.restore_serial = 0;
+          shadow.retake_queue = nullptr;
+        }
+      } else {
+        forget_shadow(shadow);
+      }
+    }
+  }
   const auto completed = r.shadow_completed[side].load(std::memory_order_acquire);
   if (shadow.saved && !shadow.confirmed && completed >= shadow.first_save_serial)
     shadow.confirmed = true;
@@ -2397,17 +2412,19 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
   const auto queue_ready = [&] {
     return r.profile && r.profile->partial_repaint[side] && r.close_forward_verified && shadow_fits(shadow, area, shadow_format(target));
   };
+  const auto start_active = [&] {
+    forget_shadow(shadow);
+    shadow.target = target;
+    shadow.area = area;
+    shadow.mode = queue_ready() ? Mode::queue : Mode::direct;
+    shadow.clean = shadow.mode == Mode::queue && !(shadow.dirty && shadow.dirty_id == target->id);
+    shadow.started_ms = now;
+    shadow.uncovered_ms = 0;
+  };
   switch (shadow.mode) {
     case Mode::off:
-      if (active) {
-        forget_shadow(shadow);
-        shadow.target = target;
-        shadow.area = area;
-        shadow.mode = queue_ready() ? Mode::queue : Mode::direct;
-        shadow.clean = shadow.mode == Mode::queue && !(shadow.dirty && shadow.dirty_id == target->id);
-        shadow.started_ms = now;
-        shadow.uncovered_ms = 0;
-      }
+      if (active)
+        start_active();
       break;
     case Mode::queue:
     case Mode::direct:
@@ -2418,10 +2435,16 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
         shadow.retake_queue = nullptr;
         if (shadow.mode == Mode::off)
           shadow.target.reset();
+      } else if (shadow.mode == Mode::direct && !shadow.fallback && queue_ready()) {
+        shadow.mode = Mode::queue;
+        shadow.clean = !(shadow.dirty && shadow.dirty_id == target->id);
+        shadow.started_ms = now;
+        shadow.uncovered_ms = 0;
       } else if (shadow.mode == Mode::queue && shadow.saved && !shadow.confirmed && now - shadow.planned_ms > kShadowConfirmMs) {
         // The first save never ran: the buffer holds nothing to restore.
         r.shadow_fallbacks.fetch_add(1, std::memory_order_relaxed);
         shadow.mode = Mode::direct;
+        shadow.fallback = true;
         shadow.saved = shadow.clean = false;
       } else if (shadow.mode == Mode::queue && shadow.retake_queue) {
         // The worker's now can predate a miss the submit thread just recorded.
@@ -2435,13 +2458,14 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
           // stamps leave the buffer alone.
           r.shadow_fallbacks.fetch_add(1, std::memory_order_relaxed);
           shadow.mode = Mode::direct;
+          shadow.fallback = true;
           shadow.saved = shadow.confirmed = shadow.clean = false;
           shadow.queue = shadow.retake_queue = nullptr;
         }
       }
       break;
     case Mode::restoring:
-      if (active) {
+      if (active && shadow.target == target && same_rect(area, shadow.area)) {
         shadow.mode = queue_ready() ? Mode::queue : Mode::direct;
         shadow.started_ms = now;
         shadow.uncovered_ms = 0;
@@ -2453,9 +2477,17 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
       } else if (shadow.restore_serial && completed >= shadow.restore_serial) {
         if (shadow.dirty_id == shadow.target->id)
           shadow.dirty = false;
-        forget_shadow(shadow);
-      } else if (!shadow.saved || (!shadow.confirmed && now - shadow.planned_ms > kShadowConfirmMs)) {
-        forget_shadow(shadow);  // No save ran: nothing to put back.
+        if (active)
+          start_active();
+        else
+          forget_shadow(shadow);
+      } else if (!shadow.saved || (!shadow.confirmed && now - shadow.planned_ms > kShadowConfirmMs) ||
+                 (active && (shadow.target != target || !same_rect(area, shadow.area)) && !shadow.restore_serial &&
+                  now > shadow.started_ms && now - shadow.started_ms > kShadowConfirmMs)) {
+        if (active)
+          start_active();
+        else
+          forget_shadow(shadow);  // No save ran: nothing to put back.
       } else if (shadow.restore_serial && now - shadow.planned_ms > kShadowReplanMs) {
         // Submitted but not finished: plan it again, trusting neither copy.
         shadow.restore_serial = 0;
@@ -2467,10 +2499,11 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
 }
 // Registry lock held. Close-time and RT-exit stamps land inside the
 // instrument's own list, where nothing can be saved before them: while a
-// shadow follows the side, only queue copies write it.
+// shadow follows the side (or is still restoring an earlier region), only
+// queue work touches it.
 bool shadow_holds_stamp(Registry& r, List& list, unsigned side) noexcept {
   const auto mode = update_shadow(r, side, GetTickCount64());
-  if (mode == Registry::ShadowMode::queue) {
+  if (mode == Registry::ShadowMode::queue || mode == Registry::ShadowMode::restoring) {
     r.shadow_held.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
@@ -3102,7 +3135,7 @@ void plan_display_submission(void*,
     }
   }
   for (unsigned side = 0; side < MaxDisplaySides; ++side) {
-    if (!(patches.ready_mask & (1u << side)))
+    if (modes[side] == ShadowMode::restoring || !(patches.ready_mask & (1u << side)))
       continue;
     const auto& target = r.selected_resources[side];
     if (!target || !target->alive || !display_item(r, *target))
@@ -3463,8 +3496,7 @@ struct Creation<I, HRESULT (STDMETHODCALLTYPE C::*)(Args...)> {
       auto** out = std::get<sizeof...(Args) - 1>(tuple);
       if (out && *out)
         observe_safely([&] {
-          observe_resource(reinterpret_cast<ID3D12Device*>(self), static_cast<IUnknown*>(*out), model(std::get<StateArgs[I]>(tuple)),
-                           true);
+          observe_resource(reinterpret_cast<ID3D12Device*>(self), static_cast<IUnknown*>(*out), model(std::get<StateArgs[I]>(tuple)), true);
           fog::created(static_cast<IUnknown*>(*out));
         });
     }
@@ -5129,6 +5161,7 @@ void service_display_shadows(Registry& r, const runtime::QueuePatchConfig& confi
         } else if (now - shadow.uncovered_ms > kShadowCoverMs) {
           r.shadow_fallbacks.fetch_add(1, std::memory_order_relaxed);
           shadow.mode = Mode::direct;
+          shadow.fallback = true;
           shadow.clean = false;
         }
       }
@@ -5283,8 +5316,8 @@ DisplaySnapshotResult request_display_snapshot(std::uint64_t id, std::uint64_t n
   r.snapshot_failure.store("", std::memory_order_relaxed);
   {
     const OwnedWork guard;
-    const auto created = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST,
-                                                         nullptr, IID_PPV_ARGS(&buffer));
+    const auto created = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                         IID_PPV_ARGS(&buffer));
     if (FAILED(created)) {
       r.snapshot_failure_code.store(created, std::memory_order_relaxed);
       r.snapshot_failure.store("create_readback_buffer", std::memory_order_relaxed);
@@ -5349,9 +5382,9 @@ DisplaySnapshotPoll poll_display_snapshot(std::uint64_t now) noexcept {
   std::uint8_t* bytes = nullptr;
   const auto& layout = footprint.Footprint;
   // The last row has no pitch padding after it: end at its last texel.
-  const D3D12_RANGE readable{static_cast<SIZE_T>(footprint.Offset),
-                             static_cast<SIZE_T>(footprint.Offset + std::uint64_t{layout.RowPitch} * (layout.Height - 1) +
-                                                 std::uint64_t{layout.Width} * 4)};
+  const D3D12_RANGE readable{
+      static_cast<SIZE_T>(footprint.Offset),
+      static_cast<SIZE_T>(footprint.Offset + std::uint64_t{layout.RowPitch} * (layout.Height - 1) + std::uint64_t{layout.Width} * 4)};
   poll.result = DisplaySnapshotResult::failed;
   const auto mapped = buffer->Map(0, &readable, reinterpret_cast<void**>(&bytes));
   r.snapshot_failure_code.store(mapped, std::memory_order_relaxed);
@@ -5403,11 +5436,14 @@ bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower
   if (!separate)
     lower = 0;
   bool l = !left, rr = !right, lw = !lower;
+  const Resource* left_res = nullptr;
   for (const auto& [p, item] : r.resources) {
     (void)p;
     if (!item->alive || !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
                                                    static_cast<UINT>(item->desc.Format)))
       continue;
+    if (item->id == left)
+      left_res = item.get();
     l |= item->id == left;
     rr |= item->id == right;
     lw |= item->id == lower;
@@ -5420,9 +5456,16 @@ bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower
   const bool previous_explicit = r.routes.lower_explicit();
   if (separate)
     r.routes.select_lower(0);
+  const auto fitted_disjoint = [&] {
+    if (r.profile->display_layout != profiles::DisplayLayout::fitted || !left || left != right || !left_res)
+      return false;
+    const auto w = static_cast<unsigned>(left_res->desc.Width), h = left_res->desc.Height;
+    return profiles::disjoint_rects(r.profile->areas[0], r.profile->areas[1]) &&
+           profiles::disjoint_rects(profiles::side_rect(*r.profile, 0, w, h), profiles::side_rect(*r.profile, 1, w, h));
+  };
   bool assigned = r.profile->display_layout == profiles::DisplayLayout::shared_texture
                       ? (!left || !right || left == right) && r.routes.select_single(left ? left : right, separate)
-                      : r.routes.select_explicit({left, right});
+                      : r.routes.select_explicit({left, right}, fitted_disjoint());
   if (separate) {
     assigned = assigned && r.routes.select_lower(lower);
     // A refused choice puts an explicit lower back; a named one returns
@@ -5516,10 +5559,28 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   auto& r = registry();
   {
     const WorkerRegistryLock lock(r);
+    const bool same_profile = r.ready && r.profile && r.profile->id == id;
+    const auto now = GetTickCount64();
     r.active_mask = r.calibration_mask = 0;
     r.named_targets = {};
-    for (auto& shadow : r.shadows)
-      forget_shadow(shadow);
+    // Display-choice updates on the same profile keep confirmed shadows
+    // restoring so the old region or panel clears before re-binding.
+    for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+      auto& shadow = r.shadows[side];
+      if (shadow.saved && !shadow.confirmed && r.shadow_completed[side].load(std::memory_order_acquire) >= shadow.first_save_serial)
+        shadow.confirmed = true;
+      if (same_profile && shadow.mode != Registry::ShadowMode::off && shadow.saved && shadow.confirmed && shadow.target &&
+          shadow.target->alive) {
+        if (shadow.mode != Registry::ShadowMode::restoring) {
+          shadow.mode = Registry::ShadowMode::restoring;
+          shadow.started_ms = now ? now : 1;
+          shadow.restore_serial = 0;
+          shadow.retake_queue = nullptr;
+        }
+      } else {
+        forget_shadow(shadow);
+      }
+    }
     // This entry point starts an explicit aircraft/profile session, including a
     // reload of the same adapter. Ordinary texture replacement uses forget().
     r.routes.reset();
@@ -5641,26 +5702,48 @@ void discover_pfds(std::uint64_t now) noexcept {
     // so Auto detect off (now == 0) leaves it out.
     if (now) {
       std::array<std::uint64_t, MaxDisplaySides> named{};
+      std::array<const Resource*, MaxDisplaySides> named_resources{};
       bool usable = false, complete = true;
       for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {
         if (!r.profile->panel_textures[side][0])
           continue;
         const auto id = r.named_targets[side];
         bool live = false;
+        const Resource* live_res = nullptr;
         if (id)
           for (const auto& [native, item] : r.resources) {
             (void)native;
             if (item->id == id) {
               live = item->alive && display_item(r, *item);
+              if (live)
+                live_res = item.get();
               break;
             }
           }
         complete = complete && live;
         named[side] = live ? id : 0;
+        named_resources[side] = live_res;
         usable = usable || live;
       }
-      if (usable && complete)
+      if (usable && complete) {
+        if (r.profile->display_layout == profiles::DisplayLayout::fitted) {
+          for (unsigned side = 1; side < r.profile->sides && side < MaxDisplaySides; ++side) {
+            if (!named[side] || !named_resources[side])
+              continue;
+            const auto w = static_cast<unsigned>(named_resources[side]->desc.Width), h = named_resources[side]->desc.Height;
+            for (unsigned earlier = 0; earlier < side; ++earlier) {
+              if (named[earlier] != named[side])
+                continue;
+              if (!profiles::disjoint_rects(r.profile->areas[earlier], r.profile->areas[side]) ||
+                  !profiles::disjoint_rects(profiles::side_rect(*r.profile, earlier, w, h), profiles::side_rect(*r.profile, side, w, h))) {
+                named[side] = 0;
+                break;
+              }
+            }
+          }
+        }
         r.routes.adopt_named(named, r.profile->sides);
+      }
     }
     refresh_selected(r);
   });

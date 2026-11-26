@@ -670,6 +670,11 @@ inline constexpr DisplayRect inset_rect(DisplayRect outer, DisplayInsets padding
 inline constexpr DisplayRect display_content_rect(const AircraftProfile& p, unsigned side) noexcept {
   return inset_rect(display_rect(p, side), p.camera_padding);
 }
+// True when both rectangles are non-empty and have no pixel in common.
+inline constexpr bool disjoint_rects(DisplayRect a, DisplayRect b) noexcept {
+  return a.right > a.left && a.bottom > a.top && b.right > b.left && b.bottom > b.top &&
+         (a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+}
 // A side's display area on the width x height texture routed to it: the
 // profile's region, or the whole texture on a set-up aircraft.
 inline constexpr DisplayRect side_rect(const AircraftProfile& p, unsigned side, unsigned width, unsigned height) noexcept {
