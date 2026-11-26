@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "1.4.1",
+      "date": "2026-11-26",
+      "fixes": [
+        "Cockpit displays that share a panel with another gauge, such as the iniBuilds A350's flight displays, are recognised reliably again: Taxi Cam now places each display's code beside the others instead of on top of them.",
+        "On aircraft you set up yourself whose displays share one texture, such as the PMDG 737-800, turning Taxi Cam off or resizing a display area now restores the aircraft's own screen cleanly, multiple displays can share the same texture with separate areas, and clicking inside a screen box in Display area snaps straight to it.",
+        "Using the door camera on its own now recovers automatically if another graphics add-on resets the simulator's display state, and Help now counts door camera frames alongside taxi camera compositions."
+      ]
+    },
+    {
       "version": "1.4.0",
       "date": "2026-11-14",
       "features": [
