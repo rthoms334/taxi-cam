@@ -1,0 +1,3 @@
+{"sName":"VCockpit05","sConfigFile":"SimObjects/Airplanes/Test/panel/panel.xml","vLogicalSize":{"x":1644,"y":1024},"vDisplaySize":{"x":1644,"y":1024},"daAttributes":[],"daInstruments":[
+{"iGUId":0,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=test.wasm&wasm_gauge=SmallCorner","vPosAndSize":{"x":1594,"y":10,"z":50,"w":50}},
+{"iGUId":1,"sUrl":"WasmInstrument/WasmInstrument.html?wasm_module=test.wasm&wasm_gauge=FullPanel","vPosAndSize":{"x":0,"y":0,"z":1644,"w":1024}}]}

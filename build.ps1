@@ -333,6 +333,7 @@ if ($Validate) {
     & (Join-Path $taskRoot 'tests/hooks/render_boundary_test.ps1') -Compiler $compiler
     & (Join-Path $taskRoot 'tests/hooks/test.ps1')
     & (Join-Path $taskRoot 'tests/camera/test.ps1')
+    & (Join-Path $taskRoot 'tests/graphics/panel_marks_test.ps1') -PanelMarksTest (Join-Path $out 'panel-marks-test.exe')
     $readobj = Join-Path (Split-Path -Parent $compiler) 'llvm-readobj.exe'
     $hashes = [ordered]@{}
     foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {

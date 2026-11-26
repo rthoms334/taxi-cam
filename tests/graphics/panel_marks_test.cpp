@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "../../src/shared/mark_identity.hpp"
 
 namespace {
 using namespace taxi_camera::panel_marks;
@@ -97,9 +98,54 @@ const Mark* named(const Mark* marks, std::size_t count, const char* name, std::u
       return &marks[i];
   return nullptr;
 }
+Image load_raw(const char* path, unsigned width, unsigned height) {
+  Image image{width, height, std::vector<std::uint8_t>(std::size_t{width} * height * 4)};
+  FILE* f = std::fopen(path, "rb");
+  require(f != nullptr, "open raw panel-marks file");
+  const auto n = std::fread(image.rgba.data(), 1, image.rgba.size(), f);
+  std::fclose(f);
+  require(n == image.rgba.size(), "read raw panel-marks image");
+  return image;
+}
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 6 && std::strcmp(argv[1], "--stacked") == 0) {
+    const unsigned w = static_cast<unsigned>(std::atoi(argv[4])), h = static_cast<unsigned>(std::atoi(argv[5]));
+    taxi_camera::mark_identity::Store store;
+    const char* panels[] = {"VCockpit03", "VCockpit04"};
+    for (int i = 0; i < 2; ++i) {
+      auto image = load_raw(argv[2 + i], w, h);
+      Mark found[4];
+      const auto count = find(image, found, 4);
+      require(count == 2, "JS stub stacked gauges decode both blocks");
+      require((std::strcmp(found[0].gauge_name.data(), "EFIS") == 0 && std::strcmp(found[1].gauge_name.data(), "A350WXR_EFIS") == 0) ||
+                  (std::strcmp(found[1].gauge_name.data(), "EFIS") == 0 && std::strcmp(found[0].gauge_name.data(), "A350WXR_EFIS") == 0),
+              "JS stub stacked gauges keep EFIS and A350WXR_EFIS names");
+      require(std::strcmp(found[0].name.data(), panels[i]) == 0 && std::strcmp(found[1].name.data(), panels[i]) == 0,
+              "JS stub stacked gauges keep panel name");
+      store.read(620 - static_cast<unsigned>(i), found, count);
+    }
+    require(store.resolve("@EFIS#0/2", nullptr, 0) == 620 && store.resolve("@EFIS#1/2", nullptr, 0) == 619,
+            "JS stub stacked gauges resolve @EFIS#0/2 and @EFIS#1/2");
+    std::printf("panel-marks stacked raw: %u checks passed\n", checks);
+    return 0;
+  }
+  if (argc == 8 && std::strcmp(argv[1], "--clear-corner") == 0) {
+    const unsigned w = static_cast<unsigned>(std::atoi(argv[3])), h = static_cast<unsigned>(std::atoi(argv[4]));
+    const unsigned cx = static_cast<unsigned>(std::atoi(argv[5])), cy = static_cast<unsigned>(std::atoi(argv[6]));
+    const unsigned bg = static_cast<unsigned>(std::atoi(argv[7]));
+    auto image = load_raw(argv[2], w, h);
+    Mark found[4];
+    const auto count = find(image, found, 4);
+    require(count == 2, "JS stub corner-guard fixture decodes both blocks");
+    for (unsigned dx = 0; dx < 2; ++dx) {
+      const auto* p = image.at(cx + dx, cy);
+      require(p[0] == bg && p[1] == bg && p[2] == bg, "other gauge top-left corner pixels stay untouched");
+    }
+    std::printf("panel-marks corner-guard raw: %u checks passed\n", checks);
+    return 0;
+  }
   // The JS helper's bytes and cells for the PMDG 777 captain's inboard DU
   // (node, taxi-cam-marks.js encodePayload/encodeCells, 2026-11-03).
   {
@@ -252,6 +298,31 @@ int main() {
     const auto image = page(2048, 2048, 6);
     Mark found[2];
     require(find(image, found, 2) == 0, "no false blocks");
+  }
+  // Stacked gauges on the same panel rect (issue 200: A350 EFIS + A350WXR_EFIS
+  // on VCockpit03/04): placed side-by-side without overlapping so both are read
+  // and @EFIS#0/2 / @EFIS#1/2 resolve.
+  {
+    taxi_camera::mark_identity::Store store;
+    const auto draw_pair = [&](std::uint64_t id, const char* panel) {
+      auto image = page(1644, 1024, static_cast<unsigned>(id));
+      auto efis = gauge(panel, "EFIS", 0, 0, 0, 1644, 1024, 1644, 1024, kCell);
+      auto wxr = gauge(panel, "A350WXR_EFIS", 1, 0, 0, 1644, 1024, 1644, 1024, kCell);
+      std::strcpy(efis.info.data(), "c=1cd9");
+      std::strcpy(wxr.info.data(), "c=1cd9");
+      const unsigned w0 = block_width(efis), w1 = block_width(wxr);
+      const unsigned x0 = 1644 - w0 - kCell, x1 = x0 - w1 - kCell;
+      draw(image, efis, x0, kCell, kLevel);
+      draw(image, wxr, x1, kCell, kLevel);
+      Mark found[4];
+      const auto count = find(image, found, 4);
+      require(count == 2, "both stacked gauge blocks are read");
+      store.read(id, found, count);
+    };
+    draw_pair(620, "VCockpit03");
+    draw_pair(619, "VCockpit04");
+    require(store.resolve("@EFIS#0/2", nullptr, 0) == 620 && store.resolve("@EFIS#1/2", nullptr, 0) == 619,
+            "stacked gauges keep EFIS panels routable");
   }
   std::printf("panel-marks: %u checks passed\n", checks);
   return 0;

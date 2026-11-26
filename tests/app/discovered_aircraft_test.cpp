@@ -324,6 +324,81 @@ void learning() {
   status.panel_state = static_cast<std::uint32_t>(PanelMapState::marked);
   std::strcpy(status.aircraft_path, "Airbus");
   require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::no_variant, "Only a known variant");
+  // Upper-gauge key saved before non-overlapping marks (e.g. @PFD_Captain on
+  // a panel whose gauge 0 is @WXR#0/2): still matches via status.gauges.
+  std::strcpy(status.aircraft_path, Fenix320);
+  std::strcpy(status.panels[4].name, "@WXR#0/2");
+  status.gauge_count = 2;
+  status.gauges[0].panel = 4;
+  std::strcpy(status.gauges[0].name, "WXR");
+  status.gauges[1].panel = 4;
+  std::strcpy(status.gauges[1].name, "PFD_Captain");
+  require(learn_layout(status, {"@PFD_Captain", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::learned &&
+              std::strcmp(l.textures[0], "@PFD_Captain") == 0,
+          "Previously saved upper-gauge key still learns via status.gauges");
+  // When two distinct panels carry the same gauge, an unranked key refuses.
+  status.gauges[2].panel = 5;
+  std::strcpy(status.gauges[2].name, "PFD_Captain");
+  status.gauge_count = 3;
+  require(learn_layout(status, {"@PFD_Captain", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::unknown_panel,
+          "Unranked key refuses when two panels carry the gauge");
+  // A texture copy sharing the same panel name does not count as a second owner.
+  status.panel_count = 9;
+  status.panels[8] = status.panels[4];
+  status.panels[8].id = 999;
+  status.gauges[2].panel = 8;
+  require(learn_layout(status, {"@PFD_Captain", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::learned,
+          "Copy of the same panel does not make an unranked key ambiguous");
+  status.panel_count = 8;
+  status.gauge_count = 2;
+  // Gauge names longer than PanelGauge::name (23 chars) are truncated in status.gauges:
+  // only full KeySize-1 (31 char) keys match by 23-char prefix (matching Store::resolve).
+  // Shorter 23..30 char keys must refuse rather than guessing a different gauge.
+  std::strcpy(status.gauges[1].name, "Fenix_A320_Captain_PFD_");
+  require(learn_layout(status, {"@Fenix_A320_Captain_PFD_Ext", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::unknown_panel,
+          "24..30-char key refuses 23-char truncated gauge name");
+  require(learn_layout(status, {"@Fenix_A320_Captain_PFD_", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::unknown_panel,
+          "23-char key refuses saturated 23-char gauge name that may be truncated");
+  std::strcpy(status.gauges[1].name, "VeryLongCustomCockpitDi");
+  require(learn_layout(status, {"@VeryLongCustomCockpitDisplayGa", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::learned &&
+              std::strcmp(l.textures[0], "@VeryLongCustomCockpitDisplayGa") == 0,
+          "KeySize-truncated >=30-char gauge name learns via 23-char prefix");
+  // Ranked upper-gauge keys saved from stacked twins (e.g. @A350WXR_EFIS#0/2
+  // when EFIS is gauge 0): still learn in panel order via the twins' keys.
+  std::strcpy(status.panels[2].name, "@EFIS#1/2");
+  status.panels[2].width = 1024;
+  status.panels[2].height = 768;
+  std::strcpy(status.panels[3].name, "@EFIS#0/2");
+  status.panels[3].width = 1644;
+  status.panels[3].height = 1024;
+  status.gauge_count = 4;
+  status.gauges[0].panel = 2;
+  std::strcpy(status.gauges[0].name, "EFIS");
+  status.gauges[1].panel = 2;
+  std::strcpy(status.gauges[1].name, "A350WXR_EFIS");
+  status.gauges[2].panel = 3;
+  std::strcpy(status.gauges[2].name, "EFIS");
+  status.gauges[3].panel = 3;
+  std::strcpy(status.gauges[3].name, "A350WXR_EFIS");
+  require(learn_layout(status, {"@A350WXR_EFIS#0/2", "@A350WXR_EFIS#1/2", nullptr}, 2, l) == LayoutLearning::learned &&
+              std::strcmp(l.textures[0], "@A350WXR_EFIS#0/2") == 0 && std::strcmp(l.textures[1], "@A350WXR_EFIS#1/2") == 0 &&
+              l.shapes[0].width == 1644 && l.shapes[1].width == 1024,
+          "Saved ranked keys from stacked twins learn with each rank's shape");
+  // Missing ranked key or wrong carrier count refuses.
+  require(learn_layout(status, {"@MissingGauge#0/2", "@A350WXR_EFIS#1/2", nullptr}, 2, l) == LayoutLearning::unknown_panel,
+          "Missing ranked key refuses");
+  require(learn_layout(status, {"@A350WXR_EFIS#0/3", "@A350WXR_EFIS#1/2", nullptr}, 2, l) == LayoutLearning::unknown_panel,
+          "Ranked key with mismatched carrier count refuses");
+  // Ranked key across panels with unrelated first gauges refuses when shapes differ.
+  std::strcpy(status.panels[2].name, "@LeftPanel");
+  std::strcpy(status.panels[3].name, "@RightPanel");
+  require(learn_layout(status, {"@A350WXR_EFIS#0/2", "@A350WXR_EFIS#1/2", nullptr}, 2, l) == LayoutLearning::unknown_panel,
+          "Ranked key refuses when rank order is unknown and shapes differ");
+  status.panels[2].width = 1644;
+  status.panels[2].height = 1024;
+  require(learn_layout(status, {"@A350WXR_EFIS#0/2", "@A350WXR_EFIS#1/2", nullptr}, 2, l) == LayoutLearning::learned &&
+              l.shapes[0].width == 1644 && l.shapes[1].width == 1644,
+          "Ranked key learns when every carrier shares the same shape");
 }
 
 // The user's display choices for a built-in profile: another panel or a
