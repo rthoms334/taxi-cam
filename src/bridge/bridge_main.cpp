@@ -832,13 +832,13 @@ DWORD run_impl() {
   // The Windows companion owns mount settings for native sessions.
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
-  CaptureProgress progress;
+  ForegroundCaptureProgress progress;
   StartupTiming startup, warmup_startup;
   win::ScenePrewarm prewarm;
   std::uint64_t next_background_start = 0;
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
-  std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
+  std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{};
   std::uint64_t next_inventory{}, logged_creation{};
   MarkIdentityState panel_identity;
   DWORD snapshot_save_error = 0;
@@ -2279,18 +2279,21 @@ DWORD run_impl() {
       scene_runtime::manager().rearm_source_states();
     }
     if (now >= next_recovery) {
-      const bool eligible = (mask || test_scene) && !outside_pause && !failed && !output.failed &&
-                            scene.pair.state == engine_camera::State::active && scene.requested_feeds >= 2 && !scene.pose_waiting &&
-                            !scene.view_waiting && (scene.pose_session_proven || native_camera::sample_body_pose(now).valid);
-      if (eligible && output.frames != last_frames)
-        native_camera::note_scene_capture_progress(now);
-      last_frames = output.frames;
+      const bool foreground = mask != 0 || door_render || test_scene;
       // Lost GPU-state evidence says nothing about native camera lifetime.
       // Keep the pair and its resource generations. AA/upscaler switches can
       // wipe source-state without new RT barriers; rearm retained RT models
       // so later draws can capture again. Never erase/recreate cameras here.
-      if (progress.observe(now, eligible, output.frames, output.capture.source_draws,
-                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0)) {
+      const auto observation =
+          progress.observe(now,
+                           {mask, door_render, test_scene, outside_pause, failed, output.failed,
+                            scene.pair.state == engine_camera::State::active, scene.requested_feeds, scene.pose_waiting, scene.view_waiting,
+                            foreground && (scene.pose_session_proven || native_camera::sample_body_pose(now).valid)},
+                           output.frames, output.door_pages, output.capture.source_draws,
+                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0);
+      if (observation.scene_progress)
+        native_camera::note_scene_capture_progress(now);
+      if (observation.rearm) {
         const auto restored = scene_runtime::manager().rearm_source_states();
         if (graphics_diagnostics) {
           const auto now_us = static_cast<std::uint64_t>(
@@ -2384,7 +2387,7 @@ DWORD run_impl() {
     static_assert(static_cast<std::size_t>(native_camera::ProbeStage::aa) == std::tuple_size_v<decltype(status.stage_ms)>);
     std::copy_n(scene.performance.stage_ms.begin(), status.stage_ms.size(), status.stage_ms.begin());
     status.captures = output.capture.captures;
-    status.composed = output.frames;
+    status.composed = composed_output_count(output.frames, output.door_pages);
     status.stamps = output.stamps;
     // These are polling observations, not GPU timestamps. They include all work
     // since accepted intent and do not redefine request duration as cold latency.
