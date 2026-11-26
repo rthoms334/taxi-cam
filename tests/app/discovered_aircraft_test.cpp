@@ -317,6 +317,28 @@ void learning() {
   status.panel_state = static_cast<std::uint32_t>(PanelMapState::marked);
   std::strcpy(status.aircraft_path, "Airbus");
   require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::no_variant, "Only a known variant");
+  // Upper-gauge key saved before non-overlapping marks (e.g. @PFD_Captain on
+  // a panel whose gauge 0 is @WXR#0/2): still matches via status.gauges.
+  std::strcpy(status.aircraft_path, Fenix320);
+  std::strcpy(status.panels[4].name, "@WXR#0/2");
+  status.gauge_count = 2;
+  status.gauges[0].panel = 4;
+  std::strcpy(status.gauges[0].name, "WXR");
+  status.gauges[1].panel = 4;
+  std::strcpy(status.gauges[1].name, "PFD_Captain");
+  require(learn_layout(status, {"@PFD_Captain", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::learned &&
+              std::strcmp(l.textures[0], "@PFD_Captain") == 0,
+          "Previously saved upper-gauge key still learns via status.gauges");
+  // Gauge names longer than PanelGauge::name (23 chars) are truncated in status.gauges:
+  // both 24-29 char keys and KeySize-1 (31 char) keys must still match by 23-char prefix.
+  std::strcpy(status.gauges[1].name, "Fenix_A320_Captain_PFD_");
+  require(learn_layout(status, {"@Fenix_A320_Captain_PFD_Ext", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::learned &&
+              std::strcmp(l.textures[0], "@Fenix_A320_Captain_PFD_Ext") == 0,
+          "Truncated >23-char gauge name learns via 23-char prefix");
+  std::strcpy(status.gauges[1].name, "VeryLongCustomCockpitDi");
+  require(learn_layout(status, {"@VeryLongCustomCockpitDisplayGa", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::learned &&
+              std::strcmp(l.textures[0], "@VeryLongCustomCockpitDisplayGa") == 0,
+          "KeySize-truncated >=30-char gauge name learns via 23-char prefix");
 }
 
 // The user's display choices for a built-in profile: another panel or a

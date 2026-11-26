@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "../../src/shared/mark_identity.hpp"
 
 namespace {
 using namespace taxi_camera::panel_marks;
@@ -252,6 +253,31 @@ int main() {
     const auto image = page(2048, 2048, 6);
     Mark found[2];
     require(find(image, found, 2) == 0, "no false blocks");
+  }
+  // Stacked gauges on the same panel rect (issue 200: A350 EFIS + A350WXR_EFIS
+  // on VCockpit03/04): placed side-by-side without overlapping so both are read
+  // and @EFIS#0/2 / @EFIS#1/2 resolve.
+  {
+    taxi_camera::mark_identity::Store store;
+    const auto draw_pair = [&](std::uint64_t id, const char* panel) {
+      auto image = page(1644, 1024, static_cast<unsigned>(id));
+      auto efis = gauge(panel, "EFIS", 0, 0, 0, 1644, 1024, 1644, 1024, kCell);
+      auto wxr = gauge(panel, "A350WXR_EFIS", 1, 0, 0, 1644, 1024, 1644, 1024, kCell);
+      std::strcpy(efis.info.data(), "c=1cd9");
+      std::strcpy(wxr.info.data(), "c=1cd9");
+      const unsigned w0 = block_width(efis), w1 = block_width(wxr);
+      const unsigned x0 = 1644 - w0 - kCell, x1 = x0 - w1 - kCell;
+      draw(image, efis, x0, kCell, kLevel);
+      draw(image, wxr, x1, kCell, kLevel);
+      Mark found[4];
+      const auto count = find(image, found, 4);
+      require(count == 2, "both stacked gauge blocks are read");
+      store.read(id, found, count);
+    };
+    draw_pair(620, "VCockpit03");
+    draw_pair(619, "VCockpit04");
+    require(store.resolve("@EFIS#0/2", nullptr, 0) == 620 && store.resolve("@EFIS#1/2", nullptr, 0) == 619,
+            "stacked gauges keep EFIS panels routable");
   }
   std::printf("panel-marks: %u checks passed\n", checks);
   return 0;

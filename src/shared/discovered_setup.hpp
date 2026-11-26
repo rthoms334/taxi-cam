@@ -1,5 +1,8 @@
 #pragma once
+#include <algorithm>
 #include <cstring>
+#include <string_view>
+#include "mark_identity.hpp"
 #include "protocol.hpp"
 
 namespace taxi_camera::standalone {
@@ -29,6 +32,31 @@ inline LayoutLearning learn_layout(const Status& status,
     for (std::size_t i = 0; i < count && !panel; ++i)
       if (names[side] && std::strncmp(status.panels[i].name, names[side], sizeof(status.panels[i].name)) == 0)
         panel = &status.panels[i];
+    if (!panel && names[side]) {
+      // Previously saved upper-gauge keys (e.g. @PFD_Captain when gauge 0 is WXR)
+      // match when exactly one panel in the map carries that gauge.
+      mark_identity::ParsedKey parsed;
+      if (mark_identity::parse_key(names[side], parsed) && parsed.count == 1) {
+        const auto gauge_count = std::min<std::size_t>(status.gauge_count, MaxPanelGauges);
+        for (std::size_t g = 0; g < gauge_count; ++g) {
+          const auto& gauge = status.gauges[g];
+          if (gauge.panel >= count)
+            continue;
+          const auto* end = static_cast<const char*>(std::memchr(gauge.name, '\0', sizeof(gauge.name)));
+          const std::size_t len = end ? static_cast<std::size_t>(end - gauge.name) : sizeof(gauge.name);
+          const bool match = len == sizeof(gauge.name) - 1
+                                 ? parsed.gauge.size() >= len && std::string_view(parsed.gauge).compare(0, len, gauge.name, len) == 0
+                                 : parsed.gauge == std::string_view(gauge.name, len);
+          if (!match)
+            continue;
+          if (panel && panel != &status.panels[gauge.panel]) {
+            panel = nullptr;
+            break;
+          }
+          panel = &status.panels[gauge.panel];
+        }
+      }
+    }
     if (!panel || !names[side][0] || std::strlen(names[side]) >= profiles::MaxPanelName)
       return LayoutLearning::unknown_panel;
     std::strncpy(l.textures[side], names[side], profiles::MaxPanelName - 1);

@@ -97,8 +97,43 @@
         var mask = Math.floor((magnitude - TARGETED) / TARGET_SERIALS);
         return Math.floor(mask / Math.pow(2, panel - 1)) % 2 === 1;
     }
+    function blockSize(rows) {
+        return { width: (COLUMNS + 2) * CELL, height: (rows + 2) * CELL };
+    }
+    function overlaps(a, b) {
+        return a.left < b.left + b.width && b.left < a.left + a.width &&
+            a.top < b.top + b.height && b.top < a.top + a.height;
+    }
+    // Places a block in the gauge's top-right corner, stepping left (then down)
+    // past any earlier gauge's block on the same panel so stacked gauges (e.g.
+    // A350 EFIS + A350WXR_EFIS) do not cover each other's marks.
+    function placeBlock(x, y, w, h, size, placed) {
+        var minLeft = x + CELL, maxLeft = x + w - size.width - CELL;
+        var minTop = y + CELL, maxTop = y + h - size.height - CELL;
+        if (maxLeft < minLeft || maxTop < minTop)
+            return null;
+        for (var top = minTop; top <= maxTop;) {
+            var nextTop = maxTop + 1;
+            for (var left = maxLeft; left >= minLeft;) {
+                var box = { left: left, top: top, width: size.width, height: size.height };
+                var hit = null;
+                for (var i = 0; i < placed.length; i++) {
+                    if (overlaps(box, placed[i])) {
+                        hit = placed[i];
+                        break;
+                    }
+                }
+                if (!hit)
+                    return box;
+                nextTop = Math.min(nextTop, hit.top + hit.height + CELL);
+                left = hit.left - size.width - CELL;
+            }
+            top = nextTop;
+        }
+        return { left: maxLeft, top: minTop, width: size.width, height: size.height };
+    }
     if (typeof module !== "undefined" && module.exports) {
-        module.exports = { encodePayload: encodePayload, encodeCells: encodeCells, crc16: crc16, asked: asked };
+        module.exports = { encodePayload: encodePayload, encodeCells: encodeCells, crc16: crc16, asked: asked, placeBlock: placeBlock, blockSize: blockSize };
         return;
     }
 
@@ -141,9 +176,6 @@
         for (var i = 0; i < s.length; i++)
             h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
         return "c=" + ("000" + ((h ^ (h >>> 16)) & 0xffff).toString(16)).slice(-4);
-    }
-    function blockSize(rows) {
-        return { width: (COLUMNS + 2) * CELL, height: (rows + 2) * CELL };
     }
     function drawBlock(encoded, left, top) {
         var size = blockSize(encoded.rows), canvas = document.createElement("canvas");
@@ -194,6 +226,7 @@
             return;
         var pw = data.vDisplaySize.x, ph = data.vDisplaySize.y, name = data.sName || "", tag = configTag(data);
         var rx = pw / data.vLogicalSize.x, ry = ph / data.vLogicalSize.y;
+        var placed = [];
         data.daInstruments.forEach(function (instrument, index) {
             var p = instrument.vPosAndSize || {};
             // setupInstrument's rounding.
@@ -208,8 +241,11 @@
             var block = fits((tag + " " + gaugeDetail(instrument)).trim()) || fits(tag);
             if (!block)
                 return;
-            var encoded = block.encoded, size = block.size;
-            shown.push(drawBlock(encoded, x + w - size.width - CELL, y + CELL));
+            var pos = placeBlock(x, y, w, h, block.size, placed);
+            if (!pos)
+                return;
+            placed.push(pos);
+            shown.push(drawBlock(block.encoded, pos.left, pos.top));
         });
         if (shown.length) {
             showing = true;
