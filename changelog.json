@@ -1,6 +1,13 @@
 {
   "releases": [
     {
+      "version": "1.4.2",
+      "date": "2026-11-26",
+      "fixes": [
+        "When the simulator rebuilds a twin cockpit display texture in flight, the other active display stays connected, the rebuilt screen reconnects faster, and Taxi Cam no longer flashes its missing-displays message while a display is still active."
+      ]
+    },
+    {
       "version": "1.4.1",
       "date": "2026-11-26",
       "fixes": [

@@ -29,7 +29,7 @@
     // A show for some panels: -(TARGETED + mask * TARGET_SERIALS + serial),
     // mask bit n-1 for panel n (sName "VCockpit05" is 5), up to TARGET_PANELS.
     var TARGETED = Math.pow(2, 52), TARGET_SERIALS = 16, TARGET_PANELS = 48;
-    var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, IDLE_POLL_MS = 1000, START_MS = 500, MAX_SHOW_MS = 45000, HARD_SHOW_MS = 120000;
+    var READ_VAR = "L:TAXICAM_MARKS", POLL_MS = 250, IDLE_POLL_MS = 250, START_MS = 500, MAX_SHOW_MS = 45000, HARD_SHOW_MS = 120000;
 
     function crc16(bytes) {
         var crc = 0xffff;
