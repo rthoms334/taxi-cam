@@ -2411,8 +2411,10 @@ DWORD run_impl() {
       startup.stamp_ms = GetTickCount64();
       log_startup(status, startup, "first_stamp");
     }
-    // Candidate rows are UI diagnostics, not the authoritative assignment or
-    // discovery state. Avoid rebuilding the full inventory on every 25 ms tick.
+    // Refresh the candidate-row inventory and named mark identity every 1 s
+    // normally, or every 100 ms while a wanted display side is still unassigned,
+    // so the 25 ms loop avoids unnecessary rebuilds while picking up replacements
+    // promptly. A change in named targets forces an immediate discovery run.
     if (now >= next_inventory) {
       inventory = win::pfd_inventory();
       next_inventory = now + (mark_scan.wanted_unassigned ? 100 : 1000);

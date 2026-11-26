@@ -11,8 +11,12 @@
 // one, 2026-11-04). "@PFD_Captain" is the texture carrying that gauge; where
 // several textures carry the same gauge (the A350's two EFIS panels),
 // "@EFIS#1/2" is the second of the two, in panel number order, which a shift
-// of the whole list keeps. Such a key only resolves while exactly that many
-// textures carry the gauge.
+// of the whole list keeps. Until all twins have been seen together, such a
+// key only resolves while exactly that many textures carry the gauge; once
+// every twin's VCockpit panel order has been recorded, a surviving twin
+// stays resolved to its remembered panel during a partial replacement, and
+// the remembered order is pruned on a session or profile change once no
+// texture carries the gauge.
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -315,8 +319,9 @@ class Store {
     return {};
   }
   // The live texture showing the display named by key: the gauge's texture
-  // (or the ranked one of exactly that many), then along the simulator's
-  // copies to the texture it shows.
+  // (the ranked one when all twins are present, or a surviving twin's
+  // remembered VCockpit panel once the full twin order has been seen), then
+  // along the simulator's copies to the texture it shows.
   std::uint64_t resolve(const char* key, const std::pair<std::uint64_t, std::uint64_t>* feeds, std::size_t count) const {
     ParsedKey parsed;
     if (!parse_key(key, parsed))
