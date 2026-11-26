@@ -79,5 +79,52 @@ int main() {
                                 250, true));
   assert(!door_progress.stalled());
 
+  // 1. Rising door_pages must NOT mask a stalled taxi capture when both are active,
+  //    nor credit SceneRecovery while taxi composition is stalled.
+  {
+    taxi_camera::ForegroundCaptureProgress fg;
+    const taxi_camera::CaptureRecoveryDemand both{1, true, false, false, false, false, true, 4, false, false, true};
+    auto obs = fg.observe(1000, both, 10, 1, 100, true);
+    assert(!obs.rearm && !fg.stalled());
+    obs = fg.observe(1250, both, 10, 2, 150, true);
+    assert(!obs.rearm && !obs.scene_progress && !fg.stalled());
+    obs = fg.observe(1000 + taxi_camera::CaptureProgress::StallMs, both, 10, 3, 200, true);
+    assert(obs.rearm && !obs.scene_progress && fg.stalled() && fg.taxi_stalled() && !fg.door_stalled());
+    obs = fg.observe(1000 + taxi_camera::CaptureProgress::StallMs + 250, both, 11, 4, 250, false);
+    assert(!obs.rearm && obs.scene_progress && !fg.stalled() && !fg.taxi_stalled() && !fg.door_stalled());
+  }
+
+  // 2. Rising taxi frames must NOT mask a stalled door capture when both are active.
+  {
+    taxi_camera::ForegroundCaptureProgress fg;
+    const taxi_camera::CaptureRecoveryDemand both{1, true, false, false, false, false, true, 4, false, false, true};
+    auto obs = fg.observe(2000, both, 20, 5, 300, true);
+    assert(!obs.rearm && !fg.stalled());
+    obs = fg.observe(2250, both, 21, 5, 350, true);
+    assert(!obs.rearm && obs.scene_progress && !fg.stalled());
+    obs = fg.observe(2000 + taxi_camera::CaptureProgress::StallMs, both, 22, 5, 400, true);
+    assert(obs.rearm && obs.scene_progress && fg.stalled() && !fg.taxi_stalled() && fg.door_stalled());
+    obs = fg.observe(2000 + taxi_camera::CaptureProgress::StallMs + 250, both, 23, 6, 450, false);
+    assert(!obs.rearm && !fg.stalled() && !fg.taxi_stalled() && !fg.door_stalled());
+  }
+
+  // 3. Door-only mode (taxi_mask == 0, door_render == true) still triggers stall
+  //    recovery and recovers on rising door_pages, and reset() clears both paths.
+  {
+    taxi_camera::ForegroundCaptureProgress fg;
+    auto obs = fg.observe(3000, base_door, 0, 10, 500, true);
+    assert(!obs.rearm && !fg.stalled());
+    obs = fg.observe(3000 + taxi_camera::CaptureProgress::StallMs, base_door, 0, 10, 600, true);
+    assert(obs.rearm && !obs.scene_progress && fg.stalled() && !fg.taxi_stalled() && fg.door_stalled());
+    obs = fg.observe(3000 + taxi_camera::CaptureProgress::StallMs + 50, base_door, 0, 11, 650, true);
+    assert(!obs.rearm && obs.scene_progress && !fg.stalled());
+    // Stop sequence reset clears an active stall on both paths.
+    assert(fg.observe(4000, base_door, 0, 11, 700, true).rearm == false);
+    assert(fg.observe(4000 + taxi_camera::CaptureProgress::StallMs, base_door, 0, 11, 750, true).rearm);
+    assert(fg.stalled());
+    fg.reset();
+    assert(!fg.stalled() && !fg.taxi_stalled() && !fg.door_stalled());
+  }
+
   std::puts("Capture-stall recovery: PASS");
 }

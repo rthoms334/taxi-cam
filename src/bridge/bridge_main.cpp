@@ -832,13 +832,13 @@ DWORD run_impl() {
   // The Windows companion owns mount settings for native sessions.
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
-  CaptureProgress progress;
+  ForegroundCaptureProgress progress;
   StartupTiming startup, warmup_startup;
   win::ScenePrewarm prewarm;
   std::uint64_t next_background_start = 0;
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
-  std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
+  std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{};
   std::uint64_t next_inventory{}, logged_creation{};
   MarkIdentityState panel_identity;
   DWORD snapshot_save_error = 0;
@@ -2280,20 +2280,20 @@ DWORD run_impl() {
     }
     if (now >= next_recovery) {
       const bool foreground = mask != 0 || door_render || test_scene;
-      const bool eligible = capture_recovery_eligible(
-          {mask, door_render, test_scene, outside_pause, failed, output.failed, scene.pair.state == engine_camera::State::active,
-           scene.requested_feeds, scene.pose_waiting, scene.view_waiting,
-           foreground && (scene.pose_session_proven || native_camera::sample_body_pose(now).valid)});
-      const auto composed = composed_output_count(output.frames, output.door_pages);
-      if (eligible && composed != last_frames)
-        native_camera::note_scene_capture_progress(now);
-      last_frames = composed;
       // Lost GPU-state evidence says nothing about native camera lifetime.
       // Keep the pair and its resource generations. AA/upscaler switches can
       // wipe source-state without new RT barriers; rearm retained RT models
       // so later draws can capture again. Never erase/recreate cameras here.
-      if (progress.observe(now, eligible, composed, output.capture.source_draws,
-                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0)) {
+      const auto observation =
+          progress.observe(now,
+                           {mask, door_render, test_scene, outside_pause, failed, output.failed,
+                            scene.pair.state == engine_camera::State::active, scene.requested_feeds, scene.pose_waiting, scene.view_waiting,
+                            foreground && (scene.pose_session_proven || native_camera::sample_body_pose(now).valid)},
+                           output.frames, output.door_pages, output.capture.source_draws,
+                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0);
+      if (observation.scene_progress)
+        native_camera::note_scene_capture_progress(now);
+      if (observation.rearm) {
         const auto restored = scene_runtime::manager().rearm_source_states();
         if (graphics_diagnostics) {
           const auto now_us = static_cast<std::uint64_t>(

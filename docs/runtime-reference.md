@@ -322,7 +322,7 @@ Use the counters in pipeline order:
 | `graphics_ready` | Native graphics observation initialized |
 | `scene_ready` | Both engine camera-ready flags are set |
 | `captures` | Snapshot copy operations recorded |
-| `composed` | Paired compositions submitted |
+| `composed` | Paired compositions and door camera pages submitted |
 | `stamps` | Camera copies or draws recorded into PFD command lists |
 
 Private-code mismatch diagnostics identify the failed discovery or validation stage. Relocated code is accepted only when the complete reviewed instruction and object-identity contract has one consistent result; partial or ambiguous matches never authorize native calls.
@@ -345,7 +345,7 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 | There is no support for this sim version. Send a report. | The loaded simulator does not match a supported camera contract. The same status line still includes the instruction-discovery, function-boundary, object-identity or activation-data reason. Use Report a bug and attach its report file, which holds the launcher and bridge logs. |
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |
-| Captures increase, no compositions | Both feeds, current scene identity and GPU completion |
+| Captures increase, no compositions | Requested feeds (both taxi feeds, or the door feed when door-only), current scene identity and GPU completion |
 | Compositions increase, no PFD draws | Assigned targets, active side, recording-end/query/state admission, `close_forward_refused` and the `Command-list Close endpoint` log line |
 | PFD draws increase, wrong display | Target identification, left/right assignment and display layer |
 | View loses the ground after take-off or shows no clouds | Camera draw distance line: each feed's far equal to the main view's (`main` not zero); Camera weather line: `cloud_merges` growing |
