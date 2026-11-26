@@ -11,8 +11,9 @@ inline TargetAssignmentResult update_target_assignment(std::uint64_t& left,
                                                        std::uint64_t& right,
                                                        std::uint64_t& request,
                                                        std::uint64_t next_left,
-                                                       std::uint64_t next_right) noexcept {
-  if (next_left && next_left == next_right)
+                                                       std::uint64_t next_right,
+                                                       bool allow_duplicate = false) noexcept {
+  if (!allow_duplicate && next_left && next_left == next_right)
     return TargetAssignmentResult::duplicate;
   if (left == next_left && right == next_right)
     return TargetAssignmentResult::unchanged;

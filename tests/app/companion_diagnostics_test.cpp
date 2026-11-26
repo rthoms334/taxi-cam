@@ -399,6 +399,56 @@ void autosave_setup_tests() {
     require(current.manual_mask == 1 && !current.door_on, "Closing the positioning window gives back the user's cameras");
     live_view = {};
   }
+  // Combined display atlases: placing one texture on two sides keeps both
+  // placements without swapping, but routes both sides to it only once both
+  // have non-empty, disjoint areas; clicking a gauge inside a whole-panel or
+  // multi-gauge frame snaps to that gauge directly unless a single gauge
+  // (including one with nested child gauges) already fills the frame.
+  setup.picked = "$DU1";
+  setup.picked_texture = 801;
+  place_setup_panel(0);
+  setup.picked = "$DU1";
+  setup.picked_texture = 801;
+  place_setup_panel(1);
+  require(setup.names[0] == "$DU1" && setup.names[1] == "$DU1" && std::string_view(current.discovered.textures[0]) == "$DU1" &&
+              std::string_view(current.discovered.textures[1]) == "$DU1" && current.left_id == 801 && current.right_id == 0,
+          "Placing a shared atlas texture keeps both placements while zeroing right_id until disjoint areas are picked");
+  setup.areas[0] = {35, 35, 970, 970};
+  setup.areas[1] = {500, 500, 1500, 1500};
+  apply_setup_picks();
+  require(current.left_id == 801 && current.right_id == 0, "Overlapping areas on a shared atlas keep right_id zeroed");
+  setup.areas[1] = {1083, 35, 2018, 970};
+  apply_setup_picks();
+  require(current.left_id == 801 && current.right_id == 801, "Disjoint non-empty areas on a shared atlas route both pilot sides to it");
+  area_picker = {};
+  area_picker.texture_width = area_picker.texture_height = 2048;
+  area_picker.area = {0, 0, 2048, 2048};
+  area_picker.gauges = {{L"DU_Upper", {35, 35, 970, 970}}, {L"DU_Lower", {1083, 35, 2018, 970}}, {L"DU_Upper_Inner", {100, 100, 400, 400}}};
+  snapshot_view.width = 1024;
+  snapshot_view.height = 1024;
+  const auto pic = area_picker_picture();
+  const auto lower_screen = win::area_edit::to_screen(pic, 2048, 2048, area_picker.gauges[1].second);
+  const POINT lower_mid{(lower_screen.left + lower_screen.right) / 2, (lower_screen.top + lower_screen.bottom) / 2};
+  const auto inner_screen = win::area_edit::to_screen(pic, 2048, 2048, area_picker.gauges[2].second);
+  const POINT inner_mid{(inner_screen.left + inner_screen.right) / 2, (inner_screen.top + inner_screen.bottom) / 2};
+  const auto upper_outer_screen = win::area_edit::to_screen(pic, 2048, 2048, {600, 600, 900, 900});
+  const POINT upper_outer_mid{(upper_outer_screen.left + upper_outer_screen.right) / 2,
+                              (upper_outer_screen.top + upper_outer_screen.bottom) / 2};
+  require(area_picker_gauge_click(lower_mid, 8) == 1 && area_picker_gauge_click(lower_mid, 0) == -1 &&
+              area_picker_gauge_click(inner_mid, 8) == 2,
+          "A gauge inside a whole-panel frame is clickable unless grabbing a resize handle");
+  area_picker.area = area_picker.gauges[1].second;
+  require(area_picker_gauge_click(lower_mid, 8) == -1,
+          "Once snapped to a single gauge, dragging inside its frame moves it instead of re-snapping");
+  area_picker.area = area_picker.gauges[0].second;
+  require(area_picker_gauge_click(upper_outer_mid, 8) == -1 && area_picker_gauge_click(inner_mid, 8) == -1,
+          "A frame snapped to a gauge with a nested child still drags everywhere inside it");
+  area_picker.area = {20, 20, 2030, 990};
+  require(area_picker_gauge_click(inner_mid, 8) == 2 && area_picker_gauge_click(lower_mid, 8) == 1,
+          "A multi-gauge frame snaps to any smaller gauge inside it");
+  area_picker = {};
+  snapshot_view.width = snapshot_view.height = 0;
+
   // Opening Displays closes the window before a trial can copy its previews.
   current.manual_mask = 1;
   current.door_on = 0;

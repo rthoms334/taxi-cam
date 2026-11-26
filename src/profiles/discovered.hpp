@@ -112,6 +112,7 @@ inline void build_discovered(DiscoveredProfile& out) noexcept {
   p.fit_texture = true;
   p.composition = A350Etacs;
   p.formats = {28, 29};
+  p.partial_repaint = {true, true, true};
   p.camera_padding = l.padding;
   p.display_layout = DisplayLayout::fitted;
   p.sides = l.sides;
