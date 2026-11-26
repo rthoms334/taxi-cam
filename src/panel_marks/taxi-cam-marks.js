@@ -1,7 +1,9 @@
 // Taxi Cam panel marks. Loaded by the Taxi Cam copy of VCockpit.html (one
 // page per cockpit panel). When the panel loads it paints one small,
-// near-black block in the top-right corner of each gauge naming the panel and
-// the gauge, so Taxi Cam can tell which display texture is which. The blocks
+// near-black block per gauge, starting in its top-right corner and stepping
+// left, then down, past earlier blocks and every gauge's top-left corner on
+// the same panel, naming the panel and the gauge so Taxi Cam can tell which
+// display texture is which. The blocks
 // go as soon as Taxi Cam has read them, and after MAX_SHOW_MS of running
 // simulation (HARD_SHOW_MS of any time) at the latest. Taxi Cam talks to the
 // pages through L:TAXICAM_MARKS: a new positive value means "read, take them
@@ -104,36 +106,47 @@
         return a.left < b.left + b.width && b.left < a.left + a.width &&
             a.top < b.top + b.height && b.top < a.top + a.height;
     }
+    function gaugeCorner(x, y) {
+        return { left: x, top: y, width: CELL, height: CELL };
+    }
     // Places a block in the gauge's top-right corner, stepping left (then down)
-    // past any earlier gauge's block on the same panel so stacked gauges (e.g.
-    // A350 EFIS + A350WXR_EFIS) do not cover each other's marks.
-    function placeBlock(x, y, w, h, size, placed) {
+    // past any earlier gauge's block and any gauge's top-left corner on the
+    // same panel so stacked gauges (e.g. A350 EFIS + A350WXR_EFIS) do not cover
+    // each other's marks or any corner pixel other tools sample. Falls back to
+    // the top-right corner only when doing so touches no gauge's top-left corner.
+    function placeBlock(x, y, w, h, size, placed, corners) {
         var minLeft = x + CELL, maxLeft = x + w - size.width - CELL;
         var minTop = y + CELL, maxTop = y + h - size.height - CELL;
         if (maxLeft < minLeft || maxTop < minTop)
             return null;
+        var avoid = (placed || []).concat(corners || []);
         for (var top = minTop; top <= maxTop;) {
             var nextTop = maxTop + 1;
             for (var left = maxLeft; left >= minLeft;) {
                 var box = { left: left, top: top, width: size.width, height: size.height };
-                var hit = null;
-                for (var i = 0; i < placed.length; i++) {
-                    if (overlaps(box, placed[i])) {
-                        hit = placed[i];
-                        break;
+                var nextLeft = left, hit = false;
+                for (var i = 0; i < avoid.length; i++) {
+                    if (overlaps(box, avoid[i])) {
+                        hit = true;
+                        nextTop = Math.min(nextTop, avoid[i].top + avoid[i].height + CELL);
+                        nextLeft = Math.min(nextLeft, avoid[i].left - size.width - CELL);
                     }
                 }
                 if (!hit)
                     return box;
-                nextTop = Math.min(nextTop, hit.top + hit.height + CELL);
-                left = hit.left - size.width - CELL;
+                left = nextLeft;
             }
             top = nextTop;
         }
-        return { left: maxLeft, top: minTop, width: size.width, height: size.height };
+        var fallback = { left: maxLeft, top: minTop, width: size.width, height: size.height };
+        for (var j = 0; corners && j < corners.length; j++) {
+            if (overlaps(fallback, corners[j]))
+                return null;
+        }
+        return fallback;
     }
     if (typeof module !== "undefined" && module.exports) {
-        module.exports = { encodePayload: encodePayload, encodeCells: encodeCells, crc16: crc16, asked: asked, placeBlock: placeBlock, blockSize: blockSize };
+        module.exports = { encodePayload: encodePayload, encodeCells: encodeCells, crc16: crc16, asked: asked, placeBlock: placeBlock, blockSize: blockSize, gaugeCorner: gaugeCorner };
         return;
     }
 
@@ -217,8 +230,10 @@
         });
         shown = [];
     }
-    // One block per gauge, in its top-right corner a cell in from the edges:
-    // far from the top-left corner other tools sample.
+    // One block per gauge, starting in its top-right corner a cell in from the
+    // edges and stepping left, then down, past earlier blocks and every gauge's
+    // top-left corner on the panel (falling back to the corner when clear of
+    // every top-left corner pixel other tools sample).
     function show() {
         hide();
         var data = panelData();
@@ -226,22 +241,34 @@
             return;
         var pw = data.vDisplaySize.x, ph = data.vDisplaySize.y, name = data.sName || "", tag = configTag(data);
         var rx = pw / data.vLogicalSize.x, ry = ph / data.vLogicalSize.y;
-        var placed = [];
-        data.daInstruments.forEach(function (instrument, index) {
+        var gauges = data.daInstruments.map(function (instrument) {
             var p = instrument.vPosAndSize || {};
             // setupInstrument's rounding.
-            var x = Math.round(p.x * rx), y = Math.round(p.y * ry), w = Math.round(p.z * rx), h = Math.round(p.w * ry);
+            return {
+                instrument: instrument,
+                x: Math.round(p.x * rx), y: Math.round(p.y * ry),
+                w: Math.round(p.z * rx), h: Math.round(p.w * ry)
+            };
+        });
+        var corners = [];
+        gauges.forEach(function (g) {
+            if (g.w > 0 && g.h > 0)
+                corners.push(gaugeCorner(g.x, g.y));
+        });
+        var placed = [];
+        gauges.forEach(function (g, index) {
+            var x = g.x, y = g.y, w = g.w, h = g.h;
             var fits = function (info) {
                 var encoded = encodeCells(encodePayload({ kind: 0, cell: CELL, gauge: index & 255, x: x, y: y, width: w, height: h, panelWidth: pw,
-                                                          panelHeight: ph, name: name, gaugeName: gaugeName(instrument.sUrl || ""), info: info }));
+                                                          panelHeight: ph, name: name, gaugeName: gaugeName(g.instrument.sUrl || ""), info: info }));
                 var size = blockSize(encoded.rows);
                 return w >= size.width + 2 * CELL && h >= size.height + 2 * CELL ? { encoded: encoded, size: size } : null;
             };
             // A small gauge keeps a block without the detail.
-            var block = fits((tag + " " + gaugeDetail(instrument)).trim()) || fits(tag);
+            var block = fits((tag + " " + gaugeDetail(g.instrument)).trim()) || fits(tag);
             if (!block)
                 return;
-            var pos = placeBlock(x, y, w, h, block.size, placed);
+            var pos = placeBlock(x, y, w, h, block.size, placed, corners);
             if (!pos)
                 return;
             placed.push(pos);
