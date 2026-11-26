@@ -909,7 +909,7 @@ void shadow_retake_fallback_checks() {
     shadow.handled_drop = r.shadow_dropped[0].load();
   };
   const auto fallbacks = r.shadow_fallbacks.load();
-  const std::uint64_t now = 100000;
+  std::uint64_t now = std::max<std::uint64_t>(GetTickCount64(), 100000);
   const auto& shadow = r.shadows[0];
   prepare(now - 100, now);
   require(
@@ -925,9 +925,98 @@ void shadow_retake_fallback_checks() {
           "Misses that stopped past the confirm window were not forgotten");
   prepare(now - win::kShadowConfirmMs - 1, now - 10);
   const auto mode = win::update_shadow(r, 0, now);
-  require(mode == win::Registry::ShadowMode::direct && r.shadow_fallbacks == fallbacks + 1 && !shadow.saved && !shadow.queue &&
-              !shadow.retake_queue,
+  require(mode == win::Registry::ShadowMode::direct && shadow.fallback && r.shadow_fallbacks == fallbacks + 1 && !shadow.saved &&
+              !shadow.queue && !shadow.retake_queue,
           "Misses going on past the confirm window kept the side on queue copies");
+  const auto old_verified = r.close_forward_verified;
+  const auto old_key = r.key;
+  const auto old_window_count = r.failure_window_count.load();
+  const auto old_window_ms = r.failure_window_ms.load();
+  const auto old_failures = r.failures.load();
+  const auto old_error = r.error.load();
+  const auto old_halted = r.admission_halted.load();
+  const auto old_armed = r.armed.load();
+  const auto old_backfill = r.live_backfill.load();
+  const auto old_full_window = r.backfill_full_window;
+  auto* const mock_shadow_buffer = reinterpret_cast<ID3D12Resource*>(0x8e0000);
+  r.close_forward_verified = true;
+  r.shadows[0].buffer = mock_shadow_buffer;
+  r.shadows[0].footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  r.shadows[0].footprint.Footprint.Width = 768;
+  r.shadows[0].footprint.Footprint.Height = 763;
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::direct,
+          "Retake fallback did not stay in direct mode with queue_ready() true");
+  // Confirm-timeout fallback sets shadow.fallback and keeps direct mode when queue_ready() is true.
+  r.shadows[0] = {};
+  r.shadows[0].mode = win::Registry::ShadowMode::queue;
+  r.shadows[0].target = target;
+  r.shadows[0].area = win::shadow_area(r, 0, *target);
+  r.shadows[0].buffer = mock_shadow_buffer;
+  r.shadows[0].footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  r.shadows[0].footprint.Footprint.Width = 768;
+  r.shadows[0].footprint.Footprint.Height = 763;
+  r.shadows[0].saved = true;
+  r.shadows[0].confirmed = false;
+  r.shadows[0].first_save_serial = completed + 1;
+  r.shadows[0].planned_ms = now - win::kShadowConfirmMs - 1;
+  r.shadows[0].handled_drop = r.shadow_dropped[0].load();
+  require(
+      win::update_shadow(r, 0, now) == win::Registry::ShadowMode::direct && r.shadows[0].fallback && r.shadow_fallbacks == fallbacks + 2,
+      "Confirm timeout did not fall back with shadow.fallback set");
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::direct,
+          "Confirm-timeout fallback did not stay in direct mode with queue_ready() true");
+  // Cover-timeout fallback in service_display_shadows sets shadow.fallback and stays in direct mode.
+  {
+    IDXGIFactory4* factory = nullptr;
+    IDXGIAdapter* adapter = nullptr;
+    ID3D12Device* warp_device = nullptr;
+    require(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter))) &&
+                SUCCEEDED(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&warp_device))),
+            "Create WARP device for cover-timeout shadow check");
+    constexpr std::uint64_t cover_key = 9401;
+    require(win::runtime::init_device(cover_key, warp_device) &&
+                win::runtime::set_patch_profile(cover_key, taxi_camera::profiles::A380.id) && win::runtime::prepare(cover_key),
+            "Prepare runtime for cover-timeout shadow check");
+    win::runtime::QueuePatchConfig config{1, taxi_camera::profiles::A380.id, 1, 0, {DXGI_FORMAT_R8G8B8A8_UNORM}, {}, 1, 0};
+    require(win::runtime::configure_queue_patches(cover_key, config), "Configure queue patches for cover-timeout check");
+    win::runtime::service();
+    win::runtime::QueuePatchSnapshot snapshot;
+    require(win::runtime::try_snapshot_queue_patches(cover_key, 1, snapshot) && (snapshot.ready_mask & 1u) != 0,
+            "Publish ready waiting patch for cover-timeout check");
+    r.key = cover_key;
+    r.device = nullptr;
+    r.queue_patch_generation.store(1);
+    target->content_serial.store(1);
+    target->covered_serial.store(0);
+    r.shadows[0] = {};
+    r.shadows[0].mode = win::Registry::ShadowMode::queue;
+    r.shadows[0].target = target;
+    r.shadows[0].area = win::shadow_area(r, 0, *target);
+    r.shadows[0].buffer = mock_shadow_buffer;
+    r.shadows[0].footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    r.shadows[0].footprint.Footprint.Width = 768;
+    r.shadows[0].footprint.Footprint.Height = 763;
+    r.shadows[0].saved = r.shadows[0].confirmed = true;
+    r.shadows[0].first_save_serial = r.shadows[0].serial = completed;
+    r.shadows[0].handled_drop = r.shadow_dropped[0].load();
+    win::service_display_shadows(r, config);
+    require(r.shadows[0].mode == win::Registry::ShadowMode::queue && r.shadows[0].uncovered_ms != 0,
+            "Uncovered shadow did not record uncovered_ms");
+    r.shadows[0].uncovered_ms = GetTickCount64() - win::kShadowCoverMs - 10;
+    win::service_display_shadows(r, config);
+    require(r.shadows[0].mode == win::Registry::ShadowMode::direct && r.shadows[0].fallback && r.shadow_fallbacks == fallbacks + 3,
+            "Cover timeout did not fall back with shadow.fallback set");
+    require(win::update_shadow(r, 0, GetTickCount64()) == win::Registry::ShadowMode::direct,
+            "Cover-timeout fallback did not stay in direct mode with queue_ready() true");
+    target->content_serial.store(0);
+    r.shadows[0].buffer = nullptr;
+    r.shadows[0] = {};
+    r.key = old_key;
+    win::runtime::destroy_device(cover_key);
+    warp_device->Release();
+    adapter->Release();
+    factory->Release();
+  }
   // Resizing or moving the display area while active restores the confirmed
   // old region first before switching to the new area.
   taxi_camera::profiles::DiscoveredLayout layout{};
@@ -958,6 +1047,7 @@ void shadow_retake_fallback_checks() {
   active_profile.display_regions[0] = active_profile.areas[0];
   const auto resized = win::shadow_area(r, 0, *target);
   const D3D12_RECT old_area{1067, 0, 2048, 973};
+  now = GetTickCount64();
   require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::restoring && r.shadows[0].area.left == old_area.left &&
               r.shadows[0].area.top == old_area.top && r.shadows[0].area.right == old_area.right &&
               r.shadows[0].area.bottom == old_area.bottom,
@@ -974,20 +1064,9 @@ void shadow_retake_fallback_checks() {
   // Same-profile display-choice updates keep confirmed shadows restoring so
   // the earlier display area clears before the new region activates; changing
   // profile forgets them.
-  const auto old_verified = r.close_forward_verified;
-  const auto old_key = r.key;
-  const auto old_window_count = r.failure_window_count.load();
-  const auto old_window_ms = r.failure_window_ms.load();
-  const auto old_failures = r.failures.load();
-  const auto old_error = r.error.load();
-  const auto old_halted = r.admission_halted.load();
-  const auto old_armed = r.armed.load();
-  const auto old_backfill = r.live_backfill.load();
-  const auto old_full_window = r.backfill_full_window;
   r.key = 0;
   r.close_forward_verified = true;
   r.failure_window_count = 0;
-  auto* const mock_shadow_buffer = reinterpret_cast<ID3D12Resource*>(0x8e0000);
   r.shadows[0].buffer = mock_shadow_buffer;
   r.shadows[0].footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   r.shadows[0].footprint.Footprint.Width = 935;
@@ -1009,6 +1088,40 @@ void shadow_retake_fallback_checks() {
   require(r.shadows[0].mode == win::Registry::ShadowMode::restoring && r.shadows[0].target == target &&
               win::same_rect(r.shadows[0].area, resized),
           "Same-profile display choice reload forgot confirmed shadow instead of restoring it");
+  // An area-only change on the same texture also unblocks after the confirm
+  // timeout if no restore completes while the side stays active.
+  r.shadows[0].mode = win::Registry::ShadowMode::queue;
+  r.shadows[0].saved = r.shadows[0].confirmed = true;
+  r.shadows[0].first_save_serial = r.shadows[0].serial = r.shadow_completed[0].load() + 1;
+  r.shadow_completed[0].store(r.shadows[0].serial);
+  r.shadows[0].target = target;
+  r.shadows[0].area = resized;
+  r.active_mask = 1;
+  r.routes.select_explicit({target->id, 0});
+  win::refresh_selected(r);
+  r.profile = &active_profile;
+  active_profile.areas[0] = {35, 35, 970, 970};
+  active_profile.display_regions[0] = active_profile.areas[0];
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::restoring && win::same_rect(r.shadows[0].area, resized),
+          "Area-only change on same texture did not enter restoring on old region");
+  require(win::update_shadow(r, 0, now + win::kShadowConfirmMs) == win::Registry::ShadowMode::restoring,
+          "Area-only restore unblocked before the confirm timeout");
+  require(win::update_shadow(r, 0, now + win::kShadowConfirmMs + 1) != win::Registry::ShadowMode::restoring &&
+              r.shadows[0].target == target && win::same_rect(r.shadows[0].area, D3D12_RECT{35, 35, 970, 970}),
+          "Stuck area-only restore on the same texture did not unblock after the confirm timeout");
+  // assign_targets accepts duplicate texture IDs on fitted layouts only when
+  // both sides have non-empty, disjoint areas, and refuses duplicates on
+  // non-fitted layouts.
+  active_profile.areas[0] = {};
+  active_profile.areas[1] = {};
+  require(!win::assign_targets(target->id, target->id), "assign_targets accepted duplicate fitted texture while areas were empty");
+  active_profile.areas[0] = {35, 35, 970, 970};
+  active_profile.areas[1] = {500, 500, 1500, 1500};
+  require(!win::assign_targets(target->id, target->id), "assign_targets accepted duplicate fitted texture with overlapping areas");
+  active_profile.areas[1] = {1083, 35, 2018, 970};
+  require(win::assign_targets(target->id, target->id) &&
+              r.routes.targets == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{target->id, target->id, 0},
+          "assign_targets rejected duplicate fitted texture with disjoint areas");
   // An active side switching to another texture does not stay blocked forever
   // if the old texture stops submitting.
   auto target2 = std::make_shared<win::Resource>();
@@ -1031,6 +1144,10 @@ void shadow_retake_fallback_checks() {
   win::set_aircraft_profile(taxi_camera::profiles::A380.id);
   require(r.shadows[0].mode == win::Registry::ShadowMode::off && !r.shadows[0].target,
           "Switching aircraft profile did not forget previous display shadow");
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->display_shape = win::display_shaped(target->desc);
+  require(!win::assign_targets(target->id, target->id), "assign_targets accepted duplicate texture on non-fitted profile");
   require(2048ull * 2048ull * 4ull <= win::kShadowMaxBytes, "2048x2048 combined display atlas must fit within shadow bounds");
   r.shadows[0].buffer = nullptr;
   r.shadows[0] = {};

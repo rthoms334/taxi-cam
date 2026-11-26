@@ -2248,7 +2248,7 @@ std::uint64_t picked_id(const std::vector<win::PanelTexture>& items, unsigned si
 // to later flights.
 void route_picks(win::Settings& s, const std::vector<win::PanelTexture>& items) {
   const std::uint64_t left = picked_id(items, 0), right = setup.sides > 1 ? picked_id(items, 1) : 0;
-  const bool shared_atlas = !setup.built_in;
+  const bool shared_atlas = !setup.built_in && profiles::disjoint_rects(s.display_override.areas[0], s.display_override.areas[1]);
   win::update_target_assignment(s.left_id, s.right_id, s.route_request, left, !shared_atlas && right == left ? 0 : right, shared_atlas);
 }
 // Setup previews on the placed displays: a taxi camera on each, but the door
@@ -2545,9 +2545,11 @@ int area_picker_gauge_at(POINT point) {
   }
   return best;
 }
-// A click strictly inside the frame picks a gauge under the cursor whenever the
-// frame still spans the whole panel or covers multiple gauges (so combined
-// atlases can be clicked directly without first shrinking the frame away).
+// A click strictly inside the frame picks a smaller gauge under the cursor
+// whenever the frame still spans the whole panel or covers at least two
+// non-nested gauges (so combined atlases can be clicked directly without first
+// shrinking the frame away, while frames snapped to a single gauge with nested
+// children can still be dragged).
 int area_picker_gauge_click(POINT point, int hit) {
   if (hit >= 0 && hit < 8)
     return -1;
@@ -2556,15 +2558,40 @@ int area_picker_gauge_click(POINT point, int hit) {
     return gauge;
   const auto& p = area_picker;
   const bool whole = p.area.left == 0 && p.area.top == 0 && p.area.right >= p.texture_width && p.area.bottom >= p.texture_height;
+  if (whole)
+    return gauge;
+  const auto& target = p.gauges[static_cast<std::size_t>(gauge)].second;
+  const auto rect_area = [](const profiles::DisplayRect& r) noexcept {
+    return r.right > r.left && r.bottom > r.top ? std::uint64_t{r.right - r.left} * (r.bottom - r.top) : 0;
+  };
+  if (win::area_edit::same(target, p.area) || rect_area(target) >= rect_area(p.area))
+    return -1;
+  const auto is_whole = [&](const profiles::DisplayRect& r) noexcept {
+    return r.left == 0 && r.top == 0 && r.right >= p.texture_width && r.bottom >= p.texture_height;
+  };
+  const auto inside_frame = [&](const profiles::DisplayRect& r) noexcept {
+    return !is_whole(r) && r.left >= p.area.left && r.top >= p.area.top && r.right <= p.area.right && r.bottom <= p.area.bottom;
+  };
   unsigned inside = 0;
-  for (const auto& [name, r] : p.gauges) {
-    (void)name;
-    if (r.left == 0 && r.top == 0 && r.right >= p.texture_width && r.bottom >= p.texture_height)
+  for (std::size_t i = 0; i < p.gauges.size(); ++i) {
+    const auto& r = p.gauges[i].second;
+    if (!inside_frame(r))
       continue;
-    if (r.left >= p.area.left && r.top >= p.area.top && r.right <= p.area.right && r.bottom <= p.area.bottom)
+    bool nested = false;
+    for (std::size_t j = 0; j < p.gauges.size(); ++j) {
+      if (j == i || !inside_frame(p.gauges[j].second))
+        continue;
+      const auto& outer = p.gauges[j].second;
+      if (outer.left <= r.left && outer.top <= r.top && outer.right >= r.right && outer.bottom >= r.bottom &&
+          (rect_area(outer) > rect_area(r) || j < i)) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested)
       ++inside;
   }
-  return whole || inside >= 2 ? gauge : -1;
+  return inside >= 2 ? gauge : -1;
 }
 INT_PTR CALLBACK area_picker_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
   auto& p = area_picker;
@@ -2726,7 +2753,8 @@ void show_area_picker(unsigned side) {
   InvalidateRect(window, nullptr, FALSE);
 }
 void refresh_setup_picking();
-// One panel per side: placing another side's panel swaps the two.
+// Places the picked panel on side; a shared atlas can serve multiple sides
+// with disjoint areas.
 void place_setup_panel(unsigned side) {
   if (side >= setup.sides || setup.picked.empty())
     return;

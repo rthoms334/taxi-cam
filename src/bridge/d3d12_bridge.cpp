@@ -2314,7 +2314,8 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
 // the side goes back to direct stamps. A first save that never completes does
 // the same. A restore that was submitted but has not completed is planned
 // again; a restore keeps being planned until it completes or the camera
-// returns. Shadows are kept only for areas up to kShadowMaxBytes, so the
+// returns (or moves on after kShadowConfirmMs while active if none was
+// submitted). Shadows are kept only for areas up to kShadowMaxBytes, so the
 // buffers stay bounded while displays are routed.
 constexpr std::uint64_t kShadowCoverMs = 250, kShadowConfirmMs = 1000, kShadowReplanMs = 250;
 constexpr std::uint64_t kShadowMaxBytes = 16u << 20;
@@ -2357,7 +2358,8 @@ void count_lost_write(Registry& r, ShadowLostWrite cause) noexcept {
 // Registry lock held. Moves a side's shadow with its camera: camera on starts
 // it, on queue copies when the worker already has its buffer; camera off
 // restores what was saved. Changing target or area while active restores any
-// confirmed shadow first before starting the new region.
+// confirmed shadow first before starting the new region, or starts the new
+// region without a restore after kShadowConfirmMs if none was submitted.
 Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now) noexcept {
   using Mode = Registry::ShadowMode;
   auto& shadow = r.shadows[side];
@@ -2480,8 +2482,8 @@ Registry::ShadowMode update_shadow(Registry& r, unsigned side, std::uint64_t now
         else
           forget_shadow(shadow);
       } else if (!shadow.saved || (!shadow.confirmed && now - shadow.planned_ms > kShadowConfirmMs) ||
-                 (active && shadow.target != target && !shadow.restore_serial && now > shadow.started_ms &&
-                  now - shadow.started_ms > kShadowConfirmMs)) {
+                 (active && (shadow.target != target || !same_rect(area, shadow.area)) && !shadow.restore_serial &&
+                  now > shadow.started_ms && now - shadow.started_ms > kShadowConfirmMs)) {
         if (active)
           start_active();
         else
@@ -5434,11 +5436,14 @@ bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower
   if (!separate)
     lower = 0;
   bool l = !left, rr = !right, lw = !lower;
+  const Resource* left_res = nullptr;
   for (const auto& [p, item] : r.resources) {
     (void)p;
     if (!item->alive || !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
                                                    static_cast<UINT>(item->desc.Format)))
       continue;
+    if (item->id == left)
+      left_res = item.get();
     l |= item->id == left;
     rr |= item->id == right;
     lw |= item->id == lower;
@@ -5451,9 +5456,16 @@ bool assign_targets(std::uint64_t left, std::uint64_t right, std::uint64_t lower
   const bool previous_explicit = r.routes.lower_explicit();
   if (separate)
     r.routes.select_lower(0);
+  const auto fitted_disjoint = [&] {
+    if (r.profile->display_layout != profiles::DisplayLayout::fitted || !left || left != right || !left_res)
+      return false;
+    const auto w = static_cast<unsigned>(left_res->desc.Width), h = left_res->desc.Height;
+    return profiles::disjoint_rects(r.profile->areas[0], r.profile->areas[1]) &&
+           profiles::disjoint_rects(profiles::side_rect(*r.profile, 0, w, h), profiles::side_rect(*r.profile, 1, w, h));
+  };
   bool assigned = r.profile->display_layout == profiles::DisplayLayout::shared_texture
                       ? (!left || !right || left == right) && r.routes.select_single(left ? left : right, separate)
-                      : r.routes.select_explicit({left, right}, r.profile->display_layout == profiles::DisplayLayout::fitted);
+                      : r.routes.select_explicit({left, right}, fitted_disjoint());
   if (separate) {
     assigned = assigned && r.routes.select_lower(lower);
     // A refused choice puts an explicit lower back; a named one returns
@@ -5553,7 +5565,10 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
     r.named_targets = {};
     // Display-choice updates on the same profile keep confirmed shadows
     // restoring so the old region or panel clears before re-binding.
-    for (auto& shadow : r.shadows) {
+    for (unsigned side = 0; side < MaxDisplaySides; ++side) {
+      auto& shadow = r.shadows[side];
+      if (shadow.saved && !shadow.confirmed && r.shadow_completed[side].load(std::memory_order_acquire) >= shadow.first_save_serial)
+        shadow.confirmed = true;
       if (same_profile && shadow.mode != Registry::ShadowMode::off && shadow.saved && shadow.confirmed && shadow.target &&
           shadow.target->alive) {
         if (shadow.mode != Registry::ShadowMode::restoring) {
@@ -5687,26 +5702,48 @@ void discover_pfds(std::uint64_t now) noexcept {
     // so Auto detect off (now == 0) leaves it out.
     if (now) {
       std::array<std::uint64_t, MaxDisplaySides> named{};
+      std::array<const Resource*, MaxDisplaySides> named_resources{};
       bool usable = false, complete = true;
       for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {
         if (!r.profile->panel_textures[side][0])
           continue;
         const auto id = r.named_targets[side];
         bool live = false;
+        const Resource* live_res = nullptr;
         if (id)
           for (const auto& [native, item] : r.resources) {
             (void)native;
             if (item->id == id) {
               live = item->alive && display_item(r, *item);
+              if (live)
+                live_res = item.get();
               break;
             }
           }
         complete = complete && live;
         named[side] = live ? id : 0;
+        named_resources[side] = live_res;
         usable = usable || live;
       }
-      if (usable && complete)
+      if (usable && complete) {
+        if (r.profile->display_layout == profiles::DisplayLayout::fitted) {
+          for (unsigned side = 1; side < r.profile->sides && side < MaxDisplaySides; ++side) {
+            if (!named[side] || !named_resources[side])
+              continue;
+            const auto w = static_cast<unsigned>(named_resources[side]->desc.Width), h = named_resources[side]->desc.Height;
+            for (unsigned earlier = 0; earlier < side; ++earlier) {
+              if (named[earlier] != named[side])
+                continue;
+              if (!profiles::disjoint_rects(r.profile->areas[earlier], r.profile->areas[side]) ||
+                  !profiles::disjoint_rects(profiles::side_rect(*r.profile, earlier, w, h), profiles::side_rect(*r.profile, side, w, h))) {
+                named[side] = 0;
+                break;
+              }
+            }
+          }
+        }
         r.routes.adopt_named(named, r.profile->sides);
+      }
     }
     refresh_selected(r);
   });

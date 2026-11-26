@@ -1,4 +1,5 @@
 #include "../../src/bridge/d3d12_bridge.hpp"
+#include "../../src/profiles/discovered.hpp"
 #include "../support/graphics_fixture.hpp"
 
 namespace {
@@ -196,7 +197,8 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   require(inventory.size() == count, "Complete pre-hook display inventory recovered through barriers");
   std::sort(inventory.begin(), inventory.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
   const std::array<std::uint64_t, taxi_camera::MaxDisplaySides> expected =
-      fbw_count ? std::array{inventory[1].id, inventory[0].id, std::uint64_t{0}} : std::array{inventory[7].id, inventory[5].id, std::uint64_t{0}};
+      fbw_count ? std::array{inventory[1].id, inventory[0].id, std::uint64_t{0}}
+                : std::array{inventory[7].id, inventory[5].id, std::uint64_t{0}};
   // Displays are routed by the names their panel marks give them.
   win::set_named_targets(expected);
   win::discover_pfds(start + 5000);
@@ -226,9 +228,9 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
       record_frame(false, false);
       execute();
       runtime::service();
-      require(win::graphics_status().queue_patch_plans == idle_plans &&
-                  win::poll_display_snapshot(GetTickCount64()).result == Result::pending,
-              "A display without a proven exit was snapshotted");
+      require(
+          win::graphics_status().queue_patch_plans == idle_plans && win::poll_display_snapshot(GetTickCount64()).result == Result::pending,
+          "A display without a proven exit was snapshotted");
     }
     const auto snapshot_id = unrouted != inventory.end() && fbw_count != 3 ? unrouted->id : inventory[0].id;
     require(win::request_display_snapshot(snapshot_id, GetTickCount64()) == Result::pending, "Snapshot request accepted");
@@ -250,9 +252,9 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
     bool correct = true;
     for (const auto [x, y] : {std::pair{0u, 0u}, std::pair{767u, 1023u}, std::pair{384u, 512u}, std::pair{100u, 900u}}) {
       const auto* bgr = poll.image.bgr.data() + (std::size_t{y} * 768 + x) * 3;
-      correct &= matches_pixel(std::array<unsigned char, 4>{bgr[2], bgr[1], bgr[0], 64}.data(),
-                               {static_cast<unsigned char>(std::lround(255.f * x / 767)),
-                                static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
+      correct &= matches_pixel(
+          std::array<unsigned char, 4>{bgr[2], bgr[1], bgr[0], 64}.data(),
+          {static_cast<unsigned char>(std::lround(255.f * x / 767)), static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
       ++checked;
     }
     require(correct, "Snapshot holds the display's native pixels");
@@ -650,6 +652,55 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
       runtime::service();
       win::service_display_patches();
     }
+    // Changing a side's display area while active puts its confirmed shadow
+    // into restoring: the planner skips camera copies on that side (even with
+    // new patches ready) and restores the old target and rectangle first.
+    win::set_target_mask(3);
+    win::service_display_patches();
+    runtime::service();
+    record_frame(false, false);
+    execute();
+    pixels(false, false);
+    runtime::service();
+    require(win::graphics_status().shadow_modes[0] == 'q' && win::graphics_status().shadow_modes[1] == 'q',
+            "Both sides entered queue shadow mode before retargeting");
+    profiles::DisplayOverride retarget{};
+    retarget.areas[0] = {0, 0, 768, 256};
+    require(profiles::publish_override(&profile, retarget) != nullptr, "Publish resized display area while active");
+    win::set_aircraft_profile(profile.id);
+    require(win::assign_targets(expected[0], expected[1]), "Rebind displays after area change");
+    win::set_target_mask(3);
+    win::service_display_patches();
+    runtime::service();
+    const auto before_retarget = win::graphics_status();
+    require(before_retarget.shadow_modes[0] == 'r' && before_retarget.shadow_modes[1] == 'q',
+            "Area change kept side 0 restoring while side 1 stayed in queue mode");
+    record_frame(false, false);
+    execute();
+    require(win::graphics_status().shadow_restores >= before_retarget.shadow_restores + 1,
+            "Planner scheduled shadow restore for the old region");
+    for (unsigned i = 0; i < count; ++i) {
+      if (inventory[i].id != expected[0])
+        continue;
+      void* mapped = nullptr;
+      const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes[i])};
+      check(readbacks[i]->Map(0, &range, &mapped), "Read retargeted side 0 display");
+      bool correct = true;
+      for (unsigned y = 0; y < 1024; ++y)
+        for (unsigned x = 0; x < 768; ++x) {
+          const auto* pixel = static_cast<unsigned char*>(mapped) + SIZE_T{footprints[i].Footprint.RowPitch} * y + x * 4;
+          correct &= matches_pixel(pixel, {static_cast<unsigned char>(std::lround(255.f * x / 767)),
+                                           static_cast<unsigned char>(std::lround(255.f * y / 1023)), 51, 64});
+          ++checked;
+        }
+      const D3D12_RANGE none{0, 0};
+      readbacks[i]->Unmap(0, &none);
+      require(correct, "Planner skipped camera copies while restoring and restored the old target and rectangle");
+    }
+    runtime::service();
+    win::service_display_patches();
+    profiles::publish_override(&profile, {});
+    win::set_aircraft_profile(profile.id);
   }
   handoff.stop_scene();
   runtime::reset_feed(key);
