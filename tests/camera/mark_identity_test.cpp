@@ -79,6 +79,46 @@ int main() {
   half.read(258, right_only, 1);
   require(half.resolve("@EFIS#0/2", nullptr, 0) == 0 && half.resolve("@EFIS#1/2", nullptr, 0) == 0, "half a pair resolves nothing");
 
+  // Once both A350 EFIS twins have been seen, a temporary single-panel
+  // replacement keeps the surviving panel resolved instead of dropping both.
+  Store churn;
+  const panel_marks::Mark vc04[] = {mark("VCockpit04", "EFIS", 0)}, vc05[] = {mark("VCockpit05", "EFIS", 0)};
+  churn.read(963, vc04, 1);
+  churn.read(984, vc05, 1);
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 963 && churn.resolve("@EFIS#1/2", nullptr, 0) == 984,
+          "twin order recorded once both EFIS panels are read");
+  churn.retain([](std::uint64_t id) { return id == 963; });
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 963 && churn.resolve("@EFIS#1/2", nullptr, 0) == 0,
+          "surviving twin stays resolved while its partner is destroyed");
+  churn.read(1053, vc04, 1);
+  churn.retain([](std::uint64_t id) { return id == 1053; });
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 1053 && churn.resolve("@EFIS#1/2", nullptr, 0) == 0,
+          "recreated surviving twin adopts before partner returns");
+  churn.read(1052, vc05, 1);
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 1053 && churn.resolve("@EFIS#1/2", nullptr, 0) == 1052,
+          "returning twin restores its rank");
+  // Multi-session startup on live textures keeps twin order after prune_twins.
+  churn.retain([](std::uint64_t id) { return id == 1053 || id == 1052; });
+  churn.prune_twins();
+  churn.retain([](std::uint64_t id) { return id == 1053; });
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 1053 && churn.resolve("@EFIS#1/2", nullptr, 0) == 0,
+          "prune_twins preserves twin order when textures stay alive");
+  // Flight/aircraft change destroys old textures: prune_twins drops stale panels
+  // so shifted panels in the next flight (e.g. VCockpit05/06) never misbind.
+  churn.retain([](std::uint64_t) { return false; });
+  churn.prune_twins();
+  churn.read(2001, vc05, 1);
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 0 && churn.resolve("@EFIS#1/2", nullptr, 0) == 0,
+          "prune_twins clears stale twin panels after old textures die");
+  const panel_marks::Mark vc06[] = {mark("VCockpit06", "EFIS", 0)};
+  churn.read(2002, vc06, 1);
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 2001 && churn.resolve("@EFIS#1/2", nullptr, 0) == 2002,
+          "shifted panels in next flight rank afresh");
+  churn.clear();
+  churn.read(1052, vc05, 1);
+  require(churn.resolve("@EFIS#0/2", nullptr, 0) == 0 && churn.resolve("@EFIS#1/2", nullptr, 0) == 0,
+          "clear drops remembered twin panel order");
+
   // PMDG 777: one texture, four DUs; any of them names it.
   Store dus;
   const panel_marks::Mark four[] = {mark("VCockpit01", "DU_LeftOutboard", 0), mark("VCockpit01", "DU_RightInboard", 2),

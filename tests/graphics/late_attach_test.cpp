@@ -342,6 +342,16 @@ void a350_named_discovery_case() {
     win::discover_pfds(4000);
     expect("named routing recovers after a full flight reset",
            win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{47, 45}, true);
+    win::reset_display_session();
+    win::set_aircraft_profile(profile->id);
+    win::set_named_targets({47, 0, 0});
+    win::discover_pfds(5000);
+    expect("a live named A350 side adopts while its partner is temporarily missing",
+           win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{47, 0}, true);
+    win::set_named_targets({47, 45, 0});
+    win::discover_pfds(6000);
+    expect("the missing partner adopts once its mark returns",
+           win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{47, 45}, true);
   }
   clear_fixture(r);
 }

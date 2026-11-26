@@ -5698,12 +5698,12 @@ void discover_pfds(std::uint64_t now) noexcept {
     }
     // Displays are named by their panel marks only (bridge_main.cpp
     // service_mark_identity): live textures of this profile's display shape,
-    // and only when every named side resolves. Naming is automatic selection,
+    // adopted per live named side as each resolves. Naming is automatic selection,
     // so Auto detect off (now == 0) leaves it out.
     if (now) {
       std::array<std::uint64_t, MaxDisplaySides> named{};
       std::array<const Resource*, MaxDisplaySides> named_resources{};
-      bool usable = false, complete = true;
+      bool usable = false;
       for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {
         if (!r.profile->panel_textures[side][0])
           continue;
@@ -5720,12 +5720,11 @@ void discover_pfds(std::uint64_t now) noexcept {
               break;
             }
           }
-        complete = complete && live;
         named[side] = live ? id : 0;
         named_resources[side] = live_res;
         usable = usable || live;
       }
-      if (usable && complete) {
+      if (usable) {
         if (r.profile->display_layout == profiles::DisplayLayout::fitted) {
           for (unsigned side = 1; side < r.profile->sides && side < MaxDisplaySides; ++side) {
             if (!named[side] || !named_resources[side])

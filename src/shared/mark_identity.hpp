@@ -208,7 +208,15 @@ struct Texture {
 
 class Store {
  public:
-  void clear() noexcept { textures_.clear(); }
+  void clear() noexcept {
+    textures_.clear();
+    known_twins_.clear();
+  }
+  void prune_twins() noexcept {
+    known_twins_.erase(std::remove_if(known_twins_.begin(), known_twins_.end(),
+                                      [&](const TwinPanels& entry) { return owners(entry.gauge, entry.prefix).empty(); }),
+                       known_twins_.end());
+  }
   const std::vector<Texture>& textures() const noexcept { return textures_; }
   const Texture* find(std::uint64_t id) const noexcept {
     for (const auto& texture : textures_)
@@ -316,9 +324,23 @@ class Store {
     // A key as long as a key can be was cut to fit: its gauge name is a prefix.
     const bool prefix = std::strlen(key) == KeySize - 1;
     const auto list = owners(parsed.gauge, prefix);
-    if (list.size() != parsed.count)
+    std::uint64_t id = 0;
+    if (list.size() == parsed.count) {
+      id = list[parsed.rank]->id;
+      if (parsed.count > 1)
+        remember_twins(parsed.gauge, prefix, parsed.count, list);
+    } else if (parsed.count > 1 && !list.empty() && list.size() < parsed.count) {
+      // Once every twin's VCockpit panel order is established, a temporary
+      // single-panel replacement keeps the surviving twin bound to its panel.
+      if (const unsigned panel = remembered_twin_panel(parsed.gauge, prefix, parsed.count, parsed.rank))
+        for (const auto* owner : list)
+          if (panel_number(owner->gauge(parsed.gauge, prefix)->section.data()) == panel) {
+            id = owner->id;
+            break;
+          }
+    }
+    if (!id)
       return 0;
-    std::uint64_t id = list[parsed.rank]->id;
     // Only into a copy that carries the gauge (one with marks of its own is
     // another display), and the newest such copy.
     for (std::size_t step = 0; step < count; ++step) {
@@ -336,10 +358,39 @@ class Store {
   }
 
  private:
+  struct TwinPanels {
+    std::string gauge;
+    bool prefix = false;
+    std::uint8_t count = 0;
+    std::vector<unsigned> panels;
+  };
+  void remember_twins(const std::string& gauge, bool prefix, std::uint8_t count, const std::vector<const Texture*>& list) const {
+    std::vector<unsigned> panels;
+    panels.reserve(list.size());
+    for (const auto* owner : list) {
+      const unsigned panel = panel_number(owner->gauge(gauge, prefix)->section.data());
+      if (!panel)
+        return;
+      panels.push_back(panel);
+    }
+    for (auto& entry : known_twins_)
+      if (entry.gauge == gauge && entry.prefix == prefix && entry.count == count) {
+        entry.panels = std::move(panels);
+        return;
+      }
+    known_twins_.push_back({gauge, prefix, count, std::move(panels)});
+  }
+  unsigned remembered_twin_panel(const std::string& gauge, bool prefix, std::uint8_t count, std::uint8_t rank) const noexcept {
+    for (const auto& entry : known_twins_)
+      if (entry.gauge == gauge && entry.prefix == prefix && entry.count == count && rank < entry.panels.size())
+        return entry.panels[rank];
+    return 0;
+  }
   static bool same(const Gauge& a, const Gauge& b) noexcept {
     return a.section == b.section && a.name == b.name && a.index == b.index && a.x == b.x && a.y == b.y && a.width == b.width &&
            a.height == b.height && a.panel_width == b.panel_width && a.panel_height == b.panel_height;
   }
   std::vector<Texture> textures_;
+  mutable std::vector<TwinPanels> known_twins_;
 };
 }  // namespace taxi_camera::mark_identity

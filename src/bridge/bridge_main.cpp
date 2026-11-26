@@ -277,7 +277,8 @@ void service_mark_identity(MarkIdentityState& state,
     // its life (the FSLabs A321 starts two more sessions on the cockpit it
     // already drew, 2026-11-04), and an aircraft change destroys the old
     // panel textures, which retain() drops.
-    if (epoch != state.epoch) {
+    const bool session_changed = epoch != state.epoch;
+    if (session_changed) {
       state.epoch = epoch;
       state.logged = false;
     }
@@ -286,6 +287,8 @@ void service_mark_identity(MarkIdentityState& state,
       return std::any_of(records.begin(), records.end(), [&](const auto& record) { return record.id == id; });
     };
     state.store.retain(alive);
+    if (session_changed || profile != state.profile)
+      state.store.prune_twins();
     const auto feeds = win::display_feed_pairs();
     if (const auto copied = state.store.inherit(feeds.data(), feeds.size(), alive)) {
       char detail[96];
@@ -1388,8 +1391,13 @@ DWORD run_impl() {
       } else if (mark_scan.shown_again && now - mark_scan.shown_ms >= MarkShowMs) {
         take_down("time limit");
       } else if (const bool up = mark_scan.shown_again && mark_scan.targets.covered_by(mark_scan.shown_mask);
-                 // Marks up for other panels: this loss's pages are asked at once.
-                 mark_scan.replacements.due(now, up, mark_scan.shown_again ? 0 : mark_scan.shown_ms)) {
+                 // Marks up (or previously shown) only for other panels: this
+                 // loss's pages are asked at once without waiting out their gap.
+                 mark_scan.replacements.due(now, up,
+                                            mark_scan.shown_again || (mark_scan.shown_mask && mark_scan.targets.mask() &&
+                                                                      !(mark_scan.shown_mask & mark_scan.targets.mask()))
+                                                ? 0
+                                                : mark_scan.shown_ms)) {
         const auto panels = mark_scan.targets.mask();
         char detail[160];
         if (panels)
@@ -1905,6 +1913,8 @@ DWORD run_impl() {
       assigned |= targets[side] ? 1u << side : 0u;
     assigned &= sides;
     mark_scan.wanted_unassigned = (wanted | door_wanted) & ~assigned;
+    if (mark_scan.wanted_unassigned)
+      next_inventory = std::min<std::uint64_t>(next_inventory, now + 100);
     const auto speed = native_camera::get_ground_speed();
     const auto setup_current = [&]() {
       const auto epoch = native_camera::get_aircraft_session_epoch();
@@ -2405,9 +2415,12 @@ DWORD run_impl() {
     // discovery state. Avoid rebuilding the full inventory on every 25 ms tick.
     if (now >= next_inventory) {
       inventory = win::pfd_inventory();
-      next_inventory = now + 1000;
+      next_inventory = now + (mark_scan.wanted_unassigned ? 100 : 1000);
+      const auto prev_named = panel_identity.named;
       service_mark_identity(panel_identity, status, native_camera::get_aircraft_session_epoch(),
                             profiles::find(applied_profile ? applied_profile : settings.profile));
+      if (panel_identity.named != prev_named)
+        next_discovery = 0;
       for (const auto& creation : win::display_creation_records(logged_creation)) {
         logged_creation = creation.serial;
         char detail[2048];
@@ -2486,7 +2499,11 @@ DWORD run_impl() {
         : !manual_only && !buttons.valid                                                                ? taxi_message
         : commandable && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
-        : (single_display ? !targets[0] || ((mask & 4u) && !targets[2]) : (!targets[0] || !targets[1])) ? target_message
+        : (single_display ? !targets[0] || (((mask | door) & 4u) && !targets[2])
+                          : ((mask | door) ? ((((mask | door) & 1u) && !targets[0]) || (((mask | door) & 2u) && !targets[1]) ||
+                                              (((mask | door) & 4u) && !targets[2]))
+                                           : (!targets[0] || !targets[1])))
+            ? target_message
         : !active && settings.calibration_mask ? "Calibration requested on the selected display."
         : stopped_camera                       ? stopped_camera
         : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."
