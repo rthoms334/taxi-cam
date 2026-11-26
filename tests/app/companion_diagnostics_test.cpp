@@ -399,6 +399,35 @@ void autosave_setup_tests() {
     require(current.manual_mask == 1 && !current.door_on, "Closing the positioning window gives back the user's cameras");
     live_view = {};
   }
+  // Combined display atlases: placing one texture on two sides keeps both
+  // placements without swapping, and clicking a gauge inside a whole-panel or
+  // multi-gauge frame snaps to that gauge directly.
+  setup.picked = "$DU1";
+  setup.picked_texture = 801;
+  place_setup_panel(0);
+  setup.picked = "$DU1";
+  setup.picked_texture = 801;
+  place_setup_panel(1);
+  require(setup.names[0] == "$DU1" && setup.names[1] == "$DU1" && std::string_view(current.discovered.textures[0]) == "$DU1" &&
+              std::string_view(current.discovered.textures[1]) == "$DU1" && current.left_id == 801 && current.right_id == 801,
+          "Placing a combined atlas texture on both pilot sides keeps both routed to it");
+  area_picker = {};
+  area_picker.texture_width = area_picker.texture_height = 2048;
+  area_picker.area = {0, 0, 2048, 2048};
+  area_picker.gauges = {{L"DU_Upper", {35, 35, 970, 970}}, {L"DU_Lower", {1083, 35, 2018, 970}}};
+  snapshot_view.width = 1024;
+  snapshot_view.height = 1024;
+  const auto pic = area_picker_picture();
+  const auto lower_screen = win::area_edit::to_screen(pic, 2048, 2048, area_picker.gauges[1].second);
+  const POINT lower_mid{(lower_screen.left + lower_screen.right) / 2, (lower_screen.top + lower_screen.bottom) / 2};
+  require(area_picker_gauge_click(lower_mid, 8) == 1 && area_picker_gauge_click(lower_mid, 0) == -1,
+          "A gauge inside a whole-panel frame is clickable unless grabbing a resize handle");
+  area_picker.area = area_picker.gauges[1].second;
+  require(area_picker_gauge_click(lower_mid, 8) == -1,
+          "Once snapped to a single gauge, dragging inside its frame moves it instead of re-snapping");
+  area_picker = {};
+  snapshot_view.width = snapshot_view.height = 0;
+
   // Opening Displays closes the window before a trial can copy its previews.
   current.manual_mask = 1;
   current.door_on = 0;

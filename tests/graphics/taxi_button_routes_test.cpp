@@ -18,13 +18,13 @@ int main() {
   assert(signal.buttons == 1 && signal.held && !signal.timed_out);
   signal = intent.observe(2300, false, 0u);
   assert(signal.buttons == 0 && !signal.held && signal.timed_out);
-  assert(intent.observe(2400, true, 3u).buttons == 3);    // Freshness recovery is automatic.
-  assert(intent.observe(2401, true, 0u).buttons == 0);  // Fresh OFF is immediate.
-  assert(intent.observe(2500, false, 3u).buttons == 0);   // Invalid values cannot turn on.
+  assert(intent.observe(2400, true, 3u).buttons == 3);   // Freshness recovery is automatic.
+  assert(intent.observe(2401, true, 0u).buttons == 0);   // Fresh OFF is immediate.
+  assert(intent.observe(2500, false, 3u).buttons == 0);  // Invalid values cannot turn on.
   assert(intent.observe(2600, true, 2u).buttons == 2);
   assert(intent.observe(2700, false, 0u).buttons == 2);
   signal = intent.observe(2699, false, 0u);
-  assert(signal.buttons == 0 && signal.timed_out);              // Clock regression closes.
+  assert(signal.buttons == 0 && signal.timed_out);    // Clock regression closes.
   assert(intent.observe(2701, false, 0u).timed_out);  // Only a fresh response clears expiry.
   intent.reset();
   assert(intent.observe(2800, false, 3u).buttons == 0);  // Manual override clears old intent.
@@ -94,6 +94,7 @@ int main() {
   assert(!named.adopt_named({279, 281, 0}, 2) && named.targets[1] == 0);
   assert(named.targets[0] == 281);
   assert(!named.select_explicit({904, 904}) && named.targets[0] == 281);
+  assert(named.select_explicit({904, 904}, true) && (named.targets == Sides{904, 904, 0}));
   assert(named.select_explicit({0, 0}) && named.adopt_named({279, 281, 0}, 2) && (named.targets == Sides{279, 281, 0}));
   assert(named.select_explicit({281, 279}) && named.matches(281, 1) && named.matches(279, 2));  // Explicit swap replaces both.
   assert(!named.adopt_named({279, 281, 0}, 2) && (named.targets == Sides{281, 279, 0}));

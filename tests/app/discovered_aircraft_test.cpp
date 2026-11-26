@@ -96,8 +96,10 @@ void publish_and_detect() {
           "find() returns the published layout's profile");
   require(first->id == profiles::DiscoveredProfileId && std::wstring(first->name) == L"FNX_320_CFM_SL" &&
               first->display_layout == profiles::DisplayLayout::fitted && !profiles::commandable_buttons(*first) &&
-              profiles::side_mask(*first) == 3 && !profiles::separate_lower_texture(*first) && first->mounts == profiles::DiscoveredMounts,
-          "A set-up aircraft routes by name and uses shortcuts only");
+              profiles::side_mask(*first) == 3 && !profiles::separate_lower_texture(*first) &&
+              first->mounts == profiles::DiscoveredMounts && first->partial_repaint[0] && first->partial_repaint[1] &&
+              first->partial_repaint[2],
+          "A set-up aircraft routes by name, keeps display shadows, and uses shortcuts only");
   require(std::strcmp(first->panel_textures[1], "$PFD_FO") == 0, "Names come from the layout");
   require(first->fit_texture && profiles::matches_display(*first, 768, 768, 5, 28) && profiles::matches_display(*first, 1024, 768, 5, 29) &&
               profiles::matches_display(*first, 2048, 1536, 10, 28) && !profiles::matches_display(*first, 768, 768, 1, 28) &&
@@ -311,6 +313,11 @@ void learning() {
   require(learn_layout(status, {"$PFD_CAPT", "$EFB", nullptr}, 2, l) == LayoutLearning::learned && l.shapes[1].width == 1024 &&
               l.shapes[1].height == 768 && profiles::valid_layout(l),
           "Sides can be panels of different sizes");
+  profiles::DiscoveredLayout shared_atlas{};
+  require(learn_layout(status, {"$PFD_CAPT", "$PFD_CAPT", "$ECAM_UPPER"}, 3, shared_atlas) == LayoutLearning::learned &&
+              std::strcmp(shared_atlas.textures[0], "$PFD_CAPT") == 0 && std::strcmp(shared_atlas.textures[1], "$PFD_CAPT") == 0 &&
+              profiles::valid_layout(shared_atlas),
+          "Sides may share a combined atlas panel");
   require(learn_layout(status, {"$PFD_CAPT", "$NONE", nullptr}, 2, l) == LayoutLearning::unknown_panel, "Names come from the map");
   status.panel_state = static_cast<std::uint32_t>(PanelMapState::waiting);
   require(learn_layout(status, {"$PFD_CAPT", "$PFD_FO", nullptr}, 2, l) == LayoutLearning::not_paired, "Only a marked map");

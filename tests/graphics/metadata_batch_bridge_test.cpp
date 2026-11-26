@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 #include "../../src/bridge/d3d12_bridge.cpp"
+#include "../../src/profiles/discovered.hpp"
 
 namespace {
 unsigned checks{};
@@ -927,11 +928,126 @@ void shadow_retake_fallback_checks() {
   require(mode == win::Registry::ShadowMode::direct && r.shadow_fallbacks == fallbacks + 1 && !shadow.saved && !shadow.queue &&
               !shadow.retake_queue,
           "Misses going on past the confirm window kept the side on queue copies");
+  // Resizing or moving the display area while active restores the confirmed
+  // old region first before switching to the new area.
+  taxi_camera::profiles::DiscoveredLayout layout{};
+  std::strcpy(layout.key, "SimObjects/Airplanes/Test737");
+  layout.sides = 2;
+  std::strcpy(layout.textures[0], "@DU_Upper");
+  std::strcpy(layout.textures[1], "@DU_Upper");
+  layout.shapes[0] = {2048, 2048, 5};
+  layout.shapes[1] = {2048, 2048, 5};
+  taxi_camera::profiles::DiscoveredProfile discovered{};
+  discovered.layout = layout;
+  taxi_camera::profiles::build_discovered(discovered);
+  taxi_camera::profiles::DisplayOverride override_areas{};
+  override_areas.areas[0] = {1067, 0, 2048, 973};
+  taxi_camera::profiles::AircraftProfile active_profile = discovered.profile;
+  taxi_camera::profiles::apply_choices(active_profile, discovered.profile, override_areas);
+  r.profile = &active_profile;
+  target->desc.Width = 2048;
+  target->desc.Height = 2048;
+  r.shadows[0] = {};
+  r.shadows[0].mode = win::Registry::ShadowMode::queue;
+  r.shadows[0].target = target;
+  r.shadows[0].area = win::shadow_area(r, 0, *target);
+  r.shadows[0].saved = r.shadows[0].confirmed = true;
+  r.shadows[0].first_save_serial = r.shadows[0].serial = r.shadow_completed[0].load() + 1;
+  r.shadow_completed[0].store(r.shadows[0].serial);
+  active_profile.areas[0] = {1083, 35, 2018, 970};
+  active_profile.display_regions[0] = active_profile.areas[0];
+  const auto resized = win::shadow_area(r, 0, *target);
+  const D3D12_RECT old_area{1067, 0, 2048, 973};
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::restoring && r.shadows[0].area.left == old_area.left &&
+              r.shadows[0].area.top == old_area.top && r.shadows[0].area.right == old_area.right &&
+              r.shadows[0].area.bottom == old_area.bottom,
+          "Resizing area while active forgot confirmed shadow instead of restoring the old region");
+  win::List dummy_list{};
+  require(win::shadow_holds_stamp(r, dummy_list, 0), "Direct stamp was not held while restoring earlier display area");
+  r.shadows[0].restore_serial = ++r.shadows[0].serial;
+  r.shadow_completed[0].store(r.shadows[0].restore_serial);
+  const auto after_restore = win::update_shadow(r, 0, now);
+  require(after_restore != win::Registry::ShadowMode::restoring && r.shadows[0].area.left == resized.left &&
+              r.shadows[0].area.top == resized.top && r.shadows[0].area.right == resized.right &&
+              r.shadows[0].area.bottom == resized.bottom,
+          "Completed area restore did not transition to the resized area");
+  // Same-profile display-choice updates keep confirmed shadows restoring so
+  // the earlier display area clears before the new region activates; changing
+  // profile forgets them.
+  const auto old_verified = r.close_forward_verified;
+  const auto old_key = r.key;
+  const auto old_window_count = r.failure_window_count.load();
+  const auto old_window_ms = r.failure_window_ms.load();
+  const auto old_failures = r.failures.load();
+  const auto old_error = r.error.load();
+  const auto old_halted = r.admission_halted.load();
+  const auto old_armed = r.armed.load();
+  const auto old_backfill = r.live_backfill.load();
+  const auto old_full_window = r.backfill_full_window;
+  r.key = 0;
+  r.close_forward_verified = true;
+  r.failure_window_count = 0;
+  auto* const mock_shadow_buffer = reinterpret_cast<ID3D12Resource*>(0x8e0000);
+  r.shadows[0].buffer = mock_shadow_buffer;
+  r.shadows[0].footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  r.shadows[0].footprint.Footprint.Width = 935;
+  r.shadows[0].footprint.Footprint.Height = 935;
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::queue,
+          "Direct shadow did not upgrade to queue copies once its buffer fitted");
+  r.shadows[0].mode = win::Registry::ShadowMode::direct;
+  r.shadows[0].fallback = true;
+  require(win::update_shadow(r, 0, now) == win::Registry::ShadowMode::direct,
+          "A fallen-back shadow skipped its fallback guard and re-entered queue mode");
+  r.shadows[0].fallback = false;
+  r.shadows[0].mode = win::Registry::ShadowMode::queue;
+  r.shadows[0].saved = r.shadows[0].confirmed = true;
+  r.shadows[0].target = target;
+  r.shadows[0].area = resized;
+  require(taxi_camera::profiles::publish_discovered(layout) != nullptr, "Publish discovered layout for profile reload check");
+  r.profile = taxi_camera::profiles::find(taxi_camera::profiles::DiscoveredProfileId);
+  win::set_aircraft_profile(taxi_camera::profiles::DiscoveredProfileId);
+  require(r.shadows[0].mode == win::Registry::ShadowMode::restoring && r.shadows[0].target == target &&
+              win::same_rect(r.shadows[0].area, resized),
+          "Same-profile display choice reload forgot confirmed shadow instead of restoring it");
+  // An active side switching to another texture does not stay blocked forever
+  // if the old texture stops submitting.
+  auto target2 = std::make_shared<win::Resource>();
+  target2->native = reinterpret_cast<ID3D12Resource*>(0x8b1000);
+  target2->id = 897;
+  target2->desc = target->desc;
+  target2->display_shape = win::display_shaped(target2->desc);
+  r.resources[target2->native] = target2;
+  r.active_mask = 1;
+  r.routes.select_explicit({target2->id, 0}, true);
+  win::refresh_selected(r);
+  active_profile.areas[0] = {35, 35, 970, 970};
+  active_profile.display_regions[0] = active_profile.areas[0];
+  r.profile = &active_profile;
+  r.shadows[0].started_ms = now;
+  require(win::update_shadow(r, 0, now + win::kShadowConfirmMs + 1) != win::Registry::ShadowMode::restoring &&
+              r.shadows[0].target == target2 && win::same_rect(r.shadows[0].area, D3D12_RECT{35, 35, 970, 970}),
+          "Stuck restore did not unblock after the confirm timeout while active on a new target");
+  r.resources.erase(target2->native);
+  win::set_aircraft_profile(taxi_camera::profiles::A380.id);
+  require(r.shadows[0].mode == win::Registry::ShadowMode::off && !r.shadows[0].target,
+          "Switching aircraft profile did not forget previous display shadow");
+  require(2048ull * 2048ull * 4ull <= win::kShadowMaxBytes, "2048x2048 combined display atlas must fit within shadow bounds");
+  r.shadows[0].buffer = nullptr;
   r.shadows[0] = {};
   r.routes.reset();
   r.active_mask = 0;
   win::refresh_selected(r);
   r.resources.erase(target->native);
+  r.close_forward_verified = old_verified;
+  r.key = old_key;
+  r.failure_window_count = old_window_count;
+  r.failure_window_ms = old_window_ms;
+  r.failures = old_failures;
+  r.error = old_error;
+  r.admission_halted = old_halted;
+  win::set_graphics_armed(old_armed);
+  r.live_backfill = old_backfill;
+  r.backfill_full_window = old_full_window;
   r.profile = old_profile;
   r.ready = old_ready;
 }

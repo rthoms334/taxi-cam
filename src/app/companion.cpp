@@ -2248,7 +2248,8 @@ std::uint64_t picked_id(const std::vector<win::PanelTexture>& items, unsigned si
 // to later flights.
 void route_picks(win::Settings& s, const std::vector<win::PanelTexture>& items) {
   const std::uint64_t left = picked_id(items, 0), right = setup.sides > 1 ? picked_id(items, 1) : 0;
-  win::update_target_assignment(s.left_id, s.right_id, s.route_request, left, right == left ? 0 : right);
+  const bool shared_atlas = !setup.built_in;
+  win::update_target_assignment(s.left_id, s.right_id, s.route_request, left, !shared_atlas && right == left ? 0 : right, shared_atlas);
 }
 // Setup previews on the placed displays: a taxi camera on each, but the door
 // camera on its own display, as in flight, rather than a taxi camera there
@@ -2544,6 +2545,27 @@ int area_picker_gauge_at(POINT point) {
   }
   return best;
 }
+// A click strictly inside the frame picks a gauge under the cursor whenever the
+// frame still spans the whole panel or covers multiple gauges (so combined
+// atlases can be clicked directly without first shrinking the frame away).
+int area_picker_gauge_click(POINT point, int hit) {
+  if (hit >= 0 && hit < 8)
+    return -1;
+  const int gauge = area_picker_gauge_at(point);
+  if (gauge < 0 || hit < 0)
+    return gauge;
+  const auto& p = area_picker;
+  const bool whole = p.area.left == 0 && p.area.top == 0 && p.area.right >= p.texture_width && p.area.bottom >= p.texture_height;
+  unsigned inside = 0;
+  for (const auto& [name, r] : p.gauges) {
+    (void)name;
+    if (r.left == 0 && r.top == 0 && r.right >= p.texture_width && r.bottom >= p.texture_height)
+      continue;
+    if (r.left >= p.area.left && r.top >= p.area.top && r.right <= p.area.right && r.bottom <= p.area.bottom)
+      ++inside;
+  }
+  return whole || inside >= 2 ? gauge : -1;
+}
 INT_PTR CALLBACK area_picker_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
   auto& p = area_picker;
   if (message == WM_INITDIALOG) {
@@ -2573,10 +2595,10 @@ INT_PTR CALLBACK area_picker_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l)
       GetCursorPos(&point);
       ScreenToClient(hwnd, &point);
       const int hit = win::area_edit::hit(area_picker_picture(), p.texture_width, p.texture_height, p.area, point, scale(9), scale(6));
-      const int gauge = area_picker_gauge_at(point);
+      const int gauge = area_picker_gauge_click(point, hit);
       LPCWSTR shape = p.dragging   ? win::area_edit::cursor(p.handle)
-                      : hit >= 0   ? win::area_edit::cursor(hit)
                       : gauge >= 0 ? IDC_HAND
+                      : hit >= 0   ? win::area_edit::cursor(hit)
                                    : nullptr;
       if (shape) {
         SetCursor(LoadCursorW(nullptr, shape));
@@ -2612,20 +2634,21 @@ INT_PTR CALLBACK area_picker_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l)
   if (message == WM_LBUTTONDOWN && p.ready) {
     const POINT point{static_cast<short>(LOWORD(l)), static_cast<short>(HIWORD(l))};
     const int hit = win::area_edit::hit(area_picker_picture(), p.texture_width, p.texture_height, p.area, point, scale(9), scale(6));
-    // On the frame or a handle the frame moves or resizes; outside it a click
-    // on a gauge makes that gauge the area.
-    const int gauge = hit < 0 ? area_picker_gauge_at(point) : -1;
-    if (hit >= 0) {
+    // On a resize handle or single-gauge frame the frame moves or resizes;
+    // outside the frame (or while the frame spans multiple gauges/whole panel)
+    // a click on a gauge snaps the frame to that gauge.
+    const int gauge = area_picker_gauge_click(point, hit);
+    if (gauge >= 0) {
+      p.area = win::area_edit::fit(p.gauges[static_cast<std::size_t>(gauge)].second, static_cast<int>(p.texture_width),
+                                   static_cast<int>(p.texture_height), p.limits);
+      update_area_picker_info(hwnd);
+      InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (hit >= 0) {
       p.dragging = true;
       p.handle = hit;
       p.start = p.area;
       p.from = point;
       SetCapture(hwnd);
-    } else if (gauge >= 0) {
-      p.area = win::area_edit::fit(p.gauges[static_cast<std::size_t>(gauge)].second, static_cast<int>(p.texture_width),
-                                   static_cast<int>(p.texture_height), p.limits);
-      update_area_picker_info(hwnd);
-      InvalidateRect(hwnd, nullptr, FALSE);
     }
     return TRUE;
   }
@@ -2728,14 +2751,8 @@ void place_setup_panel(unsigned side) {
       return;
     }
   }
-  // Built-in profiles may share a texture between sides (the PMDG 777's DUS).
-  for (unsigned other = 0; other < MaxDisplaySides && !setup.built_in; ++other)
-    if (other != side && setup.names[other] == name) {
-      setup.names[other] = setup.names[side];
-      setup.textures[other] = setup.textures[side];
-      setup.areas[other] = setup.areas[side];
-    }
   // A new panel starts from its own area; the picker opens to choose it.
+  // Combined display atlases may serve multiple sides, each with its own area.
   if (setup.names[side] != name)
     setup.areas[side] = {};
   setup.names[side] = name;
