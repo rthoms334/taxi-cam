@@ -2279,17 +2279,20 @@ DWORD run_impl() {
       scene_runtime::manager().rearm_source_states();
     }
     if (now >= next_recovery) {
-      const bool eligible = (mask || test_scene) && !outside_pause && !failed && !output.failed &&
-                            scene.pair.state == engine_camera::State::active && scene.requested_feeds >= 2 && !scene.pose_waiting &&
-                            !scene.view_waiting && (scene.pose_session_proven || native_camera::sample_body_pose(now).valid);
-      if (eligible && output.frames != last_frames)
+      const bool foreground = mask != 0 || door_render || test_scene;
+      const bool eligible = capture_recovery_eligible(
+          {mask, door_render, test_scene, outside_pause, failed, output.failed, scene.pair.state == engine_camera::State::active,
+           scene.requested_feeds, scene.pose_waiting, scene.view_waiting,
+           foreground && (scene.pose_session_proven || native_camera::sample_body_pose(now).valid)});
+      const auto composed = composed_output_count(output.frames, output.door_pages);
+      if (eligible && composed != last_frames)
         native_camera::note_scene_capture_progress(now);
-      last_frames = output.frames;
+      last_frames = composed;
       // Lost GPU-state evidence says nothing about native camera lifetime.
       // Keep the pair and its resource generations. AA/upscaler switches can
       // wipe source-state without new RT barriers; rearm retained RT models
       // so later draws can capture again. Never erase/recreate cameras here.
-      if (progress.observe(now, eligible, output.frames, output.capture.source_draws,
+      if (progress.observe(now, eligible, composed, output.capture.source_draws,
                            std::strcmp(output.capture.tail_status, "unknown_source_state") == 0)) {
         const auto restored = scene_runtime::manager().rearm_source_states();
         if (graphics_diagnostics) {
@@ -2384,7 +2387,7 @@ DWORD run_impl() {
     static_assert(static_cast<std::size_t>(native_camera::ProbeStage::aa) == std::tuple_size_v<decltype(status.stage_ms)>);
     std::copy_n(scene.performance.stage_ms.begin(), status.stage_ms.size(), status.stage_ms.begin());
     status.captures = output.capture.captures;
-    status.composed = output.frames;
+    status.composed = composed_output_count(output.frames, output.door_pages);
     status.stamps = output.stamps;
     // These are polling observations, not GPU timestamps. They include all work
     // since accepted intent and do not redefine request duration as cold latency.

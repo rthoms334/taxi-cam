@@ -4,6 +4,33 @@
 
 namespace taxi_camera {
 
+// Inputs deciding whether capture-stall recovery should watch for unknown GPU source state.
+struct CaptureRecoveryDemand {
+  unsigned taxi_mask = 0;
+  bool door_render = false;
+  bool test_scene = false;
+  bool outside_pause = false;
+  bool failed = false;
+  bool output_failed = false;
+  bool pair_active = false;
+  std::uint32_t requested_feeds = 0;
+  bool pose_waiting = false;
+  bool view_waiting = false;
+  bool pose_valid = false;
+};
+
+// Door-only camera views clear taxi_mask and advance door_pages rather than
+// taxi frames, so both recovery eligibility and progress count them.
+inline bool capture_recovery_eligible(const CaptureRecoveryDemand& demand) noexcept {
+  return (demand.taxi_mask != 0 || demand.door_render || demand.test_scene) && !demand.outside_pause && !demand.failed &&
+         !demand.output_failed && demand.pair_active && demand.requested_feeds >= 2 && !demand.pose_waiting && !demand.view_waiting &&
+         demand.pose_valid;
+}
+
+inline std::uint64_t composed_output_count(std::uint64_t frames, std::uint64_t door_pages) noexcept {
+  return frames + door_pages;
+}
+
 // A native view can stay ready while an unobserved submission invalidates its
 // GPU state. Detect that specific stall without admitting an unknown state as RT.
 class CaptureProgress {

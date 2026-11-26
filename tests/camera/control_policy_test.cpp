@@ -50,5 +50,34 @@ int main() {
   assert(recording.append({new_key, ss::Effect::Kind::draw}));
   assert(tracker.apply(recording) && tracker.state(new_key).drawn);
   assert(tracker.state(old_key).model == ss::Model::unknown);
+
+  // Door-only foreground rendering (`taxi_mask == 0`, `door_render == true`) must
+  // qualify for capture-stall recovery and count composed `door_pages` as progress.
+  const taxi_camera::CaptureRecoveryDemand base_door{0, true, false, false, false, false, true, 4, false, false, true};
+  assert(taxi_camera::capture_recovery_eligible(base_door));
+  assert(taxi_camera::capture_recovery_eligible({1, false, false, false, false, false, true, 4, false, false, true}));
+  assert(taxi_camera::capture_recovery_eligible({0, false, true, false, false, false, true, 4, false, false, true}));
+  assert(!taxi_camera::capture_recovery_eligible({0, false, false, false, false, false, true, 4, false, false, true}));
+  for (auto bad : {taxi_camera::CaptureRecoveryDemand{0, true, false, true, false, false, true, 4, false, false, true},
+                   taxi_camera::CaptureRecoveryDemand{0, true, false, false, true, false, true, 4, false, false, true},
+                   taxi_camera::CaptureRecoveryDemand{0, true, false, false, false, true, true, 4, false, false, true},
+                   taxi_camera::CaptureRecoveryDemand{0, true, false, false, false, false, false, 4, false, false, true},
+                   taxi_camera::CaptureRecoveryDemand{0, true, false, false, false, false, true, 1, false, false, true},
+                   taxi_camera::CaptureRecoveryDemand{0, true, false, false, false, false, true, 4, true, false, true},
+                   taxi_camera::CaptureRecoveryDemand{0, true, false, false, false, false, true, 4, false, true, true},
+                   taxi_camera::CaptureRecoveryDemand{0, true, false, false, false, false, true, 4, false, false, false}})
+    assert(!taxi_camera::capture_recovery_eligible(bad));
+  assert(taxi_camera::composed_output_count(1, 323) == 324);
+
+  taxi_camera::CaptureProgress door_progress;
+  const bool door_eligible = taxi_camera::capture_recovery_eligible(base_door);
+  assert(!door_progress.observe(1000, door_eligible, taxi_camera::composed_output_count(0, 0), 100, true));
+  assert(door_progress.observe(1000 + taxi_camera::CaptureProgress::StallMs, door_eligible, taxi_camera::composed_output_count(0, 0), 200,
+                               true));
+  assert(door_progress.stalled());
+  assert(!door_progress.observe(1000 + taxi_camera::CaptureProgress::StallMs + 50, door_eligible, taxi_camera::composed_output_count(0, 1),
+                                250, true));
+  assert(!door_progress.stalled());
+
   std::puts("Capture-stall recovery: PASS");
 }
